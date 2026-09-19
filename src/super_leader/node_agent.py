@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import time
+import urllib.parse
 import urllib.request
 import uuid
 from typing import Callable
@@ -14,6 +16,12 @@ from .codex_sessions import CodexSessionManager
 class NodeAgent:
     def __init__(self, server_url: str, name: str, address: str, auth_token: str, executor: Callable[[str], str] | None = None) -> None:
         self.server_url = server_url.rstrip("/")
+        parsed = urllib.parse.urlparse(self.server_url)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("server_url must use http or https")
+        loopback = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+        if parsed.scheme != "https" and not loopback and os.environ.get("ALLOW_INSECURE_NODE_HTTP") != "1":
+            raise ValueError("remote node connections require HTTPS; set ALLOW_INSECURE_NODE_HTTP=1 only for isolated development")
         self.name = name
         self.address = address
         self.auth_token = auth_token

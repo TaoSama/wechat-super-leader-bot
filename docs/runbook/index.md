@@ -49,6 +49,8 @@ python -m super_leader --node-agent \
 
 节点会注册、发送心跳、拉取任务，并默认通过 `codex exec --fork-turns none` 执行任务；完成状态会回写控制面。
 
+远程节点默认强制 HTTPS；仅在隔离的本机开发环境才允许设置 `ALLOW_INSECURE_NODE_HTTP=1`。
+
 跨机节点不要暴露 Codex token：节点以一次性注册 token 加入，服务端只保存 token 哈希；节点心跳过期后禁止派发新任务。公网部署必须放在 HTTPS、反向代理和访问白名单之后。
 
 如果 iLink 服务地址变化，可设置 `WECHAT_ILINK_BASE_URL`；不要把 bot token 写入仓库或 `.env.example`。
