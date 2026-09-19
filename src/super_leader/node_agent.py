@@ -8,6 +8,8 @@ import urllib.request
 import uuid
 from typing import Callable
 
+from .codex_sessions import CodexSessionManager
+
 
 class NodeAgent:
     def __init__(self, server_url: str, name: str, address: str, auth_token: str, executor: Callable[[str], str] | None = None) -> None:
@@ -17,6 +19,7 @@ class NodeAgent:
         self.auth_token = auth_token
         self.token: str | None = None
         self.executor = executor or (lambda payload: payload)
+        self.sessions = CodexSessionManager()
 
     def _request(self, path: str, payload: dict[str, object], headers: dict[str, str]) -> dict[str, object]:
         body = json.dumps(payload, ensure_ascii=False).encode()
@@ -37,6 +40,12 @@ class NodeAgent:
         if not self.token:
             raise RuntimeError("register the node before heartbeat")
         result = self._request("/nodes/heartbeat", {"name": self.name}, {"X-Node-Token": self.token})
+        return result.get("ok") is True
+
+    def report_sessions(self) -> bool:
+        if not self.token:
+            raise RuntimeError("register the node before reporting sessions")
+        result = self._request("/nodes/sessions", {"name": self.name, "sessions": self.sessions.list_sessions()}, {"X-Node-Token": self.token})
         return result.get("ok") is True
 
     def dispatch_once(self) -> list[dict[str, object]]:
@@ -66,5 +75,6 @@ class NodeAgent:
             self.register()
         while True:
             self.heartbeat()
+            self.report_sessions()
             self.dispatch_once()
             time.sleep(interval)

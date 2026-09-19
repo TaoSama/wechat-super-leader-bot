@@ -97,6 +97,17 @@ def make_handler(control: ControlPlane):
                 updated = control.leader.nodes.update_task(str(body.get("task_id", "")), str(body.get("status", "")))
                 self._json(HTTPStatus.OK if updated else HTTPStatus.NOT_FOUND, {"updated": updated})
                 return
+            if path == "/nodes/sessions":
+                body = self._body()
+                name = str(body.get("name", ""))
+                token = self.headers.get("X-Node-Token", "")
+                if not control.leader.nodes.authenticate(name, token):
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                sessions = body.get("sessions", [])
+                accepted = control.leader.nodes.report_sessions(name, token, sessions if isinstance(sessions, list) else [])
+                self._json(HTTPStatus.OK if accepted else HTTPStatus.UNAUTHORIZED, {"ok": accepted})
+                return
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
         def log_message(self, *_args: object) -> None:
