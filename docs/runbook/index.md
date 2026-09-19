@@ -33,6 +33,18 @@ AUTH_TOKEN='随机长 token' python -m super_leader --serve --host 0.0.0.0 --por
 
 控制面提供 `/health`、`/messages`、`/nodes/register`、`/nodes/heartbeat` 和 `/nodes/dispatch`；生产环境应放在 Tailscale/内网或 HTTPS 反向代理后，不要直接暴露到公网。
 
+公司机器上运行节点：
+
+```bash
+python -m super_leader --node-agent \
+  --server-url https://你的控制面地址 \
+  --node-name office-mac \
+  --node-address office-mac \
+  --node-auth-token '与控制面 AUTH_TOKEN 相同的长随机值'
+```
+
+节点会注册、发送心跳、拉取任务，并默认通过 `codex exec --fork-turns none` 执行任务；完成状态会回写控制面。
+
 跨机节点不要暴露 Codex token：节点以一次性注册 token 加入，服务端只保存 token 哈希；节点心跳过期后禁止派发新任务。公网部署必须放在 HTTPS、反向代理和访问白名单之后。
 
 如果 iLink 服务地址变化，可设置 `WECHAT_ILINK_BASE_URL`；不要把 bot token 写入仓库或 `.env.example`。

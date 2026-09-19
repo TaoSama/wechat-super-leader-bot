@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 
 
 class SkillRouter:
     def __init__(self, roots: list[str | Path] | None = None, allowlist: set[str] | None = None) -> None:
-        self.roots = [Path(r).expanduser() for r in (roots or [])]
+        if roots is None:
+            configured = [item for item in os.environ.get("SKILL_ROOTS", "").split(os.pathsep) if item]
+            roots = configured or [
+                Path.home() / ".claude" / "skills",
+                Path.home() / ".codex" / "skills",
+                Path("/Users/developer/Workspaces/dotfiles/claude/skills"),
+                Path.cwd() / ".claude" / "skills",
+            ]
+        self.roots = [Path(r).expanduser() for r in roots]
         self.allowlist = allowlist
+        self.builtins = {"session-management", "node-communication", "leader-coordination", "progress-tracking", "memory-management"}
 
     def list_skills(self) -> list[str]:
         names: set[str] = set()
@@ -17,7 +27,8 @@ class SkillRouter:
                 name = skill_file.parent.name
                 if self.allowlist is None or name in self.allowlist:
                     names.add(name)
-        return sorted(names)
+        names.update(self.builtins)
+        return sorted(name for name in names if self.allowlist is None or name in self.allowlist)
 
     def resolve(self, name: str) -> Path | None:
         if self.allowlist is not None and name not in self.allowlist:
@@ -28,3 +39,5 @@ class SkillRouter:
                 return candidate
         return None
 
+    def is_builtin(self, name: str) -> bool:
+        return name in self.builtins
