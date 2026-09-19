@@ -10,6 +10,8 @@ python -m compileall -q src
 python -m pytest -q
 ```
 
+扫码前先运行 `python -m super_leader --check`，它只做环境检查，不登录、不发消息。
+
 通过条件：测试全部通过；当前覆盖微信 Markdown 降级、Mock 登录生命周期、记忆、Skill 路由、Codex session 发现、Codex app-server Task 列表、节点鉴权、任务派发/回传和控制面 HTTP 接口。
 
 ## 2. 明早微信扫码验收
