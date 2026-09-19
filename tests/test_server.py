@@ -15,7 +15,12 @@ def test_control_plane_health_and_message(tmp_path):
         assert json.loads(urllib.request.urlopen(base + "/health").read())["ok"] is True
         request = urllib.request.Request(base + "/messages", data=json.dumps({"chat_id": "c", "text": "/help"}).encode(), headers={"Authorization": "Bearer test-token", "Content-Type": "application/json"})
         assert "/sessions" in json.loads(urllib.request.urlopen(request).read())["text"]
+        register = urllib.request.Request(base + "/nodes/register", data=json.dumps({"name": "mini", "address": "127.0.0.1"}).encode(), headers={"Authorization": "Bearer test-token", "Content-Type": "application/json"})
+        node_token = json.loads(urllib.request.urlopen(register).read())["token"]
+        dispatch = urllib.request.Request(base + "/nodes/dispatch", data=json.dumps({"node_name": "mini", "task_id": "t1", "payload": "检查"}).encode(), headers={"Authorization": "Bearer test-token", "Content-Type": "application/json"})
+        assert json.loads(urllib.request.urlopen(dispatch).read())["accepted"] is True
+        tasks_request = urllib.request.Request(base + "/nodes/mini/tasks", headers={"X-Node-Token": node_token})
+        assert json.loads(urllib.request.urlopen(tasks_request).read())["tasks"][0]["task_id"] == "t1"
     finally:
         server.shutdown()
         server.server_close()
-

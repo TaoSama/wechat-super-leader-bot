@@ -23,3 +23,10 @@ def test_explicit_codex_commands(tmp_path):
     app.sessions.fork = lambda prompt, model=None: Result()
     assert app.handle("/codex s1 检查状态").text == "done"
     assert app.handle("/fork gpt-5.6-sol 写测试").text == "done"
+
+
+def test_skills_include_super_leader_builtins(tmp_path):
+    app = SuperLeader(tmp_path)
+    names = app.skills.list_skills()
+    assert "session-management" in names
+    assert "node-communication" in names

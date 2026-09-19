@@ -40,8 +40,13 @@ def make_handler(control: ControlPlane):
             if self.path == "/health":
                 self._json(HTTPStatus.OK, {"ok": True})
                 return
-            if self.path == "/nodes/tasks":
-                self._json(HTTPStatus.UNAUTHORIZED, {"error": "node route requires node identity"})
+            if self.path.startswith("/nodes/") and self.path.endswith("/tasks"):
+                name = self.path.split("/")[2]
+                token = self.headers.get("X-Node-Token", "")
+                if not control.leader.nodes.authenticate(name, token):
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                self._json(HTTPStatus.OK, {"tasks": control.leader.nodes.claim_tasks(name, token)})
                 return
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
@@ -82,6 +87,16 @@ def make_handler(control: ControlPlane):
                 accepted = control.leader.nodes.dispatch(str(body.get("node_name", "")), str(body.get("task_id", "")), str(body.get("payload", "")))
                 self._json(HTTPStatus.OK if accepted else HTTPStatus.CONFLICT, {"accepted": accepted})
                 return
+            if path == "/nodes/task-status":
+                body = self._body()
+                name = str(body.get("name", ""))
+                token = self.headers.get("X-Node-Token", "")
+                if not control.leader.nodes.authenticate(name, token):
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                updated = control.leader.nodes.update_task(str(body.get("task_id", "")), str(body.get("status", "")))
+                self._json(HTTPStatus.OK if updated else HTTPStatus.NOT_FOUND, {"updated": updated})
+                return
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
         def log_message(self, *_args: object) -> None:
@@ -93,4 +108,3 @@ def make_handler(control: ControlPlane):
 def serve(leader: SuperLeader, host: str = "127.0.0.1", port: int = 8787, auth_token: str | None = None) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer((host, port), make_handler(ControlPlane(leader, auth_token)))
     return server
-

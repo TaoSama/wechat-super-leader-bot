@@ -5,6 +5,7 @@ import time
 
 from .app import SuperLeader
 from .server import serve
+from .node_agent import NodeAgent
 from .wechat import ILinkWeChatTransport
 
 
@@ -19,11 +20,23 @@ def main() -> None:
     parser.add_argument("--serve", action="store_true", help="启动内网控制面 HTTP 服务")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
+    parser.add_argument("--node-agent", action="store_true", help="以远程节点身份注册并拉取任务")
+    parser.add_argument("--server-url", default="http://127.0.0.1:8787")
+    parser.add_argument("--node-name")
+    parser.add_argument("--node-address", default="127.0.0.1")
+    parser.add_argument("--node-auth-token")
     args = parser.parse_args()
     leader = SuperLeader(args.data_dir)
     if args.demo:
         for message in ("/help", "/sessions", "/nodes"):
             print(f"> {message}\n{leader.handle(message).text}\n")
+    elif args.node_agent:
+        if not args.node_name or not args.node_auth_token:
+            parser.error("--node-agent requires --node-name and --node-auth-token")
+        def execute(payload: str) -> str:
+            result = leader.sessions.fork(payload)
+            return (result.stdout or result.stderr or "Codex accepted task").strip()
+        NodeAgent(args.server_url, args.node_name, args.node_address, args.node_auth_token, execute).run()
     elif args.serve:
         server = serve(leader, args.host, args.port)
         print(f"控制面已启动：http://{args.host}:{args.port}")
