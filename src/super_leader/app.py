@@ -48,6 +48,8 @@ class SuperLeader:
                 "/nodes 查看已注册机器\n"
                 "/skills 查看技能\n"
                 "/remember <内容> 保存记忆\n"
+                "/codex <session_id> <任务> 发送到现有会话\n"
+                "/fork [model] <任务> 创建独立 Codex 会话\n"
                 "直接发送任务可交给 Super Leader 分派。"
             )
         if text == "/sessions":
@@ -67,5 +69,23 @@ class SuperLeader:
                 return CommandResult("记忆内容不能为空。")
             self.memory.remember(chat_id, "memory", value)
             return CommandResult("已保存到长期记忆。")
+        if text.startswith("/codex "):
+            _, session_id, prompt = text.split(" ", 2) if len(text.split(" ", 2)) == 3 else ("", "", "")
+            if not session_id or not prompt.strip():
+                return CommandResult("用法：/codex <session_id> <任务>")
+            result = self.sessions.send(session_id, prompt)
+            output = (result.stdout or result.stderr or "Codex 已接受任务").strip()
+            return CommandResult(output[-3500:])
+        if text.startswith("/fork "):
+            parts = text.split(" ", 2)
+            if len(parts) == 2:
+                model, prompt = None, parts[1]
+            elif parts[1].startswith("gpt-") or parts[1].startswith("claude-"):
+                model, prompt = parts[1], parts[2]
+            else:
+                model, prompt = None, text.removeprefix("/fork ")
+            result = self.sessions.fork(prompt, model)
+            output = (result.stdout or result.stderr or "Codex 子会话已创建").strip()
+            return CommandResult(output[-3500:])
         self.memory.remember(chat_id, "task", text)
         return CommandResult("已收到任务，正在由 Super Leader 分析并选择本机会话、远程节点或技能。", {"accepted": True})
