@@ -3,6 +3,7 @@ import threading
 import urllib.request
 
 from super_leader.app import SuperLeader
+from super_leader.node_agent import NodeAgent
 from super_leader.server import serve
 
 
@@ -24,3 +25,12 @@ def test_control_plane_health_and_message(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_remote_node_agent_rejects_plain_http_by_default():
+    try:
+        NodeAgent("http://office.example", "office", "office", "secret")
+    except ValueError as error:
+        assert "HTTPS" in str(error)
+    else:
+        raise AssertionError("remote node token transport must require HTTPS")
