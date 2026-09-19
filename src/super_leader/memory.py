@@ -6,7 +6,7 @@ from pathlib import Path
 
 class MemoryStore:
     def __init__(self, path: str | Path = ":memory:") -> None:
-        self.conn = sqlite3.connect(str(path))
+        self.conn = sqlite3.connect(str(path), check_same_thread=False)
         self.conn.execute("CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY, chat_id TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
         self.conn.commit()
 
@@ -25,4 +25,3 @@ class MemoryStore:
 
     def close(self) -> None:
         self.conn.close()
-
