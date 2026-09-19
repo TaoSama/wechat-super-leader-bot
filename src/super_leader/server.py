@@ -94,7 +94,7 @@ def make_handler(control: ControlPlane):
                 if not control.leader.nodes.authenticate(name, token):
                     self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                     return
-                updated = control.leader.nodes.update_task(str(body.get("task_id", "")), str(body.get("status", "")))
+                updated = control.leader.nodes.update_task(str(body.get("task_id", "")), str(body.get("status", "")), str(body.get("result", "")))
                 self._json(HTTPStatus.OK if updated else HTTPStatus.NOT_FOUND, {"updated": updated})
                 return
             if path == "/nodes/sessions":
