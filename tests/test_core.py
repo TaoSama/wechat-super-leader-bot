@@ -20,6 +20,9 @@ def test_registry_auth(tmp_path):
     assert registry.heartbeat("mini", token)
     assert not registry.heartbeat("mini", "bad")
     assert registry.list_nodes()[0].status == "online"
+    assert registry.dispatch("mini", "task-1", "检查状态")
+    assert registry.update_task("task-1", "completed")
+    assert registry.list_tasks()[0]["status"] == "completed"
 
 
 def test_fork_uses_none(tmp_path):
