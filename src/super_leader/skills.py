@@ -11,7 +11,7 @@ class SkillRouter:
             roots = configured or [
                 Path.home() / ".claude" / "skills",
                 Path.home() / ".codex" / "skills",
-                Path("/Users/developer/Workspaces/dotfiles/claude/skills"),
+                Path.home() / "Workspaces" / "dotfiles" / "claude" / "skills",
                 Path.cwd() / ".claude" / "skills",
             ]
         self.roots = [Path(r).expanduser() for r in roots]

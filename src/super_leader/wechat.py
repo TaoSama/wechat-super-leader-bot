@@ -214,6 +214,12 @@ class ILinkWeChatTransport:
         if not self.account:
             raise RuntimeError("WeChat is not logged in; run ILinkWeChatTransport.login()")
         response = self._request("ilink/bot/getupdates", {"get_updates_buf": self.sync_buf, "base_info": {"channel_version": "0.3.0"}}, self.account["token"], timeout or self.timeout)
+        if response.get("errcode") == -14 and "timeout" in str(response.get("errmsg", "")).lower() and self.sync_buf:
+            self.sync_buf = ""
+            self._save_state()
+            response = self._request("ilink/bot/getupdates", {"get_updates_buf": "", "base_info": {"channel_version": "0.3.0"}}, self.account["token"], timeout or self.timeout)
+        if response.get("ret") not in (None, 0) or response.get("errcode") not in (None, 0):
+            raise RuntimeError(f"WeChat getupdates failed: ret={response.get('ret')} errcode={response.get('errcode')} errmsg={response.get('errmsg', '')}")
         self.sync_buf = str(response.get("get_updates_buf") or self.sync_buf)
         self._save_state()
         for message in response.get("msgs") or []:

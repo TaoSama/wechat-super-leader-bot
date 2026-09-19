@@ -50,10 +50,19 @@ def main() -> None:
             account = transport.login()
             print(f"微信登录完成：{account['accountId']}")
         if args.wechat_poll_once or args.wechat_daemon:
+            retry_delay = 1.0
             while True:
-                for message in transport.poll():
-                    result = leader.handle(message.text, message.chat_id)
-                    transport.send(message.chat_id, result.text)
+                try:
+                    for message in transport.poll():
+                        result = leader.handle(message.text, message.chat_id)
+                        transport.send(message.chat_id, result.text)
+                    retry_delay = 1.0
+                except Exception as error:
+                    print(f"微信轮询/回复失败：{error}")
+                    if not args.wechat_daemon:
+                        raise
+                    time.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 60.0)
                 if not args.wechat_daemon:
                     break
                 time.sleep(1)
