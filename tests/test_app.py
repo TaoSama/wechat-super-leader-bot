@@ -40,3 +40,11 @@ def test_skill_command_builds_and_sends_prompt(tmp_path):
     assert app.handle("/skill session-management thread-1 查看任务").text == "done"
     assert seen[0][0] == "thread-1"
     assert "session-management" in seen[0][1]
+
+
+def test_dispatch_command(tmp_path):
+    app = SuperLeader(tmp_path)
+    token = app.nodes.register("mini", "local")
+    assert app.nodes.heartbeat("mini", token)
+    result = app.handle("/dispatch mini 检查状态")
+    assert result.data and result.data["accepted"] is True
