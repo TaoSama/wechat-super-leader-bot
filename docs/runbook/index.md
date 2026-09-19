@@ -21,6 +21,8 @@ python -m super_leader --wechat-daemon
 
 第一条命令会打印短时有效的微信登录 URL，扫码并在手机确认；凭据默认保存到 `~/.super-leader/wechat-account.json`（权限 `0600`）。第二条命令启动长轮询，把收到的消息交给 Super Leader，再通过 `ilink/bot/sendmessage` 回复。首次收到某个聊天的消息后才有该聊天的 context token，主动推送需要先建立过会话。
 
+Codex 桌面 Task 通过本机 `codex app-server --stdio` 连接，不依赖 rollout 文件：微信里发送 `/threads` 查看桌面任务，发送 `/turn <thread_id> <任务>` 将任务投递到指定 Task；`/sessions` 仍保留为只读 rollout 目录兼容视图。
+
 可用 `ALLOWED_CHAT_IDS=id1,id2` 限制微信发送者。每次消息处理失败要记录 request id 并按 15 分钟周期重试，不能重复发送同一任务。微信消息应优先使用短段落、列表和链接，复杂 Markdown（表格、代码块、HTML）会降级为纯文本。
 
 跨机控制面：

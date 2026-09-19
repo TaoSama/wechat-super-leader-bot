@@ -21,11 +21,13 @@ class SuperLeader:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         from .codex_sessions import CodexSessionManager
+        from .codex_app_server import CodexAppServerClient
         from .memory import MemoryStore
         from .nodes import NodeRegistry
         from .skills import SkillRouter
 
         self.sessions = CodexSessionManager()
+        self.desktop = CodexAppServerClient()
         self.nodes = NodeRegistry(self.data_dir / "nodes.sqlite3")
         self.memory = MemoryStore(self.data_dir / "memory.sqlite3")
         self.skills = SkillRouter()
@@ -45,6 +47,8 @@ class SuperLeader:
             return CommandResult(
                 "可用命令：\n"
                 "/sessions 查看 Codex 会话\n"
+                "/threads 查看 Codex 桌面 Task\n"
+                "/turn <thread_id> <任务> 发送到桌面 Task\n"
                 "/nodes 查看已注册机器\n"
                 "/skills 查看技能\n"
                 "/remember <内容> 保存记忆\n"
@@ -57,6 +61,14 @@ class SuperLeader:
             if not rows:
                 return CommandResult("暂未发现本机 Codex 会话。")
             return CommandResult("本机 Codex 会话：\n" + "\n".join(self.sessions.format_session(r) for r in rows))
+        if text == "/threads":
+            try:
+                rows = self.desktop.list_threads(limit=20)
+            except Exception as error:
+                return CommandResult(f"读取 Codex 桌面 Task 失败：{error}")
+            if not rows:
+                return CommandResult("暂无 Codex 桌面 Task。")
+            return CommandResult("Codex 桌面 Task：\n" + "\n".join(f"- {row.get('id', '?')}：{row.get('name') or row.get('preview') or ''}" for row in rows))
         if text == "/nodes":
             rows = self.nodes.list_nodes()
             return CommandResult("已注册节点：\n" + "\n".join(f"- {n.name} ({n.status})" for n in rows) if rows else "暂无已注册节点。")
@@ -76,6 +88,15 @@ class SuperLeader:
             result = self.sessions.send(session_id, prompt)
             output = (result.stdout or result.stderr or "Codex 已接受任务").strip()
             return CommandResult(output[-3500:])
+        if text.startswith("/turn "):
+            parts = text.split(" ", 2)
+            if len(parts) != 3:
+                return CommandResult("用法：/turn <thread_id> <任务>")
+            try:
+                output = self.desktop.send_turn(parts[1], parts[2])
+            except Exception as error:
+                return CommandResult(f"发送到 Codex 桌面 Task 失败：{error}")
+            return CommandResult(output or "Codex 已接受任务。")
         if text.startswith("/fork "):
             parts = text.split(" ", 2)
             if len(parts) == 2:
