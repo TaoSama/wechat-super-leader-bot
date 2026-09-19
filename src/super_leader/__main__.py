@@ -6,6 +6,7 @@ import time
 from .app import SuperLeader
 from .server import serve
 from .node_agent import NodeAgent
+from .doctor import run_check
 from .wechat import ILinkWeChatTransport
 
 
@@ -25,8 +26,13 @@ def main() -> None:
     parser.add_argument("--node-name")
     parser.add_argument("--node-address", default="127.0.0.1")
     parser.add_argument("--node-auth-token")
+    parser.add_argument("--check", action="store_true", help="检查运行环境，不登录、不发送消息")
     args = parser.parse_args()
     leader = SuperLeader(args.data_dir)
+    if args.check:
+        for name, ok, detail in run_check(args.data_dir):
+            print(f"{'PASS' if ok else 'FAIL'}  {name}: {detail}")
+        return
     if args.demo:
         for message in ("/help", "/sessions", "/nodes"):
             print(f"> {message}\n{leader.handle(message).text}\n")
