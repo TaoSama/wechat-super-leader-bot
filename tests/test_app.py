@@ -31,3 +31,12 @@ def test_skills_include_super_leader_builtins(tmp_path):
     names = app.skills.list_skills()
     assert "session-management" in names
     assert "node-communication" in names
+
+
+def test_skill_command_builds_and_sends_prompt(tmp_path):
+    app = SuperLeader(tmp_path)
+    seen = []
+    app.desktop.send_turn = lambda thread_id, prompt: seen.append((thread_id, prompt)) or "done"
+    assert app.handle("/skill session-management thread-1 查看任务").text == "done"
+    assert seen[0][0] == "thread-1"
+    assert "session-management" in seen[0][1]

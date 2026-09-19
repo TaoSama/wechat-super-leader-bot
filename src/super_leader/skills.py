@@ -41,3 +41,15 @@ class SkillRouter:
 
     def is_builtin(self, name: str) -> bool:
         return name in self.builtins
+
+    def build_prompt(self, name: str, task: str) -> str:
+        if not task.strip():
+            raise ValueError("task cannot be empty")
+        path = self.resolve(name)
+        if path:
+            instructions = path.read_text(encoding="utf-8", errors="replace")[:12000]
+        elif self.is_builtin(name):
+            instructions = f"这是 Super Leader 内置技能：{name}。请先确认权限、目标和完成证据，再执行任务。"
+        else:
+            raise ValueError(f"unknown skill: {name}")
+        return f"请使用技能 {name} 完成以下任务。技能说明：\n{instructions}\n\n任务：\n{task}"

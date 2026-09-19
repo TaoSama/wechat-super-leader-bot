@@ -49,6 +49,7 @@ class SuperLeader:
                 "/sessions 查看 Codex 会话\n"
                 "/threads 查看 Codex 桌面 Task\n"
                 "/turn <thread_id> <任务> 发送到桌面 Task\n"
+                "/skill <技能> <thread_id> <任务> 在桌面 Task 调用技能\n"
                 "/nodes 查看已注册机器\n"
                 "/skills 查看技能\n"
                 "/remember <内容> 保存记忆\n"
@@ -104,6 +105,16 @@ class SuperLeader:
             except Exception as error:
                 return CommandResult(f"发送到 Codex 桌面 Task 失败：{error}")
             return CommandResult(output or "Codex 已接受任务。")
+        if text.startswith("/skill "):
+            parts = text.split(" ", 3)
+            if len(parts) != 4:
+                return CommandResult("用法：/skill <技能> <thread_id> <任务>")
+            try:
+                prompt = self.skills.build_prompt(parts[1], parts[3])
+                output = self.desktop.send_turn(parts[2], prompt)
+            except Exception as error:
+                return CommandResult(f"技能调用失败：{error}")
+            return CommandResult(output or "技能任务已提交。")
         if text.startswith("/fork "):
             parts = text.split(" ", 2)
             if len(parts) == 2:
