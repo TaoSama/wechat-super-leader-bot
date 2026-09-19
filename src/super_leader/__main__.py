@@ -4,6 +4,7 @@ import argparse
 import time
 
 from .app import SuperLeader
+from .server import serve
 from .wechat import ILinkWeChatTransport
 
 
@@ -15,11 +16,21 @@ def main() -> None:
     parser.add_argument("--wechat-poll-once", action="store_true", help="轮询一次微信消息并回复")
     parser.add_argument("--wechat-daemon", action="store_true", help="持续轮询微信并路由消息")
     parser.add_argument("--wechat-credentials", help="微信凭据文件路径")
+    parser.add_argument("--serve", action="store_true", help="启动内网控制面 HTTP 服务")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8787)
     args = parser.parse_args()
     leader = SuperLeader(args.data_dir)
     if args.demo:
         for message in ("/help", "/sessions", "/nodes"):
             print(f"> {message}\n{leader.handle(message).text}\n")
+    elif args.serve:
+        server = serve(leader, args.host, args.port)
+        print(f"控制面已启动：http://{args.host}:{args.port}")
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            server.shutdown()
     elif args.wechat_login or args.wechat_poll_once or args.wechat_daemon:
         transport = ILinkWeChatTransport(args.wechat_credentials)
         if args.wechat_login:
