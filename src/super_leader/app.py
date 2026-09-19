@@ -51,6 +51,7 @@ class SuperLeader:
                 "/turn <thread_id> <任务> 发送到桌面 Task\n"
                 "/skill <技能> <thread_id> <任务> 在桌面 Task 调用技能\n"
                 "/nodes 查看已注册机器\n"
+                "/remote-sessions 查看所有机器的 Codex 会话\n"
                 "/skills 查看技能\n"
                 "/remember <内容> 保存记忆\n"
                 "/recall <关键词> 检索记忆\n"
@@ -74,6 +75,9 @@ class SuperLeader:
         if text == "/nodes":
             rows = self.nodes.list_nodes()
             return CommandResult("已注册节点：\n" + "\n".join(f"- {n.name} ({n.status})" for n in rows) if rows else "暂无已注册节点。")
+        if text == "/remote-sessions":
+            rows = self.nodes.list_node_sessions()
+            return CommandResult("所有机器的 Codex 会话：\n" + "\n".join(f"- {row['node_name']} / {row['session_id']}" for row in rows) if rows else "暂无远程会话上报。")
         if text == "/skills":
             names = self.skills.list_skills()
             return CommandResult("可用技能：\n" + "\n".join(f"- {name}" for name in names) if names else "暂无可发现技能。")

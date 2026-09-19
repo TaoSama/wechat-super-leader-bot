@@ -20,6 +20,7 @@ class NodeRegistry:
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
         self.conn.execute("CREATE TABLE IF NOT EXISTS nodes (name TEXT PRIMARY KEY, address TEXT NOT NULL, token_hash TEXT NOT NULL, status TEXT NOT NULL, last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
         self.conn.execute("CREATE TABLE IF NOT EXISTS tasks (task_id TEXT PRIMARY KEY, node_name TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+        self.conn.execute("CREATE TABLE IF NOT EXISTS node_sessions (node_name TEXT NOT NULL, session_id TEXT NOT NULL, path TEXT NOT NULL, updated TEXT NOT NULL, PRIMARY KEY(node_name, session_id))")
         self.conn.commit()
 
     @staticmethod
@@ -77,6 +78,21 @@ class NodeRegistry:
             self.conn.execute("UPDATE tasks SET status='running', updated_at=CURRENT_TIMESTAMP WHERE task_id=?", (task_id,))
         self.conn.commit()
         return [{"task_id": task_id, "payload": payload, "status": "running"} for task_id, payload in rows]
+
+    def report_sessions(self, node_name: str, token: str, sessions: list[dict[str, str]]) -> bool:
+        if not self.authenticate(node_name, token):
+            return False
+        self.conn.execute("DELETE FROM node_sessions WHERE node_name=?", (node_name,))
+        self.conn.executemany("INSERT INTO node_sessions(node_name,session_id,path,updated) VALUES(?,?,?,?)", [(node_name, str(row.get("id", "")), str(row.get("path", "")), str(row.get("updated", ""))) for row in sessions if row.get("id")])
+        self.conn.commit()
+        return True
+
+    def list_node_sessions(self, node_name: str | None = None) -> list[dict[str, str]]:
+        if node_name:
+            rows = self.conn.execute("SELECT node_name,session_id,path,updated FROM node_sessions WHERE node_name=? ORDER BY updated DESC", (node_name,)).fetchall()
+        else:
+            rows = self.conn.execute("SELECT node_name,session_id,path,updated FROM node_sessions ORDER BY node_name,updated DESC").fetchall()
+        return [{"node_name": row[0], "session_id": row[1], "path": row[2], "updated": row[3]} for row in rows]
 
     def close(self) -> None:
         self.conn.close()

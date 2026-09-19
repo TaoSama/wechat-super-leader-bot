@@ -23,6 +23,8 @@ def test_registry_auth(tmp_path):
     assert registry.dispatch("mini", "task-1", "检查状态")
     assert registry.update_task("task-1", "completed")
     assert registry.list_tasks()[0]["status"] == "completed"
+    assert registry.report_sessions("mini", token, [{"id": "s1", "path": "/tmp/s1", "updated": "1"}])
+    assert registry.list_node_sessions("mini")[0]["session_id"] == "s1"
 
 
 def test_fork_uses_none(tmp_path):
