@@ -33,7 +33,7 @@ Codex 桌面 Task 通过本机 `codex app-server --stdio` 连接，不依赖 rol
 AUTH_TOKEN='随机长 token' python -m super_leader --serve --host 0.0.0.0 --port 8787
 ```
 
-控制面提供 `/health`、`/messages`、`/nodes/register`、`/nodes/heartbeat`、`/nodes/sessions` 和 `/nodes/dispatch`；微信里发送 `/remote-sessions` 可查看各机器上报的 Codex 会话。生产环境应放在 Tailscale/内网或 HTTPS 反向代理后，不要直接暴露到公网。
+控制面提供 `/health`、`/messages`、`/nodes/register`、`/nodes/heartbeat`、`/nodes/sessions` 和 `/nodes/dispatch`；微信里发送 `/remote-sessions` 可查看各机器上报的 Codex 会话，发送 `/tasks` 可查看远程任务状态和执行结果。生产环境应放在 Tailscale/内网或 HTTPS 反向代理后，不要直接暴露到公网。
 
 公司机器上运行节点：
 
