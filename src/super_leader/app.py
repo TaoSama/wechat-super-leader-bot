@@ -41,7 +41,7 @@ class SuperLeader:
             return CommandResult("请发送任务或输入 /help 查看命令。")
         if self.allowed_chat_ids and chat_id not in self.allowed_chat_ids:
             return CommandResult("当前微信账号未被授权使用此机器人。")
-        if not text.startswith("/remember "):
+        if not text.startswith("/"):
             self.memory.remember(chat_id, "user", text)
         if text in {"/help", "帮助", "菜单"}:
             return CommandResult(
@@ -52,6 +52,7 @@ class SuperLeader:
                 "/nodes 查看已注册机器\n"
                 "/skills 查看技能\n"
                 "/remember <内容> 保存记忆\n"
+                "/recall <关键词> 检索记忆\n"
                 "/codex <session_id> <任务> 发送到现有会话\n"
                 "/fork [model] <任务> 创建独立 Codex 会话\n"
                 "直接发送任务可交给 Super Leader 分派。"
@@ -81,6 +82,12 @@ class SuperLeader:
                 return CommandResult("记忆内容不能为空。")
             self.memory.remember(chat_id, "memory", value)
             return CommandResult("已保存到长期记忆。")
+        if text.startswith("/recall "):
+            query = text.removeprefix("/recall ").strip()
+            if not query:
+                return CommandResult("用法：/recall <关键词>")
+            results = self.memory.search(chat_id, query)
+            return CommandResult("相关记忆：\n" + "\n".join(f"- {item}" for item in results) if results else "没有找到相关记忆。")
         if text.startswith("/codex "):
             _, session_id, prompt = text.split(" ", 2) if len(text.split(" ", 2)) == 3 else ("", "", "")
             if not session_id or not prompt.strip():
