@@ -1,0 +1,37 @@
+# Claude Code - track .claude/CLAUDE.md, settings.json, commands, docs, rules, skills, agents
+.claude/*
+!.claude/CLAUDE.md
+!.claude/settings.json
+!.claude/commands/
+!.claude/docs/
+!.claude/rules/
+!.claude/skills/
+!.claude/agents/
+
+# Codex CLI - track .codex/AGENTS.md, config.toml, skills
+.codex/*
+!.codex/AGENTS.md
+!.codex/config.toml
+!.codex/skills
+
+# Trae CLI - track .trae/AGENTS.md, traecli.toml, skills
+.trae/*
+!.trae/AGENTS.md
+!.trae/traecli.toml
+!.trae/skills
+
+.env
+.env.*
+!.env.example
+
+# ---- Auto: Python ----
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Runtime data
+data/*.db
+data/*.sqlite*
+logs/
