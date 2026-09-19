@@ -21,8 +21,9 @@ def test_registry_auth(tmp_path):
     assert not registry.heartbeat("mini", "bad")
     assert registry.list_nodes()[0].status == "online"
     assert registry.dispatch("mini", "task-1", "检查状态")
-    assert registry.update_task("task-1", "completed")
+    assert registry.update_task("task-1", "completed", "完成")
     assert registry.list_tasks()[0]["status"] == "completed"
+    assert registry.list_tasks()[0]["result"] == "完成"
     assert registry.report_sessions("mini", token, [{"id": "s1", "path": "/tmp/s1", "updated": "1"}])
     assert registry.list_node_sessions("mini")[0]["session_id"] == "s1"
 

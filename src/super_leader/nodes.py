@@ -19,7 +19,10 @@ class NodeRegistry:
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
         self.conn.execute("CREATE TABLE IF NOT EXISTS nodes (name TEXT PRIMARY KEY, address TEXT NOT NULL, token_hash TEXT NOT NULL, status TEXT NOT NULL, last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
-        self.conn.execute("CREATE TABLE IF NOT EXISTS tasks (task_id TEXT PRIMARY KEY, node_name TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+        self.conn.execute("CREATE TABLE IF NOT EXISTS tasks (task_id TEXT PRIMARY KEY, node_name TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL, result TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+        task_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(tasks)")}
+        if "result" not in task_columns:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN result TEXT NOT NULL DEFAULT ''")
         self.conn.execute("CREATE TABLE IF NOT EXISTS node_sessions (node_name TEXT NOT NULL, session_id TEXT NOT NULL, path TEXT NOT NULL, updated TEXT NOT NULL, PRIMARY KEY(node_name, session_id))")
         self.conn.commit()
 
@@ -58,17 +61,17 @@ class NodeRegistry:
         self.conn.commit()
         return True
 
-    def update_task(self, task_id: str, status: str) -> bool:
+    def update_task(self, task_id: str, status: str, result: str = "") -> bool:
         allowed = {"queued", "running", "completed", "failed", "cancelled"}
         if status not in allowed:
             raise ValueError(f"unsupported task status: {status}")
-        cursor = self.conn.execute("UPDATE tasks SET status=?, updated_at=CURRENT_TIMESTAMP WHERE task_id=?", (status, task_id))
+        cursor = self.conn.execute("UPDATE tasks SET status=?, result=?, updated_at=CURRENT_TIMESTAMP WHERE task_id=?", (status, result, task_id))
         self.conn.commit()
         return cursor.rowcount == 1
 
     def list_tasks(self) -> list[dict[str, str]]:
-        rows = self.conn.execute("SELECT task_id,node_name,payload,status,created_at,updated_at FROM tasks ORDER BY created_at DESC").fetchall()
-        return [{"task_id": r[0], "node_name": r[1], "payload": r[2], "status": r[3], "created_at": r[4], "updated_at": r[5]} for r in rows]
+        rows = self.conn.execute("SELECT task_id,node_name,payload,status,result,created_at,updated_at FROM tasks ORDER BY created_at DESC").fetchall()
+        return [{"task_id": r[0], "node_name": r[1], "payload": r[2], "status": r[3], "result": r[4], "created_at": r[5], "updated_at": r[6]} for r in rows]
 
     def claim_tasks(self, node_name: str, token: str, limit: int = 10) -> list[dict[str, str]]:
         if not self.authenticate(node_name, token):

@@ -66,7 +66,7 @@ class NodeAgent:
             except Exception as error:
                 output = str(error)
                 status = "failed"
-            self._request("/nodes/task-status", {"name": self.name, "task_id": task_id, "status": status}, {"X-Node-Token": self.token})
+            self._request("/nodes/task-status", {"name": self.name, "task_id": task_id, "status": status, "result": output}, {"X-Node-Token": self.token})
             completed.append({"task_id": task_id, "output": output})
         return completed
 
