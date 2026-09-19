@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,7 @@ class SuperLeader:
                 "/turn <thread_id> <任务> 发送到桌面 Task\n"
                 "/skill <技能> <thread_id> <任务> 在桌面 Task 调用技能\n"
                 "/nodes 查看已注册机器\n"
+                "/dispatch <节点> <任务> 派发到远程机器\n"
                 "/remote-sessions 查看所有机器的 Codex 会话\n"
                 "/tasks 查看跨机任务状态\n"
                 "/skills 查看技能\n"
@@ -76,6 +78,13 @@ class SuperLeader:
         if text == "/nodes":
             rows = self.nodes.list_nodes()
             return CommandResult("已注册节点：\n" + "\n".join(f"- {n.name} ({n.status})" for n in rows) if rows else "暂无已注册节点。")
+        if text.startswith("/dispatch "):
+            parts = text.split(" ", 2)
+            if len(parts) != 3:
+                return CommandResult("用法：/dispatch <节点> <任务>")
+            task_id = f"wechat-{uuid.uuid4().hex[:12]}"
+            accepted = self.nodes.dispatch(parts[1], task_id, parts[2])
+            return CommandResult(f"任务已派发：{task_id}" if accepted else "节点不存在或不在线。", {"task_id": task_id, "accepted": accepted})
         if text == "/remote-sessions":
             rows = self.nodes.list_node_sessions()
             return CommandResult("所有机器的 Codex 会话：\n" + "\n".join(f"- {row['node_name']} / {row['session_id']}" for row in rows) if rows else "暂无远程会话上报。")
