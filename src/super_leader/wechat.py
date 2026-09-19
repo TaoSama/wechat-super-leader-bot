@@ -115,10 +115,12 @@ class ILinkWeChatTransport:
 
     def __init__(self, credentials_path: str | None = None, base_url: str | None = None, timeout: float = 35.0) -> None:
         self.credentials_path = credentials_path or os.environ.get("WECHAT_CREDENTIALS_PATH") or os.path.expanduser("~/.super-leader/wechat-account.json")
+        self.state_path = f"{self.credentials_path}.state.json"
         self.base_url = (base_url or os.environ.get("WECHAT_ILINK_BASE_URL") or "https://ilinkai.weixin.qq.com").rstrip("/")
         self.timeout = timeout
         self.sync_buf = ""
         self.context_tokens: dict[str, str] = {}
+        self._load_state()
         self.account: dict[str, str] | None = self._load()
 
     def _load(self) -> dict[str, str] | None:
@@ -128,6 +130,25 @@ class ILinkWeChatTransport:
             return value if isinstance(value, dict) and value.get("token") else None
         except (OSError, json.JSONDecodeError):
             return None
+
+    def _load_state(self) -> None:
+        try:
+            with open(self.state_path, encoding="utf-8") as handle:
+                state = json.load(handle)
+            if isinstance(state, dict):
+                self.sync_buf = str(state.get("sync_buf") or "")
+                tokens = state.get("context_tokens")
+                if isinstance(tokens, dict):
+                    self.context_tokens = {str(k): str(v) for k, v in tokens.items() if v}
+        except (OSError, json.JSONDecodeError):
+            return
+
+    def _save_state(self) -> None:
+        path = os.path.abspath(os.path.expanduser(self.state_path))
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"sync_buf": self.sync_buf, "context_tokens": self.context_tokens}, handle, ensure_ascii=False, indent=2)
+        os.chmod(path, 0o600)
 
     def _request(self, endpoint: str, payload: dict[str, object], token: str | None = None, timeout: float | None = None) -> dict[str, object]:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -182,6 +203,9 @@ class ILinkWeChatTransport:
                 with open(path, "w", encoding="utf-8") as handle:
                     json.dump(self.account, handle, ensure_ascii=False, indent=2)
                 os.chmod(path, 0o600)
+                self.sync_buf = ""
+                self.context_tokens = {}
+                self._save_state()
                 return self.account
             time.sleep(poll_interval)
         raise TimeoutError("WeChat QR login timed out")
@@ -191,6 +215,7 @@ class ILinkWeChatTransport:
             raise RuntimeError("WeChat is not logged in; run ILinkWeChatTransport.login()")
         response = self._request("ilink/bot/getupdates", {"get_updates_buf": self.sync_buf, "base_info": {"channel_version": "0.3.0"}}, self.account["token"], timeout or self.timeout)
         self.sync_buf = str(response.get("get_updates_buf") or self.sync_buf)
+        self._save_state()
         for message in response.get("msgs") or []:
             if not isinstance(message, dict) or message.get("message_type") != 1:
                 continue
@@ -201,6 +226,7 @@ class ILinkWeChatTransport:
             token = message.get("context_token")
             if token:
                 self.context_tokens[sender] = str(token)
+            self._save_state()
             yield WeChatMessage(sender, text, str(message.get("client_id") or message.get("create_time_ms") or ""))
 
     def send(self, chat_id: str, text: str) -> None:

@@ -59,3 +59,6 @@ def test_ilink_transport_login_poll_and_send(tmp_path):
     assert message.text == "你好"
     transport.send("u1", "**完成**")
     assert any(call[1].endswith("sendmessage") for call in transport.calls)
+    restored = FakeTransport(tmp_path / "account.json")
+    assert restored.context_tokens.get("u1") == "ctx"
+    assert restored.sync_buf == "cursor"
