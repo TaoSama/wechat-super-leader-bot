@@ -23,6 +23,8 @@ python -m super_leader --wechat-daemon
 
 Codex 桌面 Task 通过本机 `codex app-server --stdio` 连接，不依赖 rollout 文件：微信里发送 `/threads` 查看桌面任务，发送 `/turn <thread_id> <任务>` 将任务投递到指定 Task；`/sessions` 仍保留为只读 rollout 目录兼容视图。
 
+技能调用格式为 `/skill <技能名> <thread_id> <任务>`。技能目录从 `SKILL_ROOTS`、`~/.claude/skills`、`~/.codex/skills` 和 dotfiles 技能目录发现，Super Leader 的会话、节点、Leader 协调、进度和记忆技能作为内置路由提供。
+
 可用 `ALLOWED_CHAT_IDS=id1,id2` 限制微信发送者。每次消息处理失败要记录 request id 并按 15 分钟周期重试，不能重复发送同一任务。微信消息应优先使用短段落、列表和链接，复杂 Markdown（表格、代码块、HTML）会降级为纯文本。
 
 跨机控制面：
