@@ -1,56 +1,27 @@
-## 明早扫码测试
+# 运行手册
 
-当前版本已内置微信 iLink transport：二维码登录、长轮询收消息、上下文 token 回复和 Markdown 降级；同时保留 `mock` transport 做离线测试。
+当前只有 TypeScript Controller/Gateway、Go Daemon、React Web 一套实现；旧 Python、slash 命令和独立 worker 的操作方式均已删除。
 
-```bash
-cd /Users/luwentao/Documents/ordinary/wechat-super-leader-bot
-cp .env.example .env
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e '.[dev]'
-python -m pytest -q
-python -m super_leader --demo
-```
+正式实例入口、Mac/Linux 原生服务及微信允许名单见 [香港运维说明](hong-kong.md)。运行前先检查 `node local.mjs --check --controller https://leader.taoai.site`；无节点时检查原生 Daemon，不启动独立 app-server 替代原会话。独立本机开发环境另见 [项目说明](../../README.md)。
 
-明早扫码测试：
+## 微信人工联调
 
-```bash
-python -m super_leader --wechat-login
-python -m super_leader --wechat-daemon
-```
+1. 先完成模拟测试，不启动真实 Gateway，不使用真实微信 token。
+2. 用户准备好后，核对已扫码账号及实际发送者 chatId，只授权该 chatId。不要根据消息正文自动认领身份。
+3. 按香港手册授权 Controller 的 `ALLOWED_CHAT_IDS`，通过独立 Docker Gateway 接入。本地允许名单维持为空，不启动第二个 Controller 或第二个微信轮询进程。
+4. 首次上线先 `--establish-baseline` 跳过历史，再启动 `wechat` profile；收到就绪通知后，由用户亲自发送下方测试消息。正常重启不重建基线、不删除 checkpoint。
+5. 在 Codex App 打开专用测试会话并确认它可发送，再发：“查看 Mac Air 上的测试会话”；“让 Super Leader macair 联调会话 这个会话只回复 WECHAT_OK，不调用工具、不修改文件”。
+6. 核对计划目标后发送“确认执行”；随后问“刚才那个任务完成了吗，原文是什么”。
+7. 必须核对精确 turnId、completed 和 WECHAT_OK；accepted 不算验收通过。
 
-第一条命令会打印短时有效的微信登录 URL，扫码并在手机确认；凭据默认保存到 `~/.super-leader/wechat-account.json`（权限 `0600`）。第二条命令启动长轮询，把收到的消息交给 Super Leader，再通过 `ilink/bot/sendmessage` 回复。首次收到某个聊天的消息后才有该聊天的 context token，主动推送需要先建立过会话。
+发送者必须由真实入站与已登录账号身份核实，不能按消息正文认领。不能把保存 token、一次发送 HTTP 200 或健康空轮询当作微信端到端成功。若凭证过期，需另外完成重新登录；不要手改 token。
 
-Codex 桌面 Task 通过本机 `codex app-server --stdio` 连接，不依赖 rollout 文件：微信里发送 `/threads` 查看桌面任务，发送 `/turn <thread_id> <任务>` 将任务投递到指定 Task；`/sessions` 仍保留为只读 rollout 目录兼容视图。
+## 持久化和部署
 
-跨机任务使用 `/dispatch <节点> <任务>`，完成后用 `/tasks` 查看节点回传的结果。
+- PostgreSQL volume、`.runtime/daemon-state` 和微信账号凭证必须保留。Docker down 不加 `-v`。
+- Daemon journal 独占锁防止重复实例；不可删除 journal 来绕过锁。
+- 断线或重启后仅查询原 turn，不重新发送。uncertain 先核验，不能当失败随意重跑。
+- 跨机入口已部署为 `https://leader.taoai.site`，Daemon 使用 WSS，每节点独立 token；本机 127.0.0.1 不是远程可访问地址。
+- 用户服务仅在显式 `--service install` 时安装；不修改隧道、防火墙或 linger，不停止其他项目进程。
 
-技能调用格式为 `/skill <技能名> <thread_id> <任务>`。技能目录从 `SKILL_ROOTS`、`~/.claude/skills`、`~/.codex/skills` 和 dotfiles 技能目录发现，Super Leader 的会话、节点、Leader 协调、进度和记忆技能作为内置路由提供。
-
-可用 `ALLOWED_CHAT_IDS=id1,id2` 限制微信发送者。每次消息处理失败要记录 request id 并按 15 分钟周期重试，不能重复发送同一任务。微信消息应优先使用短段落、列表和链接，复杂 Markdown（表格、代码块、HTML）会降级为纯文本。
-
-跨机控制面：
-
-```bash
-AUTH_TOKEN='随机长 token' python -m super_leader --serve --host 0.0.0.0 --port 8787
-```
-
-控制面提供 `/health`、`/messages`、`/nodes/register`、`/nodes/heartbeat`、`/nodes/sessions` 和 `/nodes/dispatch`；微信里发送 `/remote-sessions` 可查看各机器上报的 Codex 会话，发送 `/tasks` 可查看远程任务状态和执行结果。生产环境应放在 Tailscale/内网或 HTTPS 反向代理后，不要直接暴露到公网。
-
-公司机器上运行节点：
-
-```bash
-python -m super_leader --node-agent \
-  --server-url https://你的控制面地址 \
-  --node-name office-mac \
-  --node-address office-mac \
-  --node-auth-token '与控制面 AUTH_TOKEN 相同的长随机值'
-```
-
-节点会注册、发送心跳、拉取任务，并默认通过 `codex exec --fork-turns none` 执行任务；完成状态会回写控制面。
-
-远程节点默认强制 HTTPS；仅在隔离的本机开发环境才允许设置 `ALLOW_INSECURE_NODE_HTTP=1`。
-
-跨机节点不要暴露 Codex token：节点以一次性注册 token 加入，服务端只保存 token 哈希；节点心跳过期后禁止派发新任务。公网部署必须放在 HTTPS、反向代理和访问白名单之后。
-
-如果 iLink 服务地址变化，可设置 `WECHAT_ILINK_BASE_URL`；不要把 bot token 写入仓库或 `.env.example`。
+详细协议与边界见 [验收清单](../changes/2026-10-10-control-plane/ACCEPTANCE.md)。
