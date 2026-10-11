@@ -76,10 +76,20 @@ go test ./pkg/codex -run '^TestLiveCodexDesktopReadonlyHistory$' -count=1 -v
 
 主控完整复验：`node verify.mjs --suite unit` PASS 12 checks / exit 0（含全包 race/vet、macOS/Linux 构建，codex race 30.503s）；`node verify.mjs --suite integration` PASS 6 checks / exit 0（真实临时 PG、真实 Go 模拟 owner、HTTP/WS、计划/通知和一次性登录）。临时服务与容器正常回收。独立只读评审无阻断问题。
 
-正式 Daemon 更新结果将在收口后补充；本节开发验证不冒充线上修复。
+### 正式历史修复更新
+
+干净提交 `e1a6408fc65c53c78d00c7a982b67819bcf8351f` 构建 darwin/arm64 Daemon，`vcs.modified=false`；安装后二进制 SHA256 为 `0f6c10a16490d30b9981731daf1979f5bf15c535e819ea317546c1e815dadf24`，PID 29300。原 token 内容、journal inode 和两个文件的 0600 权限保持不变。
+
+21:46:22 再次全量 PG 排空检查；Gateway 于 21:46:38.997 正常退出 0，其后审计仍通过；Controller 于 21:46:39.566 正常退出 0，冻结写入口后的第三次审计通过。全部为 16 completed、2 failed，无在途、有效 claim/pending、active execution 或未决通知。安装保留完整原参数，不更换绑定或创建空 journal。
+
+21:47:17.838 恢复原 Controller 容器及 `a4ef93c` 镜像，不重新构建。首次 readiness 断言未通过；定点只读复查于 21:47:58 确认 节点 A connected、83 技能、原命令精确 turn/output 不变。历史验收脚本另有一次字段名误用 `skillRefs`，对照源码及实际响应键确认为 `skills` 后仅修验收断言，未改 API 或重发任务。
+
+21:48:26 正式 HTTP 只读验收通过：首次 GET 200，first=3 / older=3 / latest=3，source=codex-desktop；固定 historyContext、旧页无重叠。明确按 `turnId`、`kind=assistant`、`type=agentMessage` 和完整 text 匹配上述三行输出，不能以用户 prompt 含成功标记冒充结果。原 command 仍 completed、同 turn、两技能。原 App 独立 read_thread 仍为同一最新 turn/completed，无新增 turn。
+
+确认停止期间微信 checkpoint SHA256 仍为 `f5c92cd16d99b7692cdc02c81300c5348269865637f0f390cfd50fa809a6e6f6` 后，于 21:48:28.380 恢复原 Gateway。21:49:23 最终全量 PG 再核：16 completed、2 failed、无未决项，精确 requestId 仅 1 行且 exact receipt=true。三服务 healthy/restart=0，Gateway errors=0；PostgreSQL StartedAt 仍为 05:56:45.930，没有重启。没有操作 Codex App 生命周期。
 
 ## 回退边界
 
 此次已真实保存两技能命令，旧 Controller 的 `max(1)` 读取校验连终态记录也拒绝。不能直接退回旧镜像、删除历史、清空 journal 或恢复陈旧数据库；应保留现数据合同进行修复。运维切换示例已补 `--no-deps`，避免触碰 PG。
 
-本轮临时构建工具与专用验收会话尚待历史问题收尾后清理/归档。
+专用验收会话核对 idle/completed 后已归档，并返回主 Task；没有新增测试会话。临时 buildx 目录已移到废纸篓，原路径不存在，可恢复；正式镜像、服务和运行数据保留。统一验证创建的临时容器已回收，本机只保留原有 PostgreSQL 容器。上述提交仅在本地，未推送。

@@ -38,7 +38,7 @@ node local.mjs --sessions --controller https://leader.example.com
 
 部署、原生服务及人工微信验收见 [远端运维说明](docs/runbook/hong-kong.md)。已迁移到远端的实例不要再执行本地 `--up` 启动第二个编排权威。
 
-部署前分别核对控制平面镜像、节点 Daemon 和数据合同，并在自己的环境记录会话、微信和跨机流程的实际验收结果。相关记录：[发布与验收记录](docs/changes/2026-10-12-release-preflight/VERIFICATION.md)。
+部署前分别核对控制平面镜像、节点 Daemon 和数据合同，并在自己的环境记录会话、微信和跨机流程的实际验收结果。相关记录：[发布与验收记录](docs/changes/2026-10-12-ordered-skills-release/VERIFICATION.md)。
 
 ## Web 会话工作台
 
@@ -111,7 +111,7 @@ Web：`http://127.0.0.1:8790`。前端无手输 token 入口；本机若需签�
 
 已支持最多四步的持久依赖计划，例如“先让这个会话检查测试，完成后再让另一个会话检查文档”。预览冻结每步的目标、内容、技能版本和依赖，10 分钟内确认后最多自动推进 24 小时；只有精确完成回执才解锁后继，同一会话还要等待空闲资格。可说“计划到哪了”查询，或“停止后续任务”取消；取消不终止原会话已运行的任务，已领取项可能已发送。结果不明时不重发；重启后查原回执，不另起后端。后续内容不会自动吸收前项输出，需动态决定时应查询结果后另提计划。已随远端镜像部署；原子确认、取消、真实临时 PG 和 HTTP/WS 开发期验收见 [持久计划验证](docs/changes/2026-10-12-persistent-plans/VERIFICATION.md)，真实微信计划仍待验收。
 
-本地新增每任务最多 4 个有序技能组合，例如“按顺序使用设计和 UX 技能优化页面”。预览列出全部技能及 SHA256，确认与派发均核对整组；任一失配不部分执行，同请求调换顺序也拒绝。预览过长时不保存可确认计划，避免授权未显示的内容。该增量尚未部署，需 Controller 与 Daemon 同步发布，见 [有序技能组合](docs/changes/2026-10-12-ordered-skills/VERIFICATION.md)。
+已部署每任务最多 4 个有序技能组合，例如“按顺序使用设计和 UX 技能优化页面”。预览列出全部技能及 SHA256，确认与派发均核对整组；任一失配不部分执行，同请求调换顺序也拒绝。预览过长时不保存可确认计划，避免授权未显示的内容。正式原会话已验证两技能按指定顺序完整读取与实算 SHA256、精确 turn 完成、相同请求不重发及反序 HTTP 409；这是管理接口验收，不代替微信自然语言实测，也不冻结技能依赖目录。见 [开发合同](docs/changes/2026-10-12-ordered-skills/VERIFICATION.md) 与 [正式发布验收](docs/changes/2026-10-12-ordered-skills-release/VERIFICATION.md)。
 
 已确认计划可生成终态微信通知：完成、失败或授权到期后，在原聊天提示计划 ID、总步数和状态，不包含任务正文、会话输出或登录链接。默认关闭，需 Gateway 显式开启 `GATEWAY_PLAN_NOTIFICATIONS=true`（或 `--plan-notifications`）；只在既有基线和聊天 context 可用时处理。通知与计划终态同事务保存，每条只领取一次；结果不明不自动重发，`accepted` 仅表示微信接口受理，不保证送达或已读。代码已随远端镜像部署，但通知开关未启用，未做真实外发验收，不等于持续动态自治已经完成。真实临时 PostgreSQL/Controller/Gateway 与模拟微信验收见 [计划通知验证](docs/changes/2026-10-12-plan-notifications/VERIFICATION.md)。
 
