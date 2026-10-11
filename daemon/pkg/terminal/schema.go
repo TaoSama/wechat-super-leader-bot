@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"regexp"
@@ -74,11 +75,15 @@ func (a *agentInfo) publicCwd() string {
 }
 
 func (c *rpcClient) getAgent(pane string) (*agentInfo, error) {
+	return c.getAgentContext(c.ctx, pane)
+}
+
+func (c *rpcClient) getAgentContext(ctx context.Context, pane string) (*agentInfo, error) {
 	var response struct {
 		Type  string     `json:"type"`
 		Agent *agentInfo `json:"agent"`
 	}
-	if err := c.call("agent.get", struct {
+	if err := c.callContext(ctx, "agent.get", struct {
 		Target string `json:"target"`
 	}{pane}, &response); err != nil {
 		return nil, err
@@ -89,7 +94,13 @@ func (c *rpcClient) getAgent(pane string) (*agentInfo, error) {
 	if response.Agent == nil {
 		return nil, errors.New("terminal agent result object is missing")
 	}
-	a := response.Agent
+	return validateAgentInfo(response.Agent, pane)
+}
+
+func validateAgentInfo(a *agentInfo, pane string) (*agentInfo, error) {
+	if a == nil {
+		return nil, errors.New("terminal agent result object is missing")
+	}
 	if a.Pane != pane || !validIdentity(a.Terminal) || !validIdentity(a.Workspace) || !validIdentity(a.Tab) ||
 		!validIdentity(a.Status) || a.Revision == nil || a.Focused == nil || !a.validOptionalFields() {
 		return nil, errors.New("terminal agent identity or status is invalid")

@@ -47,6 +47,9 @@ test('plans build prerequisites once, include all components, and never invoke l
   const unit = verificationPlan('unit');
   assert(unit.find(step => step.id === 'cli-and-tool-tests').args.includes('deploy/image-build.test.mjs'));
   assert(unit.some(step => step.id === 'daemon-race' && step.args.includes('-count=1')));
+  assert.deepEqual(unit.find(step => step.id === 'terminal-delivery-sample'), {
+    id: 'terminal-delivery-sample', command: 'go', args: ['run', '-race', './examples/terminal-delivery', '--run'], cwd: 'daemon', env: {},
+  });
   assert.deepEqual(unit.find(step => step.id === 'daemon-linux-build').env, { GOOS: 'linux', GOARCH: 'amd64', CGO_ENABLED: '0' });
   assert.throws(() => verificationPlan('production'), /Unknown suite/);
 });
