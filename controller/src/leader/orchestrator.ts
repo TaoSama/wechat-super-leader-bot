@@ -126,6 +126,11 @@ export class LeaderOrchestrator {
         reply = { text: failureReply(error, reference) };
       }
     }
+    // Confirmation must never authorize steps or skill versions hidden by clipping.
+    if (data.pending && reply.text.length > MAX_REPLY_CHARS) {
+      data.pending = undefined;
+      reply = { text: this.attachConsoleLink("计划内容过长，无法完整展示供确认，未保存待确认计划，也未派发。请缩短任务内容或分批提出。", linkContext) };
+    }
     reply.text = clip(reply.text, MAX_REPLY_CHARS);
     data.inflight = undefined;
     data.receipts.push({ messageId, inputHash, ...reply });
@@ -377,9 +382,9 @@ export class LeaderOrchestrator {
 
   private preview(plan: Plan): string {
     const lines = plan.actions.map((action, index) => {
-      const selected = (action.skills ?? []).map(ref => {
+      const selected = (action.skills ?? []).map((ref, skillIndex) => {
         const item = this.hub.getNodeSkills(action.nodeId).find(skill => skill.id === ref.id && skill.digest === ref.digest);
-        return `\n技能：${JSON.stringify(item?.name ?? ref.id)}\nSHA256：${ref.digest}`;
+        return `\n技能 ${skillIndex + 1}：${JSON.stringify(item?.name ?? ref.id)}\nSHA256：${ref.digest}`;
       }).join("");
       return `${index + 1}. [${action.nodeId}] ${action.sessionId}\n任务：${action.prompt}${selected}\n依赖：${action.dependsOn.length ? `步骤 ${action.dependsOn.join("、")} 完成后` : "无，可独立执行"}`;
     });

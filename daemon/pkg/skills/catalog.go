@@ -46,10 +46,6 @@ type Skill struct {
 	Path        string `json:"path"`
 	Digest      string `json:"digest"`
 }
-type Ref struct {
-	ID     string `json:"id"`
-	Digest string `json:"digest"`
-}
 type permittedRoot struct {
 	path   string
 	handle *os.Root
@@ -237,8 +233,8 @@ func parse(path string, content []byte) (Skill, error) {
 
 // Resolve never accepts arbitrary paths and refuses incomplete catalogs.
 func Resolve(roots []string, refs []Ref) ([]Skill, error) {
-	if len(refs) > 1 {
-		return nil, errors.New("at most one selected skill is supported")
+	if err := ValidateRefs(refs); err != nil {
+		return nil, err
 	}
 	if len(refs) == 0 {
 		return []Skill{}, nil
@@ -247,10 +243,17 @@ func Resolve(roots []string, refs []Ref) ([]Skill, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate incomplete catalog: %w", err)
 	}
+	byID := make(map[string]Skill, len(catalog))
 	for _, item := range catalog {
-		if item.ID == refs[0].ID && item.Digest == refs[0].Digest {
-			return []Skill{item}, nil
-		}
+		byID[item.ID] = item
 	}
-	return nil, errors.New("selected skill missing or changed")
+	selected := make([]Skill, 0, len(refs))
+	for _, ref := range refs {
+		item, exists := byID[ref.ID]
+		if !exists || item.Digest != ref.Digest {
+			return nil, errors.New("selected skill missing or changed")
+		}
+		selected = append(selected, item)
+	}
+	return selected, nil
 }
