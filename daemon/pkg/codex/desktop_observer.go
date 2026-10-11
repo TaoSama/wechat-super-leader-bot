@@ -19,14 +19,17 @@ type DesktopWatcher interface {
 }
 
 type DesktopObserver struct {
-	socketPath   string
-	ownerTimeout time.Duration
-	watchWindow  time.Duration
-	discovery    desktopDiscoverySchedule
+	socketPath         string
+	ownerTimeout       time.Duration
+	watchWindow        time.Duration
+	discovery          desktopDiscoverySchedule
+	subscriptionWindow time.Duration
+	subscriptions      desktopDiscoverySchedule
 }
 
 func NewDesktopObserver(socketPath string) *DesktopObserver {
-	return &DesktopObserver{socketPath: socketPath, ownerTimeout: desktopOwnerTimeout, watchWindow: DesktopWatchWindow}
+	return &DesktopObserver{socketPath: socketPath, ownerTimeout: desktopOwnerTimeout, watchWindow: DesktopWatchWindow,
+		subscriptionWindow: desktopSubscriptionWindow}
 }
 
 type desktopRuntimeState struct {
@@ -209,10 +212,10 @@ func applyDesktopChange(message desktopEnvelope, clientID string, projections ma
 	return nil
 }
 
-// Watch keeps one bounded connection and only the execution-state projection.
-// Unrelated history patches advance the revision but never enter public telemetry.
+// Watch discovers owners together but isolates each bounded state subscription.
+// Only scalar execution-state projections enter public telemetry.
 func (o *DesktopObserver) Watch(ctx context.Context, ids []string, publish func(string, protocol.DesktopObservation)) (err error) {
-	return o.watch(ctx, ids, publish, false)
+	return o.watchSubscriptions(ctx, ids, publish)
 }
 
 func (o *DesktopObserver) Snapshot(ctx context.Context, ids []string, publish func(string, protocol.DesktopObservation)) error {

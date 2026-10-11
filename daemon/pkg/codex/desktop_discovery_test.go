@@ -116,19 +116,17 @@ func desktopOnlyUnsubscribeUntilClosed(c *desktopConn, valid map[string]string) 
 
 func TestDesktopDiscoveryPipelineOutOfOrderAndTimeoutIsolation(t *testing.T) {
 	expired := make(chan struct{})
-	path := desktopFixture(t, func(c *desktopConn) error {
-		if err := desktopHandshake(c); err != nil {
-			return err
-		}
-		requests, err := desktopDiscoveryRequests(c, 3)
+	owners := map[string]string{"session-a": "owner-session-a", "session-b": "owner-session-b"}
+	path := desktopWatchFixture(t, owners, func(c *desktopConn, id string) error {
+		snapshot, err := desktopAnySessionSnapshot(id, owners[id], "active")
 		if err != nil {
 			return err
 		}
-		// The first request never responds; later owners arrive in reverse order.
-		for _, id := range []string{"session-b", "session-a"} {
-			if err := desktopReplyAndSnapshot(c, requests[id], id, "owner-"+id); err != nil {
-				return err
-			}
+		if err := c.write(snapshot); err != nil {
+			return err
+		}
+		if id != "session-a" {
+			return desktopOnlyUnsubscribeUntilClosed(c, owners)
 		}
 		select {
 		case <-expired:
@@ -143,7 +141,19 @@ func TestDesktopDiscoveryPipelineOutOfOrderAndTimeoutIsolation(t *testing.T) {
 		if err := c.write(patch); err != nil {
 			return err
 		}
-		return desktopOnlyUnsubscribeUntilClosed(c, map[string]string{"session-a": "owner-session-a", "session-b": "owner-session-b"})
+		return desktopOnlyUnsubscribeUntilClosed(c, owners)
+	}, func(c *desktopConn, first desktopEnvelope) error {
+		requests, err := desktopDiscoveryWithFirst(c, first, 3)
+		if err != nil {
+			return err
+		}
+		// The silent request never responds; confirmed owners arrive out of order.
+		for _, id := range []string{"session-b", "session-a"} {
+			if err := desktopReply(c, requests[id], owners[id], nil); err != nil {
+				return err
+			}
+		}
+		return desktopExpectClosed(c)
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), desktopTestTimeout)
 	defer cancel()
@@ -160,31 +170,26 @@ func TestDesktopDiscoveryPipelineOutOfOrderAndTimeoutIsolation(t *testing.T) {
 			cancel()
 		}
 	})
-	if err == nil || len(observations["silent"]) != 1 || observations["silent"][0].Availability != "unavailable" || len(observations["session-a"]) != 3 || observations["session-a"][2].Status != "idle" || len(observations["session-b"]) != 2 {
+	available := desktopAvailableObservations(observations)
+	if err == nil || len(observations["silent"]) != 1 || observations["silent"][0].Availability != "unavailable" || len(available["session-a"]) != 2 || available["session-a"][1].Status != "idle" || len(available["session-b"]) != 1 {
 		t.Fatalf("pipeline observations = %+v, termination = %v", observations, err)
 	}
 }
 
 func TestDesktopDiscoveryLateResponseCannotSubscribeExpiredTarget(t *testing.T) {
 	expired := make(chan struct{})
-	path := desktopFixture(t, func(c *desktopConn) error {
-		if err := desktopHandshake(c); err != nil {
-			return err
-		}
-		requests, err := desktopDiscoveryRequests(c, 2)
+	path := desktopWatchFixture(t, map[string]string{"session": "owner"}, func(c *desktopConn, _ string) error {
+		snapshot, err := desktopAnySessionSnapshot("session", "owner", "active")
 		if err != nil {
 			return err
 		}
-		if err := desktopReplyAndSnapshot(c, requests["session"], "session", "owner"); err != nil {
+		if err := c.write(snapshot); err != nil {
 			return err
 		}
 		select {
 		case <-expired:
 		case <-time.After(desktopTestTimeout):
 			return errors.New("silent discovery did not expire")
-		}
-		if err := desktopReply(c, requests["silent"], "late-owner", nil); err != nil {
-			return err
 		}
 		patch, err := desktopAnySessionEnvelope("session", "owner", desktopPatchChange(1, 2,
 			map[string]any{"op": "replace", "path": []any{"threadRuntimeStatus", "type"}, "value": "idle"}))
@@ -195,6 +200,25 @@ func TestDesktopDiscoveryLateResponseCannotSubscribeExpiredTarget(t *testing.T) 
 			return err
 		}
 		return desktopOnlyUnsubscribeUntilClosed(c, map[string]string{"session": "owner"})
+	}, func(c *desktopConn, first desktopEnvelope) error {
+		requests, err := desktopDiscoveryWithFirst(c, first, 2)
+		if err != nil {
+			return err
+		}
+		if err := desktopReply(c, requests["session"], "owner", nil); err != nil {
+			return err
+		}
+		// A reply after expiry cannot survive the closed discovery connection.
+		timer := time.NewTimer(2 * desktopTestOwnerTimeout)
+		defer timer.Stop()
+		<-timer.C
+		if err := desktopReply(c, requests["silent"], "late-owner", nil); err != nil {
+			var networkError net.Error
+			if !errors.As(err, &networkError) {
+				return err
+			}
+		}
+		return desktopExpectClosed(c)
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), desktopTestTimeout)
 	defer cancel()
@@ -208,9 +232,37 @@ func TestDesktopDiscoveryLateResponseCannotSubscribeExpiredTarget(t *testing.T) 
 			cancel()
 		}
 	})
-	if err == nil || len(observations["silent"]) != 1 || observations["silent"][0].Availability != "unavailable" || len(observations["session"]) != 3 || observations["session"][2].Status != "idle" {
+	available := desktopAvailableObservations(observations)
+	if err == nil || len(observations["silent"]) != 1 || observations["silent"][0].Availability != "unavailable" || len(available["session"]) != 2 || available["session"][1].Status != "idle" {
 		t.Fatalf("late response changed subscription: observations = %+v, error = %v", observations, err)
 	}
+}
+
+func desktopDiscoveryWithFirst(c *desktopConn, first desktopEnvelope, count int) (map[string]desktopEnvelope, error) {
+	requests, err := desktopDiscoveryRequests(c, count-1)
+	if err != nil {
+		return nil, err
+	}
+	var params struct {
+		ConversationID string `json:"conversationId"`
+	}
+	if err := json.Unmarshal(first.Params, &params); err != nil {
+		return nil, err
+	}
+	requests[params.ConversationID] = first
+	return requests, nil
+}
+
+func desktopAvailableObservations(observations map[string][]protocol.DesktopObservation) map[string][]protocol.DesktopObservation {
+	available := make(map[string][]protocol.DesktopObservation)
+	for id, results := range observations {
+		for _, result := range results {
+			if result.Availability == "available" {
+				available[id] = append(available[id], result)
+			}
+		}
+	}
+	return available
 }
 
 func TestDesktopDiscoveryPartialFrameCancellationJoinsReader(t *testing.T) {

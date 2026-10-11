@@ -118,7 +118,7 @@ test('Dockerfile.gateway defines valid non-root UID 1000 and standard ENTRYPOINT
   assert.ok(existsSync(dockerfilePath), 'Dockerfile.gateway must exist');
   const content = readFileSync(dockerfilePath, 'utf8');
 
-  assert.match(content, /FROM node:24-bookworm-slim AS toolchain/);
+  assert.match(content, /FROM --platform=\$BUILDPLATFORM node:24-bookworm-slim AS toolchain/);
   assert.match(content, /RUN npm install --global pnpm@11.8.0/);
   assert.match(content, /pnpm install --frozen-lockfile/);
   assert.match(content, /USER node/);
