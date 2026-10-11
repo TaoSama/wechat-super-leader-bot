@@ -64,7 +64,7 @@ describe("terminal proof normalization and route isolation", () => {
   });
 
   it("rejects terminal sessions and input-written in durable execution projections", () => {
-    const step = { step: 1, nodeId: "fixture", sessionId, prompt: "fixture", promptTruncated: false, dependsOn: [], status: "waiting" };
+    const step = { step: 1, nodeId: "fixture", sessionId, prompt: "fixture", promptTruncated: false, dependsOn: [], resultFrom: [], status: "waiting" };
     const projection = { observedAt: NOW, limit: 12, hasMore: false, items: [{ id: "execution", status: "active", createdAt: NOW, expiresAt: NOW + 1000, steps: [step] }] };
     expect(() => parseConsoleExecutions(projection)).toThrow("持久计划状态格式无效");
     projection.items[0].steps[0] = { ...step, sessionId: "native", status: "input-written" };

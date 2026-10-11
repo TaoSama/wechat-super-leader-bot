@@ -44,6 +44,17 @@ function fixture(kind: string) {
 }
 
 describe.each(["memory", "postgres"])("%s send route persistence", kind => {
+  it.each([undefined, "", "recorded result"])("preserves output presence on insert, lookup and deduplication: %j", async output => {
+    const { store } = fixture(kind);
+    const record = command({ status: "completed", turnId: "turn", output });
+    expect((await store.createCommandIfAbsent(record)).command.output).toBe(output);
+    expect((await store.getCommand("cmd"))?.output).toBe(output);
+    expect((await store.findCommandByRequestId("req"))?.output).toBe(output);
+    const repeated = await store.createCommandIfAbsent({ ...record, commandId: "duplicate", output: "late replacement" });
+    expect(repeated.created).toBe(false);
+    expect(repeated.command.output).toBe(output);
+  });
+
   it("roundtrips and clones both fixed routes and preserves the first route on request deduplication", async () => {
     const { store } = fixture(kind);
     const created = await store.createCommandIfAbsent(command());

@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { CommandError, type CommandService } from "../commands.js";
 import type { IStore } from "../store/interface.js";
-import { assertNativeExecutionPlan, EXECUTION_CLAIM_MS, EXECUTION_PAGE_SIZE, EXECUTION_TICK_MS, executionRequestId,
-  type ExecutionRecord } from "./execution.js";
+import { assertNativeExecutionPlan, EXECUTION_CLAIM_MS, EXECUTION_PAGE_SIZE, EXECUTION_TICK_MS, executionRequestId, sameExecutionAuthorization,
+  type ExecutionAttempt, type ExecutionRecord } from "./execution.js";
 import { readExecutionView, type ExecutionView } from "./execution-view.js";
+import { collectExecutionInput, ExecutionInputError, verifyExecutionInput } from "./execution-input-source.js";
 
 export type { ExecutionView } from "./execution-view.js";
 type SchedulerOptions = {
@@ -134,8 +135,17 @@ export class ExecutionScheduler {
       if (!this.stepReady(latest, index)) continue;
       const { execution } = latest;
       const action = execution.plan.actions[index];
+      let input: ExecutionAttempt["input"];
+      try { input = await collectExecutionInput(this.store, execution, index); }
+      catch (error) {
+        if (!(error instanceof ExecutionInputError)) throw error;
+        this.report(error);
+        await this.transition(execution, "failed");
+        return;
+      }
       const now = this.now();
-      const attempt = { token: randomUUID(), startedAt: now, expiresAt: now + EXECUTION_CLAIM_MS };
+      const attempt: ExecutionAttempt = { token: randomUUID(), startedAt: now, expiresAt: now + EXECUTION_CLAIM_MS,
+        ...(input ? { input } : {}) };
       const next = { ...execution, revision: execution.revision + 1, attempts: [...execution.attempts] };
       next.attempts[index] = attempt;
       const claimed = await this.store.compareAndSetExecution(next, execution.revision);
@@ -143,17 +153,21 @@ export class ExecutionScheduler {
       this.changed();
       if (this.stopped) return;
       try {
-        await this.commands.submit({ nodeId: action.nodeId, sessionId: action.sessionId, prompt: action.prompt,
+        await this.commands.submit({ nodeId: action.nodeId, sessionId: action.sessionId, prompt: input?.prompt ?? action.prompt,
           ...(action.skills ? { skills: action.skills } : {}), action: "send", requestId: executionRequestId(execution, index) },
         0, async () => {
           const snapshot = await this.store.getExecution(id);
           const view = snapshot && await readExecutionView(this.store, snapshot, this.now());
+          const validInput = snapshot && await verifyExecutionInput(this.store, snapshot, index);
           // Claims and pending records do not override another step's failure or exact dependencies.
           // Re-read authority after the asynchronous command reads, including cancellation.
           const current = await this.store.getExecution(id);
           if (this.stopped || !current || current.status !== "active" || current.expiresAt <= this.now() ||
               !this.isChatAllowed(current.chatId) || current.attempts[index]?.token !== attempt.token ||
+              JSON.stringify(current.attempts[index]) !== JSON.stringify(attempt) ||
               current.attempts[index]!.expiresAt <= this.now() || !view ||
+              !validInput || !snapshot || JSON.stringify(snapshot.attempts[index]) !== JSON.stringify(attempt) ||
+              !sameExecutionAuthorization(claimed, snapshot) || !sameExecutionAuthorization(claimed, current) ||
               view.steps.some(step => step.status === "failed" || step.status === "uncertain") ||
               !action.dependsOn.every(step => view.steps[step - 1].status === "completed")) {
             throw new CommandError(409, "Execution dispatch authority is unavailable");

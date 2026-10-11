@@ -10,7 +10,7 @@ Daemon → Controller：
 
 - `{type:"hello",version:1,nodeId,sessions:[Session],skills:[Skill]}`
 - `{type:"heartbeat",sessions:[Session],skills:[Skill]}`，间隔 15 秒。
-- `{type:"result",commandId,status:"completed"|"failed"|"accepted"|"uncertain",output,error?,turnId?}`
+- `{type:"result",commandId,status:"completed"|"failed"|"accepted"|"uncertain"|"input-written",output?,error?,turnId?,inputReceipt?}`
 - `{type:"history",requestId,sessionId,history?:SessionHistory,error?:string}`，成功 history 与静态 error 二者恰有一个。
 
 Controller → Daemon：
@@ -52,5 +52,7 @@ Cookie 消息写入必须 application/json、Origin 精确匹配 `CONSOLE_PUBLIC
 ## 持久化、渠道与完成语义
 
 派发后断连或投递不确定记为 uncertain，不能自动重发。Daemon 检查到期时间和精确节点身份，串行化会话修改，并由持久化 journal 防止同 commandId 重放。send 的 accepted 回执必须带合法且精确关联的 turnId，accepted 与 result_ack 都不等于任务完成；随后必须核查该 turn 的终态与输出。结构化历史查询与 command 的 read/send 生命周期分开。
+
+本地源码新增结果传递所需的输出存在性语义：省略 `output` 表示没有已记录输出；明确 `output:""` 才表示已记录空结果。completed 不继承 accepted 正文。Daemon 对精确空结果显式序列化空串，已 ACK 且正文已裁除的 journal 记录不重新报告为空结果；缺失/非法 turn items 不伪装成空输出。`input-written` 只证明终端输入写入，必须有 inputReceipt、不得含 turnId 或非空输出，不能解锁结果链。结果传递合同及尚未部署的边界见 [TECH.md](../2026-10-12-plan-result-handoff/TECH.md)。
 
 Controller 使用可跨重启恢复的 PostgreSQL；MemoryStore 仅用于显式测试/开发。凭证通过环境或私有文件提供，不写 CLI 参数、日志或 Git。Gateway 读取现有私有微信账号与独立同步状态，完成 baseline 才可转发新消息；正常重启沿用 checkpoint，不重建基线，不能启动第二个真实 poller。真实轮询、微信发送与部署遵循用户授权；接口返回不证明微信已读或全链路完成。

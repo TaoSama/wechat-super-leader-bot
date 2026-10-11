@@ -40,6 +40,20 @@ afterEach(async () => {
 });
 
 describe("turn receipt binding", () => {
+  it.each([undefined, "", "recorded"])("preserves output presence through wire parsing, hub persistence and ACK: %j", async output => {
+    const { ws, store } = await fixture();
+    await store.createCommandIfAbsent(command("output-presence"));
+    ws.receive({ type: "result", commandId: "output-presence", status: "accepted", turnId: "turn", output: "acceptance only" });
+    await drain();
+    const receipt = { type: "result", commandId: "output-presence", status: "completed", turnId: "turn",
+      ...(output === undefined ? {} : { output }) };
+    expect(DaemonResultMessageSchema.parse(receipt).output).toBe(output);
+    ws.receive(receipt);
+    await drain();
+    expect((await store.getCommand("output-presence"))?.output).toBe(output);
+    expect(ws.acks()).toHaveLength(2);
+  });
+
   it("uses the same UTF-8, whitespace and control boundary without normalizing identifiers", () => {
     for (const invalid of ["", " ", "turn id", "turn\t", "turn\n", "turn\u0000", "turn\u007f", "turn\u0085",
       "turn\u2007", "\ud800", "turn\ufffd", "x".repeat(129), "é".repeat(65)]) {

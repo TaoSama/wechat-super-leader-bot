@@ -22,6 +22,7 @@ import { verifyPlanConfirmationStore } from './test-plan-confirmation-store.mjs'
 import { verifyNotificationStore } from './test-notification-store.mjs';
 import { verifyPlanNotifications } from './test-plan-notifications.mjs';
 import { verifyPlanExecution, planModelCall, PLAN_CHAT, PLAN_NODE } from './test-plan-execution.mjs';
+import { verifyPlanResultHandoff, resultModelCall, RESULT_NODES } from './test-plan-result-handoff.mjs';
 import { closeTestWebSocket, withTestCleanup } from './scripts/test-cleanup.mjs';
 
 const { values } = parseArgs({ options: {
@@ -47,6 +48,7 @@ async function main() {
   const terminalInputToken = randomBytes(24).toString('hex');
   const terminalHistoryToken = randomBytes(24).toString('hex');
   const planToken = randomBytes(24).toString('hex');
+  const resultTokens = Object.fromEntries(RESULT_NODES.map(id => [id, randomBytes(24).toString('hex')]));
   const name = `super-leader-test-${randomUUID()}`;
   const docker = (args) => execFileSync('docker', args, {
     encoding: 'utf8', env: { ...process.env, POSTGRES_PASSWORD: password }, timeout: 30_000,
@@ -91,10 +93,12 @@ async function main() {
           let message = { role: 'assistant', content: 'Mock model response' };
           const call = (name, args) => ({ role: 'assistant', content: null, tool_calls: [{ id: `mock-${name}`, type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
           const planCall = planModelCall(last.content);
+          const resultCall = resultModelCall(last.content);
           const terminalCall = terminalModelCall(last.content);
           const terminalInputCall = terminalInputModelCall(last.content);
           if (last.type === 'function_call_output') message.content = `Tool evidence: ${last.output}`;
           else if (planCall) message = call(planCall.name, planCall.args);
+          else if (resultCall) message = call(resultCall.name, resultCall.args);
           else if (terminalCall) message = call(terminalCall.name, terminalCall.args);
           else if (terminalInputCall) message = call(terminalInputCall.name, terminalInputCall.args);
           else if (last.content === '请记住测试偏好') message = call('remember', { key: 'test-preference', value: '中文' });
@@ -122,7 +126,7 @@ async function main() {
     const env = {
       ...process.env, HOST: '127.0.0.1', PORT: String(port), PERSISTENCE_MODE: 'postgres',
       DATABASE_URL: `postgresql://leader:${password}@127.0.0.1:${dbPort}/leader`,
-      CONTROLLER_TOKEN: token, NODE_TOKENS: JSON.stringify({ [values.live ? 'demoair' : 'test-node']: nodeToken, ...(!values.live ? { ...isolationTokens, 'desktop-fixture-node': desktopToken, [TERMINAL_NODE]: terminalToken, [TERMINAL_INPUT_NODE]: terminalInputToken, [TERMINAL_HISTORY_NODE]: terminalHistoryToken, [PLAN_NODE]: planToken } : {}) }),
+      CONTROLLER_TOKEN: token, NODE_TOKENS: JSON.stringify({ [values.live ? 'demoair' : 'test-node']: nodeToken, ...(!values.live ? { ...isolationTokens, ...resultTokens, 'desktop-fixture-node': desktopToken, [TERMINAL_NODE]: terminalToken, [TERMINAL_INPUT_NODE]: terminalInputToken, [TERMINAL_HISTORY_NODE]: terminalHistoryToken, [PLAN_NODE]: planToken } : {}) }),
       CONSOLE_PUBLIC_URL: base,
       ALLOWED_CHAT_IDS: 'test-chat,' + PLAN_CHAT,
       LEADER_MODE: values.live ? 'rules' : 'model',
@@ -387,6 +391,8 @@ async function main() {
       };
       const planIds = await verifyPlanExecution({ WebSocket, base, request, nodeToken: planToken, store: planStore, waitFor, restart });
       await verifyPlanNotifications({ base, token, request, store: planStore, restart, planIds });
+      await verifyPlanResultHandoff({ WebSocket, base, request, nodeTokens: resultTokens, store: planStore,
+        reopenStore: () => new PostgresStore(env.DATABASE_URL), restart, waitFor });
     }, [{ label: 'plan PostgreSQL store', cleanup: () => planStore.close() }]);
   }, [
     { label: 'fixture WebSocket', cleanup: () => closeTestWebSocket(socket) },

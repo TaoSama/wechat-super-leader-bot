@@ -85,7 +85,10 @@ func (a *AppServerAdapter) InspectTurn(ctx context.Context, sessionID, turnID st
 		return TurnObservation{}, errors.New("unrecognized turn status")
 	}
 
-	output := extractTurnOutput(targetTurn)
+	output, err := extractTurnOutput(targetTurn)
+	if err != nil {
+		return TurnObservation{}, err
+	}
 	turnErr := extractTurnError(normalizedStatus)
 
 	return TurnObservation{
@@ -112,18 +115,27 @@ func normalizeTurnStatus(raw string) (string, error) {
 	}
 }
 
-func extractTurnOutput(turnMap map[string]any) string {
-	items, _ := turnMap["items"].([]any)
+func extractTurnOutput(turnMap map[string]any) (string, error) {
+	items, ok := turnMap["items"].([]any)
+	if !ok || items == nil {
+		return "", errors.New("turn output items unavailable")
+	}
 	var agentOutputs []string
 
 	for _, rawItem := range items {
 		item, ok := rawItem.(map[string]any)
 		if !ok {
-			continue
+			return "", errors.New("turn output item invalid")
 		}
-		itemType, _ := item["type"].(string)
+		itemType, ok := item["type"].(string)
+		if !ok || itemType == "" {
+			return "", errors.New("turn output item type unavailable")
+		}
 		if itemType == "agentMessage" {
-			text, _ := item["text"].(string)
+			text, ok := item["text"].(string)
+			if !ok {
+				return "", errors.New("turn output text unavailable")
+			}
 			text = strings.TrimSpace(text)
 			if text != "" {
 				agentOutputs = append(agentOutputs, text)
@@ -132,11 +144,11 @@ func extractTurnOutput(turnMap map[string]any) string {
 	}
 
 	if len(agentOutputs) == 0 {
-		return ""
+		return "", nil
 	}
 
 	combined := strings.Join(agentOutputs, "\n\n")
-	return truncateText(combined, MaxReadLineLength)
+	return truncateText(combined, MaxReadLineLength), nil
 }
 
 // extractTurnError provides static sanitized error descriptions without leaking upstream error payloads or keys.

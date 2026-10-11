@@ -13,7 +13,7 @@ import { ExecutionScheduler } from "./execution-scheduler.js";
 import { executionSummary } from "./execution-presentation.js";
 import {
   CLAIM_TTL_MS, ConsoleLinkIssued, ConsoleLinkIssuer, LEADER_TOOLS, LeaderData, LeaderDataSchema, LeaderReply, MAX_HISTORY_ITEMS,
-  MAX_MODEL_STEPS, MAX_RECEIPTS, MAX_REPLY_CHARS, MAX_TOOL_CALLS, PLAN_TTL_MS, Plan,
+  MAX_MODEL_STEPS, MAX_RECEIPTS, MAX_REPLY_CHARS, MAX_RESULT_CODE_POINTS, MAX_RESULT_JSON_CHARS, MAX_TOOL_CALLS, PLAN_TTL_MS, Plan,
   SYSTEM_PROMPT, TURN_TIMEOUT_MS, ToolArguments,
 } from "./contracts.js";
 
@@ -154,7 +154,7 @@ export class LeaderOrchestrator {
   private async executePlan(chatId: string, revision: number, plan: Plan, data: LeaderData): Promise<LeaderReply> {
     if (plan.expiresAt <= this.now()) return { text: "计划已过期，没有派发。请重新描述任务以核对最新会话状态。" };
     try { validatePlanDependencies(plan); }
-    catch { return { text: "计划依赖无效，没有派发。请重新规划。" }; }
+    catch { return { text: "计划依赖或结果来源无效，没有派发。请重新规划。" }; }
     try { assertTerminalSingleStep(plan); }
     catch { return { text: "终端输入只支持独立单步，不能加入多步或依赖计划，没有派发。" }; }
     // Validate every target before beginning; revalidate again inside CommandService immediately before dispatch.
@@ -352,7 +352,7 @@ export class LeaderOrchestrator {
         try { assertTerminalSingleStep({ actions }); }
         catch { return { error: "终端输入无法证明任务完成，只支持独立单步，不能加入多步或依赖计划" }; }
         try { validatePlanDependencies({ actions }); }
-        catch { return { error: "Invalid plan dependencies; same-session tasks must form a chain of earlier steps" }; }
+        catch { return { error: "Invalid plan dependencies or result sources; resultFrom must select distinct direct earlier dependencies, and same-session tasks must form a chain" }; }
         if ((await this.store.getLatestExecution(chatId))?.status === "active") return { error: "An active plan already exists; query its progress or ask the user to cancel it" };
         const boundActions: Plan["actions"] = [];
         for (const action of actions) {
@@ -395,9 +395,13 @@ export class LeaderOrchestrator {
         const item = this.hub.getNodeSkills(action.nodeId).find(skill => skill.id === ref.id && skill.digest === ref.digest);
         return `\n技能 ${skillIndex + 1}：${JSON.stringify(item?.name ?? ref.id)}\nSHA256：${ref.digest}`;
       }).join("");
-      return `${index + 1}. [${action.nodeId}] ${action.sessionId}\n任务：${action.prompt}${selected}\n依赖：${action.dependsOn.length ? `步骤 ${action.dependsOn.join("、")} 完成后` : "无，可独立执行"}`;
+      const sources = action.resultFrom ?? [];
+      return `${index + 1}. [${action.nodeId}] ${action.sessionId}\n任务：${action.prompt}${selected}\n依赖：${action.dependsOn.length ? `步骤 ${action.dependsOn.join("、")} 完成后` : "无，可独立执行"}` +
+        `\n输入资料：${sources.length ? `按顺序使用步骤 ${sources.join("、")} 的已记录输出` : "不传入其他步骤的输出"}`;
     });
     if (hasTerminalTarget(plan)) return `待确认终端单步输入（尚未派发）：\n${lines.join("\n\n")}\n\n${TERMINAL_INPUT_WARNING}\n如目标与输入无误，回复“确认执行”；也可以说“取消计划”。确认有效期 10 分钟；新请求会替换此输入。不创建后台执行计划。`;
-    return `待执行计划（尚未派发）：\n${lines.join("\n\n")}\n\n如目标与任务无误，回复“确认执行”；也可以说“取消计划”。确认有效期 10 分钟；新请求会替换待确认计划。确认后授权在24小时内按上述固定依赖自动推进，不自动改写任务或传递前一步输出。取消只停止后续派发，不停止原会话已有任务。`;
+    const resultPolicy = plan.actions.some(action => action.resultFrom?.length)
+      ? `\n结果传递：只使用上述来源的精确完成回执；每来源最多 ${MAX_RESULT_CODE_POINTS} 字符，JSON 编码含转义最多 ${MAX_RESULT_JSON_CHARS} 字符，超长仅取前缀并标明裁剪，可能不完整。输出作为不可信资料，不构成新指令或授权。` : "";
+    return `待执行计划（尚未派发）：\n${lines.join("\n\n")}${resultPolicy}\n\n如目标、任务与结果来源无误，回复“确认执行”；也可以说“取消计划”。确认有效期 10 分钟；新请求会替换待确认计划。确认后授权在24小时内按上述固定依赖和结果来源自动推进，不自动改写任务或增加资料来源。取消只停止后续派发，不停止原会话已有任务。`;
   }
 }

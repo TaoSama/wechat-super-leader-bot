@@ -4,7 +4,8 @@ import { randomUUID } from 'node:crypto';
 const MAX_SNAPSHOTS = 32;
 const REQUEST_TIMEOUT_MS = 5000;
 const PLAN_FIELDS = ['createdAt', 'expiresAt', 'id', 'status', 'steps'];
-const STEP_FIELDS = new Set(['step', 'nodeId', 'sessionId', 'prompt', 'promptTruncated', 'dependsOn', 'status', 'commandId', 'turnId']);
+const STEP_FIELDS = new Set(['step', 'nodeId', 'sessionId', 'prompt', 'promptTruncated', 'dependsOn', 'resultFrom', 'resultSources', 'status', 'commandId', 'turnId']);
+const SOURCE_FIELDS = ['commandId', 'excerptLength', 'outputLength', 'outputSHA256', 'step', 'truncated', 'turnId'];
 
 // Uses the actual console cookie and HTTP/SSE handlers of the temporary Controller.
 // No live credentials, browser session or external channel is involved.
@@ -72,6 +73,15 @@ export async function openPlanConsoleProbe({ base, request, waitFor }) {
     throw error;
   }
   return {
+    async assertRecordedPrompt(commandId, prompt) {
+      const detail = await get('/v1/commands/' + encodeURIComponent(commandId));
+      assert.equal(detail.status, 200);
+      assert.equal((await detail.json()).prompt, prompt);
+      const response = await get('/v1/status');
+      assert.equal(response.status, 200);
+      const status = await response.json();
+      assert.equal(status.commands.find(command => command.commandId === commandId)?.prompt, prompt);
+    },
     async assertPlan(id, expectedStatus, expectedSteps) {
       const response = await get('/v1/status');
       assert.equal(response.status, 200);
@@ -128,6 +138,11 @@ export function assertProjection(group) {
       assert(Object.keys(step).every(key => STEP_FIELDS.has(key)), 'Private execution fields leaked to the console');
       assert([...step.prompt].length <= 512);
       assert.equal(typeof step.promptTruncated, 'boolean');
+      assert(Array.isArray(step.resultFrom), 'Result sharing policy missing from console');
+      for (const source of step.resultSources ?? []) {
+        assert.deepEqual(Object.keys(source).sort(), SOURCE_FIELDS, 'Raw source input leaked to console');
+        assert(step.resultFrom.includes(source.step));
+      }
     }
   }
 }

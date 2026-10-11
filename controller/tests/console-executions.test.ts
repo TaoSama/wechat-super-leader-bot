@@ -53,7 +53,7 @@ it("uses an explicit whitelist and truncates prompts by Unicode code points with
   const result = await readConsoleExecutions(store, ["private-chat"], NOW);
   const item = result.items[0];
   expect(Object.keys(item).sort()).toEqual(["createdAt", "expiresAt", "id", "status", "steps"]);
-  expect(Object.keys(item.steps[0]).sort()).toEqual(["commandId", "dependsOn", "nodeId", "prompt", "promptTruncated", "sessionId", "status", "step", "turnId"]);
+  expect(Object.keys(item.steps[0]).sort()).toEqual(["commandId", "dependsOn", "nodeId", "prompt", "promptTruncated", "resultFrom", "sessionId", "status", "step", "turnId"]);
   expect(item.steps[0]).toMatchObject({ status: "accepted", promptTruncated: false, turnId: "exact-turn" });
   expect(item.steps[1]).toMatchObject({ prompt: "a".repeat(510) + "🙂s", promptTruncated: true, dependsOn: [1] });
   expect(Array.from(item.steps[1].prompt)).toHaveLength(512);

@@ -9,6 +9,8 @@ const labels: Record<string, string> = {
 export function executionSummary(view: ExecutionView): string {
   const lines = view.steps.map(step => `${step.step}. [${step.nodeId}] ${step.sessionId}：${step.status}（${labels[step.status] ?? "待核查"}）` +
     `${step.dependsOn.length ? `；依赖步骤 ${step.dependsOn.join("、")}` : ""}` +
+    `${step.resultSources ? `；已冻结输入资料：${step.resultSources.map(source => `步骤 ${source.step}（${source.outputLength === 0 ? "已记录输出为空" : source.truncated ? "已裁剪" : "未裁剪"}）`).join("、")}，冻结不代表已送达` :
+      step.resultFrom.length ? `；将使用步骤 ${step.resultFrom.join("、")} 的已记录输出` : ""}` +
     `${step.commandId ? `\n命令 ${step.commandId}${step.turnId ? `，turn ${step.turnId}` : ""}` : ""}`);
   return `计划 ${view.id}：${labels[view.status] ?? view.status}\n${lines.join("\n")}\n` +
     `自动推进授权截止：${new Date(view.expiresAt).toISOString()}\n` +

@@ -273,6 +273,20 @@ button:active:enabled { background-color: var(--bg-elevated); }
 .execution-receipt { margin-top: 10px; display: grid; gap: 4px; color: var(--text-muted); font-size: 10px; }
 .execution-receipt > div { display: flex; gap: 8px; }
 .execution-receipt dt { flex-shrink: 0; } .execution-receipt dd { min-width: 0; }
+.execution-input { margin-top: 12px; padding: 12px; border-left: 2px solid var(--border-strong); background: var(--bg-panel); min-width: 0; }
+.execution-input-note { margin-top: 12px; font-size: 12px; line-height: 1.8; color: var(--text-secondary); overflow-wrap: anywhere; }
+.execution-input > .execution-input-note { margin-top: 0; font-weight: 600; }
+.execution-source-list { list-style: none; margin-top: 8px; padding: 0; font-size: 12px; line-height: 1.8; color: var(--text-secondary); }
+.execution-source-list li { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.execution-source-truncated { color: var(--warning); }
+.execution-source-details { margin-top: 8px; min-width: 0; }
+.execution-source-details > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; color: var(--accent-teal); font-size: 12px; list-style: none; }
+.execution-source-details > summary::-webkit-details-marker { display: none; }
+.execution-source-details > summary svg { flex-shrink: 0; transition: transform 180ms; }
+.execution-source-details[open] > summary svg { transform: rotate(180deg); }
+.execution-source-boundary { color: var(--text-secondary); font-size: 12px; line-height: 1.8; }
+.execution-source-details .execution-receipt { padding-top: 8px; border-top: 1px solid var(--border-subtle); font-size: 12px; line-height: 1.8; }
+.execution-source-details .execution-receipt dd { overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
 @media (max-width: 767px) {
   .execution-details > summary { padding: 16px; }
   .execution-content { padding-inline: 16px; }

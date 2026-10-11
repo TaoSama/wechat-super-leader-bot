@@ -1,6 +1,10 @@
 import type { IStore } from "../store/interface.js";
 import { TurnIdSchema } from "../types.js";
 import { assertNativeExecutionPlan, executionRequestId, matchesExecutionCommand, type ExecutionRecord } from "./execution.js";
+import { summarizeExecutionInput, type ExecutionResultSourceView } from "./execution-input.js";
+import { verifyExecutionInput } from "./execution-input-source.js";
+
+export type { ExecutionResultSourceView } from "./execution-input.js";
 
 export interface ExecutionView {
   id: string;
@@ -9,7 +13,8 @@ export interface ExecutionView {
   createdAt: number;
   expiresAt: number;
   steps: Array<{
-    step: number; nodeId: string; sessionId: string; prompt: string; dependsOn: number[];
+    step: number; nodeId: string; sessionId: string; prompt: string; dependsOn: number[]; resultFrom: number[];
+    resultSources?: ExecutionResultSourceView[];
     status: string; commandId?: string; turnId?: string; output?: string; error?: string;
   }>;
 }
@@ -19,10 +24,13 @@ export async function readExecutionView(store: IStore, execution: ExecutionRecor
   const steps: ExecutionView["steps"] = [];
   for (const [index, action] of execution.plan.actions.entries()) {
     const step = { step: index + 1, nodeId: action.nodeId, sessionId: action.sessionId,
-      prompt: action.prompt, dependsOn: [...action.dependsOn] };
+      prompt: action.prompt, dependsOn: [...action.dependsOn], resultFrom: [...(action.resultFrom ?? [])],
+      ...(execution.attempts[index]?.input ? { resultSources: summarizeExecutionInput(execution.attempts[index]!.input!) } : {}) };
     const attempt = execution.attempts[index];
     const command = await store.findCommandByRequestId(executionRequestId(execution, index));
-    if (command && (!attempt || !matchesExecutionCommand(execution, index, command))) {
+    if (attempt && !await verifyExecutionInput(store, execution, index)) {
+      steps.push({ ...step, status: "uncertain", error: "Execution input snapshot is inconsistent" });
+    } else if (command && (!attempt || !matchesExecutionCommand(execution, index, command))) {
       steps.push({ ...step, status: "uncertain", error: "Execution command identity is inconsistent" });
     } else if (command) {
       const validTurn = TurnIdSchema.safeParse(command.turnId).success;

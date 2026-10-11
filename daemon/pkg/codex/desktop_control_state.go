@@ -239,5 +239,9 @@ func (d *DesktopController) InspectTurn(ctx context.Context, sessionID, turnID s
 	if target.Items == nil {
 		return TurnObservation{}, errors.New("desktop turn items missing")
 	}
-	return TurnObservation{Status: status, Output: extractTurnOutput(map[string]any{"items": target.Items}), Error: extractTurnError(status)}, nil
+	output, err := extractTurnOutput(map[string]any{"items": target.Items})
+	if err != nil {
+		return TurnObservation{}, err
+	}
+	return TurnObservation{Status: status, Output: output, Error: extractTurnError(status)}, nil
 }

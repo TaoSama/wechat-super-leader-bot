@@ -91,7 +91,7 @@ func SameInputReceipt(a, b *InputReceipt) bool {
 }
 
 func SameResult(a, b DaemonResultMessage) bool {
-	return a.Type == b.Type && a.CommandID == b.CommandID && a.Status == b.Status && a.Output == b.Output &&
+	return a.Type == b.Type && a.CommandID == b.CommandID && a.Status == b.Status && a.Output == b.Output && a.HasOutput() == b.HasOutput() &&
 		a.Error == b.Error && a.TurnID == b.TurnID && SameInputReceipt(a.InputReceipt, b.InputReceipt)
 }
 

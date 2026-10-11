@@ -4,13 +4,15 @@ import { PlanSchema, type Plan } from "./contracts.js";
 import { validateChatId } from "./state.js";
 import { type CommandRecord } from "../types.js";
 import { sameSkillRefs } from "../skills.js";
+import { ExecutionInputSchema, normalizeExecutionInput } from "./execution-input.js";
 
 export const EXECUTION_TTL_MS = 24 * 60 * 60 * 1000;
 export const EXECUTION_CLAIM_MS = 15_000;
 export const EXECUTION_TICK_MS = 2_000;
 export const EXECUTION_PAGE_SIZE = 8;
 const timestamp = z.number().int().nonnegative().refine(Number.isSafeInteger);
-const AttemptSchema = z.object({ token: z.string().uuid(), startedAt: timestamp, expiresAt: timestamp }).strict();
+const AttemptSchema = z.object({ token: z.string().uuid(), startedAt: timestamp, expiresAt: timestamp,
+  input: ExecutionInputSchema.optional() }).strict();
 export const ExecutionSchema = z.object({
   id: z.string().uuid(), chatId: z.string(), revision: z.number().int().positive().refine(Number.isSafeInteger),
   plan: PlanSchema, createdAt: timestamp, expiresAt: timestamp,
@@ -39,6 +41,10 @@ export function validatePlanDependencies(plan: Pick<Plan, "actions">): void {
     if (new Set(dependencies).size !== dependencies.length || dependencies.some(step => step < 1 || step > index)) {
       throw new Error("Dependencies must refer to distinct earlier steps");
     }
+    const sources = action.resultFrom ?? [];
+    if (new Set(sources).size !== sources.length || sources.some(step => !Number.isSafeInteger(step) || step < 1 || step > index || !dependencies.includes(step))) {
+      throw new Error("Result sources must refer to distinct direct dependencies");
+    }
     const reachable = new Set<number>();
     for (const step of dependencies) {
       reachable.add(step);
@@ -66,6 +72,12 @@ export function normalizeExecution(value: unknown): ExecutionRecord {
         attempt.expiresAt <= attempt.startedAt || attempt.expiresAt - attempt.startedAt > EXECUTION_CLAIM_MS))) {
     throw new Error("Invalid confirmed execution record");
   }
+  for (const [index, attempt] of execution.attempts.entries()) {
+    if (!attempt) continue;
+    const action = execution.plan.actions[index], sources = action.resultFrom ?? [];
+    if (sources.length) attempt.input = normalizeExecutionInput(action.prompt, sources, attempt.input);
+    else if (attempt.input !== undefined) throw new Error("Execution without result sources cannot carry input");
+  }
   return execution;
 }
 
@@ -76,8 +88,7 @@ export function createExecution(chatId: string, plan: Plan, now: number): Execut
 }
 
 export function validateExecutionUpdate(current: ExecutionRecord, next: ExecutionRecord): void {
-  const immutable = (value: ExecutionRecord) => JSON.stringify([value.id, value.chatId, value.plan, value.createdAt, value.expiresAt]);
-  if (current.status !== "active" || next.revision !== current.revision + 1 || immutable(current) !== immutable(next)) {
+  if (current.status !== "active" || next.revision !== current.revision + 1 || !sameExecutionAuthorization(current, next)) {
     throw new Error("Confirmed execution is immutable or terminal");
   }
   for (const [index, attempt] of current.attempts.entries()) {
@@ -87,6 +98,11 @@ export function validateExecutionUpdate(current: ExecutionRecord, next: Executio
   }
 }
 
+export function sameExecutionAuthorization(first: ExecutionRecord, second: ExecutionRecord): boolean {
+  const immutable = (value: ExecutionRecord) => JSON.stringify([value.id, value.chatId, value.plan, value.createdAt, value.expiresAt]);
+  return immutable(first) === immutable(second);
+}
+
 export function executionRequestId(execution: Pick<ExecutionRecord, "id" | "chatId">, index: number): string {
   return `leader_exec_${createHash("sha256").update(JSON.stringify([execution.chatId, execution.id, index + 1])).digest("hex")}`;
 }
@@ -94,8 +110,12 @@ export function executionRequestId(execution: Pick<ExecutionRecord, "id" | "chat
 export function matchesExecutionCommand(execution: ExecutionRecord, index: number, command: CommandRecord): boolean {
   const action = execution.plan.actions[index];
   return command.requestId === executionRequestId(execution, index) && command.action === "send" &&
-    command.nodeId === action.nodeId && command.sessionId === action.sessionId && command.prompt === action.prompt &&
+    command.nodeId === action.nodeId && command.sessionId === action.sessionId && command.prompt === executionPrompt(execution, index) &&
     command.sendRoute === action.sendRoute && sameSkillRefs(command.skills, action.skills);
+}
+
+export function executionPrompt(execution: ExecutionRecord, index: number): string {
+  return execution.attempts[index]?.input?.prompt ?? execution.plan.actions[index].prompt;
 }
 
 export function executionPageLimit(limit: number): number {

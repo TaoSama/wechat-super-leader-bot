@@ -194,6 +194,13 @@ func decode(key, value []byte) (Entry, error) {
 	if err := validateTerminalEntry(entry); err != nil {
 		return Entry{}, err
 	}
+	if entry.Acknowledged {
+		// Acknowledgement relinquishes the body to the Controller. An empty
+		// stored placeholder is pruning, never evidence of a recorded empty result.
+		entry.Result.Output = ""
+		entry.Result.OutputPresent = false
+		entry.Result.Error = ""
+	}
 	return entry, nil
 }
 
@@ -322,6 +329,7 @@ func (j *Journal) Ack(ack protocol.ResultAckMessage) error {
 		// The Controller owns the full audit output. Retain the replay guard and
 		// turn/status receipt indefinitely, not the acknowledged conversation text.
 		entry.Result.Output = ""
+		entry.Result.OutputPresent = false
 		entry.Result.Error = ""
 		if err := put(records, entry); err != nil {
 			return err
