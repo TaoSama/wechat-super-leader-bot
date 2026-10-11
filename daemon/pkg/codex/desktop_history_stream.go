@@ -251,7 +251,12 @@ func (stream *desktopHistoryStream) handle(message desktopEnvelope) error {
 		if !targeted {
 			return stream.skip()
 		}
-		if message.SourceClientID != stream.owner || stream.owner == "" || !stream.subscribed {
+		// Before following, broadcasts cannot establish or invalidate this
+		// subscription. Count them as noise without extending the handshake.
+		if !stream.subscribed {
+			return stream.skip()
+		}
+		if message.SourceClientID != stream.owner || stream.owner == "" {
 			return historyError(protocol.HistoryContextExpired)
 		}
 		if message.Method == desktopFollowingChanged {
