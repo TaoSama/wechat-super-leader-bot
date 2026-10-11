@@ -58,6 +58,9 @@ func (m *DarwinManager) ServiceTarget() string {
 
 // GeneratePlistXML creates valid launchd plist XML.
 func GeneratePlistXML(binPath string, cfg *config.Config, tokenFilePath string) (string, error) {
+	if err := config.ValidateTerminalObservation(cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
+		return "", err
+	}
 	if binPath == "" {
 		return "", errors.New("binary path must not be empty")
 	}
@@ -81,6 +84,12 @@ func GeneratePlistXML(binPath string, cfg *config.Config, tokenFilePath string) 
 	}
 	if cfg.CodexHome != "" {
 		args = append(args, "--codex-home", cfg.CodexHome)
+	}
+	if cfg.TerminalSocketPath != "" {
+		args = append(args, "--terminal-sock", cfg.TerminalSocketPath)
+		for _, pane := range cfg.TerminalPanes {
+			args = append(args, "--terminal-pane", pane)
+		}
 	}
 	for _, root := range cfg.SkillRoots {
 		args = append(args, "--skill-root", root)
@@ -197,6 +206,9 @@ func (m *DarwinManager) verifyExistingPlistOwnership(plistPath string) error {
 }
 
 func (m *DarwinManager) Install(ctx context.Context, cfg *config.Config) error {
+	if err := config.ValidateTerminalObservation(cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
+		return err
+	}
 	if err := EnsureNotRoot(); err != nil {
 		return err
 	}

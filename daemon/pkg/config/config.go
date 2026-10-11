@@ -31,19 +31,21 @@ const (
 )
 
 type Config struct {
-	NodeID            string
-	ControllerURL     string
-	NodeToken         string
-	SocketPath        string
-	DesktopSocketPath string
-	DesktopSend       bool
-	CodexHome         string
-	HeartbeatInterval time.Duration
-	ProbeOnly         bool
-	ProbeSkills       bool
-	ServiceAction     string
-	SkillRoots        []string
-	StateDir          string
+	NodeID             string
+	ControllerURL      string
+	NodeToken          string
+	SocketPath         string
+	DesktopSocketPath  string
+	DesktopSend        bool
+	TerminalSocketPath string
+	TerminalPanes      []string
+	CodexHome          string
+	HeartbeatInterval  time.Duration
+	ProbeOnly          bool
+	ProbeSkills        bool
+	ServiceAction      string
+	SkillRoots         []string
+	StateDir           string
 }
 
 func ParseFlags(args []string) (*Config, error) {
@@ -71,6 +73,12 @@ func ParseFlags(args []string) (*Config, error) {
 	socketPath := fs.String("sock", defaultSock, "Path to Codex app-server Unix domain socket")
 	desktopSocketPath := fs.String("desktop-sock", "", "Optional existing desktop IPC socket for read-only execution-state observation")
 	desktopSend := fs.Bool("desktop-send", false, "Explicitly allow sending through the existing desktop owner (requires desktop-sock)")
+	terminalSocketPath := fs.String("terminal-sock", "", "Optional existing terminal-host Unix socket for read-only observation (requires terminal-pane)")
+	var terminalPanes []string
+	fs.Func("terminal-pane", "Explicit terminal pane wN:pN to observe read-only (repeatable, at most 16)", func(value string) error {
+		terminalPanes = append(terminalPanes, value)
+		return nil
+	})
 	codexHome := fs.String("codex-home", "", "Optional absolute Codex directory: discover session metadata from files without starting a backend")
 	heartbeatSec := fs.Int("heartbeat", DefaultHeartbeatSeconds, "Heartbeat interval in seconds (must be > 0)")
 	probeOnly := fs.Bool("probe", false, "Read-only probe configured session sources, output discovery and source availability as JSON, then exit")
@@ -136,6 +144,9 @@ func ParseFlags(args []string) (*Config, error) {
 	if *desktopSend && *desktopSocketPath == "" {
 		return nil, errors.New("desktop-send requires an explicit desktop-sock")
 	}
+	if err := ValidateTerminalObservation(*terminalSocketPath, terminalPanes); err != nil {
+		return nil, err
+	}
 	if *codexHome != "" && (!filepath.IsAbs(*codexHome) || strings.ContainsAny(*codexHome, "\x00\r\n\t")) {
 		return nil, errors.New("codex-home must be an absolute directory path without control characters")
 	}
@@ -148,17 +159,19 @@ func ParseFlags(args []string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		NodeID:            strings.TrimSpace(*nodeID),
-		ControllerURL:     strings.TrimSpace(*controllerURL),
-		SocketPath:        resolvedSock,
-		DesktopSocketPath: *desktopSocketPath,
-		DesktopSend:       *desktopSend,
-		CodexHome:         *codexHome,
-		HeartbeatInterval: time.Duration(*heartbeatSec) * time.Second,
-		ProbeOnly:         *probeOnly,
-		ProbeSkills:       *probeSkills,
-		ServiceAction:     action,
-		SkillRoots:        skillRoots,
+		NodeID:             strings.TrimSpace(*nodeID),
+		ControllerURL:      strings.TrimSpace(*controllerURL),
+		SocketPath:         resolvedSock,
+		DesktopSocketPath:  *desktopSocketPath,
+		DesktopSend:        *desktopSend,
+		TerminalSocketPath: *terminalSocketPath,
+		TerminalPanes:      append([]string(nil), terminalPanes...),
+		CodexHome:          *codexHome,
+		HeartbeatInterval:  time.Duration(*heartbeatSec) * time.Second,
+		ProbeOnly:          *probeOnly,
+		ProbeSkills:        *probeSkills,
+		ServiceAction:      action,
+		SkillRoots:         skillRoots,
 	}
 
 	if cfg.NodeID == "" {

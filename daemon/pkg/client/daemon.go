@@ -15,6 +15,7 @@ import (
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/config"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
+	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/terminal"
 	"github.com/gorilla/websocket"
 )
 
@@ -56,6 +57,9 @@ type Daemon struct {
 	sessionSnapshot    []protocol.Session
 	sessionCatalog     sessionCatalog
 	catalogSnapshot    []protocol.Session
+	terminalObserver   sessionCatalog
+	terminalSnapshot   []protocol.Session
+	terminalDiscovery  chan struct{}
 	desktopObserver    codex.DesktopWatcher
 	desktopController  desktopController
 	desktopSnapshot    map[string]protocol.DesktopObservation
@@ -81,6 +85,7 @@ func NewDaemon(cfg *config.Config, adapter codex.SessionAdapter) *Daemon {
 		desktopGeneration:  make(map[string]uint64),
 		historyContexts:    newHistoryContexts(),
 		historyRequests:    newHistoryRequests(),
+		terminalDiscovery:  make(chan struct{}, 1),
 	}
 	if cfg.DesktopSocketPath != "" {
 		d.desktopObserver = codex.NewDesktopObserver(cfg.DesktopSocketPath)
@@ -89,6 +94,9 @@ func NewDaemon(cfg *config.Config, adapter codex.SessionAdapter) *Daemon {
 	}
 	if cfg.CodexHome != "" {
 		d.sessionCatalog = codex.NewRolloutCatalog(cfg.CodexHome)
+	}
+	if cfg.TerminalSocketPath != "" && len(cfg.TerminalPanes) != 0 {
+		d.terminalObserver = terminal.NewObserver(cfg.TerminalSocketPath, cfg.TerminalPanes)
 	}
 	return d
 }
@@ -207,7 +215,7 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 		return wsConn.WriteMessage(websocket.TextMessage, encoded)
 	}
 
-	// Connection liveness does not wait for native discovery. A reconnect retains
+	// Connection liveness does not wait for source discovery. A reconnect retains
 	// the last successful snapshot with its original observation timestamps.
 	catalog := d.discoverSkills()
 	hello := protocol.DaemonHelloMessage{
@@ -228,7 +236,9 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 	defer cancelConn()
 
 	// Close websocket when connCtx is canceled to unblock ReadMessage
+	connectionClosed := make(chan struct{})
 	go func() {
+		defer close(connectionClosed)
 		<-connCtx.Done()
 		closeConnection()
 	}()
@@ -241,17 +251,11 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 		case <-connCtx.Done():
 		}
 	}
-	updates := make(chan struct{}, 1)
 	skillRefresh := make(chan struct{}, 1)
 	skillCache := &skillCatalogCache{catalog: catalog}
-	heartbeatDone, discoveryDone, skillsDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	desktopDone := make(chan struct{})
-	readinessDone := make(chan struct{})
-	catalogDone := make(chan struct{})
-	go func() { defer close(discoveryDone); d.refreshSessions(connCtx, updates) }()
-	go func() { defer close(catalogDone); d.refreshSessionCatalog(connCtx, updates) }()
-	go func() { defer close(desktopDone); d.refreshDesktop(connCtx, updates) }()
-	go func() { defer close(readinessDone); d.refreshSendReadiness(connCtx, updates) }()
+	heartbeatDone, skillsDone := make(chan struct{}), make(chan struct{})
+	updates := make(chan struct{}, 1)
+	waitObservations := d.startSessionWorkers(connCtx, updates)
 	go func() {
 		defer close(skillsDone)
 		refreshSkillCatalog(connCtx, skillRefresh, skillCache, d.discoverSkills)
@@ -270,15 +274,13 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 	defer func() {
 		cancelConn()
 		closeConnection()
+		<-connectionClosed
 		<-readerDone
 		historyWorkers.Wait()
 		d.resetHistory()
 		<-heartbeatDone
-		<-discoveryDone
 		<-skillsDone
-		<-desktopDone
-		<-readinessDone
-		<-catalogDone
+		waitObservations()
 	}()
 	go func() {
 		defer close(readerDone)
@@ -498,6 +500,10 @@ func (d *Daemon) executeVolatileCommand(ctx context.Context, cmd protocol.Contro
 		}
 
 	case protocol.ActionSend:
+		if isTerminalSession(cmd.SessionID) {
+			res = protocol.DaemonResultMessage{Type: "result", CommandID: cmdID, Status: protocol.StatusFailed, Error: "terminal sessions are read-only; no input was sent"}
+			break
+		}
 		prompt, prepareErr := d.prepareSkillPrompt(cmd)
 		if prepareErr != nil {
 			res = protocol.DaemonResultMessage{Type: "result", CommandID: cmdID, Status: protocol.StatusFailed, Error: prepareErr.Error()}

@@ -64,6 +64,10 @@ func (d *Daemon) ReadHistory(ctx context.Context, msg protocol.ReadHistoryMessag
 		return response
 	}
 	limit := msg.Limit
+	if isTerminalSession(msg.SessionID) {
+		response.Error = protocol.HistoryUnavailable
+		return response
+	}
 	if limit == 0 {
 		limit = protocol.DefaultHistoryLimit
 	}

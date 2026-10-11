@@ -136,4 +136,6 @@ node verify.mjs --list              # 只列计划，不运行检查
 
 仓库新增 `.github/workflows/verify.yml`：Ubuntu 运行完整验证，macOS 运行不依赖 Docker 的单测与构建，CI 使用 Node 24。当前本机实际为 Node 26；工作流配置检查不等于 GitHub 已运行，未推送前不宣称 CI 通过。实现、命令和交付边界见 [可复现验证](docs/changes/2026-10-12-reproducible-verification/TECH.md)。
 
-现阶段重点验收远端 Controller 与 demoair 的 Codex 会话。Claude/Grok 适配、所有独立 CLI 附着和持续自治调度尚未完成；单节点部署与联调不代表完整生产保障。准确证据见 `docs/changes/2026-10-10-control-plane/ACCEPTANCE.md` 与 `VERIFICATION.md`。
+本地源码新增已有终端 Agent 的显式只读观测：Daemon 配置 `--terminal-sock <已有绝对路径>` 与可重复 `--terminal-pane <明确wN:pN>` 后，每 15 秒独立刷新状态；Web 标注终端来源，状态超过 45 秒失效，不轮询聊天历史、不开放发送。微信可明确询问该会话的最新输出，获得有裁剪提示的有限终端快照；不等于完整历史或精确任务回执。`--probe` 可无 token 检查该来源，不写 journal，不启动终端宿主。当前只接受已核对的 protocol 22，默认关闭，macOS/Linux 用户服务可保存相同参数。新增能力尚未部署，真实终端目标未指定，见 [终端观测设计与边界](docs/changes/2026-10-12-terminal-observation/TECH.md)。
+
+现阶段重点验收远端 Controller 与 demoair 的 Codex 会话。独立 CLI 的发送与精确完成回执、所有会话附着和持续自治调度尚未完成；终端只读观测、单节点部署与联调不代表完整生产保障。准确证据见 `docs/changes/2026-10-10-control-plane/ACCEPTANCE.md` 与 `VERIFICATION.md`。

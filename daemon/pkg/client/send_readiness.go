@@ -117,7 +117,9 @@ func (d *Daemon) readinessSweep(now time.Time, running map[string]bool, capacity
 	known := map[string]bool{}
 	for _, sessions := range [][]protocol.Session{d.sessionSnapshot, d.catalogSnapshot} {
 		for _, session := range sessions {
-			known[session.ID] = true
+			if !isTerminalSession(session.ID) {
+				known[session.ID] = true
+			}
 		}
 	}
 	changed := false

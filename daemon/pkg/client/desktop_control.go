@@ -18,6 +18,9 @@ type desktopController interface {
 // The route is selected before dispatch. Neither an unavailable runtime nor an
 // uncertain acknowledgement can cause a second send through another adapter.
 func (d *Daemon) sendPrompt(ctx context.Context, cmd protocol.ControllerCommandMessage, prompt string) (string, error) {
+	if isTerminalSession(cmd.SessionID) {
+		return "", errors.New("terminal sessions are read-only; no input was sent")
+	}
 	if cmd.SendRoute != protocol.RouteDesktopOwner {
 		return d.adapter.SendPrompt(ctx, cmd.SessionID, prompt)
 	}
@@ -59,6 +62,9 @@ func (d *Daemon) sendPrompt(ctx context.Context, cmd protocol.ControllerCommandM
 }
 
 func (d *Daemon) turnInspector(msg protocol.InspectTurnMessage) (codex.TurnInspector, error) {
+	if isTerminalSession(msg.SessionID) {
+		return nil, errors.New("terminal turn inspection unavailable; terminal snapshots are not turn receipts")
+	}
 	if d.journal != nil {
 		identity, err := d.journal.ReadDispatch(msg.CommandID, msg.SessionID, msg.TurnID)
 		if err == nil {

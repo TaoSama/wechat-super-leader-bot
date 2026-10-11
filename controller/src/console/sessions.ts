@@ -4,10 +4,11 @@ import { z } from "zod";
 import { CommandService } from "../commands.js";
 import { NodeHub } from "../hub.js";
 import { HistoryError } from "../session-history.js";
+import { TERMINAL_SESSION_ID_PATTERN } from "../terminal-session.js";
 
 const TargetSchema = z.object({
   nodeId: z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/),
-  sessionId: z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/),
+  sessionId: z.string().min(1).max(64).refine(value => /^[A-Za-z0-9_-]+$/.test(value) || TERMINAL_SESSION_ID_PATTERN.test(value)),
 });
 const HistoryQuerySchema = z.object({
   cursor: z.string().min(1).max(4096).optional(),

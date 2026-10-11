@@ -32,7 +32,7 @@ func (d *Daemon) recoverControllerPayload(ctx context.Context, cause error) {
 		return
 	}
 	var pending sync.WaitGroup
-	for _, refresh := range []func(context.Context, chan<- struct{}){d.refreshControlSnapshot, d.refreshCatalogSnapshot} {
+	for _, refresh := range []func(context.Context, chan<- struct{}){d.refreshControlSnapshot, d.refreshCatalogSnapshot, d.refreshTerminalSnapshot} {
 		pending.Add(1)
 		go func() { defer pending.Done(); refresh(ctx, nil) }()
 	}

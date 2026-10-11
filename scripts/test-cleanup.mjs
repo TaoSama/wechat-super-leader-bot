@@ -1,5 +1,41 @@
 const WEBSOCKET_CLOSED = 3;
 const TEST_WEBSOCKET_CLOSE_TIMEOUT_MS = 5_000;
+const TEST_PROCESS_STOP_TIMEOUT_MS = 5_000;
+
+// Only accepts the ChildProcess handle spawned by a fixture, never a discovered PID.
+export function stopTestProcess(child, { timeoutMs = TEST_PROCESS_STOP_TIMEOUT_MS } = {}) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError('Test process cleanup timeout must be positive');
+  return new Promise((resolve, reject) => {
+    let timer, failure, settled = false;
+    const finish = error => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener('exit', onExit);
+      child.removeListener('error', onError);
+      if (error) reject(error); else resolve();
+    };
+    const onExit = () => finish(failure);
+    const onError = error => finish(failure ? new AggregateError([failure, error], 'Test process stop failed') : error);
+    const signal = name => {
+      try {
+        if (!child.kill(name)) {
+          if (child.exitCode !== null || child.signalCode !== null) onExit();
+          else onError(new Error('Test process signal was not delivered'));
+        }
+      } catch (error) { onError(error); }
+    };
+    child.once('exit', onExit);
+    child.on('error', onError);
+    timer = setTimeout(() => {
+      failure = new Error('Timed out stopping test process gracefully');
+      timer = setTimeout(() => finish(new Error('Test process exit unconfirmed after forced cleanup', { cause: failure })), timeoutMs);
+      signal('SIGKILL');
+    }, timeoutMs);
+    signal('SIGTERM');
+  });
+}
 
 // Only pass sockets created by the test harness; timeout termination never targets a discovered session.
 export function closeTestWebSocket(socket, { timeoutMs = TEST_WEBSOCKET_CLOSE_TIMEOUT_MS } = {}) {

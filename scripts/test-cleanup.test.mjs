@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
-import { closeTestWebSocket, withTestCleanup } from './test-cleanup.mjs';
+import { closeTestWebSocket, stopTestProcess, withTestCleanup } from './test-cleanup.mjs';
 
 const OPEN = 1;
 const CLOSED = 3;
@@ -127,4 +127,59 @@ test('WebSocket failure cannot prevent fixture process and container cleanup', {
   ]), error => error.errors[0].cause === failure);
   assert.deepEqual(calls, ['controller', 'container']);
   assertListenersReleased(socket);
+});
+
+function fixtureProcess(kill) {
+  return Object.assign(new EventEmitter(), { exitCode: null, signalCode: null, kill });
+}
+
+test('owned process cleanup handles absent/already exited and synchronous graceful exit', async () => {
+  await stopTestProcess(undefined);
+  const exited = fixtureProcess(() => assert.fail('already exited'));
+  exited.exitCode = 0;
+  await stopTestProcess(exited);
+  const child = fixtureProcess(function (signal) {
+    assert.equal(signal, 'SIGTERM'); this.signalCode = signal; this.emit('exit'); return true;
+  });
+  await stopTestProcess(child);
+  assert.equal(child.listenerCount('exit'), 0);
+  assert.equal(child.listenerCount('error'), 0);
+});
+
+test('owned process timeout is reported even after forced exit, and later cleanup proceeds', { timeout: 1000 }, async () => {
+  const signals = [], cleaned = [];
+  const child = fixtureProcess(function (signal) {
+    signals.push(signal);
+    if (signal === 'SIGKILL') { this.signalCode = signal; this.emit('exit'); }
+    return true;
+  });
+  await assert.rejects(withTestCleanup(() => {}, [
+    { label: 'owned process', cleanup: () => stopTestProcess(child, { timeoutMs: 5 }) },
+    { label: 'socket', cleanup: () => cleaned.push('socket') },
+    { label: 'files', cleanup: () => cleaned.push('files') },
+  ]), error => /Timed out stopping/.test(error.errors[0].cause.message));
+  assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
+  assert.deepEqual(cleaned, ['socket', 'files']);
+  assert.equal(child.listenerCount('exit'), 0);
+  assert.equal(child.listenerCount('error'), 0);
+});
+
+test('owned process never exiting is bounded and retains the graceful timeout as cause', { timeout: 1000 }, async () => {
+  const child = fixtureProcess(() => true);
+  await assert.rejects(stopTestProcess(child, { timeoutMs: 5 }), error => {
+    assert.match(error.message, /exit unconfirmed/);
+    assert.match(error.cause.message, /Timed out/);
+    return true;
+  });
+  assert.equal(child.listenerCount('exit'), 0);
+  assert.equal(child.listenerCount('error'), 0);
+});
+
+test('owned process signal errors are observable and release listeners', async () => {
+  for (const kill of [() => false, () => { throw new Error('signal failed'); }, function () { this.emit('error', new Error('async signal failed')); return true; }]) {
+    const child = fixtureProcess(kill);
+    await assert.rejects(stopTestProcess(child));
+    assert.equal(child.listenerCount('exit'), 0);
+    assert.equal(child.listenerCount('error'), 0);
+  }
 });

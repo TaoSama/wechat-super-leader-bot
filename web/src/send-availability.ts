@@ -1,5 +1,6 @@
 import type { ScopedSession, SendAvailability, SendRoute } from "./types";
 import { isDesktopObservationFresh, isIsoTimestamp, normalizeDesktopObservation } from "./session-observation";
+import { isTerminalSession, TERMINAL_READ_ONLY_REASON } from "./terminal-session";
 
 export const MAX_SEND_AVAILABILITY_AGE_MS = 45_000;
 const AVAILABILITY_KEYS = new Set(["route", "state", "observedAt", "validUntil", "reason"]);
@@ -28,6 +29,7 @@ export function isSendAvailabilityFresh(availability: SendAvailability, now = Da
 }
 
 export function sessionSendBlockReason(session: ScopedSession, now = Date.now()): string | null {
+  if (isTerminalSession(session)) return TERMINAL_READ_ONLY_REASON;
   const availability = normalizeSendAvailability(session.sendAvailability);
   if (availability) {
     if (availability.state !== "ready") {

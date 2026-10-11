@@ -1,5 +1,6 @@
 import type { DesktopObservation, ScopedSession } from "./types";
 import { formatTimestamp } from "./format";
+import { isTerminalSession, MAX_TERMINAL_OBSERVATION_AGE_MS } from "./terminal-session";
 
 export const MAX_DESKTOP_OBSERVATION_AGE_MS = 45_000;
 export const MAX_MODEL_FIELD_BYTES = 256;
@@ -45,8 +46,13 @@ export function isDesktopObservationFresh(observation: DesktopObservation | unde
 }
 
 /** Display-only status; this observation never grants send permission. */
-export function selectExecutionObservation(session: Pick<ScopedSession, "status" | "desktopObservation">,
-  now = Date.now()): { executionStatus: string; statusSource: "control-socket" | "codex-desktop" } {
+export function selectExecutionObservation(session: Pick<ScopedSession, "status" | "desktopObservation"> & Partial<Pick<ScopedSession, "id" | "provider" | "observedAt">>,
+  now = Date.now()): { executionStatus: string; statusSource: "control-socket" | "codex-desktop" | "terminal" } {
+  if (isTerminalSession(session)) {
+    const observedAt = Date.parse(session.observedAt ?? "");
+    const fresh = isIsoTimestamp(session.observedAt) && observedAt <= now && now - observedAt <= MAX_TERMINAL_OBSERVATION_AGE_MS;
+    return { executionStatus: fresh ? session.status || "unknown" : "unknown", statusSource: "terminal" };
+  }
   const controlStatus = session.status || "unknown";
   const desktop = session.desktopObservation;
   if ((controlStatus === "notLoaded" || controlStatus === "unknown") && desktop &&
