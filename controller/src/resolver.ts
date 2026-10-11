@@ -1,5 +1,6 @@
 import { ScopedSession } from "./types.js";
 import { selectSendRoute } from "./send-eligibility.js";
+import { isTerminalSession } from "./terminal-session.js";
 
 export type NLActionType =
   | "list_sessions"
@@ -25,6 +26,9 @@ export interface ResolverContext {
     sessionId: string;
   };
 }
+
+const terminalInputRequiresConfirmation = (): NLIntent => ({ action: "unknown",
+  replyText: "规则模式仅支持读取终端观测；终端非原子输入请使用模型模式生成独立单步并确认，或在控制台明确发送。输入写入不代表执行完成。" });
 
 export class NaturalLanguageResolver {
   resolve(text: string, ctx: ResolverContext): NLIntent {
@@ -181,6 +185,7 @@ export class NaturalLanguageResolver {
     }
 
     if (targetCheck.session) {
+      if (isTerminalSession(targetCheck.session)) return terminalInputRequiresConfirmation();
       if (!selectSendRoute(targetCheck.session).ready) {
         return {
           action: "unknown",
@@ -200,6 +205,7 @@ export class NaturalLanguageResolver {
     if (!targetClause) {
       if (ctx.sessions.length === 1) {
         const s = ctx.sessions[0];
+        if (isTerminalSession(s)) return terminalInputRequiresConfirmation();
         if (!selectSendRoute(s).ready) {
           return {
             action: "unknown",
@@ -219,6 +225,7 @@ export class NaturalLanguageResolver {
           (s) => s.nodeId === ctx.lastContext!.nodeId && s.id === ctx.lastContext!.sessionId
         );
         if (prev) {
+          if (isTerminalSession(prev)) return terminalInputRequiresConfirmation();
           if (!selectSendRoute(prev).ready) {
             return {
               action: "unknown",

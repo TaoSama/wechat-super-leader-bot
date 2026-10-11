@@ -142,8 +142,12 @@ node verify.mjs --list              # 只列计划，不运行检查
 
 仓库新增 `.github/workflows/verify.yml`：Ubuntu 运行完整验证，macOS 运行不依赖 Docker 的单测与构建，CI 使用 Node 24。当前本机实际为 Node 26；工作流配置检查不等于 GitHub 已运行，未推送前不宣称 CI 通过。实现、命令和交付边界见 [可复现验证](docs/changes/2026-10-12-reproducible-verification/TECH.md)。
 
-已有终端 Agent 支持显式只读观测：Daemon 配置 `--terminal-sock <已有绝对路径>` 与可重复 `--terminal-pane <明确wN:pN>` 后，每 15 秒独立刷新状态；Web 标注终端来源，状态超过 45 秒失效，不轮询聊天历史、不开放发送。微信可明确询问该会话的最新输出，获得有裁剪提示的有限终端快照；不等于完整历史或精确任务回执。`--probe` 可无 token 检查该来源，不写 journal，不启动终端宿主。当前只接受已核对的 protocol 22，默认关闭，macOS/Linux 用户服务可保存相同参数。代码已随构建产物部署，但未配置真实终端目标、未启用观测，见 [终端观测设计与边界](docs/changes/2026-10-12-terminal-observation/TECH.md)。
+已有终端 Agent 支持显式只读观测：Daemon 配置 `--terminal-sock <已有绝对路径>` 与可重复 `--terminal-pane <明确wN:pN>` 后，每 15 秒独立刷新状态；Web 标注终端来源，状态超过 45 秒失效，不轮询聊天历史、默认不开放发送。微信可明确询问该会话的最新输出，获得有裁剪提示的有限终端快照；不等于完整历史或精确任务回执。`--probe` 可无 token 检查该来源，不写 journal，不启动终端宿主。当前只接受已核对的 protocol 22，默认关闭，macOS/Linux 用户服务可保存相同参数。观测代码已随构建产物部署，但未配置真实终端目标、未启用观测，见 [终端观测设计与边界](docs/changes/2026-10-12-terminal-observation/TECH.md)。
 
-开发中的原终端投递器已实现准备、身份冻结、一次性输入与前后复核；只返回“输入已写入”，不伪造原生 turn 或任务完成。公开包运行示例仅连接自建临时 socket，已加入统一验证入口，可在 `daemon/` 执行 `go run -race ./examples/terminal-delivery --run`。生产没有接入该发送入口：持久命令绑定、Controller/Web/微信路由、任务完成证据与真实 pane 验收仍待完成；同一 PTY 内原 CLI 退出或更换的非原子窗口也未封闭。见 [投递契约](docs/changes/2026-10-12-terminal-delivery/TECH.md) 与 [验证记录](docs/changes/2026-10-12-terminal-delivery/VERIFICATION.md)。
+原终端单步输入现已接通源码中的持久命令、Controller、Web 与自然语言确认链路，**尚未部署或启用正式终端发送**。必须在已有 socket 和明确 pane 清单之外显式设置 `--terminal-send-mode=non-atomic`，并使用真实持久 journal；独立零输入预检通过后才发布 45 秒发送资格。不启动 Agent、不恢复会话、不使用默认焦点，也不在通道失效时自动换路。同一 PTY 内原 CLI 退出、替换和人工输入的非原子窗口仍存在，启用前必须接受此边界并验收明确目标。
 
-现阶段重点验收远端 Controller 与 demoair 的 Codex 会话。独立 CLI 的发送与精确完成回执、所有会话附着和持续自治调度尚未完成；终端只读观测、单节点部署与联调不代表完整生产保障。准确证据见 `docs/changes/2026-10-10-control-plane/ACCEPTANCE.md` 与 `VERIFICATION.md`。
+Web 可向明确终端会话发送单步输入；微信模型模式先生成带非原子警告的准确目标/内容预览，用户确认后才投递。规则诊断模式仍只读，所有含终端的多步和持久依赖计划均拒绝。回执 `input-written` 只显示“输入已写入，执行未确认”，独立于最近完成；六字段输入证明不包含私有 socket、原会话路径或虚构 turn/output。命令先持久化身份再写入，重复请求与重启不重发；丢回执保持 `uncertain`，仅核查原请求，不能凭 idle/done 解锁后继。
+
+公开包运行示例仍仅连接自建临时 socket，可在 `daemon/` 执行 `go run -race ./examples/terminal-delivery --run`。完整合成链和 Web 验收入口、边界见 [终端控制合同](docs/changes/2026-10-12-terminal-control-chain/TECH.md) 与 [验证记录](docs/changes/2026-10-12-terminal-control-chain/VERIFICATION.md)；这不代替真实 CLI、真实模型或微信验收。
+
+现阶段重点验收远端 Controller 与 demoair 的 Codex 会话。独立 CLI 的真实发送验收与精确完成回执、所有会话附着和持续自治调度尚未完成；合成终端投递、单节点部署与联调不代表完整生产保障。准确证据见 `docs/changes/2026-10-10-control-plane/ACCEPTANCE.md` 与 `VERIFICATION.md`。

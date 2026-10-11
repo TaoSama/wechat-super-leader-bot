@@ -15,6 +15,7 @@ import (
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/config"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/journal"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
+	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/terminal"
 )
 
 const maxPersistedOutputBytes = 16 * 1024
@@ -24,6 +25,7 @@ type commandJournal interface {
 	Lookup(protocol.ControllerCommandMessage) (journal.Entry, bool, error)
 	Begin(protocol.ControllerCommandMessage) (journal.Entry, bool, error)
 	BindDispatch(protocol.ControllerCommandMessage, protocol.DispatchIdentity) error
+	BindTerminal(protocol.ControllerCommandMessage, terminal.DeliveryIdentity) error
 	ReadDispatch(string, string, string) (protocol.DispatchIdentity, error)
 	Finish(protocol.DaemonResultMessage) error
 	Ack(protocol.ResultAckMessage) error
@@ -34,6 +36,12 @@ type commandJournal interface {
 // OpenDaemon is the production constructor. NewDaemon remains an explicitly
 // in-memory constructor for embedded fixtures; main never uses it directly.
 func OpenDaemon(cfg *config.Config, adapter codex.SessionAdapter) (*Daemon, error) {
+	if err := config.ValidateTerminalObservation(cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
+		return nil, err
+	}
+	if err := config.ValidateTerminalSend(cfg.TerminalSendMode, cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
+		return nil, err
+	}
 	scope, err := json.Marshal([]string{cfg.NodeID, cfg.ControllerURL, cfg.SocketPath})
 	if err != nil {
 		return nil, err
@@ -45,6 +53,7 @@ func OpenDaemon(cfg *config.Config, adapter codex.SessionAdapter) (*Daemon, erro
 	}
 	d := NewDaemon(cfg, adapter)
 	d.journal = store
+	d.durableJournal = true
 	return d, nil
 }
 

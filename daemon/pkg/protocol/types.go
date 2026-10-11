@@ -26,10 +26,11 @@ const (
 type DaemonResultStatus string
 
 const (
-	StatusAccepted  DaemonResultStatus = "accepted"
-	StatusCompleted DaemonResultStatus = "completed"
-	StatusFailed    DaemonResultStatus = "failed"
-	StatusUncertain DaemonResultStatus = "uncertain"
+	StatusAccepted     DaemonResultStatus = "accepted"
+	StatusCompleted    DaemonResultStatus = "completed"
+	StatusFailed       DaemonResultStatus = "failed"
+	StatusUncertain    DaemonResultStatus = "uncertain"
+	StatusInputWritten DaemonResultStatus = "input-written"
 )
 
 // Session represents a session discovered on a node
@@ -83,12 +84,13 @@ type DaemonHeartbeatMessage struct {
 
 // DaemonResultMessage: {type:"result",commandId,status,output,error?}
 type DaemonResultMessage struct {
-	Type      string             `json:"type"`
-	CommandID string             `json:"commandId"`
-	Status    DaemonResultStatus `json:"status"`
-	Output    string             `json:"output"`
-	Error     string             `json:"error,omitempty"`
-	TurnID    string             `json:"turnId,omitempty"`
+	Type         string             `json:"type"`
+	CommandID    string             `json:"commandId"`
+	Status       DaemonResultStatus `json:"status"`
+	Output       string             `json:"output"`
+	Error        string             `json:"error,omitempty"`
+	TurnID       string             `json:"turnId,omitempty"`
+	InputReceipt *InputReceipt      `json:"inputReceipt,omitempty"`
 }
 
 // InspectTurnMessage is read-only reconciliation, never a request to start a turn.
@@ -101,10 +103,11 @@ type InspectTurnMessage struct {
 }
 
 type ResultAckMessage struct {
-	Type      string             `json:"type"`
-	CommandID string             `json:"commandId"`
-	TurnID    string             `json:"turnId,omitempty"`
-	Status    DaemonResultStatus `json:"status"`
+	Type         string             `json:"type"`
+	CommandID    string             `json:"commandId"`
+	TurnID       string             `json:"turnId,omitempty"`
+	Status       DaemonResultStatus `json:"status"`
+	InputReceipt *InputReceipt      `json:"inputReceipt,omitempty"`
 }
 
 // ControllerCommandMessage: {type:"command",commandId,nodeId,sessionId,action,prompt?,expiresAt}
@@ -175,8 +178,11 @@ func (c *ControllerCommandMessage) Validate(expectedNodeID string, now time.Time
 	if c.Action == ActionSend && strings.TrimSpace(c.Prompt) == "" {
 		return errors.New("prompt is required for send action")
 	}
-	if c.SendRoute != "" && (c.Action != ActionSend || (c.SendRoute != RouteControlSocket && c.SendRoute != RouteDesktopOwner)) {
+	if c.SendRoute != "" && (c.Action != ActionSend || (c.SendRoute != RouteControlSocket && c.SendRoute != RouteDesktopOwner && c.SendRoute != RouteTerminalPane)) {
 		return errors.New("invalid send route")
+	}
+	if c.SendRoute == RouteTerminalPane && !strings.HasPrefix(c.SessionID, "terminal:") {
+		return errors.New("terminal-pane requires a terminal session")
 	}
 	if len(c.Skills) > 0 && c.Action != ActionSend {
 		return errors.New("only send accepts skill references")

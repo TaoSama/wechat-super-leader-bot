@@ -67,6 +67,9 @@ func GeneratePlistXML(binPath string, cfg *config.Config, tokenFilePath string) 
 	if cfg.DesktopSend && cfg.DesktopSocketPath == "" {
 		return "", errors.New("desktop-send requires an explicit desktop-sock")
 	}
+	if err := config.ValidateTerminalSend(cfg.TerminalSendMode, cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
+		return "", err
+	}
 	args := []string{
 		binPath,
 		"--node-id", cfg.NodeID,
@@ -90,6 +93,9 @@ func GeneratePlistXML(binPath string, cfg *config.Config, tokenFilePath string) 
 		for _, pane := range cfg.TerminalPanes {
 			args = append(args, "--terminal-pane", pane)
 		}
+	}
+	if cfg.TerminalSendMode != "" {
+		args = append(args, "--terminal-send-mode", cfg.TerminalSendMode)
 	}
 	for _, root := range cfg.SkillRoots {
 		args = append(args, "--skill-root", root)
@@ -206,6 +212,9 @@ func (m *DarwinManager) verifyExistingPlistOwnership(plistPath string) error {
 }
 
 func (m *DarwinManager) Install(ctx context.Context, cfg *config.Config) error {
+	if err := config.ValidateTerminalSend(cfg.TerminalSendMode, cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
+		return err
+	}
 	if err := config.ValidateTerminalObservation(cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
 		return err
 	}

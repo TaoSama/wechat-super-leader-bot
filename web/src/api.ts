@@ -15,6 +15,7 @@ import { normalizeDesktopObservation } from "./session-observation";
 import { normalizeSendAvailability } from "./send-availability";
 import { HISTORY_CONTEXT_EXPIRED_MESSAGE, isHistoryContext } from "./history-contract";
 import { parseConsoleExecutions } from "./execution-contract";
+import { normalizeInputReceipt, TERMINAL_SESSION_ID } from "./input-receipt";
 
 export class ApiAuthError extends Error {
   public readonly statusCode: number;
@@ -75,6 +76,7 @@ async function historyHttpError(response: Response): Promise<ApiHistoryError> {
 const VALID_COMMAND_STATUSES: ReadonlySet<CommandStatus> = new Set([
   "pending",
   "accepted",
+  "input-written",
   "completed",
   "failed",
   "uncertain",
@@ -220,6 +222,16 @@ function normalizeCommand(raw: unknown): CommandRecord | null {
     : "uncertain";
 
   const action: ActionType = obj.action === "send" ? "send" : "read";
+  const inputReceipt = normalizeInputReceipt(obj.inputReceipt);
+  const terminalSend = action === "send" && (obj.sendRoute === "terminal-pane" || obj.sessionId.startsWith("terminal:"));
+  if (terminalSend) {
+    if (obj.sendRoute !== "terminal-pane" || !TERMINAL_SESSION_ID.test(obj.sessionId) ||
+        !["pending", "input-written", "failed", "uncertain"].includes(status) || obj.turnId !== undefined ||
+        obj.output !== undefined && obj.output !== "") return null;
+    if (status === "input-written") {
+      if (!inputReceipt || inputReceipt.sessionId !== obj.sessionId || obj.error !== undefined) return null;
+    } else if (obj.inputReceipt !== undefined) return null;
+  } else if (status === "input-written" || obj.inputReceipt !== undefined || action === "read" && obj.sendRoute !== undefined) return null;
 
   return {
     commandId: obj.commandId,
@@ -232,7 +244,8 @@ function normalizeCommand(raw: unknown): CommandRecord | null {
     output: typeof obj.output === "string" ? obj.output : undefined,
     error: typeof obj.error === "string" ? obj.error : undefined,
     turnId: typeof obj.turnId === "string" ? obj.turnId : undefined,
-    sendRoute: obj.sendRoute === "desktop-owner" || obj.sendRoute === "control-socket" ? obj.sendRoute : undefined,
+    sendRoute: obj.sendRoute === "desktop-owner" || obj.sendRoute === "control-socket" || obj.sendRoute === "terminal-pane" ? obj.sendRoute : undefined,
+    inputReceipt,
     expiresAt: typeof obj.expiresAt === "string" ? obj.expiresAt : "",
     createdAt: typeof obj.createdAt === "string" ? obj.createdAt : "",
     updatedAt: typeof obj.updatedAt === "string" ? obj.updatedAt : "",

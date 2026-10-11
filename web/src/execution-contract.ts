@@ -26,6 +26,7 @@ function identifier(raw: unknown): string {
 function parseStep(raw: unknown, index: number): ConsoleExecutionStep {
   const value = object(raw, ["step", "nodeId", "sessionId", "prompt", "promptTruncated", "dependsOn", "status", "commandId", "turnId"]);
   if (value.step !== index + 1 || typeof value.prompt !== "string" ||
+      typeof value.sessionId === "string" && value.sessionId.startsWith("terminal:") ||
       Array.from(value.prompt).length > PROMPT_CODE_POINT_LIMIT || typeof value.promptTruncated !== "boolean" ||
       typeof value.status !== "string" || !STEP_STATUSES.has(value.status) || !Array.isArray(value.dependsOn)) return invalid();
   const dependsOn = value.dependsOn.map(dependency => {

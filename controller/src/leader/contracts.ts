@@ -53,10 +53,10 @@ const descriptions: Record<keyof typeof ToolArguments, string> = {
   forget: "按用户要求删除当前聊天的指定记忆。",
   get_console_link: "当用户请求打开、查看控制台、获取控制台登录链接时调用。为用户发行1小时有效的一次性受限会话控制台登录链接，可查询状态和向精确会话发送消息，不能调用通用管理接口。不要编造或推测链接，不要生成虚假地址。",
 };
-const TERMINAL_OBSERVATION_GUIDANCE = " terminal: ID 或 terminal/ 提供方为独立终端观测，statusSource=terminal；它只读，不能发送或提执行计划。终端状态只在过去45秒内有效；idle/done不是精确任务完成证据，blocked表示等待处理。read_session只返回明确标注、可能裁剪的终端快照，不是完整对话历史；无可信模型时保持未知，不根据标题推断。";
+const TERMINAL_OBSERVATION_GUIDANCE = " terminal: ID 或 terminal/ 提供方为独立终端观测，statusSource=terminal；默认只读。只有明确报告新鲜的 sendAvailability(route=terminal-pane,mode=non-atomic,state=ready) 才能提出独立单步终端输入供用户确认，禁止任何含终端的多步或依赖计划，即使无依赖也禁止。终端输入不创建后台执行计划；CLI退出、同类进程替换或人工输入存在非原子竞态。input-written仅表示输入已写入，执行未确认，不能当作Agent开始、成功、完成或解锁依赖，不自动重发。终端状态只在过去45秒内有效；idle/done不是精确任务完成证据，blocked表示等待处理。read_session只返回明确标注、可能裁剪的终端快照，不是完整对话历史；无可信模型时保持未知，不根据标题推断。";
 export const LEADER_TOOLS: ModelTool[] = Object.entries(ToolArguments).map(([name, schema]) => ({
   type: "function", function: { name, description: descriptions[name as keyof typeof ToolArguments] +
-    (["list_sessions", "read_session"].includes(name) ? TERMINAL_OBSERVATION_GUIDANCE : ""),
+    (["list_sessions", "read_session", "propose_plan", "get_command"].includes(name) ? TERMINAL_OBSERVATION_GUIDANCE : ""),
     parameters: z.toJSONSchema(schema) as Record<string, unknown> },
 }));
 export const LeaderDataSchema = z.object({

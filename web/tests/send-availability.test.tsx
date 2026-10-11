@@ -9,7 +9,7 @@ import type { DesktopObservation, ScopedSession, SendAvailability } from "../src
 
 const NOW = Date.parse("2026-10-11T12:00:00Z");
 const iso = (offset = 0) => new Date(NOW + offset).toISOString();
-const ready = (overrides: Partial<SendAvailability> = {}): SendAvailability => ({
+const ready = (overrides: Partial<Extract<SendAvailability, { route: "desktop-owner" }>> = {}): SendAvailability => ({
   route: "desktop-owner", state: "ready", observedAt: iso(), validUntil: iso(45_000), ...overrides,
 });
 const observation = (overrides: Partial<DesktopObservation> = {}): DesktopObservation => ({

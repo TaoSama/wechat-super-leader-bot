@@ -1,4 +1,4 @@
-import { CommandRecord, MessageRecord, ScopedSession, Session } from "../types.js";
+import { CommandRecord, InputReceipt, MessageRecord, ScopedSession, Session } from "../types.js";
 import { LeaderState } from "../leader/state.js";
 import type { CreateExecutionResult, ExecutionRecord } from "../leader/execution.js";
 import type { ExecutionConfirmationAuthority } from "../leader/execution-confirmation.js";
@@ -43,7 +43,8 @@ export interface IStore extends IConsoleAuthStore {
     status: CommandRecord["status"],
     output?: string,
     error?: string,
-    turnId?: string
+    turnId?: string,
+    inputReceipt?: InputReceipt
   ): Promise<void>;
   markNodeActiveCommandsUncertain(nodeId: string, reason: string): Promise<void>;
   markExpiredActiveCommandsUncertain(): Promise<void>;

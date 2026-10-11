@@ -21,6 +21,9 @@ func (d *Daemon) sendPrompt(ctx context.Context, cmd protocol.ControllerCommandM
 	if isTerminalSession(cmd.SessionID) {
 		return "", errors.New("terminal sessions are read-only; no input was sent")
 	}
+	if cmd.SendRoute == protocol.RouteTerminalPane {
+		return "", errors.New("terminal-pane cannot target a native session; no fallback was attempted")
+	}
 	if cmd.SendRoute != protocol.RouteDesktopOwner {
 		return d.adapter.SendPrompt(ctx, cmd.SessionID, prompt)
 	}

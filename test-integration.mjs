@@ -14,6 +14,8 @@ import { join } from 'node:path';
 import { verifyNodeIsolation } from './test-node-isolation.mjs';
 import { verifyDesktopRoute } from './test-desktop-route.mjs';
 import { verifyTerminalObservation, terminalModelCall, TERMINAL_NODE } from './test-terminal-observation.mjs';
+import { verifyTerminalControl, terminalInputModelCall, TERMINAL_INPUT_NODE } from './test-terminal-control.mjs';
+import { verifyTerminalStore } from './test-terminal-store.mjs';
 import { verifyPlanStore } from './test-plan-store.mjs';
 import { verifyPlanConfirmationStore } from './test-plan-confirmation-store.mjs';
 import { verifyNotificationStore } from './test-notification-store.mjs';
@@ -41,6 +43,7 @@ async function main() {
   const isolationTokens = Object.fromEntries(['scope-node-a', 'scope-node-b'].map(id => [id, randomBytes(24).toString('hex')]));
   const desktopToken = randomBytes(24).toString('hex');
   const terminalToken = randomBytes(24).toString('hex');
+  const terminalInputToken = randomBytes(24).toString('hex');
   const planToken = randomBytes(24).toString('hex');
   const name = `super-leader-test-${randomUUID()}`;
   const docker = (args) => execFileSync('docker', args, {
@@ -87,9 +90,11 @@ async function main() {
           const call = (name, args) => ({ role: 'assistant', content: null, tool_calls: [{ id: `mock-${name}`, type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
           const planCall = planModelCall(last.content);
           const terminalCall = terminalModelCall(last.content);
+          const terminalInputCall = terminalInputModelCall(last.content);
           if (last.type === 'function_call_output') message.content = `Tool evidence: ${last.output}`;
           else if (planCall) message = call(planCall.name, planCall.args);
           else if (terminalCall) message = call(terminalCall.name, terminalCall.args);
+          else if (terminalInputCall) message = call(terminalInputCall.name, terminalInputCall.args);
           else if (last.content === '请记住测试偏好') message = call('remember', { key: 'test-preference', value: '中文' });
           else if (last.content === '查询已记住的偏好') message = call('recall', {});
           else if (last.content === '查询桌面模型') message = call('list_sessions', { nodeId: 'desktop-fixture-node' });
@@ -115,7 +120,7 @@ async function main() {
     const env = {
       ...process.env, HOST: '127.0.0.1', PORT: String(port), PERSISTENCE_MODE: 'postgres',
       DATABASE_URL: `postgresql://leader:${password}@127.0.0.1:${dbPort}/leader`,
-      CONTROLLER_TOKEN: token, NODE_TOKENS: JSON.stringify({ [values.live ? 'demoair' : 'test-node']: nodeToken, ...(!values.live ? { ...isolationTokens, 'desktop-fixture-node': desktopToken, [TERMINAL_NODE]: terminalToken, [PLAN_NODE]: planToken } : {}) }),
+      CONTROLLER_TOKEN: token, NODE_TOKENS: JSON.stringify({ [values.live ? 'demoair' : 'test-node']: nodeToken, ...(!values.live ? { ...isolationTokens, 'desktop-fixture-node': desktopToken, [TERMINAL_NODE]: terminalToken, [TERMINAL_INPUT_NODE]: terminalInputToken, [PLAN_NODE]: planToken } : {}) }),
       CONSOLE_PUBLIC_URL: base,
       ALLOWED_CHAT_IDS: 'test-chat,' + PLAN_CHAT,
       LEADER_MODE: values.live ? 'rules' : 'model',
@@ -151,6 +156,7 @@ async function main() {
     const fixturePool = new Pool({ connectionString: env.DATABASE_URL });
     await withTestCleanup(async () => {
       await stores[0].init();
+      await verifyTerminalStore({ stores });
       await verifyPlanStore({ stores, reopenStore: () => new PostgresStore(env.DATABASE_URL) });
       await verifyPlanConfirmationStore({ stores, pool: fixturePool, waitFor });
       await verifyNotificationStore({ stores, pool: fixturePool, reopenStore: () => new PostgresStore(env.DATABASE_URL) });
@@ -237,6 +243,9 @@ async function main() {
     assert([401, 403].includes((await request('/v1/status', undefined, false)).status));
     await verifyNodeIsolation({ WebSocket, base, request, nodeTokens: isolationTokens, waitFor });
     await verifyTerminalObservation({ base, request, nodeToken: terminalToken, waitFor });
+    const terminalInputReceipt = await verifyTerminalControl({ base, request, nodeToken: terminalInputToken, waitFor,
+      openStore: () => new PostgresStore(env.DATABASE_URL),
+      restart: async () => { await stop(controller); controller = undefined; await start(); } });
     let desktopSkillReceipt;
     const desktopReceipt = await verifyDesktopRoute({ base, request, nodeToken: desktopToken, waitFor,
       onSkillReceipt: receipt => { desktopSkillReceipt = receipt; } });
@@ -319,6 +328,8 @@ async function main() {
     await start();
     assert.deepEqual((await request(`/v1/commands/${desktopReceipt.commandId}`)).body, desktopReceipt,
       'Controller restart lost desktop route or exact native receipt');
+    assert.deepEqual((await request(`/v1/commands/${terminalInputReceipt.commandId}`)).body, terminalInputReceipt,
+      'Controller restart lost terminal input proof or promoted it to native completion');
     assert.deepEqual((await request(`/v1/commands/${desktopSkillReceipt.commandId}`)).body, desktopSkillReceipt,
       'Controller restart lost ordered skill refs or exact desktop skill receipt');
     assert.equal((await request(`/v1/commands/${id}`)).body.status, 'completed');

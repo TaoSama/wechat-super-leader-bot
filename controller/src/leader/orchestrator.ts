@@ -7,7 +7,8 @@ import { hasSkillRefs } from "../skills.js";
 import { selectExecutionObservation, selectModelObservation } from "../session-observation.js";
 import { selectSendRoute } from "../send-eligibility.js";
 import { failureReply, modelDiagnostic } from "./errors.js";
-import { createExecution, matchesExecutionCommand, validatePlanDependencies } from "./execution.js";
+import { createExecution, hasTerminalTarget, matchesExecutionCommand, validatePlanDependencies } from "./execution.js";
+import { assertTerminalSingleStep, submitTerminalPlan, TERMINAL_INPUT_WARNING } from "./terminal-plan.js";
 import { ExecutionScheduler } from "./execution-scheduler.js";
 import { executionSummary } from "./execution-presentation.js";
 import {
@@ -154,6 +155,8 @@ export class LeaderOrchestrator {
     if (plan.expiresAt <= this.now()) return { text: "计划已过期，没有派发。请重新描述任务以核对最新会话状态。" };
     try { validatePlanDependencies(plan); }
     catch { return { text: "计划依赖无效，没有派发。请重新规划。" }; }
+    try { assertTerminalSingleStep(plan); }
+    catch { return { text: "终端输入只支持独立单步，不能加入多步或依赖计划，没有派发。" }; }
     // Validate every target before beginning; revalidate again inside CommandService immediately before dispatch.
     for (const action of plan.actions) {
       const session = this.hub.getNodeSession(action.nodeId, action.sessionId);
@@ -169,6 +172,7 @@ export class LeaderOrchestrator {
     if (current?.revision !== revision || data.inflight!.expiresAt <= this.now()) {
       return { text: "处理所有权或时限已变化，没有创建新的执行计划，请核验已有回执。" };
     }
+    if (hasTerminalTarget(plan)) return submitTerminalPlan(this.store, this.commands, chatId, revision, plan, data, this.now);
     try {
       await this.store.confirmExecution(createExecution(chatId, plan, this.now()), {
         revision, messageId: data.inflight!.messageId, inputHash: data.inflight!.inputHash,
@@ -344,6 +348,9 @@ export class LeaderOrchestrator {
       }
       case "propose_plan": {
         const { actions } = ToolArguments.propose_plan.parse(raw);
+        data.pending = undefined;
+        try { assertTerminalSingleStep({ actions }); }
+        catch { return { error: "终端输入无法证明任务完成，只支持独立单步，不能加入多步或依赖计划" }; }
         try { validatePlanDependencies({ actions }); }
         catch { return { error: "Invalid plan dependencies; same-session tasks must form a chain of earlier steps" }; }
         if ((await this.store.getLatestExecution(chatId))?.status === "active") return { error: "An active plan already exists; query its progress or ask the user to cancel it" };
@@ -359,6 +366,8 @@ export class LeaderOrchestrator {
           }
           boundActions.push({ ...action, sendRoute: eligibility.route });
         }
+        try { assertTerminalSingleStep({ actions: boundActions }); }
+        catch { data.pending = undefined; return { error: "终端输入无法证明任务完成，只支持独立单步，不能加入多步或依赖计划" }; }
         data.pending = { id: randomUUID(), expiresAt: this.now() + PLAN_TTL_MS, actions: boundActions };
         return { pending: true };
       }
@@ -388,6 +397,7 @@ export class LeaderOrchestrator {
       }).join("");
       return `${index + 1}. [${action.nodeId}] ${action.sessionId}\n任务：${action.prompt}${selected}\n依赖：${action.dependsOn.length ? `步骤 ${action.dependsOn.join("、")} 完成后` : "无，可独立执行"}`;
     });
+    if (hasTerminalTarget(plan)) return `待确认终端单步输入（尚未派发）：\n${lines.join("\n\n")}\n\n${TERMINAL_INPUT_WARNING}\n如目标与输入无误，回复“确认执行”；也可以说“取消计划”。确认有效期 10 分钟；新请求会替换此输入。不创建后台执行计划。`;
     return `待执行计划（尚未派发）：\n${lines.join("\n\n")}\n\n如目标与任务无误，回复“确认执行”；也可以说“取消计划”。确认有效期 10 分钟；新请求会替换待确认计划。确认后授权在24小时内按上述固定依赖自动推进，不自动改写任务或传递前一步输出。取消只停止后续派发，不停止原会话已有任务。`;
   }
 }

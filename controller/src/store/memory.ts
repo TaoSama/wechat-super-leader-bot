@@ -1,7 +1,7 @@
-import { CommandRecord, MessageRecord, ScopedSession, Session, validateCommandSendRoute } from "../types.js";
+import { CommandRecord, InputReceipt, MessageRecord, ScopedSession, Session, validateCommandSendRoute } from "../types.js";
 import { IStore, CreateCommandResult, ConflictError } from "./interface.js";
 import { sameSkillRefs } from "../skills.js";
-import { nextCommandState, inspectionLimit } from "./command-state.js";
+import { nextCommandState, inspectionLimit, validateStoredCommandInput } from "./command-state.js";
 import { executionListQuery } from "./execution-list.js";
 import { createTerminalNotification, readNotification, claimNotificationRecord, receiptNotificationRecord,
   NotificationIdSchema, NotificationReceiptStatusSchema, validateNotificationTime, NOTIFICATION_BATCH_LIMIT,
@@ -44,6 +44,7 @@ export class MemoryStore implements IStore {
 
   async createCommandIfAbsent(cmd: CommandRecord): Promise<CreateCommandResult> {
     validateCommandSendRoute(cmd);
+    validateStoredCommandInput(cmd);
     if (cmd.requestId && this.commandsByRequestId.has(cmd.requestId)) {
       const existingId = this.commandsByRequestId.get(cmd.requestId)!;
       const existing = this.commands.get(existingId)!;
@@ -78,6 +79,7 @@ export class MemoryStore implements IStore {
 
   async getCommand(commandId: string): Promise<CommandRecord | null> {
     const cmd = this.commands.get(commandId);
+    if (cmd) validateStoredCommandInput(cmd);
     return cmd ? structuredClone(cmd) : null;
   }
 
@@ -92,12 +94,13 @@ export class MemoryStore implements IStore {
     status: CommandRecord["status"],
     output?: string,
     error?: string,
-    turnId?: string
+    turnId?: string,
+    inputReceipt?: InputReceipt
   ): Promise<void> {
     const cmd = this.commands.get(commandId);
     if (!cmd) return;
 
-    this.commands.set(commandId, nextCommandState(cmd, status, output, error, turnId));
+    this.commands.set(commandId, nextCommandState(cmd, status, output, error, turnId, inputReceipt));
   }
 
   async markNodeActiveCommandsUncertain(nodeId: string, reason: string): Promise<void> {
@@ -129,12 +132,13 @@ export class MemoryStore implements IStore {
   async listRecentCommands(limit = 50): Promise<CommandRecord[]> {
     const list = Array.from(this.commands.values());
     list.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-    return structuredClone(list.slice(0, limit));
+    return list.slice(0, limit).map(cmd => { validateStoredCommandInput(cmd); return structuredClone(cmd); });
   }
 
   async listInspectableCommands(nodeId: string, limit = 50, afterCommandId = ""): Promise<CommandRecord[]> {
     const count = inspectionLimit(limit);
     return structuredClone([...this.commands.values()].filter(cmd => cmd.nodeId === nodeId && cmd.action === "send" &&
+      cmd.sendRoute !== "terminal-pane" && !cmd.sessionId.startsWith("terminal:") && !cmd.inputReceipt &&
       cmd.turnId && ["accepted", "uncertain"].includes(cmd.status) && cmd.commandId > afterCommandId)
       .sort((a, b) => a.commandId < b.commandId ? -1 : a.commandId > b.commandId ? 1 : 0).slice(0, count));
   }
@@ -253,7 +257,7 @@ export class MemoryStore implements IStore {
 
   async getExecution(id: string): Promise<ExecutionRecord | null> {
     const execution = this.executions.get(id);
-    return execution ? structuredClone(execution) : null;
+    return execution ? structuredClone(normalizeExecution(execution)) : null;
   }
 
   async getLatestExecution(chatId: string): Promise<ExecutionRecord | null> {
@@ -261,7 +265,7 @@ export class MemoryStore implements IStore {
     const candidates = [...this.executions.values()].filter(execution => execution.chatId === chatId)
       .sort((a, b) => Number(b.status === "active") - Number(a.status === "active") ||
         b.createdAt - a.createdAt || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
-    return candidates[0] ? structuredClone(candidates[0]) : null;
+    return candidates[0] ? structuredClone(normalizeExecution(candidates[0])) : null;
   }
 
   async compareAndSetExecution(next: ExecutionRecord, expectedRevision: number, now = Date.now()): Promise<ExecutionRecord | null> {
@@ -282,7 +286,7 @@ export class MemoryStore implements IStore {
   async listActiveExecutions(limit = EXECUTION_PAGE_SIZE, afterId = ""): Promise<ExecutionRecord[]> {
     const count = executionPageLimit(limit);
     return structuredClone([...this.executions.values()].filter(execution => execution.status === "active" && execution.id > afterId)
-      .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0).slice(0, count));
+      .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0).slice(0, count).map(normalizeExecution));
   }
 
   async listRecentExecutions(chatIds: readonly string[], limit: number): Promise<ExecutionRecord[]> {

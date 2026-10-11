@@ -70,7 +70,15 @@ func (d *Daemon) cachedSessions() []protocol.Session {
 			}
 		}
 	}
-	return append(sessions, cloneSessions(d.terminalSnapshot)...)
+	terminals := cloneSessions(d.terminalSnapshot)
+	if d.terminalSendingEnabled() {
+		for i := range terminals {
+			terminals[i].Capabilities = []protocol.ActionType{protocol.ActionRead, protocol.ActionSend}
+			availability := d.terminalAvailabilityLocked(terminals[i], time.Now())
+			terminals[i].SendAvailability = &availability
+		}
+	}
+	return append(sessions, terminals...)
 }
 
 func (d *Daemon) refreshSessions(ctx context.Context, updates chan<- struct{}) {

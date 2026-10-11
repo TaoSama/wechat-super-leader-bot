@@ -8,6 +8,7 @@ export type ActionType = "read" | "send";
 export type CommandStatus =
   | "pending"
   | "accepted"
+  | "input-written"
   | "completed"
   | "failed"
   | "uncertain";
@@ -29,13 +30,22 @@ export interface DesktopObservation {
   reasoningEffort?: string;
 }
 
-export type SendRoute = "control-socket" | "desktop-owner";
-export interface SendAvailability {
-  route: "desktop-owner";
+export type SendRoute = "control-socket" | "desktop-owner" | "terminal-pane";
+interface SendAvailabilityFields {
   state: "ready" | "blocked" | "unavailable";
   observedAt: string;
   validUntil: string;
   reason?: "busy" | "preflight-rejected" | "unavailable" | "checking";
+}
+export type SendAvailability = SendAvailabilityFields & ({ route: "desktop-owner" } | { route: "terminal-pane"; mode: "non-atomic" });
+
+export interface InputReceipt {
+  kind: "terminal-input-written";
+  sessionId: string;
+  requestId: string;
+  promptSHA256: string;
+  responseRevision: number;
+  observedRevision: number;
 }
 
 export interface ScopedSession {
@@ -91,6 +101,7 @@ export interface CommandRecord {
   error?: string;
   turnId?: string;
   sendRoute?: SendRoute;
+  inputReceipt?: InputReceipt;
   expiresAt: string;
   createdAt: string;
   updatedAt: string;
@@ -106,7 +117,7 @@ export interface ControlPlaneStatusResponse {
 }
 
 export type ExecutionStatus = "active" | "completed" | "failed" | "cancelled" | "expired";
-export type ExecutionStepStatus = CommandStatus | "waiting" | "claimed" | "cancelled" | "expired";
+export type ExecutionStepStatus = Exclude<CommandStatus, "input-written"> | "waiting" | "claimed" | "cancelled" | "expired";
 export interface ConsoleExecutionStep {
   step: number;
   nodeId: string;
@@ -171,6 +182,13 @@ export const COMMAND_STATUS_SEMANTICS: Record<
     shortTag: "ACCEPTED",
     description: "输入已被接受，执行结果尚未确认",
     tone: "cyan",
+  },
+  "input-written": {
+    status: "input-written",
+    label: "输入已写入 (Input Written)",
+    shortTag: "INPUT_WRITTEN",
+    description: "输入已写入，执行未确认；不是任务完成，勿自动重发",
+    tone: "amber",
   },
   completed: {
     status: "completed",
