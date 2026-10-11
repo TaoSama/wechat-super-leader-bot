@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
 import {
   ControllerReadHistoryMessageSchema, DaemonHistoryMessageSchema,
-  HistoryReadOptions, SessionHistory,
+  HistoryReadOptions, Session, SessionHistory,
 } from "./types.js";
+import { isTerminalSession } from "./terminal-session.js";
 
 const HISTORY_TIMEOUT_MS = 15000;
 const HISTORY_MAX_PENDING = 32;
@@ -40,6 +41,7 @@ interface PendingHistory {
   ws: WebSocket;
   limit: number;
   historyContext?: string;
+  terminalProvider?: string;
   settle: (history?: SessionHistory, error?: HistoryError) => void;
 }
 
@@ -49,7 +51,7 @@ export class SessionHistoryRequests {
   private pendingByNode = new Map<string, number>();
 
   async read(nodeId: string, sessionId: string, ws: WebSocket,
-    options: HistoryReadOptions, signal?: AbortSignal): Promise<SessionHistory> {
+    options: HistoryReadOptions, signal?: AbortSignal, session?: Session): Promise<SessionHistory> {
     const parsed = ControllerReadHistoryMessageSchema.safeParse({
       ...options, type: "read_history", requestId: randomUUID(), nodeId, sessionId,
     });
@@ -79,6 +81,7 @@ export class SessionHistoryRequests {
       const timer = setTimeout(() => cancelPending(timeout()), HISTORY_TIMEOUT_MS);
       const pending: PendingHistory = {
         nodeId, sessionId, ws, limit: request.limit, historyContext: request.historyContext,
+        terminalProvider: session && isTerminalSession(session) ? session.provider : undefined,
         settle: (history, error) => {
           if (settled) return;
           settled = true;
@@ -120,6 +123,7 @@ export class SessionHistoryRequests {
     const response = parsed.data;
     if (response.error !== undefined) pending.settle(undefined, remoteError(response.error));
     else if (response.history?.session.id !== pending.sessionId || response.history.items.length > pending.limit ||
+        pending.terminalProvider !== undefined && response.history.session.provider !== pending.terminalProvider ||
         pending.historyContext !== undefined && response.history.historyContext !== pending.historyContext) {
       pending.settle(undefined, invalidResponse());
     } else pending.settle(response.history);

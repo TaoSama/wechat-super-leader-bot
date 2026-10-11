@@ -2,6 +2,7 @@ import { z } from "zod";
 import { SkillCatalogSchema, SkillRef, SkillRefsSchema } from "./skills.js";
 import { sanitizeModelMetadata } from "./model-metadata.js";
 import { InputReceiptSchema, TerminalSessionIdSchema, type InputReceipt } from "./input-receipt.js";
+import { isTerminalHistoryTarget, isTerminalSession } from "./terminal-session.js";
 export { InputReceiptSchema, type InputReceipt } from "./input-receipt.js";
 
 export const ActionTypeSchema = z.enum(["read", "send"]);
@@ -83,7 +84,8 @@ export const SessionSchema = z.object({
   loaded: z.boolean().optional(),
   desktopObservation: DesktopObservationSchema.optional(),
   sendAvailability: SendAvailabilitySchema.optional(),
-});
+  historySource: z.literal("terminal-transcript").optional(),
+}).refine(session => session.historySource === undefined || isTerminalHistoryTarget(session), "Invalid terminal history target");
 export type Session = z.infer<typeof SessionSchema>;
 
 export const HISTORY_DEFAULT_LIMIT = 30;
@@ -104,15 +106,20 @@ export const HistoryItemSchema = z.object({
 });
 export type HistoryItem = z.infer<typeof HistoryItemSchema>;
 
+export const HistorySourceSchema = z.enum(["control-socket", "codex-desktop", "terminal-transcript"]);
 export const SessionHistorySchema = z.object({
   session: SessionSchema,
   historyContext: z.string().uuid(),
-  source: z.enum(["control-socket", "codex-desktop"]),
+  source: HistorySourceSchema,
   items: z.array(HistoryItemSchema).max(HISTORY_MAX_LIMIT),
   nextCursor: z.string().min(1).max(HISTORY_MAX_CURSOR_LENGTH).nullable(),
   fetchedAt: z.string().datetime({ offset: true }),
   truncated: z.boolean(),
-});
+}).refine(history => history.source === "terminal-transcript"
+  ? isTerminalHistoryTarget(history.session) && history.session.historySource === "terminal-transcript" &&
+    history.items.every(item => (item.kind === "user" || item.kind === "assistant") &&
+      (item.type === "transcript_message" || item.type === "transcript_chunk"))
+  : !isTerminalSession(history.session), "History source does not match session");
 export type SessionHistory = z.infer<typeof SessionHistorySchema>;
 
 export interface ScopedSession extends Session {

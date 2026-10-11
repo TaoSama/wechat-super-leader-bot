@@ -50,6 +50,7 @@ type Session struct {
 	Loaded             *bool               `json:"loaded,omitempty"`
 	DesktopObservation *DesktopObservation `json:"desktopObservation,omitempty"`
 	SendAvailability   *SendAvailability   `json:"sendAvailability,omitempty"`
+	HistorySource      string              `json:"historySource,omitempty"`
 }
 
 // DesktopObservation is read-only telemetry, never authority to send a prompt.

@@ -16,6 +16,7 @@ import { verifyDesktopRoute } from './test-desktop-route.mjs';
 import { verifyTerminalObservation, terminalModelCall, TERMINAL_NODE } from './test-terminal-observation.mjs';
 import { verifyTerminalControl, terminalInputModelCall, TERMINAL_INPUT_NODE } from './test-terminal-control.mjs';
 import { verifyTerminalStore } from './test-terminal-store.mjs';
+import { verifyTerminalHistory, TERMINAL_HISTORY_NODE } from './test-terminal-history.mjs';
 import { verifyPlanStore } from './test-plan-store.mjs';
 import { verifyPlanConfirmationStore } from './test-plan-confirmation-store.mjs';
 import { verifyNotificationStore } from './test-notification-store.mjs';
@@ -44,6 +45,7 @@ async function main() {
   const desktopToken = randomBytes(24).toString('hex');
   const terminalToken = randomBytes(24).toString('hex');
   const terminalInputToken = randomBytes(24).toString('hex');
+  const terminalHistoryToken = randomBytes(24).toString('hex');
   const planToken = randomBytes(24).toString('hex');
   const name = `super-leader-test-${randomUUID()}`;
   const docker = (args) => execFileSync('docker', args, {
@@ -120,7 +122,7 @@ async function main() {
     const env = {
       ...process.env, HOST: '127.0.0.1', PORT: String(port), PERSISTENCE_MODE: 'postgres',
       DATABASE_URL: `postgresql://leader:${password}@127.0.0.1:${dbPort}/leader`,
-      CONTROLLER_TOKEN: token, NODE_TOKENS: JSON.stringify({ [values.live ? 'macair' : 'test-node']: nodeToken, ...(!values.live ? { ...isolationTokens, 'desktop-fixture-node': desktopToken, [TERMINAL_NODE]: terminalToken, [TERMINAL_INPUT_NODE]: terminalInputToken, [PLAN_NODE]: planToken } : {}) }),
+      CONTROLLER_TOKEN: token, NODE_TOKENS: JSON.stringify({ [values.live ? 'macair' : 'test-node']: nodeToken, ...(!values.live ? { ...isolationTokens, 'desktop-fixture-node': desktopToken, [TERMINAL_NODE]: terminalToken, [TERMINAL_INPUT_NODE]: terminalInputToken, [TERMINAL_HISTORY_NODE]: terminalHistoryToken, [PLAN_NODE]: planToken } : {}) }),
       CONSOLE_PUBLIC_URL: base,
       ALLOWED_CHAT_IDS: 'test-chat,' + PLAN_CHAT,
       LEADER_MODE: values.live ? 'rules' : 'model',
@@ -243,6 +245,7 @@ async function main() {
     assert([401, 403].includes((await request('/v1/status', undefined, false)).status));
     await verifyNodeIsolation({ WebSocket, base, request, nodeTokens: isolationTokens, waitFor });
     await verifyTerminalObservation({ base, request, nodeToken: terminalToken, waitFor });
+    await verifyTerminalHistory({ base, request, nodeToken: terminalHistoryToken, waitFor });
     const terminalInputReceipt = await verifyTerminalControl({ base, request, nodeToken: terminalInputToken, waitFor,
       openStore: () => new PostgresStore(env.DATABASE_URL),
       restart: async () => { await stop(controller); controller = undefined; await start(); } });

@@ -14,12 +14,13 @@ const Markdown = memo(function Markdown({ text }: { text: string }) {
 
 export const HistoryMessage = memo(function HistoryMessage({ item }: { item: HistoryItem }) {
   const [expanded, setExpanded] = useState(false);
+  const transcriptChunk = item.type === "transcript_chunk";
   if (item.kind === "tool") return <details className="tool-message" data-history-id={item.id} onToggle={(event) => setExpanded(event.currentTarget.open)}>
     <summary><span>工具 · {item.title || item.type}</span><span className="muted">{item.status || "查看详情"}</span></summary>
     {expanded && <div className="markdown"><Markdown text={item.text} />{item.truncated && <p className="muted">内容已裁剪</p>}</div>}
   </details>;
   return <article className={`history-message role-${item.kind}`} data-history-id={item.id}>
-    <div className="message-meta"><span>{ROLE_NAMES[item.kind]}</span>{item.timestamp && <time dateTime={item.timestamp}>{new Date(item.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time>}</div>
+    <div className="message-meta"><span>{transcriptChunk ? `${ROLE_NAMES[item.kind]} · 文本片段（非完整轮次）` : ROLE_NAMES[item.kind]}</span>{item.timestamp && <time dateTime={item.timestamp}>{new Date(item.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time>}</div>
     <div className="markdown"><Markdown text={item.text} /></div>
     {item.truncated && <p className="muted">内容已裁剪</p>}
   </article>;

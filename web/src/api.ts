@@ -13,7 +13,8 @@ import {
 } from "./types";
 import { normalizeDesktopObservation } from "./session-observation";
 import { normalizeSendAvailability } from "./send-availability";
-import { HISTORY_CONTEXT_EXPIRED_MESSAGE, isHistoryContext } from "./history-contract";
+import { HISTORY_CONTEXT_EXPIRED_MESSAGE, isHistoryContext, isSessionHistorySource } from "./history-contract";
+import { isTerminalHistoryTarget } from "./terminal-session";
 import { parseConsoleExecutions } from "./execution-contract";
 import { normalizeInputReceipt, TERMINAL_SESSION_ID } from "./input-receipt";
 
@@ -116,6 +117,7 @@ function normalizeSession(raw: unknown): ScopedSession | null {
   const obj = raw as Record<string, unknown>;
   if (typeof obj.id !== "string" || obj.id.trim() === "") return null;
   if (typeof obj.nodeId !== "string" || obj.nodeId.trim() === "") return null;
+  const provider = typeof obj.provider === "string" && obj.provider ? obj.provider : "codex-app";
 
   // Malformed desktop evidence must not become "absent" and bypass its veto.
   const desktopObservation = normalizeDesktopObservation(obj.desktopObservation) ??
@@ -125,7 +127,7 @@ function normalizeSession(raw: unknown): ScopedSession | null {
   return {
     id: obj.id,
     nodeId: obj.nodeId,
-    provider: typeof obj.provider === "string" && obj.provider ? obj.provider : "codex-app",
+    provider,
     title: typeof obj.title === "string" ? obj.title : "",
     cwd: typeof obj.cwd === "string" ? obj.cwd : "",
     status:
@@ -142,6 +144,8 @@ function normalizeSession(raw: unknown): ScopedSession | null {
     loaded: typeof obj.loaded === "boolean" ? obj.loaded : undefined,
     desktopObservation,
     sendAvailability: normalizeSendAvailability(obj.sendAvailability),
+    ...(obj.historySource === "terminal-transcript" && isTerminalHistoryTarget({ id: obj.id, provider })
+      ? { historySource: "terminal-transcript" as const } : {}),
   };
 }
 
@@ -182,15 +186,17 @@ export async function fetchSessionHistory(nodeId: string, sessionId: string, cur
   const raw = await sessionRequest(`${sessionPath(nodeId, sessionId)}/history?${query}`, { method: "GET", headers: { Accept: "application/json" }, signal }, true);
   if (typeof raw !== "object" || raw === null) throw new Error("历史响应格式无效");
   const data = raw as Record<string, unknown>;
-  if (!isHistoryContext(data.historyContext) || historyContext !== undefined && data.historyContext !== historyContext ||
-      data.source !== "control-socket" && data.source !== "codex-desktop") throw new Error("历史响应与当前读取上下文不匹配");
+  if (!isHistoryContext(data.historyContext) || historyContext !== undefined && data.historyContext !== historyContext) throw new Error("历史响应与当前读取上下文不匹配");
   if (data.session && typeof data.session === "object" && "nodeId" in data.session && data.session.nodeId !== nodeId) throw new Error("历史响应与当前会话不匹配");
   const session = normalizeSession({ ...(typeof data.session === "object" ? data.session : {}), nodeId });
   if (!session || session.id !== sessionId || !Array.isArray(data.items) || typeof data.fetchedAt !== "string") throw new Error("历史响应与当前会话不匹配");
+  if (!isSessionHistorySource(data.source, session)) throw new Error("历史响应与当前读取来源不匹配");
   const items = data.items.map((item: unknown): HistoryItem => {
     if (typeof item !== "object" || item === null) throw new Error("历史条目格式无效");
     const value = item as Record<string, unknown>;
     if (typeof value.id !== "string" || typeof value.text !== "string" || typeof value.turnId !== "string" || !["user", "assistant", "tool", "system"].includes(String(value.kind))) throw new Error("历史条目格式无效");
+    if (data.source === "terminal-transcript" && ((value.kind !== "user" && value.kind !== "assistant") ||
+        (value.type !== "transcript_message" && value.type !== "transcript_chunk"))) throw new Error("CLI 会话记录条目格式无效");
     return { id: value.id, text: value.text, turnId: value.turnId, kind: value.kind as HistoryItem["kind"], type: typeof value.type === "string" ? value.type : "unknown", title: typeof value.title === "string" ? value.title : undefined, status: typeof value.status === "string" ? value.status : undefined, timestamp: typeof value.timestamp === "string" ? value.timestamp : undefined, truncated: value.truncated === true };
   });
   return { session, historyContext: data.historyContext, source: data.source, items, nextCursor: typeof data.nextCursor === "string" ? data.nextCursor : null, fetchedAt: data.fetchedAt, truncated: data.truncated === true };

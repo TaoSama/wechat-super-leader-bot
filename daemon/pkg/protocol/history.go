@@ -22,6 +22,7 @@ const (
 	HistoryIncomplete        = "History incomplete"
 	HistorySourceControl     = "control-socket"
 	HistorySourceDesktop     = "codex-desktop"
+	HistorySourceTerminal    = "terminal-transcript"
 )
 
 type ReadHistoryMessage struct {

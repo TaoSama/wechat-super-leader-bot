@@ -31,22 +31,23 @@ const (
 )
 
 type Config struct {
-	NodeID             string
-	ControllerURL      string
-	NodeToken          string
-	SocketPath         string
-	DesktopSocketPath  string
-	DesktopSend        bool
-	TerminalSocketPath string
-	TerminalPanes      []string
-	TerminalSendMode   string
-	CodexHome          string
-	HeartbeatInterval  time.Duration
-	ProbeOnly          bool
-	ProbeSkills        bool
-	ServiceAction      string
-	SkillRoots         []string
-	StateDir           string
+	NodeID               string
+	ControllerURL        string
+	NodeToken            string
+	SocketPath           string
+	DesktopSocketPath    string
+	DesktopSend          bool
+	TerminalSocketPath   string
+	TerminalPanes        []string
+	TerminalSendMode     string
+	TerminalHistoryRoots map[string]string
+	CodexHome            string
+	HeartbeatInterval    time.Duration
+	ProbeOnly            bool
+	ProbeSkills          bool
+	ServiceAction        string
+	SkillRoots           []string
+	StateDir             string
 }
 
 func ParseFlags(args []string) (*Config, error) {
@@ -76,6 +77,18 @@ func ParseFlags(args []string) (*Config, error) {
 	desktopSend := fs.Bool("desktop-send", false, "Explicitly allow sending through the existing desktop owner (requires desktop-sock)")
 	terminalSocketPath := fs.String("terminal-sock", "", "Optional existing terminal-host Unix socket for read-only observation (requires terminal-pane)")
 	terminalSendMode := fs.String("terminal-send-mode", "", "Explicit terminal input delivery mode: non-atomic (requires terminal-sock and terminal-pane)")
+	terminalHistoryRoots := make(map[string]string)
+	fs.Func("terminal-history-root", "Explicit transcript directory: codex|claude|grok=/absolute/records (one per provider; requires terminal selectors)", func(value string) error {
+		provider, root, found := strings.Cut(value, "=")
+		if !found {
+			return errors.New("terminal-history-root requires provider=/absolute/records")
+		}
+		if _, duplicate := terminalHistoryRoots[provider]; duplicate {
+			return errors.New("terminal-history-root provider must not be repeated")
+		}
+		terminalHistoryRoots[provider] = root
+		return nil
+	})
 	var terminalPanes []string
 	fs.Func("terminal-pane", "Explicit terminal pane wN:pN to observe read-only (repeatable, at most 16)", func(value string) error {
 		terminalPanes = append(terminalPanes, value)
@@ -152,6 +165,9 @@ func ParseFlags(args []string) (*Config, error) {
 	if err := ValidateTerminalSend(*terminalSendMode, *terminalSocketPath, terminalPanes); err != nil {
 		return nil, err
 	}
+	if err := ValidateTerminalHistory(terminalHistoryRoots, *terminalSocketPath, terminalPanes); err != nil {
+		return nil, err
+	}
 	if *codexHome != "" && (!filepath.IsAbs(*codexHome) || strings.ContainsAny(*codexHome, "\x00\r\n\t")) {
 		return nil, errors.New("codex-home must be an absolute directory path without control characters")
 	}
@@ -164,20 +180,21 @@ func ParseFlags(args []string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		NodeID:             strings.TrimSpace(*nodeID),
-		ControllerURL:      strings.TrimSpace(*controllerURL),
-		SocketPath:         resolvedSock,
-		DesktopSocketPath:  *desktopSocketPath,
-		DesktopSend:        *desktopSend,
-		TerminalSocketPath: *terminalSocketPath,
-		TerminalPanes:      append([]string(nil), terminalPanes...),
-		TerminalSendMode:   *terminalSendMode,
-		CodexHome:          *codexHome,
-		HeartbeatInterval:  time.Duration(*heartbeatSec) * time.Second,
-		ProbeOnly:          *probeOnly,
-		ProbeSkills:        *probeSkills,
-		ServiceAction:      action,
-		SkillRoots:         skillRoots,
+		NodeID:               strings.TrimSpace(*nodeID),
+		ControllerURL:        strings.TrimSpace(*controllerURL),
+		SocketPath:           resolvedSock,
+		DesktopSocketPath:    *desktopSocketPath,
+		DesktopSend:          *desktopSend,
+		TerminalSocketPath:   *terminalSocketPath,
+		TerminalPanes:        append([]string(nil), terminalPanes...),
+		TerminalSendMode:     *terminalSendMode,
+		TerminalHistoryRoots: terminalHistoryRoots,
+		CodexHome:            *codexHome,
+		HeartbeatInterval:    time.Duration(*heartbeatSec) * time.Second,
+		ProbeOnly:            *probeOnly,
+		ProbeSkills:          *probeSkills,
+		ServiceAction:        action,
+		SkillRoots:           skillRoots,
 	}
 
 	if cfg.NodeID == "" {

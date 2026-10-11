@@ -54,6 +54,7 @@ func normalizeTerminalSessions(sessions []protocol.Session) ([]protocol.Session,
 		session.Loaded = &loaded
 		session.Capabilities = []protocol.ActionType{protocol.ActionRead}
 		session.DesktopObservation, session.SendAvailability = nil, nil
+		session.HistorySource = ""
 		session.Model, session.ModelProvider, session.ReasoningEffort, session.Preview = "", "", "", ""
 		switch session.Status {
 		case "active", "idle", "blocked", "unknown":
@@ -83,13 +84,28 @@ func (d *Daemon) discoverTerminal(ctx context.Context) ([]protocol.Session, erro
 	if err != nil {
 		return nil, errors.New("terminal discovery unavailable")
 	}
-	return normalizeTerminalSessions(sessions)
+	normalized, err := normalizeTerminalSessions(sessions)
+	if err != nil {
+		return nil, err
+	}
+	if d.terminalHistory != nil {
+		for i := range normalized {
+			if d.terminalHistory.Supports(normalized[i].ID) {
+				normalized[i].HistorySource = protocol.HistorySourceTerminal
+			}
+		}
+	}
+	return normalized, nil
 }
 
 func (d *Daemon) invalidateTerminal(updates chan<- struct{}) {
 	d.snapshotMu.Lock()
 	changed := false
 	for i := range d.terminalSnapshot {
+		if d.terminalSnapshot[i].HistorySource != "" {
+			d.terminalSnapshot[i].HistorySource = ""
+			changed = true
+		}
 		if d.terminalSnapshot[i].Status != "unknown" {
 			d.terminalSnapshot[i].Status = "unknown"
 			changed = true

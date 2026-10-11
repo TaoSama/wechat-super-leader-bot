@@ -16,6 +16,7 @@ import (
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/config"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/terminal"
+	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/transcript"
 	"github.com/gorilla/websocket"
 )
 
@@ -59,6 +60,7 @@ type Daemon struct {
 	sessionCatalog     sessionCatalog
 	catalogSnapshot    []protocol.Session
 	terminalObserver   sessionCatalog
+	terminalHistory    terminalHistoryReader
 	terminalSnapshot   []protocol.Session
 	terminalDiscovery  chan struct{}
 	terminalController *terminal.DeliveryController
@@ -102,6 +104,13 @@ func NewDaemon(cfg *config.Config, adapter codex.SessionAdapter) *Daemon {
 	if cfg.TerminalSocketPath != "" && len(cfg.TerminalPanes) != 0 {
 		observer := terminal.NewObserver(cfg.TerminalSocketPath, cfg.TerminalPanes)
 		d.terminalObserver = observer
+		if len(cfg.TerminalHistoryRoots) != 0 {
+			if err := config.ValidateTerminalHistory(cfg.TerminalHistoryRoots, cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
+				log.Printf("terminal history disabled: invalid explicit configuration")
+			} else {
+				d.terminalHistory = terminal.NewHistoryReader(observer, transcript.New(transcript.Config{Roots: cfg.TerminalHistoryRoots}))
+			}
+		}
 		if cfg.TerminalSendMode == protocol.TerminalNonAtomicMode {
 			d.terminalController = terminal.NewDeliveryController(observer)
 		}

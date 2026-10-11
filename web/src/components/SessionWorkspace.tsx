@@ -11,6 +11,7 @@ import { describeDesktopObservation, MAX_DESKTOP_OBSERVATION_AGE_MS, selectExecu
 import { MAX_SEND_AVAILABILITY_AGE_MS, sendRouteLabel } from "../send-availability";
 import { modelSourceLabel, selectModelObservation } from "../model-observation";
 import { isTerminalSession, MAX_TERMINAL_OBSERVATION_AGE_MS } from "../terminal-session";
+import { hasTerminalHistorySource } from "../history-contract";
 
 interface Props {
   data: ControlPlaneStatusResponse;
@@ -36,7 +37,8 @@ export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = t
   const selectedModel = selected ? selectModelObservation(selected, observationNow) : null;
   const selectedDesktopDescription = selectedTerminal ? null : describeDesktopObservation(selected?.desktopObservation, observationNow);
   const connected = nodes.some((node) => node.nodeId === selected?.nodeId && node.connected);
-  const history = useSessionHistory(selectedTerminal ? null : selected, connected && active, onAuthFailure);
+  const history = useSessionHistory(selected, connected && active, onAuthFailure);
+  const showHistory = !selectedTerminal || !!selected && hasTerminalHistorySource(selected) || !!history.history;
   const messages = useSessionMessages(selected, onAuthFailure);
   const blockReason = sendBlockReason(selected, connected, stale, observationNow);
   const submission = messages.submission;
@@ -113,7 +115,7 @@ export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = t
               const model = selectModelObservation(session, observationNow);
               return <button key={sessionKey(session)} type="button" className={`session-choice ${sessionKey(session) === selectedKey ? "selected" : ""}`} aria-pressed={sessionKey(session) === selectedKey} onClick={() => setSelectedKey(sessionKey(session))} data-testid={`session-row-${session.nodeId}-${session.id}`}>
               <span className="session-title-line"><span className="session-title">{session.title || "未命名会话"}</span><span className={`session-state state-${executionStatus}`}>{STATUS_NAMES[executionStatus] || executionStatus}</span></span>
-              <span className="session-preview" title={desktopDescription ?? undefined}>{terminal ? "终端观测 · 只读状态，非对话历史" : session.preview || "暂无消息摘要 · 打开查看历史"}{desktopDescription && ` · ${desktopDescription}`}</span>
+              <span className="session-preview" title={desktopDescription ?? undefined}>{terminal ? hasTerminalHistorySource(session) ? "终端观测 · CLI 会话记录" : "终端观测 · 只读状态，非对话历史" : session.preview || "暂无消息摘要 · 打开查看历史"}{desktopDescription && ` · ${desktopDescription}`}</span>
               <span className="session-bottom-line"><span className="session-model" title={modelSourceLabel(model.source)}>{model.model || "模型未报告"}</span><span className="session-project" title={session.cwd}>{projectName(session.cwd)}</span><time title={formatTimestamp(session.updatedAt || session.observedAt)}>{formatRelativeAge(session.updatedAt || session.observedAt)}</time></span>
             </button>;
             })}
@@ -131,22 +133,24 @@ export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = t
           <div className="detail-title"><h2 ref={headingRef} tabIndex={-1} title={selected.title || "未命名会话"}>{selected.title || "未命名会话"}</h2><span className="status-label">{STATUS_NAMES[selectedObservation!.executionStatus] || selectedObservation!.executionStatus}</span></div>
           {selectedDesktopDescription && <div className="detail-subline"><span>{selectedDesktopDescription}</span><span>控制接口：{STATUS_NAMES[selected.status] || selected.status}</span></div>}
           <div className="detail-subline"><span className="detail-model" title={modelSourceLabel(selectedModel!.source)}>{selectedModel?.model || "模型未报告"}</span><span>{selected.nodeId}</span><span title={selected.cwd}>{projectName(selected.cwd)}</span><details className="session-metadata"><summary>会话详情</summary><dl><div><dt>标题</dt><dd>{selected.title || "未命名会话"}</dd></div><div><dt>工作目录</dt><dd>{selected.cwd || "目录未报告"}</dd></div><div><dt>Provider</dt><dd>{selectedModel?.modelProvider || "未报告"}</dd></div><div><dt>推理强度</dt><dd>{selectedModel?.reasoningEffort || "未报告"}</dd></div><div><dt>模型来源</dt><dd>{modelSourceLabel(selectedModel!.source)}</dd></div><div><dt>模型观测时间</dt><dd>{selectedModel?.observedAt ? formatTimestamp(selectedModel.observedAt) : "未报告"}</dd></div><div><dt>会话 ID</dt><dd>{selected.id}</dd></div><div><dt>最近更新</dt><dd>{formatTimestamp(selected.updatedAt || selected.observedAt)}</dd></div></dl></details></div>
-          {selectedTerminal ? <div className="detail-subline"><span>终端观测 · {selected.provider}</span><span>观测于 {formatTimestamp(selected.observedAt)}</span></div> : <div className="history-controls"><span>{history.history ? `历史更新于 ${formatDate(history.history.fetchedAt)}` : "正在准备会话历史"}</span><button type="button" onClick={() => void history.refresh()} disabled={history.loadingLatest || !connected || history.contextExpired} aria-label="刷新会话历史"><RefreshCw size={14} aria-hidden="true" />刷新历史</button></div>}
-          {history.contextExpired && <div role="alert" className="notice error history-context-notice">{history.error}<button type="button" disabled={!connected} onClick={() => void history.resetLatest()}>重新读取最新页</button></div>}
+          {selectedTerminal && <div className="detail-subline"><span>终端观测 · {selected.provider}</span><span>观测于 {formatTimestamp(selected.observedAt)}</span></div>}
+          {showHistory && <div className="history-controls"><span>{selectedTerminal && "CLI 会话记录 · "}{history.history ? `历史更新于 ${formatDate(history.history.fetchedAt)}` : "正在准备会话历史"}</span><button type="button" onClick={() => void history.refresh()} disabled={history.loadingLatest || !history.canRead || history.contextExpired} aria-label="刷新会话历史"><RefreshCw size={14} aria-hidden="true" />刷新历史</button></div>}
+          {history.contextExpired && <div role="alert" className="notice error history-context-notice">{history.error}<button type="button" disabled={!history.canRead} onClick={() => void history.resetLatest()}>重新读取最新页</button></div>}
         </header>
-        {selectedTerminal ? <div className="history-scroll" aria-label="终端观测说明"><div className="history-content"><p>{selected.sendAvailability?.route === "terminal-pane" ? "此会话提供终端运行状态与独立单步输入，未接入完整对话历史。" : "此会话仅提供终端运行状态，尚未接入完整对话历史与发送。"}</p><p>可在微信中明确询问这个会话的最新输出，读取有限终端快照。快照可能裁剪，不是完整对话记录。</p><p>空闲仅是终端宿主报告的生命周期状态，不代表某项任务已完成。模型未提供可信信息时不作推断。</p></div></div> : <div className="history-scroll" ref={scroll.scrollRef} tabIndex={0} aria-label="会话历史" onScroll={scroll.onScroll}>
+        {!showHistory ? <div className="history-scroll" aria-label="终端观测说明"><div className="history-content"><p>{selected.sendAvailability?.route === "terminal-pane" ? "此会话提供终端运行状态与独立单步输入，未接入完整对话历史。" : "此会话仅提供终端运行状态，尚未接入完整对话历史与发送。"}</p><p>可在微信中明确询问这个会话的最新输出，读取有限终端快照。快照可能裁剪，不是完整对话记录。</p><p>空闲仅是终端宿主报告的生命周期状态，不代表某项任务已完成。模型未提供可信信息时不作推断。</p></div></div> : <div className="history-scroll" ref={scroll.scrollRef} tabIndex={0} aria-label="会话历史" onScroll={scroll.onScroll}>
           <div className="history-content">
-            {history.history?.nextCursor && <button type="button" className="older-button" disabled={history.loadingOlder} onClick={() => void scroll.loadOlder()}>{history.loadingOlder ? "正在读取更早消息…" : "加载更早的消息"}</button>}
-            {history.windowNotice && <div className="history-window-notice" role="status">{history.windowNotice}{!history.contextExpired && <button type="button" className="text-button" disabled={history.loadingLatest} onClick={() => void history.resetLatest()}>仅保留最新消息</button>}</div>}
-            {history.pollingPaused && !history.contextExpired && <div role="status" className="notice">自动更新已暂停，可手动刷新继续读取。<button type="button" disabled={history.loading} onClick={() => void history.resetLatest()}>重新读取最新页</button></div>}
-            {history.error && !history.contextExpired && <div role="alert" className="notice error">{history.error}<button type="button" onClick={() => void history.refresh()} disabled={history.loading || !connected}>重试读取</button><button type="button" disabled={!connected} onClick={() => void history.resetLatest()}>重新读取最新页</button></div>}
+            {selectedTerminal && <p className="muted">CLI 会话记录来自原 CLI 的结构化可见文本；终端快照不是对话历史。读取记录不提供发送资格或任务完成证明。</p>}
+            {history.history?.nextCursor && <button type="button" className="older-button" disabled={history.loadingOlder || !history.canRead} onClick={() => void scroll.loadOlder()}>{history.loadingOlder ? "正在读取更早消息…" : "加载更早的消息"}</button>}
+            {history.windowNotice && <div className="history-window-notice" role="status">{history.windowNotice}{!history.contextExpired && <button type="button" className="text-button" disabled={history.loadingLatest || !history.canRead} onClick={() => void history.resetLatest()}>仅保留最新消息</button>}</div>}
+            {history.pollingPaused && !history.contextExpired && <div role="status" className="notice">{history.readBlockReason || "自动更新已暂停，可手动刷新继续读取。"}<button type="button" disabled={history.loading || !history.canRead} onClick={() => void history.resetLatest()}>重新读取最新页</button></div>}
+            {history.error && !history.contextExpired && !history.readBlockReason && <div role="alert" className="notice error">{history.error}<button type="button" onClick={() => void history.refresh()} disabled={history.loading || !history.canRead}>重试读取</button><button type="button" disabled={!history.canRead} onClick={() => void history.resetLatest()}>重新读取最新页</button></div>}
             {history.loading && !history.history && <p role="status" className="history-loading">正在读取会话历史…</p>}
-            {history.history?.items.map((item) => <div key={item.id}>{history.gapBeforeIds.includes(item.id) && <div role="status" className="notice history-gap">此处还有未加载的消息，历史不连续。{!history.contextExpired && (history.memoryGap ? <button type="button" disabled={history.loadingLatest} onClick={() => void history.resetLatest()}>重新读取最新页</button> : <button type="button" disabled={history.loadingOlder} onClick={() => void scroll.loadOlder()}>补齐这段历史</button>)}</div>}<HistoryMessage item={item} /></div>)}
+            {history.history?.items.map((item) => <div key={item.id}>{history.gapBeforeIds.includes(item.id) && <div role="status" className="notice history-gap">此处还有未加载的消息，历史不连续。{!history.contextExpired && (history.memoryGap ? <button type="button" disabled={history.loadingLatest || !history.canRead} onClick={() => void history.resetLatest()}>重新读取最新页</button> : <button type="button" disabled={history.loadingOlder || !history.canRead} onClick={() => void scroll.loadOlder()}>补齐这段历史</button>)}</div>}<HistoryMessage item={item} /></div>)}
             {history.history && !history.history.items.length && <p className="history-loading">这段会话暂时没有可显示的消息</p>}
             {history.history?.truncated && <p className="muted">部分历史内容已裁剪</p>}
           </div>
         </div>}
-        {!selectedTerminal && scroll.newContent && <button type="button" className="new-message-button" onClick={scroll.jumpLatest}><ArrowDown size={16} aria-hidden="true" />有新消息 · 跳到最新</button>}
+        {showHistory && scroll.newContent && <button type="button" className="new-message-button" onClick={scroll.jumpLatest}><ArrowDown size={16} aria-hidden="true" />有新消息 · 跳到最新</button>}
         <form className="composer" onSubmit={(event) => { event.preventDefault(); send(); }}>
           {submission && <div className={`send-receipt ${submission.uncertain ? "receipt-uncertain" : ""}`} role="status">
             <span>{submission.command ? COMMAND_STATUS_SEMANTICS[submission.command.status].label : "提交结果待核查"}</span>
