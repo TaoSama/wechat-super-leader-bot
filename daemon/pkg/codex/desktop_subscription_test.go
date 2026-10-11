@@ -7,9 +7,75 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 )
+
+func TestDesktopSubscriptionFreeCapacityDoesNotRotateForDiscoveryGate(t *testing.T) {
+	const slot = 20 * time.Millisecond
+	owners := map[string]string{"a": "owner-a", "b": "owner-b", "c": "owner-c"}
+	aAvailable := make(chan struct{}, 1)
+	path := desktopWatchFixture(t, owners, func(c *desktopConn, id string) error {
+		snapshot, err := desktopAnySessionSnapshot(id, owners[id], "idle")
+		if err != nil {
+			return err
+		}
+		if err := c.write(snapshot); err != nil {
+			return err
+		}
+		return desktopOnlyUnsubscribeUntilClosed(c, owners)
+	}, func(c *desktopConn, first desktopEnvelope) error {
+		requests, err := desktopDiscoveryWithFirst(c, first, len(owners))
+		if err != nil {
+			return err
+		}
+		for _, id := range []string{"a", "c"} {
+			if err := desktopReply(c, requests[id], owners[id], nil); err != nil {
+				return err
+			}
+		}
+		select {
+		case <-aAvailable:
+		case <-time.After(desktopTestTimeout):
+			return errors.New("first owner never became available")
+		}
+		timer := time.NewTimer(3 * slot)
+		defer timer.Stop()
+		<-timer.C
+		if err := desktopReply(c, requests["b"], owners["b"], nil); err != nil {
+			return err
+		}
+		return desktopExpectClosed(c)
+	})
+	observer := NewDesktopObserver(path)
+	observer.subscriptionWindow = slot
+	for id := range owners {
+		observer.subscriptions.observe(id, true)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), desktopTestTimeout)
+	defer cancel()
+	available := map[string]bool{}
+	lost := false
+	err := observer.Watch(ctx, []string{"a", "b", "c"}, func(id string, observation protocol.DesktopObservation) {
+		if observation.Availability != "available" {
+			if available[id] && ctx.Err() == nil {
+				lost = true
+			}
+			return
+		}
+		if id == "a" && !available[id] {
+			aAvailable <- struct{}{}
+		}
+		available[id] = true
+		if len(available) == len(owners) {
+			cancel()
+		}
+	})
+	if !errors.Is(err, context.Canceled) || lost || len(available) != len(owners) {
+		t.Fatalf("free slots caused healthy eviction behind discovery gate: err=%v lost=%v available=%v", err, lost, available)
+	}
+}
 
 func TestDesktopDiscoveryRejectsOnlyCorrelatedInvalidTarget(t *testing.T) {
 	for _, wrongMethod := range []bool{false, true} {

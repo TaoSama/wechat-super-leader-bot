@@ -11,9 +11,8 @@ import (
 )
 
 const (
-	// These two 32 MiB readers have no frame read-ahead. Their budget is separate
-	// from control/readiness and history connections; JSON decoding also allocates.
-	desktopSubscriptionConcurrency = 2
+	// Idle per-target connections do not consume the shared frame-processing budget.
+	desktopSubscriptionConcurrency = 16
 	desktopSubscriptionWindow      = 10 * time.Second
 )
 
@@ -58,7 +57,7 @@ func (o *DesktopObserver) watchSubscriptions(parent context.Context, ids []strin
 		}
 	}()
 	ownerEvents := make(chan desktopOwnerEvent, desktopDiscoveryConcurrency)
-	events := make(chan desktopSubscriptionEvent, desktopSubscriptionConcurrency)
+	events := make(chan desktopSubscriptionEvent, o.subscriptionLimit)
 	workers.Add(1)
 	go func() {
 		defer workers.Done()
@@ -88,7 +87,7 @@ func (o *DesktopObserver) watchSubscriptions(parent context.Context, ids []strin
 		}
 		blockedKnown := false
 		for _, target := range queue {
-			if len(active) == desktopSubscriptionConcurrency {
+			if len(active) == o.subscriptionLimit {
 				break
 			}
 			owner, ready := owners[target.id]
@@ -127,12 +126,15 @@ func (o *DesktopObserver) watchSubscriptions(parent context.Context, ids []strin
 				}
 			}(subCtx, subCancel, target.id, owner)
 		}
-		// Rotate only when another proved owner is waiting. Cold catalog entries
-		// must not evict the few healthy owners from otherwise idle slots.
+		// Rotate only at connection capacity with another proved owner waiting.
+		// A discovery gate or cold catalog entry must not evict healthy owners
+		// while there are still free connection slots.
 		waiting := 0
-		for id := range owners {
-			if !started[id] {
-				waiting++
+		if len(active) == o.subscriptionLimit {
+			for id := range owners {
+				if !started[id] {
+					waiting++
+				}
 			}
 		}
 		for _, subscription := range active {
@@ -227,7 +229,18 @@ func (o *DesktopObserver) watchSubscriptions(parent context.Context, ids []strin
 // A single target owns this reader. Rejecting a frame header never requires
 // draining an oversized body or trusting its target identity to isolate failure.
 func (o *DesktopObserver) subscribeDesktopTarget(ctx context.Context, id, owner string, followed func(), publish func(protocol.DesktopObservation)) (err error) {
+	// Cancellation closes the transport asynchronously, including while scalar
+	// delivery is blocked. Preserve its cause rather than exposing net.ErrClosed.
+	defer func() {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+	}()
+	if err := o.frameBudget.acquire(ctx); err != nil {
+		return err
+	}
 	c, cleanup, err := connectDesktop(ctx, o.socketPath)
+	o.frameBudget.release()
 	if err != nil {
 		return err
 	}
@@ -244,9 +257,7 @@ func (o *DesktopObserver) subscribeDesktopTarget(ctx context.Context, id, owner 
 			}
 		}
 	}()
-	if err := c.SetReadDeadline(time.Now().Add(o.ownerTimeout)); err != nil {
-		return err
-	}
+	headerDeadline := time.Now().Add(o.ownerTimeout)
 	if err := c.SetWriteDeadline(time.Now().Add(desktopRequestTimeout)); err != nil {
 		return err
 	}
@@ -257,20 +268,30 @@ func (o *DesktopObserver) subscribeDesktopTarget(ctx context.Context, id, owner 
 	projection := &desktopProjection{owner: owner}
 	projections := map[string]*desktopProjection{id: projection}
 	for {
-		message, err := c.read()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := c.SetReadDeadline(headerDeadline); err != nil {
+			return err
+		}
+		var observation protocol.DesktopObservation
+		observed := false
+		err := c.readBudgeted(ctx, o.frameBudget, func(message desktopEnvelope) error {
+			return applyDesktopChange(message, c.clientID, projections, func(_ string, scalar protocol.DesktopObservation) {
+				observation, observed = scalar, true
+			})
+		})
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			return err
 		}
-		if err := applyDesktopChange(message, c.clientID, projections, func(_ string, observation protocol.DesktopObservation) { publish(observation) }); err != nil {
-			return err
+		if observed {
+			publish(observation)
 		}
 		if projection.initialized {
-			if err := c.SetReadDeadline(time.Time{}); err != nil {
-				return err
-			}
+			headerDeadline = time.Time{}
 		}
 	}
 }

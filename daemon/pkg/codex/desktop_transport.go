@@ -21,6 +21,8 @@ const (
 	desktopSkipLimit          = 128
 	desktopRequestTimeout     = 2 * time.Second
 	desktopOwnerTimeout       = 5 * time.Second
+	desktopFrameConcurrency   = 2
+	desktopFrameBodyTimeout   = 5 * time.Second
 	desktopInitialize         = "initialize"
 	desktopDiscoverOwner      = "thread-owner-discovery"
 	desktopFollowingChanged   = "thread-stream-following-changed"
@@ -48,6 +50,37 @@ type desktopConn struct {
 	net.Conn
 	clientID string
 }
+
+// State subscriptions share this across every Watch on one observer, including
+// initialization, decoding and projection, but not idle headers/scalar delivery.
+// Discovery, Snapshot, control and history use separate paths. JSON also
+// allocates, so this processing-concurrency budget is not a total heap cap.
+type desktopFrameBudget struct {
+	slots       chan struct{}
+	bodyTimeout time.Duration
+}
+
+func newDesktopFrameBudget(capacity int, bodyTimeout time.Duration) *desktopFrameBudget {
+	return &desktopFrameBudget{slots: make(chan struct{}, capacity), bodyTimeout: bodyTimeout}
+}
+
+func (b *desktopFrameBudget) acquire(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case b.slots <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			b.release()
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (b *desktopFrameBudget) release() { <-b.slots }
 
 func (c *desktopConn) write(envelope desktopEnvelope) error {
 	data, err := json.Marshal(envelope)
@@ -78,22 +111,34 @@ func (c *desktopConn) read() (desktopEnvelope, error) {
 }
 
 func (c *desktopConn) readWithLimit(limit int) (desktopEnvelope, error) {
+	size, err := c.readHeader(limit)
+	if err != nil {
+		return desktopEnvelope{}, err
+	}
+	return c.readBody(size)
+}
+
+func (c *desktopConn) readHeader(limit int) (int, error) {
 	var header [4]byte
-	var result desktopEnvelope
 	if limit <= 0 {
-		return result, errors.New("invalid desktop frame limit")
+		return 0, errors.New("invalid desktop frame limit")
 	}
 	if _, err := io.ReadFull(c, header[:]); err != nil {
-		return result, err
+		return 0, err
 	}
 	size := binary.LittleEndian.Uint32(header[:])
 	if size == 0 {
-		return result, errors.New("invalid desktop frame size")
+		return 0, errors.New("invalid desktop frame size")
 	}
 	if uint64(size) > uint64(limit) {
-		return result, errDesktopFrameTooLarge
+		return 0, errDesktopFrameTooLarge
 	}
-	data := make([]byte, int(size))
+	return int(size), nil
+}
+
+func (c *desktopConn) readBody(size int) (desktopEnvelope, error) {
+	var result desktopEnvelope
+	data := make([]byte, size)
 	if _, err := io.ReadFull(c, data); err != nil {
 		return result, err
 	}
@@ -104,6 +149,32 @@ func (c *desktopConn) readWithLimit(limit int) (desktopEnvelope, error) {
 		return result, errors.New("invalid desktop frame JSON")
 	}
 	return result, nil
+}
+
+// No frame body is allocated or read before the shared budget is acquired.
+// consume must finish strict projection without retaining the raw envelope.
+func (c *desktopConn) readBudgeted(ctx context.Context, budget *desktopFrameBudget, consume func(desktopEnvelope) error) (err error) {
+	size, err := c.readHeader(desktopInboundFrameLimit)
+	if err != nil {
+		return err
+	}
+	if err := budget.acquire(ctx); err != nil {
+		return err
+	}
+	defer budget.release()
+	deadline := time.Now().Add(budget.bodyTimeout)
+	if end, ok := ctx.Deadline(); ok && end.Before(deadline) {
+		deadline = end
+	}
+	if err := c.SetReadDeadline(deadline); err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, c.SetReadDeadline(time.Time{})) }()
+	message, err := c.readBody(size)
+	if err != nil {
+		return err
+	}
+	return consume(message)
 }
 
 func (c *desktopConn) request(ctx context.Context, method string, version int, params any) (desktopEnvelope, error) {

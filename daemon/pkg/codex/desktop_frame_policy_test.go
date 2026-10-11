@@ -10,6 +10,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 )
@@ -33,6 +34,8 @@ func (c *desktopFramePolicyConn) Write(buffer []byte) (int, error) {
 	return len(buffer), nil
 }
 
+func (c *desktopFramePolicyConn) SetReadDeadline(time.Time) error { return nil }
+
 func TestDesktopFrameInboundPolicy(t *testing.T) {
 	t.Run("exact limit", func(t *testing.T) {
 		body := bytes.Repeat([]byte(" "), desktopInboundFrameLimit)
@@ -53,6 +56,44 @@ func TestDesktopFrameInboundPolicy(t *testing.T) {
 		_, err := (&desktopConn{Conn: connection}).read()
 		if !errors.Is(err, errDesktopFrameTooLarge) || len(connection.readSizes) != 1 || connection.readSizes[0] != len(header) {
 			t.Fatalf("oversized inbound body read: err=%v reads=%v", err, connection.readSizes)
+		}
+	})
+}
+
+func TestDesktopBudgetedFrameInboundPolicy(t *testing.T) {
+	t.Run("oversized does not wait for occupied budget", func(t *testing.T) {
+		budget := newDesktopFrameBudget(1, time.Second)
+		if err := budget.acquire(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		defer budget.release()
+		var header [4]byte
+		binary.LittleEndian.PutUint32(header[:], uint32(desktopInboundFrameLimit+1))
+		connection := &desktopFramePolicyConn{reader: bytes.NewReader(header[:])}
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		err := (&desktopConn{Conn: connection}).readBudgeted(ctx, budget, func(desktopEnvelope) error {
+			t.Error("oversized frame reached projection")
+			return nil
+		})
+		if !errors.Is(err, errDesktopFrameTooLarge) || len(connection.readSizes) != 1 || connection.readSizes[0] != len(header) || len(budget.slots) != 1 {
+			t.Fatalf("oversized frame consumed body/budget: err=%v reads=%v slots=%d", err, connection.readSizes, len(budget.slots))
+		}
+	})
+	t.Run("exact limit remains accepted", func(t *testing.T) {
+		body := bytes.Repeat([]byte(" "), desktopInboundFrameLimit)
+		copy(body, []byte(`{"type":"broadcast","version":11,"method":"thread-stream-state-changed"}`))
+		var header [4]byte
+		binary.LittleEndian.PutUint32(header[:], uint32(len(body)))
+		connection := &desktopFramePolicyConn{reader: bytes.NewReader(append(header[:], body...))}
+		budget := newDesktopFrameBudget(1, time.Second)
+		projected := false
+		err := (&desktopConn{Conn: connection}).readBudgeted(context.Background(), budget, func(message desktopEnvelope) error {
+			projected = message.Method == desktopStateChanged && message.Version == 11 && len(budget.slots) == 1
+			return nil
+		})
+		if err != nil || !projected || len(budget.slots) != 0 {
+			t.Fatalf("exact inbound frame rejected/slot retained: err=%v projected=%v slots=%d", err, projected, len(budget.slots))
 		}
 	})
 }

@@ -308,6 +308,7 @@ func TestDesktopSubscriptionIsolationBoundedFollowersAndCancellation(t *testing.
 	})
 	observer := NewDesktopObserver(path)
 	observer.watchWindow, observer.subscriptionWindow = time.Second, time.Second
+	observer.subscriptionLimit = 2
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
@@ -352,6 +353,7 @@ func TestDesktopSubscriptionIsolationFairActualStartsAcrossWindows(t *testing.T)
 	})
 	observer := NewDesktopObserver(path)
 	observer.watchWindow, observer.subscriptionWindow = 80*time.Millisecond, 50*time.Millisecond
+	observer.subscriptionLimit = 2
 	ids := []string{"a", "b", "c", "d", "e", "f", "g"}
 	for round := range 4 {
 		ctx, cancel := context.WithTimeout(context.Background(), isolationWait)
@@ -393,6 +395,7 @@ func TestDesktopSubscriptionIsolationKnownOwnersFairWithoutWithinWindowRotation(
 	})
 	observer := NewDesktopObserver(path)
 	observer.watchWindow, observer.subscriptionWindow = 80*time.Millisecond, 200*time.Millisecond
+	observer.subscriptionLimit = 2
 	ids := []string{"a", "b", "c", "d", "e", "f", "g"}
 	for _, id := range ids {
 		observer.discovery.observe(id, true)
