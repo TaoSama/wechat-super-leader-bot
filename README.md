@@ -38,27 +38,29 @@ node local.mjs --sessions --controller https://leader.example.com
 
 部署、原生服务及人工微信验收见 [远端运维说明](docs/runbook/hong-kong.md)。已迁移到远端的实例不要再执行本地 `--up` 启动第二个编排权威。
 
+部署前分别核对控制平面镜像、节点 Daemon 和数据合同，并在自己的环境记录会话、微信和跨机流程的实际验收结果。相关记录：[发布与验收记录](docs/changes/2026-10-12-release-preflight/VERIFICATION.md)。
+
 ## Web 会话工作台
 
 打开微信中的登录链接后，通过顶部“Super Leader / 会话”切换工作区。Leader 将最近 50 条真实指令分为需要处理、执行中、最近完成，可筛选机器/状态、展开完整回执并返回对应会话。会话列表按机器、标题、目录或模型查找，三行摘要展示标题、状态、预览、模型、项目和时间；提供方、推理强度及完整目录在会话详情中。没有报告的模型明确显示未知，不套用全局默认值。
 
-本地源码新增“Super Leader → 任务计划”：显示已确认计划的首步摘要、完成步数和授权时间，展开可看依赖、逐步回执并跳转准确原会话。只把精确完成计入进度；结果存疑、取消后续和授权到期有独立提示，取消不表示原任务已停止。视图沿用状态流实时更新，机器筛选保留完整跨机步骤；最多展示 12 条、进行中优先，不是全部历史。确认和取消仍通过发起计划的微信聊天进行，不增加浏览器管理写权限。Controller 513 项、Web 276 项、真实临时 PG/HTTP/SSE 与桌面/手机尺寸验收通过；尚未部署，见 [任务计划视图验收](docs/changes/2026-10-12-plan-console/VERIFICATION.md)。
+“Super Leader → 任务计划”显示已确认计划的首步摘要、完成步数和授权时间，展开可看依赖、逐步回执并跳转准确原会话。只把精确完成计入进度；结果存疑、取消后续和授权到期有独立提示，取消不表示原任务已停止。视图沿用状态流实时更新，机器筛选保留完整跨机步骤；最多展示 12 条、进行中优先，不是全部历史。确认和取消仍通过发起计划的微信聊天进行，不增加浏览器管理写权限。已随远端镜像部署；开发期的组件、真实临时 PG/HTTP/SSE 与桌面/手机尺寸验证见 [任务计划视图验收](docs/changes/2026-10-12-plan-console/VERIFICATION.md)，不代替真实微信计划验收。
 
-本地源码已接入原桌面模型观测：列表、详情、输入框和搜索优先使用 45 秒内可用的桌面模型设置，模型/提供方/推理强度取自同一来源；过期或失联后显示原控制接口记录，详情注明模型来源及观测时间，没有模型则显示“模型未报告”。Leader 查询使用相同规则。模型展示不改变 loaded 或发送权限。真实只读核查及桌面/手机宽度浏览器验证通过，尚未更新运行服务，见 [模型观测验收](docs/changes/2026-10-11-desktop-model-observation/VERIFICATION.md)。
+已接入原桌面模型观测：列表、详情、输入框和搜索优先使用 45 秒内可用的桌面模型设置，模型/提供方/推理强度取自同一来源；过期或失联后显示原控制接口记录，详情注明模型来源及观测时间，没有模型则显示“模型未报告”。Leader 查询使用相同规则。模型展示不改变 loaded 或发送权限。远端与 节点 A 已更新，开发期真实只读核查及桌面/手机宽度浏览器验证见 [模型观测验收](docs/changes/2026-10-11-desktop-model-observation/VERIFICATION.md)。
 
 会话状态通过认证 SSE 自动更新，断流时单飞轮询兜底；Daemon 每 2 秒检查变化。选中会话的历史每 2 秒读取快照，向上滚动自动加载更早消息，阅读旧消息时新回复不会拉走位置；这是历史快照更新，不是 token 流式。历史最多显示 2000 条，裁剪缺口明确标注，可重新读取最新页；支持安全 Markdown 和折叠工具输出。隐藏页面/会话区及离线时暂停读取，恢复后继续。
 
-本地源码已接入原桌面已记录历史：配置 `--desktop-sock` 后，精确 owner 证明决定首次来源；连续刷新和旧页通过不透明 `historyContext` 固定来源，不会在原桌面与控制接口之间偷偷换路。完整加载等待同 owner 的 revision 和完整性证明，不合并尚未记录的 UI 暂态。来源失效时保留已读内容、停止自动请求，并在详情顶部提供“重新读取最新页”。历史连接最多 4 个目标，闲置 60 秒回收；原始帧超过 32 MiB 明确报超限，不返回部分结果冒充完整历史。本轮尚未部署，证据与限制见 [原桌面历史验收](docs/changes/2026-10-12-desktop-history/VERIFICATION.md)。
+已接入原桌面已记录历史：配置 `--desktop-sock` 后，精确 owner 证明决定首次来源；连续刷新和旧页通过不透明 `historyContext` 固定来源，不会在原桌面与控制接口之间偷偷换路。完整加载等待同 owner 的 revision 和完整性证明，不合并尚未记录的 UI 暂态。来源失效时保留已读内容、停止自动请求，并在详情顶部提供“重新读取最新页”。历史连接最多 4 个目标，闲置 60 秒回收；原始帧超过 32 MiB 明确报超限，不返回部分结果冒充完整历史。远端与 节点 A 已部署并完成真实 Cookie 接口分页回查；开发期证据与限制见 [原桌面历史验收](docs/changes/2026-10-12-desktop-history/VERIFICATION.md)。
 
-后续本地修复已将状态/模型、控制预检和历史的桌面入站上限统一为 32 MiB，避免大会话历史可读但状态不可用。出站仍限 16 MiB；控制读取共享两个连接槽，完整展开前检查深度和节点预算，并拒绝重复历史索引引用。帧上限不是内存上限，详见 [大快照资源边界](docs/changes/2026-10-12-desktop-frame-budget/TECH.md) 与 [验收记录](docs/changes/2026-10-12-desktop-frame-budget/VERIFICATION.md)；尚未部署。
+状态/模型、控制预检和历史的桌面入站上限统一为 32 MiB，出站仍限 16 MiB；控制读取共享两个连接槽，完整展开前检查深度和节点预算，并拒绝重复历史索引引用。已部署；超过上限的会话仍不可观测或完整读取，不会提高上限掩盖资源问题。帧上限不是内存上限，详见 [大快照资源边界](docs/changes/2026-10-12-desktop-frame-budget/TECH.md) 与 [验收记录](docs/changes/2026-10-12-desktop-frame-budget/VERIFICATION.md)。
 
 Daemon 可显式通过 `--desktop-sock` 订阅既有桌面应用的运行状态。桌面端 `active/idle` 只在观测可用且过去 45 秒内时补足控制接口的 `notLoaded/unknown`；微信查询与 Web 显示使用同一规则，注明来源和观测时间。控制接口的原始状态、loaded 和发送权限保持不变；桌面空闲不等于可以发送。此订阅依赖当前桌面内部协议，不是官方稳定 API；故障或过期会降级，不猜测状态。实现和验收见 [桌面状态观测](docs/changes/2026-10-11-desktop-observation/VERIFICATION.md)。
 
 输入框直接发送到所选原会话，不经过 Leader 再猜目标。控制接口路径要求在线、明确 loaded=true、idle、send 能力和过去 45 秒内的观测；桌面 owner 路径使用独立完整预检产生的 `sendAvailability`，不改写 native loaded/status/capabilities。字段存在但被撤销、非法或过期时，不自动换路；没有可用发送路径时只读，不隐式恢复、不抢占 writer。
 
-本地原桌面 owner 适配器已通过持久 journal 完成一次专用会话真实发送与精确 turn 回查，不更改 App transport、不启动额外后端。本地 Controller/Leader/Web 也已接入：新命令服务端选择并持久化路线，确认和派发时复验同一路线，重复 requestId 返回原记录；Web 显示通道和不可用原因，资格过期自动禁用，点击时再检查。Daemon 必须显式启用 `--desktop-send`（要求 `--desktop-sock`），默认仍只读。此轮代码尚未更新运行服务，不能据此宣称远端线上已启用桌面发送。预检仍非原子。见 [原 owner 真实发送](docs/changes/2026-10-11-desktop-owner-send/VERIFICATION.md) 与 [跨层路由验证](docs/changes/2026-10-11-desktop-send-route/VERIFICATION.md)。
+原桌面 owner 适配器通过持久 journal 追踪原会话，不更改 App transport、不启动额外后端。Controller/Leader/Web 已接入：新命令服务端选择并持久化路线，确认和派发时复验同一路线，重复 requestId 返回原记录；Web 显示通道和不可用原因，资格过期自动禁用，点击时再检查。Daemon 必须显式启用 `--desktop-send`（要求 `--desktop-sock`），默认仍只读。远端与 节点 A 已启用，并完成正式 Cookie 接口到专用原会话的真实发送、精确 turn 回查及重复请求防重发。预检仍非原子。开发期证据见 [原 owner 真实发送](docs/changes/2026-10-11-desktop-owner-send/VERIFICATION.md) 与 [跨层路由验证](docs/changes/2026-10-11-desktop-send-route/VERIFICATION.md)。
 
-本地源码已修复大量无响应 ID 导致后部桌面会话无法被探测的问题，并新增显式 `--codex-home` 文件发现：只读首条会话元数据、按稳定会话 ID 处理回退后的多份记录，不读取 SQLite 或启动后端。发现、桌面观测、控制权限独立；文件发现不提供历史或发送权限。节点 A 实测发现 17 个会话，节点 B 在控制 socket 缺失时发现 1 个，但 节点 B 本次未找到可用桌面 owner。新增文件发现与公平轮转尚未更新运行服务，见 [文件发现验证与限制](docs/changes/2026-10-11-rollout-discovery/VERIFICATION.md)。
+已修复大量无响应 ID 导致后部桌面会话无法被探测的问题，并提供显式 `--codex-home` 文件发现：只读首条会话元数据、按稳定会话 ID 处理回退后的多份记录，不读取 SQLite 或启动后端。发现、桌面观测、控制权限独立；文件发现不提供历史或发送权限。节点 A 已启用；节点 B 的只读探测在控制 socket 缺失时发现 1 个，但未找到可用桌面 owner，也未安装本项目服务。开发期证据见 [文件发现验证与限制](docs/changes/2026-10-11-rollout-discovery/VERIFICATION.md)。
 
 发送后展示受理/完成回执。网络不确定时先使用原请求核查，不能另发一遍；切换会话保留各自的内存草稿，退出登录清除。精确 HTTP 与数据契约见 [会话工作台设计](docs/changes/2026-10-10-control-plane/SESSION_WORKSPACE.md)。前轮部署见 [验证记录](docs/changes/2026-10-10-control-plane/VERIFICATION.md)，本轮增量结果见 [体验与查询修复验收](docs/changes/2026-10-11-workspace-experience/VERIFICATION.md)。
 
@@ -105,9 +107,9 @@ Web：`http://127.0.0.1:8790`。前端无手输 token 入口；本机若需签�
 
 例如：“看看 demoair 上这个会话的进度”“让这个会话只回复测试字符串”。发送任务先生成准确目标和内容的计划；回复“确认执行”才发送，待确认阶段说“取消计划”不会派发。`accepted` 只表示受理；必须跟踪关联 `turnId` 的终态和输出才算测试成功。
 
-本地源码已支持最多四步的持久依赖计划，例如“先让这个会话检查测试，完成后再让另一个会话检查文档”。预览冻结每步的目标、内容、技能版本和依赖，10 分钟内确认后最多自动推进 24 小时；只有精确完成回执才解锁后继，同一会话还要等待空闲资格。可说“计划到哪了”查询，或“停止后续任务”取消；取消不终止原会话已运行的任务，已领取项可能已发送。结果不明时不重发；重启后查原回执，不另起后端。后续内容不会自动吸收前项输出，需动态决定时应查询结果后另提计划。原子确认、取消、真实临时 PG 和 HTTP/WS 验收见 [持久计划验证](docs/changes/2026-10-12-persistent-plans/VERIFICATION.md)；尚未更新运行服务。
+已支持最多四步的持久依赖计划，例如“先让这个会话检查测试，完成后再让另一个会话检查文档”。预览冻结每步的目标、内容、技能版本和依赖，10 分钟内确认后最多自动推进 24 小时；只有精确完成回执才解锁后继，同一会话还要等待空闲资格。可说“计划到哪了”查询，或“停止后续任务”取消；取消不终止原会话已运行的任务，已领取项可能已发送。结果不明时不重发；重启后查原回执，不另起后端。后续内容不会自动吸收前项输出，需动态决定时应查询结果后另提计划。已随远端镜像部署；原子确认、取消、真实临时 PG 和 HTTP/WS 开发期验收见 [持久计划验证](docs/changes/2026-10-12-persistent-plans/VERIFICATION.md)，真实微信计划仍待验收。
 
-本地源码新增已确认计划的终态微信通知：完成、失败或授权到期后，在原聊天提示计划 ID、总步数和状态，不包含任务正文、会话输出或登录链接。默认关闭，需 Gateway 显式开启 `GATEWAY_PLAN_NOTIFICATIONS=true`（或 `--plan-notifications`）；只在既有基线和聊天 context 可用时处理。通知与计划终态同事务保存，每条只领取一次；结果不明不自动重发，`accepted` 仅表示微信接口受理，不保证送达或已读。真实临时 PostgreSQL/Controller/Gateway 与模拟微信验收见 [计划通知验证](docs/changes/2026-10-12-plan-notifications/VERIFICATION.md)。尚未部署或真实外发，不等于持续动态自治已经完成。
+已确认计划可生成终态微信通知：完成、失败或授权到期后，在原聊天提示计划 ID、总步数和状态，不包含任务正文、会话输出或登录链接。默认关闭，需 Gateway 显式开启 `GATEWAY_PLAN_NOTIFICATIONS=true`（或 `--plan-notifications`）；只在既有基线和聊天 context 可用时处理。通知与计划终态同事务保存，每条只领取一次；结果不明不自动重发，`accepted` 仅表示微信接口受理，不保证送达或已读。代码已随远端镜像部署，但通知开关未启用，未做真实外发验收，不等于持续动态自治已经完成。真实临时 PostgreSQL/Controller/Gateway 与模拟微信验收见 [计划通知验证](docs/changes/2026-10-12-plan-notifications/VERIFICATION.md)。
 
 ## 微信实测边界
 
@@ -136,6 +138,6 @@ node verify.mjs --list              # 只列计划，不运行检查
 
 仓库新增 `.github/workflows/verify.yml`：Ubuntu 运行完整验证，macOS 运行不依赖 Docker 的单测与构建，CI 使用 Node 24。当前本机实际为 Node 26；工作流配置检查不等于 GitHub 已运行，未推送前不宣称 CI 通过。实现、命令和交付边界见 [可复现验证](docs/changes/2026-10-12-reproducible-verification/TECH.md)。
 
-本地源码新增已有终端 Agent 的显式只读观测：Daemon 配置 `--terminal-sock <已有绝对路径>` 与可重复 `--terminal-pane <明确wN:pN>` 后，每 15 秒独立刷新状态；Web 标注终端来源，状态超过 45 秒失效，不轮询聊天历史、不开放发送。微信可明确询问该会话的最新输出，获得有裁剪提示的有限终端快照；不等于完整历史或精确任务回执。`--probe` 可无 token 检查该来源，不写 journal，不启动终端宿主。当前只接受已核对的 protocol 22，默认关闭，macOS/Linux 用户服务可保存相同参数。新增能力尚未部署，真实终端目标未指定，见 [终端观测设计与边界](docs/changes/2026-10-12-terminal-observation/TECH.md)。
+已有终端 Agent 支持显式只读观测：Daemon 配置 `--terminal-sock <已有绝对路径>` 与可重复 `--terminal-pane <明确wN:pN>` 后，每 15 秒独立刷新状态；Web 标注终端来源，状态超过 45 秒失效，不轮询聊天历史、不开放发送。微信可明确询问该会话的最新输出，获得有裁剪提示的有限终端快照；不等于完整历史或精确任务回执。`--probe` 可无 token 检查该来源，不写 journal，不启动终端宿主。当前只接受已核对的 protocol 22，默认关闭，macOS/Linux 用户服务可保存相同参数。代码已随构建产物部署，但未配置真实终端目标、未启用观测，见 [终端观测设计与边界](docs/changes/2026-10-12-terminal-observation/TECH.md)。
 
 现阶段重点验收远端 Controller 与 demoair 的 Codex 会话。独立 CLI 的发送与精确完成回执、所有会话附着和持续自治调度尚未完成；终端只读观测、单节点部署与联调不代表完整生产保障。准确证据见 `docs/changes/2026-10-10-control-plane/ACCEPTANCE.md` 与 `VERIFICATION.md`。
