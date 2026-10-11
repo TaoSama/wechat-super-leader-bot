@@ -24,12 +24,15 @@ type DesktopObserver struct {
 	watchWindow        time.Duration
 	discovery          desktopDiscoverySchedule
 	subscriptionWindow time.Duration
+	subscriptionLimit  int
+	frameBudget        *desktopFrameBudget
 	subscriptions      desktopDiscoverySchedule
 }
 
 func NewDesktopObserver(socketPath string) *DesktopObserver {
 	return &DesktopObserver{socketPath: socketPath, ownerTimeout: desktopOwnerTimeout, watchWindow: DesktopWatchWindow,
-		subscriptionWindow: desktopSubscriptionWindow}
+		subscriptionWindow: desktopSubscriptionWindow, subscriptionLimit: desktopSubscriptionConcurrency,
+		frameBudget: newDesktopFrameBudget(desktopFrameConcurrency, desktopFrameBodyTimeout)}
 }
 
 type desktopRuntimeState struct {

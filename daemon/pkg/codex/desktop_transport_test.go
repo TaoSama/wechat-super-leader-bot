@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -230,6 +231,63 @@ func TestDesktopFrameSplitAndInvalidInput(t *testing.T) {
 			if err := <-done; err != nil {
 				t.Fatal(err)
 			}
+		})
+	}
+}
+
+type desktopDeadlineFailureConn struct {
+	*desktopFramePolicyConn
+	deadlineErr error
+}
+
+func (c desktopDeadlineFailureConn) SetReadDeadline(time.Time) error { return c.deadlineErr }
+
+func TestDesktopBudgetedFrameFailureReleasesSlot(t *testing.T) {
+	projectionErr := errors.New("strict projection failed")
+	deadlineErr := errors.New("read deadline failed")
+	for _, tc := range []struct {
+		name        string
+		body        []byte
+		deadlineErr error
+		consumeErr  error
+		wantError   error
+	}{
+		{name: "deadline", body: []byte(`{}`), deadlineErr: deadlineErr, wantError: deadlineErr},
+		{name: "UTF8", body: []byte{0xff}},
+		{name: "JSON", body: []byte("{")},
+		{name: "short body", body: nil},
+		{name: "strict projection", body: []byte(`{}`), consumeErr: projectionErr, wantError: projectionErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var header [4]byte
+			size := len(tc.body)
+			if size == 0 {
+				size = 1
+			}
+			binary.LittleEndian.PutUint32(header[:], uint32(size))
+			spy := &desktopFramePolicyConn{reader: bytes.NewReader(append(header[:], tc.body...))}
+			connection := desktopDeadlineFailureConn{desktopFramePolicyConn: spy, deadlineErr: tc.deadlineErr}
+			budget := newDesktopFrameBudget(1, time.Second)
+			consumed := false
+			err := (&desktopConn{Conn: connection}).readBudgeted(context.Background(), budget, func(desktopEnvelope) error {
+				consumed = true
+				if len(budget.slots) != 1 {
+					t.Error("projection ran outside budget")
+				}
+				return tc.consumeErr
+			})
+			if err == nil || (tc.wantError != nil && !errors.Is(err, tc.wantError)) || len(budget.slots) != 0 || consumed != (tc.consumeErr != nil) {
+				t.Fatalf("failure leaked/escaped slot: err=%v slots=%d consumed=%v", err, len(budget.slots), consumed)
+			}
+			if tc.deadlineErr != nil && len(spy.readSizes) != 1 {
+				t.Fatalf("body read after deadline failure: %v", spy.readSizes)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			if err := budget.acquire(ctx); err != nil {
+				t.Fatalf("failed frame blocked next reader: %v", err)
+			}
+			budget.release()
 		})
 	}
 }
