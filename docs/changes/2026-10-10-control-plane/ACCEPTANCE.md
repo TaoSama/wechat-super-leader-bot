@@ -8,6 +8,8 @@
 
 发布边界：原 owner 路由、模型、已记录历史、有序多技能组合、固定依赖计划、计划 Web 与计划通知代码已有上述发布记录；通知开关仍关闭，真实微信通知未验收。main 中的 [终端单步输入](../2026-10-12-terminal-control-chain/VERIFICATION.md)、[Codex/Claude/Grok 可信记录历史](../2026-10-12-terminal-history/VERIFICATION.md) 和 [跨步骤结果传递](../2026-10-12-plan-result-handoff/VERIFICATION.md) 已源码实现并通过合成验收，尚未部署或通过真实 CLI/模型接力验收。
 
+后续本地发布准备：固定 `f6b2b5d` 的 linux/amd64 Controller/Web 镜像及 macOS/Linux Daemon 候选已构建；真实镜像在 Node 24/x64 下完成内存与临时 PostgreSQL 两种 HTTP/鉴权/SSE 烟测。首次测试容器 OOM 和驱动 DTO 断言错误均保留，最终测试资源已清理。见 [候选产物身份与运行证据](../2026-10-12-release-candidate/VERIFICATION.md)。候选仅保留本地，未推送、上传或替换服务；上述部署状态不变。
+
 开发期证据仍保留：[桌面历史](../2026-10-12-desktop-history/VERIFICATION.md)、[技能组合](../2026-10-12-ordered-skills/VERIFICATION.md)、[文件发现](../2026-10-11-rollout-discovery/VERIFICATION.md)、[路由研究](DESKTOP_ROUTING.md)、[持久计划](../2026-10-12-persistent-plans/VERIFICATION.md)；其中旧部署状态不覆盖最近发布记录。
 
 TypeScript Controller 是唯一控制权威，使用 PostgreSQL；TypeScript 微信 Gateway 是独立渠道进程；Go Daemon 在宿主机原生运行，通过主动连接 Controller 管理用户可见的既有会话；React/TypeScript Web 提供会话列表、结构化历史与受限发送工作台。Controller/PostgreSQL/Web 可在 Docker 内，Daemon 不在隔离环境创建 worker，不以历史 resume 冒充原会话附着。
