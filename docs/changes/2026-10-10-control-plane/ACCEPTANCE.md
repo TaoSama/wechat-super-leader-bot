@@ -4,7 +4,9 @@
 
 ## 不变架构
 
-后续同日大快照修复：本地 observer/control/history 入站统一 32 MiB，控制连接共享两槽、结构预算和重复引用拒绝已补齐；最终 Go race/vet/Linux build、大帧跨层及真实只读通过。尚未部署，结果和内存测量限制见 [大快照验收](../2026-10-12-desktop-frame-budget/VERIFICATION.md)。
+后续同日大快照修复：observer/control/history 入站统一 32 MiB，控制连接共享两槽、结构预算和重复引用拒绝已补齐；Go race/vet/Linux build、大帧跨层及真实只读通过。香港 `3488d3a` 与 Air `058af3d` 已发布，正式 Cookie 接口原会话发送、精确 turn、历史分页及重复请求验收通过，见 [当前发布状态](../2026-10-12-release-preflight/VERIFICATION.md)。原 [大快照验收](../2026-10-12-desktop-frame-budget/VERIFICATION.md) 保留开发期事实及内存测量限制。
+
+发布状态更正：下表若仍出现“本地新代码尚未部署”“运行服务未更新”，均是对应开发阶段记录，不覆盖上述发布证据。原 owner 路由、模型、历史、任务计划视图与计划通知代码已随该版本发布；通知开关仍关闭，真实微信通知未验收。本轮新增的有序多技能组合尚未发布，单独记录于 [组合验证](../2026-10-12-ordered-skills/VERIFICATION.md)。
 
 TypeScript Controller 是唯一控制权威，使用 PostgreSQL；TypeScript 微信 Gateway 是独立渠道进程；Go Daemon 在宿主机原生运行，通过主动连接 Controller 管理用户可见的既有会话；React/TypeScript Web 提供会话列表、结构化历史与受限发送工作台。Controller/PostgreSQL/Web 可在 Docker 内，Daemon 不在隔离环境创建 worker，不以历史 resume 冒充原会话附着。
 

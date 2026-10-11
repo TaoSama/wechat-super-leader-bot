@@ -62,6 +62,8 @@ Daemon 可显式通过 `--desktop-sock` 订阅既有桌面应用的运行状态�
 
 已修复大量无响应 ID 导致后部桌面会话无法被探测的问题，并提供显式 `--codex-home` 文件发现：只读首条会话元数据、按稳定会话 ID 处理回退后的多份记录，不读取 SQLite 或启动后端。发现、桌面观测、控制权限独立；文件发现不提供历史或发送权限。Air 已启用；Mini 的只读探测在控制 socket 缺失时发现 1 个，但未找到可用桌面 owner，也未安装本项目服务。开发期证据见 [文件发现验证与限制](docs/changes/2026-10-11-rollout-discovery/VERIFICATION.md)。
 
+Mini 最新定点复核：已确认持久化会话 ID，本机 IPC 两次初始化成功，但对该 ID 的 owner discovery 两次超时。这不是整个 Mini 无 owner 的证明；共享控制 socket 缺失也不构成必须重启或改造 App 的理由。未安装正式节点，见 [精确目标复核](docs/changes/2026-10-12-macmini-owner-check/VERIFICATION.md)。
+
 发送后展示受理/完成回执。网络不确定时先使用原请求核查，不能另发一遍；切换会话保留各自的内存草稿，退出登录清除。精确 HTTP 与数据契约见 [会话工作台设计](docs/changes/2026-10-10-control-plane/SESSION_WORKSPACE.md)。前轮部署见 [验证记录](docs/changes/2026-10-10-control-plane/VERIFICATION.md)，本轮增量结果见 [体验与查询修复验收](docs/changes/2026-10-11-workspace-experience/VERIFICATION.md)。
 
 ## 独立本机开发环境
@@ -108,6 +110,8 @@ Web：`http://127.0.0.1:8790`。前端无手输 token 入口；本机若需签�
 例如：“看看 Mac Air 上这个会话的进度”“让这个会话只回复测试字符串”。发送任务先生成准确目标和内容的计划；回复“确认执行”才发送，待确认阶段说“取消计划”不会派发。`accepted` 只表示受理；必须跟踪关联 `turnId` 的终态和输出才算测试成功。
 
 已支持最多四步的持久依赖计划，例如“先让这个会话检查测试，完成后再让另一个会话检查文档”。预览冻结每步的目标、内容、技能版本和依赖，10 分钟内确认后最多自动推进 24 小时；只有精确完成回执才解锁后继，同一会话还要等待空闲资格。可说“计划到哪了”查询，或“停止后续任务”取消；取消不终止原会话已运行的任务，已领取项可能已发送。结果不明时不重发；重启后查原回执，不另起后端。后续内容不会自动吸收前项输出，需动态决定时应查询结果后另提计划。已随香港镜像部署；原子确认、取消、真实临时 PG 和 HTTP/WS 开发期验收见 [持久计划验证](docs/changes/2026-10-12-persistent-plans/VERIFICATION.md)，真实微信计划仍待验收。
+
+本地新增每任务最多 4 个有序技能组合，例如“按顺序使用设计和 UX 技能优化页面”。预览列出全部技能及 SHA256，确认与派发均核对整组；任一失配不部分执行，同请求调换顺序也拒绝。预览过长时不保存可确认计划，避免授权未显示的内容。该增量尚未部署，需 Controller 与 Daemon 同步发布，见 [有序技能组合](docs/changes/2026-10-12-ordered-skills/VERIFICATION.md)。
 
 已确认计划可生成终态微信通知：完成、失败或授权到期后，在原聊天提示计划 ID、总步数和状态，不包含任务正文、会话输出或登录链接。默认关闭，需 Gateway 显式开启 `GATEWAY_PLAN_NOTIFICATIONS=true`（或 `--plan-notifications`）；只在既有基线和聊天 context 可用时处理。通知与计划终态同事务保存，每条只领取一次；结果不明不自动重发，`accepted` 仅表示微信接口受理，不保证送达或已读。代码已随香港镜像部署，但通知开关未启用，未做真实外发验收，不等于持续动态自治已经完成。真实临时 PostgreSQL/Controller/Gateway 与模拟微信验收见 [计划通知验证](docs/changes/2026-10-12-plan-notifications/VERIFICATION.md)。
 
