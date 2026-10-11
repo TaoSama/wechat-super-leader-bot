@@ -58,6 +58,9 @@ func (m *DarwinManager) ServiceTarget() string {
 
 // GeneratePlistXML creates valid launchd plist XML.
 func GeneratePlistXML(binPath string, cfg *config.Config, tokenFilePath string) (string, error) {
+	if err := config.ValidateTerminalHistory(cfg.TerminalHistoryRoots, cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
+		return "", err
+	}
 	if err := config.ValidateTerminalObservation(cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
 		return "", err
 	}
@@ -97,6 +100,7 @@ func GeneratePlistXML(binPath string, cfg *config.Config, tokenFilePath string) 
 	if cfg.TerminalSendMode != "" {
 		args = append(args, "--terminal-send-mode", cfg.TerminalSendMode)
 	}
+	args = append(args, config.TerminalHistoryArgs(cfg.TerminalHistoryRoots)...)
 	for _, root := range cfg.SkillRoots {
 		args = append(args, "--skill-root", root)
 	}
@@ -212,6 +216,9 @@ func (m *DarwinManager) verifyExistingPlistOwnership(plistPath string) error {
 }
 
 func (m *DarwinManager) Install(ctx context.Context, cfg *config.Config) error {
+	if err := config.ValidateTerminalHistory(cfg.TerminalHistoryRoots, cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
+		return err
+	}
 	if err := config.ValidateTerminalSend(cfg.TerminalSendMode, cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
 		return err
 	}

@@ -71,6 +71,9 @@ func EscapeSystemdArg(arg string) (string, error) {
 
 // GenerateSystemdUnit creates the systemd user service unit content.
 func GenerateSystemdUnit(binPath string, cfg *config.Config, tokenFilePath string) (string, error) {
+	if err := config.ValidateTerminalHistory(cfg.TerminalHistoryRoots, cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
+		return "", err
+	}
 	if err := config.ValidateTerminalObservation(cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
 		return "", err
 	}
@@ -110,6 +113,7 @@ func GenerateSystemdUnit(binPath string, cfg *config.Config, tokenFilePath strin
 	if cfg.TerminalSendMode != "" {
 		rawArgs = append(rawArgs, "--terminal-send-mode", cfg.TerminalSendMode)
 	}
+	rawArgs = append(rawArgs, config.TerminalHistoryArgs(cfg.TerminalHistoryRoots)...)
 	for _, root := range cfg.SkillRoots {
 		rawArgs = append(rawArgs, "--skill-root", root)
 	}
@@ -193,6 +197,9 @@ func (m *LinuxManager) verifyExistingUnitOwnership(unitPath string) error {
 }
 
 func (m *LinuxManager) Install(ctx context.Context, cfg *config.Config) error {
+	if err := config.ValidateTerminalHistory(cfg.TerminalHistoryRoots, cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
+		return err
+	}
 	if err := config.ValidateTerminalSend(cfg.TerminalSendMode, cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
 		return err
 	}

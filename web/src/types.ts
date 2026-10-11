@@ -65,6 +65,7 @@ export interface ScopedSession {
   loaded?: boolean;
   desktopObservation?: DesktopObservation;
   sendAvailability?: SendAvailability;
+  historySource?: "terminal-transcript";
 }
 
 export interface HistoryItem {
@@ -79,10 +80,12 @@ export interface HistoryItem {
   truncated?: boolean;
 }
 
+export type HistorySource = "control-socket" | "codex-desktop" | "terminal-transcript";
+
 export interface SessionHistory {
   session: ScopedSession;
   historyContext: string;
-  source: "control-socket" | "codex-desktop";
+  source: HistorySource;
   items: HistoryItem[];
   nextCursor: string | null;
   fetchedAt: string;

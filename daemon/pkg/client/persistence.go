@@ -42,6 +42,9 @@ func OpenDaemon(cfg *config.Config, adapter codex.SessionAdapter) (*Daemon, erro
 	if err := config.ValidateTerminalSend(cfg.TerminalSendMode, cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
 		return nil, err
 	}
+	if err := config.ValidateTerminalHistory(cfg.TerminalHistoryRoots, cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
+		return nil, err
+	}
 	scope, err := json.Marshal([]string{cfg.NodeID, cfg.ControllerURL, cfg.SocketPath})
 	if err != nil {
 		return nil, err

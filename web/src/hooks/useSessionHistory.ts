@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiAuthError, ApiHistoryError, fetchSessionHistory } from "../api";
 import { HistoryItem, ScopedSession, SessionHistory } from "../types";
-import { HISTORY_CONTEXT_EXPIRED_MESSAGE, isHistoryContext } from "../history-contract";
+import { HISTORY_CONTEXT_EXPIRED_MESSAGE, isHistoryContext, isSessionHistorySource, terminalHistoryBlockReason } from "../history-contract";
+import { isTerminalSession, MAX_TERMINAL_OBSERVATION_AGE_MS } from "../terminal-session";
 
 const HISTORY_POLL_MS = 2000;
 const MAX_RETRY_MS = 30_000;
@@ -50,12 +51,15 @@ function mergePage(current: HistoryItem[], incoming: HistoryItem[], insertion: n
 
 export function useSessionHistory(session: ScopedSession | null, connected: boolean, onAuthFailure: () => void) {
   const owner = session ? sessionKey(session) : "";
+  const terminalObservedAt = session && isTerminalSession(session) ? session.observedAt : undefined;
   const [state, setState] = useState<HistoryState>(EMPTY);
   const requestRef = useRef<(older?: boolean, reset?: boolean) => Promise<boolean>>(async () => false);
   const lifecycleRef = useRef<() => void>(() => undefined);
   const authRef = useRef(onAuthFailure);
   const connectedRef = useRef(connected);
+  const sessionRef = useRef(session);
   connectedRef.current = connected;
+  sessionRef.current = session;
   authRef.current = onAuthFailure;
 
   useEffect(() => {
@@ -64,6 +68,7 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
     let disposed = false;
     let active: { controller: AbortController; job: Job } | null = null;
     let timer: number | undefined;
+    let observationTimer: number | undefined;
     let latest: SessionHistory | null = null;
     let oldestCursor: string | null = null;
     let olderSeen = new Set<string>();
@@ -74,7 +79,8 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
     let contextExpired = false;
     let needsReset = false;
     const queue: Job[] = [];
-    const available = () => connectedRef.current && navigator.onLine !== false && document.visibilityState !== "hidden";
+    const readable = () => !!sessionRef.current && sessionKey(sessionRef.current) === owner && !terminalHistoryBlockReason(sessionRef.current);
+    const available = () => connectedRef.current && readable() && navigator.onLine !== false && document.visibilityState !== "hidden";
     setState({ ...EMPTY, owner, loading: available(), pollingPaused: !available() });
 
     function publish(error: string | null = null) {
@@ -116,10 +122,13 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
       try {
         const historyContext = needsReset ? undefined : latest?.historyContext;
         const page = await fetchSessionHistory(target.nodeId, target.id, cursor ?? undefined, controller.signal, historyContext);
-        if (disposed || controller.signal.aborted || active !== flight) return;
+        const current = sessionRef.current;
+        if (disposed || controller.signal.aborted || active !== flight || !current || !available()) return;
         if (!isHistoryContext(page.historyContext) || page.session.nodeId !== target.nodeId || page.session.id !== target.id ||
-            page.source !== "control-socket" && page.source !== "codex-desktop" ||
-            historyContext !== undefined && (page.historyContext !== historyContext || page.source !== latest?.source)) {
+            !isSessionHistorySource(page.source, page.session) || !isSessionHistorySource(page.source, current) ||
+            isTerminalSession(target) && page.session.provider !== current.provider ||
+            historyContext !== undefined && (page.historyContext !== historyContext || page.source !== latest?.source ||
+              isTerminalSession(target) && page.session.provider !== latest?.session.provider)) {
           throw new Error("历史响应与当前读取来源或上下文不匹配");
         }
         if (!latest || job.reset || needsReset) {
@@ -211,8 +220,14 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
 
     function reconcile() {
       if (disposed) return;
+      window.clearTimeout(observationTimer);
+      const current = sessionRef.current;
+      if (current && isTerminalSession(current) && !terminalHistoryBlockReason(current)) {
+        observationTimer = window.setTimeout(reconcile, Date.parse(current.observedAt) + MAX_TERMINAL_OBSERVATION_AGE_MS - Date.now() + 1);
+      }
       if (contextExpired) { publish(); return; }
-      if (!available()) { cancel(); publish(connectedRef.current && navigator.onLine !== false ? null : "机器或网络离线，已暂停实时更新，恢复连接后自动继续"); }
+      if (!available()) { cancel(); publish(current && terminalHistoryBlockReason(current) ||
+        (connectedRef.current && navigator.onLine !== false ? null : "机器或网络离线，已暂停实时更新，恢复连接后自动继续")); }
       else { failures = 0; void request(); }
     }
     requestRef.current = request;
@@ -229,15 +244,18 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
     return () => {
       disposed = true;
       cancel();
+      window.clearTimeout(observationTimer);
       detach();
       requestRef.current = async () => false;
       lifecycleRef.current = () => undefined;
     };
   }, [owner]);
 
-  useEffect(() => lifecycleRef.current(), [connected]);
+  useEffect(() => lifecycleRef.current(), [connected, session?.historySource, terminalObservedAt, session?.provider]);
   const refresh = useCallback(() => requestRef.current(), []);
   const loadOlder = useCallback(() => requestRef.current(true), []);
   const resetLatest = useCallback(() => requestRef.current(false, true), []);
-  return { ...(state.owner === owner ? state : { ...EMPTY, owner, loading: !!owner }), refresh, loadOlder, resetLatest };
+  const readBlockReason = session ? terminalHistoryBlockReason(session) : null;
+  return { ...(state.owner === owner ? state : { ...EMPTY, owner, loading: !!owner }),
+    canRead: !!session && connected && !readBlockReason, readBlockReason, refresh, loadOlder, resetLatest };
 }

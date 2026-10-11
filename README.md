@@ -142,7 +142,11 @@ node verify.mjs --list              # 只列计划，不运行检查
 
 仓库新增 `.github/workflows/verify.yml`：Ubuntu 运行完整验证，macOS 运行不依赖 Docker 的单测与构建，CI 使用 Node 24。当前本机实际为 Node 26；工作流配置检查不等于 GitHub 已运行，未推送前不宣称 CI 通过。实现、命令和交付边界见 [可复现验证](docs/changes/2026-10-12-reproducible-verification/TECH.md)。
 
-已有终端 Agent 支持显式只读观测：Daemon 配置 `--terminal-sock <已有绝对路径>` 与可重复 `--terminal-pane <明确wN:pN>` 后，每 15 秒独立刷新状态；Web 标注终端来源，状态超过 45 秒失效，不轮询聊天历史、默认不开放发送。微信可明确询问该会话的最新输出，获得有裁剪提示的有限终端快照；不等于完整历史或精确任务回执。`--probe` 可无 token 检查该来源，不写 journal，不启动终端宿主。当前只接受已核对的 protocol 22，默认关闭，macOS/Linux 用户服务可保存相同参数。观测代码已随构建产物部署，但未配置真实终端目标、未启用观测，见 [终端观测设计与边界](docs/changes/2026-10-12-terminal-observation/TECH.md)。
+已有终端 Agent 支持显式只读观测：Daemon 配置 `--terminal-sock <已有绝对路径>` 与可重复 `--terminal-pane <明确wN:pN>` 后，每 15 秒独立刷新状态；Web 标注终端来源，状态超过 45 秒失效，默认不读取聊天历史、不开放发送。微信可明确询问该会话的最新输出，获得有裁剪提示的有限终端快照；不等于完整历史或精确任务回执。`--probe` 可无 token 检查该来源，不写 journal，不启动终端宿主。当前只接受已核对的 protocol 22，默认关闭，macOS/Linux 用户服务可保存相同参数。观测代码已随构建产物部署，但未配置真实终端目标、未启用观测，见 [终端观测设计与边界](docs/changes/2026-10-12-terminal-observation/TECH.md)。
+
+原 CLI 历史读取已在本地实现，**尚未部署或配置真实记录目录**。除已有 socket 和明确 pane 外，须逐个提供方显式增加 `--terminal-history-root codex=/absolute/sessions`、`--terminal-history-root claude=/absolute/projects` 或 `--terminal-history-root grok=/absolute/sessions`；路径指向记录目录本身，每提供方最多一个。不会从 home、环境变量或只授权元数据发现的 `--codex-home` 推导正文权限。仅可信会话 ID 绑定可用，配置目录不等于保证文件存在。
+
+启用后 Web 显示“CLI 会话记录”，沿用 2 秒快照刷新与向上自动分页；读取原 JSONL 中的用户/助手可见文本，隐藏推理和私有元数据。Grok ACP 文本明确标注“文本片段（非完整轮次）”，不伪造消息结束、turn ID 或完成回执。旧页不因追加漂移，文件改写/替换或原会话换绑使上下文失效，必须显式重新读取；来源撤销或观测过期会暂停并保留已读内容。每文件最多 32 MiB，读取预算和不支持格式见 [历史读取合同](docs/changes/2026-10-12-terminal-history/TECH.md)。真实 Go/HTTP/临时 PG 与独立浏览器合成验收均通过，证据见 [验证记录](docs/changes/2026-10-12-terminal-history/VERIFICATION.md)；不代表真实 CLI、微信或 Linux 服务已验收。
 
 原终端单步输入现已接通源码中的持久命令、Controller、Web 与自然语言确认链路，**尚未部署或启用正式终端发送**。必须在已有 socket 和明确 pane 清单之外显式设置 `--terminal-send-mode=non-atomic`，并使用真实持久 journal；独立零输入预检通过后才发布 45 秒发送资格。不启动 Agent、不恢复会话、不使用默认焦点，也不在通道失效时自动换路。同一 PTY 内原 CLI 退出、替换和人工输入的非原子窗口仍存在，启用前必须接受此边界并验收明确目标。
 

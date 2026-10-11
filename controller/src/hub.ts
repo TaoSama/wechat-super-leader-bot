@@ -75,10 +75,11 @@ export class NodeHub {
     if (!node || !node.isHelloCompleted || node.ws.readyState !== WebSocket.OPEN) {
       throw new HistoryError(503, "history_offline", "History node is offline");
     }
-    if (!node.sessions.some(session => session.id === sessionId)) {
+    const session = node.sessions.find(session => session.id === sessionId);
+    if (!session) {
       throw new HistoryError(404, "history_session_not_found", "Session not found");
     }
-    return this.historyRequests.read(nodeId, sessionId, node.ws, options, signal);
+    return this.historyRequests.read(nodeId, sessionId, node.ws, options, signal, session);
   }
 
   handleConnection(ws: WebSocket, nodeId: string): void {
