@@ -1,4 +1,4 @@
-FROM node:24-bookworm-slim AS toolchain
+FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS toolchain
 RUN npm install --global pnpm@11.8.0
 
 FROM toolchain AS build
@@ -8,6 +8,7 @@ RUN pnpm install --frozen-lockfile
 COPY gateway/tsconfig.json ./
 COPY gateway/src ./src
 RUN pnpm run build && pnpm prune --prod
+RUN mkdir -p /runtime/etc/super-leader /runtime/var/lib/super-leader-gateway
 
 FROM node:24-bookworm-slim
 ENV NODE_ENV=production
@@ -15,9 +16,8 @@ WORKDIR /app
 COPY --from=build --chown=node:node /app/package.json ./package.json
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
-
-RUN mkdir -p /etc/super-leader /var/lib/super-leader-gateway /tmp \
-    && chown -R node:node /etc/super-leader /var/lib/super-leader-gateway /tmp
+COPY --from=build --chown=node:node /runtime/etc/super-leader /etc/super-leader
+COPY --from=build --chown=node:node /runtime/var/lib/super-leader-gateway /var/lib/super-leader-gateway
 
 USER node
 

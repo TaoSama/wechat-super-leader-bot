@@ -1,4 +1,4 @@
-FROM node:24-bookworm-slim AS toolchain
+FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS toolchain
 RUN npm install --global pnpm@11.8.0
 
 FROM toolchain AS controller-build
@@ -17,6 +17,7 @@ COPY web/ ./
 RUN pnpm run build
 
 FROM node:24-bookworm-slim
+# Production dependencies copied across architectures must remain platform-independent.
 ENV NODE_ENV=production WEB_DIST_DIR=/app/web
 WORKDIR /app
 COPY --from=controller-build --chown=node:node /app/package.json ./package.json
