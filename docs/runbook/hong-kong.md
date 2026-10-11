@@ -42,7 +42,7 @@ docker compose --env-file .runtime/controller.env \
 
 ```sh
 docker compose --env-file .runtime/controller.env \
-  -f compose.yaml -f deploy/compose.production.yaml up -d --no-build --pull never controller
+  -f compose.yaml -f deploy/compose.production.yaml up -d --no-deps --no-build --pull never controller
 nginx -t
 ```
 
@@ -151,6 +151,8 @@ Linux 已通过参数/权限/生命周期单测及 amd64 交叉编译，尚未�
 Daemon journal 防重放记录绑定节点、Controller URL 和本机 socket。切换 Controller 不得删除 journal、换空目录绕过保护或自动回退原地址。运维迁移须显式检查原绑定和所有回执终态，确认数据库迁移无损后再更新绑定。故障中存在未决记录时应先核查原任务，不能重新发送。
 
 回退不是只换一个 URL：远端上线后的新命令、消息、记忆不能丢弃。需先停止新的写入和节点服务，对远端数据库做反向流式迁移并核对，显式迁移 journal 绑定后才启用本地 Controller。保留原本地卷不表示它仍是最新数据。
+
+多技能组合还有读取合同的回退边界：旧 Controller 的技能引用校验为 `max(1)`，读取命令时无条件执行，包括 completed/failed 终态记录。新版一旦保存含 2–4 份技能引用的命令，即使已排空，也不能直接退回旧镜像。不能删除或改写历史记录规避校验；需使用支持同一数据合同的修复版本，保留数据库和原 journal。
 
 ## 独立微信 Gateway
 
