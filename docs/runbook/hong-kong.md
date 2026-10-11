@@ -36,11 +36,13 @@ docker compose --env-file .runtime/controller.env \
   -f compose.yaml -f deploy/compose.production.yaml logs --tail 80 controller
 ```
 
-更新代码后重建本项目：
+生产机不承担镜像构建。先在开发机或 CI 按香港的 `linux/amd64` 架构构建 Controller/Web 与 Gateway 镜像，验证后导出并在香港加载，记录源提交与镜像 ID，再按下文排空流程切换。不要在有运行负载的小内存 VPS 上直接执行 Compose 并行构建；构建前也不能仅凭服务健康就认定资源充足。不能通过临时增加 swap、改 Docker/system 配置或杀其他进程解决构建压力。
+
+以下仅切换已经加载并核对的本项目镜像，不构建、不重新拉取镜像：
 
 ```sh
 docker compose --env-file .runtime/controller.env \
-  -f compose.yaml -f deploy/compose.production.yaml up -d --build controller
+  -f compose.yaml -f deploy/compose.production.yaml up -d --no-build --pull never controller
 nginx -t
 ```
 
@@ -52,7 +54,7 @@ Nginx 配置源为 `deploy/nginx.conf`，安装到独立 `/etc/nginx/conf.d/supe
 
 ## 原生 Daemon 用户服务
 
-Mac Air 已安装并连接香港，不需要重复安装或另开前台 Daemon。服务直接运行 Go 二进制，不依赖 Node 包装器，也不另启 Codex app-server。
+Mac Air 已恢复原生用户服务并连接香港，维护窗口、版本与验收结果见 [发布记录](../changes/2026-10-12-release-preflight/VERIFICATION.md)。不要另开前台 Daemon。服务直接运行 Go 二进制，不依赖 Node 包装器，也不另启 Codex app-server。
 
 | 项目 | macOS | Linux |
 | --- | --- | --- |
@@ -80,7 +82,7 @@ node local.mjs --check --controller https://leader.taoai.site
 
 新增物理节点先核对实际远端用户目录、既有控制 socket、原服务和 journal；不能仅凭桌面 IPC 存在就安装并宣称可控。Mac Mini 当前用户目录为 `/Users/macmini`，控制 socket 缺失，尚未安装本项目服务；详见 [接入前置核查](../changes/2026-10-11-macmini-onboarding/VERIFICATION.md)。不要照搬 Mac Air 路径或未经授权启动后端/重启桌面应用。
 
-控制接口缺失不代表必须改变用户桌面配置。本地 SQLite 实验已撤回；新源码的 `--codex-home` 改为纯文件元数据发现，不读取数据库、不创建后端。两机临时 probe 已通过发现测试：Air 17 个、Mini 1 个；Mini 无可用桌面 owner，仍不可发送。本轮没有更新任何运行服务，独立发现与原进程控制不能混为一谈，见 [最新文件发现验证](../changes/2026-10-11-rollout-discovery/VERIFICATION.md)。
+控制接口缺失不代表必须改变用户桌面配置。本地 SQLite 实验已撤回；`--codex-home` 使用纯文件元数据发现，不读取数据库、不创建后端。两机开发期临时 probe 发现 Air 17 个、Mini 1 个；Air 现已正式启用，Mini 未找到可用桌面 owner，仍未安装本项目服务。独立发现与原进程控制不能混为一谈，见 [文件发现验证](../changes/2026-10-11-rollout-discovery/VERIFICATION.md) 与 [当前发布状态](../changes/2026-10-12-release-preflight/VERIFICATION.md)。
 
 下面是**当前 Mac Air 的维护命令**：使用已存在的私有 token、原 state-dir、香港地址和完整技能根目录。不要将它照搬到另一个节点；Linux 应使用该机器原生构建、独立 node-id/token、实际 socket 和技能目录。
 
@@ -94,6 +96,8 @@ go build -o bin/super-leader-daemon .
   --state-dir "$HOME/Workspaces/wechat-super-leader-bot/.runtime/daemon-state" \
   --sock "$HOME/.codex/app-server-control/app-server-control.sock" \
   --desktop-sock "$HOME/.codex/ipc/ipc.sock" \
+  --codex-home "$HOME/.codex" \
+  --desktop-send --heartbeat 15 \
   --skill-root "$HOME/.claude/skills" \
   --skill-root "$HOME/.claude/skills/ego-browser" \
   --skill-root "$HOME/.agents/skills" \
@@ -102,13 +106,15 @@ go build -o bin/super-leader-daemon .
 
 每次安装需显式保留完整运行参数；不自动继承旧服务参数或模型/API 环境。服务定义只包含 `--token-file` 路径，不含 token 明文。state-dir 为 `0700`，token 和 journal 为私有运行数据；安装器拒绝覆盖非本项目服务和不安全的目标文件。
 
-`--desktop-sock` 是可选只读状态来源，默认不启用。Mac Air 指向已运行桌面的 IPC socket；不要将此路径照搬到没有桌面应用的 Linux 节点。两平台服务生成器均保留显式参数。它不执行 resume/start-turn、不取得 writer；订阅期间原桌面会保留 follower，可能推迟空闲 owner 的自动卸载。每个订阅窗口 30 秒，增量只保留状态投影，断连会移除 follower。未知协议、超过 16 MiB 的帧或 revision 不连续时降级；不改变原有控制 socket 的能力。升级桌面应用后重新执行只读探测并验证，不能假定内部协议永远兼容。
+`--desktop-sock` 是可选只读状态来源，默认不启用。Mac Air 指向已运行桌面的 IPC socket；不要将此路径照搬到没有桌面应用的 Linux 节点。两平台服务生成器均保留显式参数。它不执行 resume/start-turn、不取得 writer；订阅期间原桌面会保留 follower，可能推迟空闲 owner 的自动卸载。每个观测窗口 30 秒，增量只保留状态投影，断连会移除 follower。未知协议、超过 32 MiB 的入站帧或 revision 不连续时降级；出站仍限 16 MiB，不改变原有控制 socket 的能力。升级桌面应用后重新执行只读探测并验证，不能假定内部协议永远兼容。
+
+状态 Watch 将发现与订阅分开：最多 16 条单目标订阅连接；同一观察器共享两个帧处理槽，初始化握手以及合法 body 的分配、读取、解码和严格投影完整持槽，释放后才发布标量状态。空闲 header 不占槽，超限 header 不等待槽或读取 body；body 有 5 秒绝对读取期限。连接未满时不做 10 秒轮转，已证明 owner 超过上限才公平轮转。超限、身份不符或断连只撤销对应目标。本设计仍每 30 秒重连整个 Watch，窗口边界可能短暂显示重新检查；不是零抖动保证。发现、Snapshot、控制/资格预检与历史另有开销，两个处理槽不等于进程内存上限 64 MiB。
 
 ```sh
 ./bin/super-leader-daemon --probe --desktop-sock "$HOME/.codex/ipc/ipc.sock"
 ```
 
-新源码还支持独立文件发现的只读检查（须先在项目目录构建，不要误用尚未更新的稳定安装版本）：
+独立文件发现的只读检查（项目二进制须先构建；已安装版本也支持这些参数）：
 
 ```sh
 ./bin/super-leader-daemon --probe \
@@ -116,9 +122,9 @@ go build -o bin/super-leader-daemon .
   --desktop-sock "$HOME/.codex/ipc/ipc.sock"
 ```
 
-`--codex-home` 必须显式提供，不读取 `CODEX_HOME` 默认值；不会创建该目录、journal 或连接 Controller。只扫描未归档目录的完整首条元数据，标题索引仅补已验证 ID。缺失控制接口时返回明确 warning，文件独有会话保持 unknown/read-only；`sources.desktop=true` 仅表示本次 Snapshot 调用成功，必须另看各会话 `desktopObservation.availability`，不能据此声称有可用 owner。如以后正式启用，按既有排空流程更新服务，并在完整 install 参数中显式增加该路径；macOS/Linux 服务生成器都保留它，不自动改桌面 transport。
+`--codex-home` 必须显式提供，不读取 `CODEX_HOME` 默认值；不会创建该目录、journal 或连接 Controller。只扫描未归档目录的完整首条元数据，标题索引仅补已验证 ID。缺失控制接口时返回明确 warning，文件独有会话保持 unknown/read-only；`sources.desktop=true` 仅表示本次 Snapshot 调用成功，必须另看各会话 `desktopObservation.availability`，不能据此声称有可用 owner。Air 已正式启用，其他节点仍须按排空流程更新并在完整 install 参数中显式增加其实际路径；macOS/Linux 服务生成器都保留它，不自动改桌面 transport。
 
-### 原桌面发送开关（本地源码已验证，尚未部署）
+### 原桌面发送开关
 
 `--desktop-sock` 单独使用仍然只读；只有在同一完整安装命令中显式追加 `--desktop-send` 才开启原 owner 发送。该开关默认 false，缺少显式 desktop socket 时启动校验失败。macOS/Linux 服务定义都会保存此参数，但 Linux 构建成功不代表它有可用桌面 owner。
 
@@ -126,9 +132,13 @@ Daemon 在发现精确 owner 后单独执行只读预检（最多两个并发）
 
 Controller/Leader/Web 必须一起更新：服务端选择并持久化新命令的 `sendRoute`，派发前复验同路由；旧记录不补选、不重派。页面显示原桌面通道与不可用原因，资格过期立即禁用。真实发送仍执行同连接 owner 预检；这是私有协议且非原子，不保证与 App 同时人工输入无竞争。
 
-此轮只有本地适配器真实发送及独立数据库/模拟 owner 的跨层测试，未更新香港服务或已安装 Daemon。上线前按下述排空流程核对当前命令/claim并沿用原 journal；不修改 App transport、不另起 app-server、不重启桌面应用。停用时去掉 `--desktop-send`，保留 socket 和原 journal用于精确 turn 只读核查；不能删除数据库或 journal解除 uncertain。见 [接线验收](../changes/2026-10-11-desktop-send-route/VERIFICATION.md)。
+香港与 Air 已完成正式 Cookie 接口到原桌面会话的真实发送、精确 turn 回查和重复请求防重发，见 [发布验收](../changes/2026-10-12-release-preflight/VERIFICATION.md)。后续更新仍按下述排空流程核对当前命令/claim并沿用原 journal；不修改 App transport、不另起 app-server、不重启桌面应用。停用时去掉 `--desktop-send`，保留 socket 和原 journal用于精确 turn 只读核查；不能删除数据库或 journal解除 uncertain。开发期证据见 [接线验收](../changes/2026-10-11-desktop-send-route/VERIFICATION.md)。
 
-更新正在使用的服务前，确认没有 pending/accepted/uncertain 命令与有效 Leader claim；正常排空并停止 Gateway 后再复查，只更新本项目 Controller/Daemon，然后恢复原 Gateway。不要重建微信基线、删除 journal 或重启无关应用。详细最新证据见 [桌面状态观测验收](../changes/2026-10-11-desktop-observation/VERIFICATION.md)。
+更新正在使用的服务前，完整核查 pending/accepted/uncertain 命令、有效 Leader claim，以及所有 active 持久计划（包括尚无命令的 waiting 步骤）。不能以 `/v1/status` 的近 50 条命令和最多 12 个计划判定排空；它不是完整数据库清单，读取还可能把过期命令转为 uncertain。使用数据库只读事务统计全量记录，异常结构也应阻断升级。活动计划须先核查并明确继续或取消，不能为部署直接修改其状态。
+
+先预构建镜像与原生二进制，再正常排空并停止唯一 Gateway，保留其 checkpoint。停止 Gateway 不会停止 Controller 的计划调度，也不会关闭 Web/管理写入口；需冻结其余写入口，并在停止 Controller 后通过仍运行的 PostgreSQL 再次核查，防止检查期间进入新任务。发现未决项时不切换版本、不强杀或清空状态，先恢复原运行路径核验。只更新本项目 Controller/Daemon 后恢复原 Gateway；不重建微信基线、删除 journal 或重启无关应用。
+
+上方完整 Air 安装命令显式包含文件发现 `--codex-home` 和原 owner 发送 `--desktop-send`，不是只读探测命令。保留原 node-id、Controller URL、控制 socket、state-dir、token-file、heartbeat 和全部技能根，不将 desktop socket 替换为 journal 绑定的控制 socket。安装会依次停服务、替换本项目二进制/服务定义再加载，不是整体事务，失败不会自动恢复旧服务。回退发送能力优先去掉 `--desktop-send` 并保留同版只读核查与原 journal，不恢复陈旧数据库。详细路由证据见 [接线验收](../changes/2026-10-11-desktop-send-route/VERIFICATION.md)。
 
 Mac Air 的 journal/token/log 位于 `~/Workspaces/wechat-super-leader-bot/.runtime/daemon-state/`。运行中不要再执行 `node local.mjs --daemon`；独占 journal 会拒绝第二实例，不能删除文件或换空目录绕过。更新二进制不改变 journal 绑定；更换 Controller/node/socket 必须先按下节核验迁移。macOS 文件日志尚未配置轮转，不应将当前安装视为完整长期运维方案。
 
@@ -156,16 +166,13 @@ Gateway 是香港独立 Docker 服务，不依赖 Mac 的轮询进程；Mac 休�
 cd /opt/super-leader
 docker compose --env-file .runtime/controller.env \
   -f compose.yaml -f deploy/compose.production.yaml -f deploy/compose.gateway.yaml \
-  --profile wechat build gateway
+  --profile wechat run --rm --no-deps --no-build --pull never gateway --establish-baseline
 docker compose --env-file .runtime/controller.env \
   -f compose.yaml -f deploy/compose.production.yaml -f deploy/compose.gateway.yaml \
-  --profile wechat run --rm --no-deps gateway --establish-baseline
-docker compose --env-file .runtime/controller.env \
-  -f compose.yaml -f deploy/compose.production.yaml -f deploy/compose.gateway.yaml \
-  --profile wechat up -d --no-deps gateway
+  --profile wechat up -d --no-deps --no-build --pull never gateway
 ```
 
-上述基线命令仅用于首次上线，不是每次更新的步骤。正常更新只 build/up，始终沿用原 state。重复基线被拒绝是保护生效，不能删除 state 绕过。
+上述基线命令仅用于首次上线，且要求已加载并核对 Gateway 镜像，不是每次更新的步骤。正常更新使用开发机/CI 构建并加载的镜像，排空后执行带 `--no-build --pull never` 的 up，始终沿用原 state。重复基线被拒绝是保护生效，不能删除 state 绕过。
 
 ```sh
 docker compose --env-file .runtime/controller.env \
@@ -180,11 +187,11 @@ docker compose --env-file .runtime/controller.env \
 
 同一微信账号不得在两台机器并行轮询。香港启用后，本机 `.runtime/local.json` 的允许名单维持为空，不运行 `node local.mjs --gateway`。停用时只 `stop gateway`，保留账号、state 和数据库；不要 `down -v` 或清除 checkpoint。实际部署与验收结果见 [验证记录](../changes/2026-10-10-control-plane/VERIFICATION.md)。
 
-### 计划终态通知（本地源码已验证，尚未启用）
+### 计划终态通知（代码已部署，尚未启用）
 
 默认关闭。完成、失败或授权到期时，Controller 在计划终态事务内保存一条通知；取消仍通过原请求同步回复，不另外通知。只通知计划 ID、总步数和状态，不附带原会话输出、错误细节或控制台登录凭证。
 
-经确认更新运行服务后，可在既有私有 `.runtime/controller.env` 中显式设置 `GATEWAY_PLAN_NOTIFICATIONS=true`，并沿用上面的排空及 build/up 流程更新 Controller 和 Gateway。该变量仅注入 Gateway，不需要修改模型配置或重建基线。不要运行第二份 Gateway；不要重置 state、cursor、数据库或 journal。若关闭，将变量设为 `false` 后正常更新 Gateway，保留全部通知记录。
+经确认更新运行服务后，可在既有私有 `.runtime/controller.env` 中显式设置 `GATEWAY_PLAN_NOTIFICATIONS=true`，并沿用上面的外部构建、加载、排空及无构建切换流程更新 Controller 和 Gateway。该变量仅注入 Gateway，不需要修改模型配置或重建基线。不要运行第二份 Gateway；不要重置 state、cursor、数据库或 journal。若关闭，将变量设为 `false` 后正常更新 Gateway，保留全部通知记录。
 
 通知列表只请求当前有聊天 context 的目标，并与 Controller 当前允许名单求交；无 context 不领取，超过128个目标会轮转。`--run` 每次入站轮询前最多处理4条，`--poll-once` 在正常入站周期成功后处理。繁忙的模型调用和长轮询可能延迟通知；现有 context 也可能过期，不能保证永久主动触达。
 
@@ -200,7 +207,7 @@ docker compose --env-file .runtime/controller.env \
 
 上述运行证据不替代全链路最终验收。仍需待用户在微信端发起实际入站消息并使用内置浏览器完成点击与登录交互确认。最终验收时由用户在已接入的微信对话发送“给我控制台链接”验证免密登录，并发送：“查看 Mac Air 在线节点和会话”。随后选择明确的专用测试会话，让它仅回复 `WECHAT_OK`、不调用工具不改文件。核对计划中的节点、会话与内容后回复“确认执行”，最后查询原任务结果，核对精确 turnId、completed 和输出。
 
-不能把登录成功、一次发消息 HTTP 200、空轮询或模型模拟测试当作真实微信端到端通过。若目标会话 notLoaded，先由用户在原客户端打开，不隐式 resume 或替换成新会话。
+不能把登录成功、一次发消息 HTTP 200、空轮询或模型模拟测试当作真实微信端到端通过。native notLoaded 不等于原桌面不可控，须单独检查 sendAvailability；只有没有有效发送路线时，才由用户在原客户端打开目标，不隐式 resume 或替换成新会话。
 
 ## 仍需单独验证
 
