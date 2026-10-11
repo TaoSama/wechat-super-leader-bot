@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { DesktopObservationSchema, SendAvailabilitySchema, SendRoute, Session } from "./types.js";
 import { MAX_DESKTOP_OBSERVATION_AGE_MS } from "./session-observation.js";
+import { isTerminalSession } from "./terminal-session.js";
 
 const isoTimestamp = z.string().datetime({ offset: true });
 type SendEligibility = { ready: true; route: SendRoute } | { ready: false; httpStatus: number; reason: string };
@@ -14,6 +15,7 @@ function freshTimestamp(value: unknown, now: number): boolean {
 
 /** A present desktop authority, including an invalid one, never falls back to native control. */
 export function selectSendRoute(session: Session, now = Date.now()): SendEligibility {
+  if (isTerminalSession(session)) return blocked("Terminal sessions support observation only; sending is unavailable");
   if (Object.hasOwn(session, "sendAvailability")) {
     const parsed = SendAvailabilitySchema.safeParse(session.sendAvailability);
     if (!parsed.success || parsed.data.state !== "ready") return blocked("Desktop send authority is unavailable or blocked");

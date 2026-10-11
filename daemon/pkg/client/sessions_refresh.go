@@ -70,7 +70,7 @@ func (d *Daemon) cachedSessions() []protocol.Session {
 			}
 		}
 	}
-	return sessions
+	return append(sessions, cloneSessions(d.terminalSnapshot)...)
 }
 
 func (d *Daemon) refreshSessions(ctx context.Context, updates chan<- struct{}) {

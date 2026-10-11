@@ -20,13 +20,13 @@ type sessionCatalog interface {
 // Persistent files supply identities, never live execution or send authority.
 // In particular, a fresh file scan cannot refresh an old control observation.
 func mergeSessionSources(control, catalog []protocol.Session) []protocol.Session {
-	result := cloneSessions(control)
+	result := cloneSessions(nativeSessions(control))
 	positions := make(map[string]int, len(control))
 	for i := range result {
 		positions[result[i].ID] = i
 	}
 	for _, stored := range catalog {
-		if !protocol.ValidHistoryIdentity(stored.ID) {
+		if !protocol.ValidHistoryIdentity(stored.ID) || isTerminalSession(stored.ID) {
 			continue
 		}
 		if index, exists := positions[stored.ID]; exists {
@@ -96,6 +96,9 @@ func (d *Daemon) refreshCatalogSnapshot(ctx context.Context, updates chan<- stru
 }
 
 func (d *Daemon) readSession(ctx context.Context, sessionID string) (string, error) {
+	if isTerminalSession(sessionID) {
+		return d.readTerminal(ctx, sessionID)
+	}
 	if d.sessionCatalog == nil {
 		return d.adapter.ReadSession(ctx, sessionID)
 	}

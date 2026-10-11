@@ -14,7 +14,9 @@ func (d *Daemon) desktopSessionIDs() []string {
 	sessions := d.cachedSessions()
 	ids := make([]string, 0, len(sessions))
 	for _, session := range sessions {
-		ids = append(ids, session.ID)
+		if !isTerminalSession(session.ID) {
+			ids = append(ids, session.ID)
+		}
 	}
 	sort.Strings(ids)
 	return ids
@@ -35,6 +37,9 @@ func signalSnapshotUpdate(updates chan<- struct{}) {
 }
 
 func (d *Daemon) publishDesktop(id string, observation protocol.DesktopObservation, updates chan<- struct{}) {
+	if isTerminalSession(id) {
+		return
+	}
 	d.snapshotMu.Lock()
 	known := false
 	for _, session := range d.sessionSnapshot {

@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { verifyNodeIsolation } from './test-node-isolation.mjs';
 import { verifyDesktopRoute } from './test-desktop-route.mjs';
+import { verifyTerminalObservation, terminalModelCall, TERMINAL_NODE } from './test-terminal-observation.mjs';
 import { verifyPlanStore } from './test-plan-store.mjs';
 import { verifyPlanConfirmationStore } from './test-plan-confirmation-store.mjs';
 import { verifyNotificationStore } from './test-notification-store.mjs';
@@ -39,6 +40,7 @@ async function main() {
   const nodeToken = randomBytes(24).toString('hex');
   const isolationTokens = Object.fromEntries(['scope-node-a', 'scope-node-b'].map(id => [id, randomBytes(24).toString('hex')]));
   const desktopToken = randomBytes(24).toString('hex');
+  const terminalToken = randomBytes(24).toString('hex');
   const planToken = randomBytes(24).toString('hex');
   const name = `super-leader-test-${randomUUID()}`;
   const docker = (args) => execFileSync('docker', args, {
@@ -81,8 +83,10 @@ async function main() {
           let message = { role: 'assistant', content: 'Mock model response' };
           const call = (name, args) => ({ role: 'assistant', content: null, tool_calls: [{ id: `mock-${name}`, type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
           const planCall = planModelCall(last.content);
+          const terminalCall = terminalModelCall(last.content);
           if (last.type === 'function_call_output') message.content = `Tool evidence: ${last.output}`;
           else if (planCall) message = call(planCall.name, planCall.args);
+          else if (terminalCall) message = call(terminalCall.name, terminalCall.args);
           else if (last.content === '请记住测试偏好') message = call('remember', { key: 'test-preference', value: '中文' });
           else if (last.content === '查询已记住的偏好') message = call('recall', {});
           else if (last.content === '查询桌面模型') message = call('list_sessions', { nodeId: 'desktop-fixture-node' });
@@ -104,7 +108,7 @@ async function main() {
     const env = {
       ...process.env, HOST: '127.0.0.1', PORT: String(port), PERSISTENCE_MODE: 'postgres',
       DATABASE_URL: `postgresql://leader:${password}@127.0.0.1:${dbPort}/leader`,
-      CONTROLLER_TOKEN: token, NODE_TOKENS: JSON.stringify({ [values.live ? 'macair' : 'test-node']: nodeToken, ...(!values.live ? { ...isolationTokens, 'desktop-fixture-node': desktopToken, [PLAN_NODE]: planToken } : {}) }),
+      CONTROLLER_TOKEN: token, NODE_TOKENS: JSON.stringify({ [values.live ? 'macair' : 'test-node']: nodeToken, ...(!values.live ? { ...isolationTokens, 'desktop-fixture-node': desktopToken, [TERMINAL_NODE]: terminalToken, [PLAN_NODE]: planToken } : {}) }),
       CONSOLE_PUBLIC_URL: base,
       ALLOWED_CHAT_IDS: 'test-chat,' + PLAN_CHAT,
       LEADER_MODE: values.live ? 'rules' : 'model',
@@ -225,6 +229,7 @@ async function main() {
     }
     assert([401, 403].includes((await request('/v1/status', undefined, false)).status));
     await verifyNodeIsolation({ WebSocket, base, request, nodeTokens: isolationTokens, waitFor });
+    await verifyTerminalObservation({ base, request, nodeToken: terminalToken, waitFor });
     const desktopReceipt = await verifyDesktopRoute({ base, request, nodeToken: desktopToken, waitFor });
     const denied = await request('/v1/messages', { chatId: 'not-allowed', messageId: 'deny', text: '列出会话' });
     assert([401, 403].includes(denied.status), 'Chat allowlist must reject unauthorized senders');

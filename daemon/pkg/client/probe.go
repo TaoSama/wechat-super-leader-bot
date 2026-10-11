@@ -18,9 +18,10 @@ type SessionProbe struct {
 }
 
 type ProbeSources struct {
-	Control bool `json:"control"`
-	Catalog bool `json:"catalog"`
-	Desktop bool `json:"desktop"`
+	Control  bool `json:"control"`
+	Catalog  bool `json:"catalog"`
+	Desktop  bool `json:"desktop"`
+	Terminal bool `json:"terminal"`
 }
 
 type discoveryResult struct {
@@ -32,6 +33,14 @@ type discoveryResult struct {
 // native backend. Partial availability is reported explicitly, not as control.
 func (d *Daemon) Probe(ctx context.Context) (SessionProbe, error) {
 	result := SessionProbe{Sessions: []protocol.Session{}, Warnings: []string{}}
+	var terminalResult chan discoveryResult
+	if d.terminalObserver != nil {
+		terminalResult = make(chan discoveryResult, 1)
+		go func() {
+			sessions, err := d.discoverTerminal(ctx)
+			terminalResult <- discoveryResult{sessions, err}
+		}()
+	}
 	controlResult := make(chan discoveryResult, 1)
 	go func() {
 		controlCtx, cancel := context.WithTimeout(ctx, probeControlTimeout)
@@ -55,6 +64,16 @@ func (d *Daemon) Probe(ctx context.Context) (SessionProbe, error) {
 		}
 	}
 	control := <-controlResult
+	var terminal []protocol.Session
+	if terminalResult != nil {
+		observed := <-terminalResult
+		result.Sources.Terminal = observed.err == nil
+		if result.Sources.Terminal {
+			terminal = observed.sessions
+		} else {
+			result.Warnings = append(result.Warnings, "Terminal observation unavailable; terminal sessions remain read-only")
+		}
+	}
 	if ctx.Err() != nil {
 		return result, ctx.Err()
 	}
@@ -63,18 +82,25 @@ func (d *Daemon) Probe(ctx context.Context) (SessionProbe, error) {
 		control.sessions = nil
 		result.Warnings = append(result.Warnings, "Shared control unavailable; file discovery does not grant send capability")
 	}
-	if !result.Sources.Control && !result.Sources.Catalog {
+	if !result.Sources.Control && !result.Sources.Catalog && !result.Sources.Terminal {
 		return result, errors.New("no session discovery source available")
 	}
 	result.Sessions = mergeSessionSources(control.sessions, catalog)
+	result.Sessions = append(result.Sessions, terminal...)
 	if d.desktopObserver == nil || len(result.Sessions) == 0 {
 		return result, nil
 	}
 	ids := make([]string, 0, len(result.Sessions))
 	positions := make(map[string]int, len(result.Sessions))
 	for i, session := range result.Sessions {
+		if isTerminalSession(session.ID) {
+			continue
+		}
 		ids = append(ids, session.ID)
 		positions[session.ID] = i
+	}
+	if len(ids) == 0 {
+		return result, nil
 	}
 	observer, ok := d.desktopObserver.(interface {
 		Snapshot(context.Context, []string, func(string, protocol.DesktopObservation)) error

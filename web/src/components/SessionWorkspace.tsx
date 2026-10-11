@@ -10,6 +10,7 @@ import { formatRelativeAge, formatTimestamp, projectName } from "../format";
 import { describeDesktopObservation, MAX_DESKTOP_OBSERVATION_AGE_MS, selectExecutionObservation } from "../session-observation";
 import { MAX_SEND_AVAILABILITY_AGE_MS, sendRouteLabel } from "../send-availability";
 import { modelSourceLabel, selectModelObservation } from "../model-observation";
+import { isTerminalSession, MAX_TERMINAL_OBSERVATION_AGE_MS } from "../terminal-session";
 
 interface Props {
   data: ControlPlaneStatusResponse;
@@ -21,7 +22,7 @@ interface Props {
   requestedSessionRevision?: number;
 }
 
-const STATUS_NAMES: Record<string, string> = { idle: "空闲", active: "执行中", busy: "执行中", running: "执行中", notLoaded: "未加载", unknown: "状态未知" };
+const STATUS_NAMES: Record<string, string> = { idle: "空闲", active: "执行中", busy: "执行中", running: "执行中", blocked: "等待处理", notLoaded: "未加载", unknown: "状态未知" };
 
 export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = true, requestedSessionKey, requestedSessionRevision }: Props) {
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -30,11 +31,12 @@ export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = t
   const [observationRevision, setObservationRevision] = useState(0);
   const observationNow = Date.now();
   const selected = data.sessions.find((session) => sessionKey(session) === selectedKey) ?? null;
+  const selectedTerminal = !!selected && isTerminalSession(selected);
   const selectedObservation = selected ? selectExecutionObservation(selected, observationNow) : null;
   const selectedModel = selected ? selectModelObservation(selected, observationNow) : null;
-  const selectedDesktopDescription = describeDesktopObservation(selected?.desktopObservation, observationNow);
+  const selectedDesktopDescription = selectedTerminal ? null : describeDesktopObservation(selected?.desktopObservation, observationNow);
   const connected = nodes.some((node) => node.nodeId === selected?.nodeId && node.connected);
-  const history = useSessionHistory(selected, connected && active, onAuthFailure);
+  const history = useSessionHistory(selectedTerminal ? null : selected, connected && active, onAuthFailure);
   const messages = useSessionMessages(selected, onAuthFailure);
   const blockReason = sendBlockReason(selected, connected, stale, observationNow);
   const submission = messages.submission;
@@ -65,6 +67,7 @@ export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = t
       const desktop = session.desktopObservation;
       const observedAt = desktop?.observedAt ? Date.parse(desktop.observedAt) : NaN;
       const candidates: number[] = [];
+      if (isTerminalSession(session)) candidates.push(Date.parse(session.observedAt) + MAX_TERMINAL_OBSERVATION_AGE_MS);
       if (desktop?.availability === "available" && observedAt <= now) candidates.push(observedAt + MAX_DESKTOP_OBSERVATION_AGE_MS);
       if (session.sendAvailability?.state === "ready") candidates.push(Date.parse(session.sendAvailability.validUntil));
       if (!session.sendAvailability && session.loaded === true) candidates.push(Date.parse(session.observedAt) + MAX_SEND_AVAILABILITY_AGE_MS);
@@ -105,11 +108,12 @@ export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = t
             <h3><Server size={14} aria-hidden="true" /><span>{node.nodeId}</span><span className={`connection ${node.connected ? "online" : "offline"}`}>{node.connected ? "在线" : "离线"}</span></h3>
             {sessions.map((session) => {
               const { executionStatus } = selectExecutionObservation(session, observationNow);
-              const desktopDescription = describeDesktopObservation(session.desktopObservation, observationNow);
+              const terminal = isTerminalSession(session);
+              const desktopDescription = terminal ? null : describeDesktopObservation(session.desktopObservation, observationNow);
               const model = selectModelObservation(session, observationNow);
               return <button key={sessionKey(session)} type="button" className={`session-choice ${sessionKey(session) === selectedKey ? "selected" : ""}`} aria-pressed={sessionKey(session) === selectedKey} onClick={() => setSelectedKey(sessionKey(session))} data-testid={`session-row-${session.nodeId}-${session.id}`}>
               <span className="session-title-line"><span className="session-title">{session.title || "未命名会话"}</span><span className={`session-state state-${executionStatus}`}>{STATUS_NAMES[executionStatus] || executionStatus}</span></span>
-              <span className="session-preview" title={desktopDescription ?? undefined}>{session.preview || "暂无消息摘要 · 打开查看历史"}{desktopDescription && ` · ${desktopDescription}`}</span>
+              <span className="session-preview" title={desktopDescription ?? undefined}>{terminal ? "终端观测 · 只读状态，非对话历史" : session.preview || "暂无消息摘要 · 打开查看历史"}{desktopDescription && ` · ${desktopDescription}`}</span>
               <span className="session-bottom-line"><span className="session-model" title={modelSourceLabel(model.source)}>{model.model || "模型未报告"}</span><span className="session-project" title={session.cwd}>{projectName(session.cwd)}</span><time title={formatTimestamp(session.updatedAt || session.observedAt)}>{formatRelativeAge(session.updatedAt || session.observedAt)}</time></span>
             </button>;
             })}
@@ -127,10 +131,10 @@ export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = t
           <div className="detail-title"><h2 ref={headingRef} tabIndex={-1} title={selected.title || "未命名会话"}>{selected.title || "未命名会话"}</h2><span className="status-label">{STATUS_NAMES[selectedObservation!.executionStatus] || selectedObservation!.executionStatus}</span></div>
           {selectedDesktopDescription && <div className="detail-subline"><span>{selectedDesktopDescription}</span><span>控制接口：{STATUS_NAMES[selected.status] || selected.status}</span></div>}
           <div className="detail-subline"><span className="detail-model" title={modelSourceLabel(selectedModel!.source)}>{selectedModel?.model || "模型未报告"}</span><span>{selected.nodeId}</span><span title={selected.cwd}>{projectName(selected.cwd)}</span><details className="session-metadata"><summary>会话详情</summary><dl><div><dt>标题</dt><dd>{selected.title || "未命名会话"}</dd></div><div><dt>工作目录</dt><dd>{selected.cwd || "目录未报告"}</dd></div><div><dt>Provider</dt><dd>{selectedModel?.modelProvider || "未报告"}</dd></div><div><dt>推理强度</dt><dd>{selectedModel?.reasoningEffort || "未报告"}</dd></div><div><dt>模型来源</dt><dd>{modelSourceLabel(selectedModel!.source)}</dd></div><div><dt>模型观测时间</dt><dd>{selectedModel?.observedAt ? formatTimestamp(selectedModel.observedAt) : "未报告"}</dd></div><div><dt>会话 ID</dt><dd>{selected.id}</dd></div><div><dt>最近更新</dt><dd>{formatTimestamp(selected.updatedAt || selected.observedAt)}</dd></div></dl></details></div>
-          <div className="history-controls"><span>{history.history ? `历史更新于 ${formatDate(history.history.fetchedAt)}` : "正在准备会话历史"}</span><button type="button" onClick={() => void history.refresh()} disabled={history.loadingLatest || !connected || history.contextExpired} aria-label="刷新会话历史"><RefreshCw size={14} aria-hidden="true" />刷新历史</button></div>
+          {selectedTerminal ? <div className="detail-subline"><span>终端观测 · {selected.provider}</span><span>观测于 {formatTimestamp(selected.observedAt)}</span></div> : <div className="history-controls"><span>{history.history ? `历史更新于 ${formatDate(history.history.fetchedAt)}` : "正在准备会话历史"}</span><button type="button" onClick={() => void history.refresh()} disabled={history.loadingLatest || !connected || history.contextExpired} aria-label="刷新会话历史"><RefreshCw size={14} aria-hidden="true" />刷新历史</button></div>}
           {history.contextExpired && <div role="alert" className="notice error history-context-notice">{history.error}<button type="button" disabled={!connected} onClick={() => void history.resetLatest()}>重新读取最新页</button></div>}
         </header>
-        <div className="history-scroll" ref={scroll.scrollRef} tabIndex={0} aria-label="会话历史" onScroll={scroll.onScroll}>
+        {selectedTerminal ? <div className="history-scroll" aria-label="终端观测说明"><div className="history-content"><p>此会话仅提供终端运行状态，尚未接入完整对话历史与发送。</p><p>可在微信中明确询问这个会话的最新输出，读取有限终端快照。快照可能裁剪，不是完整对话记录。</p><p>空闲仅是终端宿主报告的生命周期状态，不代表某项任务已完成。模型未提供可信信息时不作推断。</p></div></div> : <div className="history-scroll" ref={scroll.scrollRef} tabIndex={0} aria-label="会话历史" onScroll={scroll.onScroll}>
           <div className="history-content">
             {history.history?.nextCursor && <button type="button" className="older-button" disabled={history.loadingOlder} onClick={() => void scroll.loadOlder()}>{history.loadingOlder ? "正在读取更早消息…" : "加载更早的消息"}</button>}
             {history.windowNotice && <div className="history-window-notice" role="status">{history.windowNotice}{!history.contextExpired && <button type="button" className="text-button" disabled={history.loadingLatest} onClick={() => void history.resetLatest()}>仅保留最新消息</button>}</div>}
@@ -141,8 +145,8 @@ export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = t
             {history.history && !history.history.items.length && <p className="history-loading">这段会话暂时没有可显示的消息</p>}
             {history.history?.truncated && <p className="muted">部分历史内容已裁剪</p>}
           </div>
-        </div>
-        {scroll.newContent && <button type="button" className="new-message-button" onClick={scroll.jumpLatest}><ArrowDown size={16} aria-hidden="true" />有新消息 · 跳到最新</button>}
+        </div>}
+        {!selectedTerminal && scroll.newContent && <button type="button" className="new-message-button" onClick={scroll.jumpLatest}><ArrowDown size={16} aria-hidden="true" />有新消息 · 跳到最新</button>}
         <form className="composer" onSubmit={(event) => { event.preventDefault(); send(); }}>
           {submission && <div className={`send-receipt ${submission.uncertain ? "receipt-uncertain" : ""}`} role="status">
             <span>{submission.command ? COMMAND_STATUS_SEMANTICS[submission.command.status].label : "提交结果待核查"}</span>
@@ -152,7 +156,7 @@ export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = t
             {submission.command?.status === "completed" && submission.command.output && <details><summary>查看最终回执</summary><pre>{submission.command.output}</pre></details>}
           </div>}
           {messages.error && <p role="alert" className="composer-error">{messages.error}</p>}
-          {selected.sendAvailability && <p className="composer-route" role="status">{blockReason ? "原桌面发送通道 · 暂不可用" : "通过原桌面会话发送 · 保留原会话设置"}</p>}
+          {!selectedTerminal && selected.sendAvailability && <p className="composer-route" role="status">{blockReason ? "原桌面发送通道 · 暂不可用" : "通过原桌面会话发送 · 保留原会话设置"}</p>}
           <label className="composer-label" htmlFor="message-draft">发送给当前会话<span aria-hidden="true">{selectedModel?.model || "模型未报告"}</span></label>
           <textarea aria-label="发送给当前会话" id="message-draft" rows={3} value={messages.draft} onChange={(event) => messages.setDraft(event.target.value)} placeholder="继续这个会话…" disabled={messages.sending || pending} onCompositionStart={() => { composingRef.current = true; }} onCompositionEnd={() => { composingRef.current = false; }} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && !composingRef.current && event.keyCode !== 229) { event.preventDefault(); send(); } }} />
           <div className="composer-footer"><span id="send-guidance" role="status">{blockReason || (pending ? "正在核查本次发送，请等待回执" : "Enter 发送 · Shift + Enter 换行")}</span><button type="submit" className="send-button" aria-describedby="send-guidance" disabled={!!blockReason || pending || messages.sending || !messages.draft.trim()}><Send size={16} aria-hidden="true" />{messages.sending ? "发送中…" : "发送消息"}</button></div>

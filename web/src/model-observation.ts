@@ -1,5 +1,6 @@
 import type { ScopedSession } from "./types";
 import { isDesktopObservationFresh, isIsoTimestamp, normalizeModelField } from "./session-observation";
+import { isTerminalSession } from "./terminal-session";
 
 export interface ModelObservation {
   model?: string;
@@ -9,10 +10,11 @@ export interface ModelObservation {
   observedAt?: string;
 }
 
-type ModelSession = Pick<ScopedSession, "model" | "modelProvider" | "reasoningEffort" | "observedAt" | "desktopObservation">;
+type ModelSession = Pick<ScopedSession, "model" | "modelProvider" | "reasoningEffort" | "observedAt" | "desktopObservation"> & Partial<Pick<ScopedSession, "id" | "provider">>;
 
 /** Select an entire read-only group; never combine settings from two sources. */
 export function selectModelObservation(session: ModelSession, now = Date.now()): ModelObservation {
+  if (isTerminalSession(session)) return { source: "unknown" };
   const desktop = session.desktopObservation;
   const desktopModel = normalizeModelField(desktop?.model);
   if (desktopModel && desktop && isIsoTimestamp(desktop.observedAt) && isDesktopObservationFresh(desktop, now)) {
