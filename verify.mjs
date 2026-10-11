@@ -33,7 +33,7 @@ export function verificationPlan(suite = 'all') {
     step('cli-and-tool-tests', process.execPath, ['--test', 'verify.test.mjs', 'scripts/compose-command.test.mjs',
       'scripts/verification-env.test.mjs', 'scripts/test-cleanup.test.mjs',
       'local.test.mjs', 'test-live-session.test.mjs', 'test-wechat-model.test.mjs',
-      'deploy/authorize-wechat.test.mjs', 'deploy/register-node.test.mjs']),
+      'deploy/authorize-wechat.test.mjs', 'deploy/register-node.test.mjs', 'deploy/image-build.test.mjs']),
     step('daemon-race', 'go', ['test', '-race', '-count=1', './...'], 'daemon'),
     step('daemon-vet', 'go', ['vet', './...'], 'daemon'),
     step('daemon-build', 'go', ['build', './...'], 'daemon'),
