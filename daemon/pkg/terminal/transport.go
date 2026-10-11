@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"reflect"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -28,6 +29,8 @@ type rpcClient struct {
 	timeout    time.Duration
 	stopCancel func() bool
 	cancelDone chan error
+	closeOnce  sync.Once
+	closeErr   error
 }
 
 func dialRPC(ctx context.Context, socket string, timeout time.Duration) (*rpcClient, error) {
@@ -41,16 +44,18 @@ func dialRPC(ctx context.Context, socket string, timeout time.Duration) (*rpcCli
 }
 
 func (c *rpcClient) close() error {
-	var err error
-	if c.stopCancel() {
-		err = c.conn.Close()
-	} else {
-		err = <-c.cancelDone
-	}
-	if err != nil && !errors.Is(err, net.ErrClosed) {
-		return errors.New("terminal connection cleanup failed")
-	}
-	return nil
+	c.closeOnce.Do(func() {
+		var err error
+		if c.stopCancel() {
+			err = c.conn.Close()
+		} else {
+			err = <-c.cancelDone
+		}
+		if err != nil && !errors.Is(err, net.ErrClosed) {
+			c.closeErr = errors.New("terminal connection cleanup failed")
+		}
+	})
+	return c.closeErr
 }
 
 func safeIOError(ctx context.Context, err error) error {
@@ -75,15 +80,30 @@ func requestID() (string, error) {
 }
 
 func (c *rpcClient) call(method string, params any, result any) error {
+	return c.callContext(c.ctx, method, params, result)
+}
+
+func (c *rpcClient) callContext(ctx context.Context, method string, params any, result any) error {
 	if method != "ping" && method != "agent.get" && method != "pane.read" {
 		return errors.New("terminal method is not read-only")
 	}
-	if err := c.ctx.Err(); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	id, err := requestID()
 	if err != nil {
 		return err
+	}
+	_, err = c.roundTrip(ctx, method, id, params, result, nil)
+	return err
+}
+
+// Shared framing is private. Only callContext's read-only whitelist and the
+// separately typed prompt entry may choose a method. attempted flips before
+// the first Write call, even when Write returns zero bytes with an error.
+func (c *rpcClient) roundTrip(ctx context.Context, method, id string, params any, result any, beforeWrite func() error) (attempted bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 	request, err := json.Marshal(struct {
 		ID     string `json:"id"`
@@ -91,29 +111,38 @@ func (c *rpcClient) call(method string, params any, result any) error {
 		Params any    `json:"params"`
 	}{id, method, params})
 	if err != nil {
-		return errors.New("terminal request encoding failed")
+		return false, errors.New("terminal request encoding failed")
 	}
 	deadline := time.Now().Add(c.timeout)
-	if ctxDeadline, ok := c.ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
 		deadline = ctxDeadline
 	}
 	if err := c.conn.SetDeadline(deadline); err != nil {
-		return safeIOError(c.ctx, err)
+		return false, safeIOError(ctx, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 	request = append(request, '\n')
 	for len(request) > 0 {
+		if !attempted && beforeWrite != nil {
+			if err := beforeWrite(); err != nil {
+				return false, err
+			}
+		}
+		attempted = true
 		n, err := c.conn.Write(request)
 		if err != nil {
-			return safeIOError(c.ctx, err)
+			return attempted, safeIOError(ctx, err)
 		}
 		if n == 0 {
-			return errors.New("terminal request write failed")
+			return attempted, errors.New("terminal request write failed")
 		}
 		request = request[n:]
 	}
 	line, err := c.readLine()
 	if err != nil {
-		return err
+		return attempted, err
 	}
 	var response struct {
 		ID     string          `json:"id"`
@@ -121,14 +150,14 @@ func (c *rpcClient) call(method string, params any, result any) error {
 		Error  json.RawMessage `json:"error"`
 	}
 	if err := strictDecode(line, &response); err != nil {
-		return err
+		return attempted, err
 	}
 	if response.ID != id {
-		return errors.New("terminal response identity mismatch")
+		return attempted, errors.New("terminal response identity mismatch")
 	}
 	hasResult, hasError := response.Result != nil, response.Error != nil
 	if hasResult == hasError {
-		return errors.New("terminal response must contain exactly one result or error")
+		return attempted, errors.New("terminal response must contain exactly one result or error")
 	}
 	if hasError {
 		var hostError struct {
@@ -136,14 +165,14 @@ func (c *rpcClient) call(method string, params any, result any) error {
 			Message *string `json:"message"`
 		}
 		if err := strictDecode(response.Error, &hostError); err != nil {
-			return err
+			return attempted, err
 		}
 		if hostError.Code == nil || hostError.Message == nil {
-			return errors.New("terminal error schema is invalid")
+			return attempted, errors.New("terminal error schema is invalid")
 		}
-		return errors.New("terminal host rejected read-only request")
+		return attempted, errors.New("terminal host rejected request")
 	}
-	return strictDecode(response.Result, result)
+	return attempted, strictDecode(response.Result, result)
 }
 
 func (c *rpcClient) readLine() ([]byte, error) {

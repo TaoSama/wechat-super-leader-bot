@@ -1,5 +1,6 @@
-// Package terminal observes explicitly selected existing terminal agents. It
-// does not start agents, resolve focus, read transcript files, or send input.
+// Package terminal observes explicitly selected existing terminal agents and
+// provides an opt-in low-level input delivery object. Observation is read-only;
+// neither path starts agents, resolves focus, or reads transcript files.
 package terminal
 
 import (

@@ -35,6 +35,7 @@ export function verificationPlan(suite = 'all') {
       'local.test.mjs', 'test-live-session.test.mjs', 'test-wechat-model.test.mjs',
       'deploy/authorize-wechat.test.mjs', 'deploy/register-node.test.mjs', 'deploy/image-build.test.mjs']),
     step('daemon-race', 'go', ['test', '-race', '-count=1', './...'], 'daemon'),
+    step('terminal-delivery-sample', 'go', ['run', '-race', './examples/terminal-delivery', '--run'], 'daemon'),
     step('daemon-vet', 'go', ['vet', './...'], 'daemon'),
     step('daemon-build', 'go', ['build', './...'], 'daemon'),
     step('daemon-linux-build', 'go', ['build', './...'], 'daemon', { GOOS: 'linux', GOARCH: 'amd64', CGO_ENABLED: '0' })];
