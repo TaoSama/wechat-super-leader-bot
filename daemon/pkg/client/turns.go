@@ -74,6 +74,7 @@ func (d *Daemon) InspectTurn(ctx context.Context, msg protocol.InspectTurnMessag
 		return res
 	}
 	res.Output = turn.Output
+	res.OutputPresent = turn.Status == "completed" && turn.Output == ""
 	return res
 }
 

@@ -148,7 +148,7 @@ export const DaemonResultMessageSchema = z.object({
   type: z.literal("result"),
   commandId: z.string().min(1),
   status: DaemonResultStatusSchema,
-  output: z.string().default(""),
+  output: z.string().optional(),
   error: z.string().optional(),
   turnId: TurnIdSchema.optional(),
   inputReceipt: InputReceiptSchema.optional(),
@@ -156,7 +156,8 @@ export const DaemonResultMessageSchema = z.object({
   message: "Accepted receipt requires a turn ID",
   path: ["turnId"],
 }).refine(value => value.status === "input-written"
-  ? value.inputReceipt !== undefined && value.turnId === undefined && value.output === "" && value.error === undefined
+  ? value.inputReceipt !== undefined && value.turnId === undefined &&
+    (value.output === undefined || value.output === "") && value.error === undefined
   : value.inputReceipt === undefined, "Input-written requires only a precise input receipt and empty output");
 export type DaemonResultMessage = z.infer<typeof DaemonResultMessageSchema>;
 

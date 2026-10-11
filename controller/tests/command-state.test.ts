@@ -67,6 +67,15 @@ async function fixture(kind: string, record = command()): Promise<{ store: IStor
 }
 
 describe.each(["memory", "postgres"])("%s shared command state boundary", kind => {
+  it.each([undefined, "", "final"])("does not substitute acceptance output for completed output: %j", async output => {
+    const { store } = await fixture(kind);
+    await store.updateCommandStatus("command", "accepted", "not a final result", undefined, "turn");
+    await store.updateCommandStatus("command", "completed", output, undefined, "turn");
+    expect((await store.getCommand("command"))?.output).toBe(output);
+    await store.updateCommandStatus("command", "completed", "late result", undefined, "turn");
+    expect((await store.getCommand("command"))?.output).toBe(output);
+  });
+
   it("rejects missing, malformed and unbound completion IDs without modifying storage", async () => {
     const { store, pool } = await fixture(kind);
     const initial = await store.getCommand("command");

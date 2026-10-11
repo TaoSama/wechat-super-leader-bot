@@ -509,10 +509,11 @@ func (d *Daemon) executeVolatileCommand(ctx context.Context, cmd protocol.Contro
 			}
 		} else {
 			res = protocol.DaemonResultMessage{
-				Type:      "result",
-				CommandID: cmdID,
-				Status:    protocol.StatusCompleted,
-				Output:    output,
+				Type:          "result",
+				CommandID:     cmdID,
+				Status:        protocol.StatusCompleted,
+				Output:        output,
+				OutputPresent: output == "",
 			}
 		}
 

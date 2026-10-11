@@ -83,15 +83,18 @@ type DaemonHeartbeatMessage struct {
 	Skills   []skills.Skill `json:"skills"`
 }
 
-// DaemonResultMessage: {type:"result",commandId,status,output,error?}
+// DaemonResultMessage: {type:"result",commandId,status,output?,error?}
 type DaemonResultMessage struct {
-	Type         string             `json:"type"`
-	CommandID    string             `json:"commandId"`
-	Status       DaemonResultStatus `json:"status"`
-	Output       string             `json:"output"`
-	Error        string             `json:"error,omitempty"`
-	TurnID       string             `json:"turnId,omitempty"`
-	InputReceipt *InputReceipt      `json:"inputReceipt,omitempty"`
+	Type      string             `json:"type"`
+	CommandID string             `json:"commandId"`
+	Status    DaemonResultStatus `json:"status"`
+	Output    string             `json:"-"`
+	// OutputPresent distinguishes a recorded empty result from no result.
+	// Non-empty Output also implies presence for existing string-based callers.
+	OutputPresent bool          `json:"-"`
+	Error         string        `json:"error,omitempty"`
+	TurnID        string        `json:"turnId,omitempty"`
+	InputReceipt  *InputReceipt `json:"inputReceipt,omitempty"`
 }
 
 // InspectTurnMessage is read-only reconciliation, never a request to start a turn.

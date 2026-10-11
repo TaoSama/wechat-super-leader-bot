@@ -59,6 +59,7 @@ func TestTerminalSendDurableExactInputReplayAndAck(t *testing.T) {
 	if res.Status != protocol.StatusInputWritten || res.InputReceipt == nil || res.Output != "" || res.TurnID != "" || res.Error != "" || h.prompt() != cmd.Prompt || a.sends.Load() != 0 {
 		t.Fatalf("wrong result: %+v", res)
 	}
+	requireResultOutput(t, res, false)
 	digest := sha256.Sum256([]byte(cmd.Prompt))
 	if res.InputReceipt.PromptSHA256 != fmt.Sprintf("%x", digest) {
 		t.Fatal("digest not raw input")

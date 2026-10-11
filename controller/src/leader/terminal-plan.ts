@@ -7,7 +7,7 @@ import { hasTerminalTarget } from "./execution.js";
 export const TERMINAL_INPUT_WARNING = "原终端输入 · 非原子：CLI 退出、同类进程替换或人工输入可能与投递竞态。输入已写入不表示 Agent 已开始、成功或完成；不自动重发，也不解锁依赖。";
 
 export function assertTerminalSingleStep(plan: Pick<Plan, "actions">): void {
-  if (hasTerminalTarget(plan) && (plan.actions.length !== 1 || plan.actions[0].dependsOn.length !== 0)) {
+  if (hasTerminalTarget(plan) && (plan.actions.length !== 1 || plan.actions[0].dependsOn.length !== 0 || (plan.actions[0].resultFrom?.length ?? 0) !== 0)) {
     throw new CommandError(409, "终端输入无法证明任务完成，只支持独立单步，不能加入多步或依赖计划");
   }
 }

@@ -188,7 +188,7 @@ it("does not dispatch a stored plan with invalid dependencies", async () => {
   saved.data.pending!.actions[0].dependsOn = [1];
   await f.store.compareAndSetLeaderState("chat", saved.revision, saved.data);
   const reply = await f.leader().handle("chat", "c", "确认执行");
-  expect(reply.text).toContain("计划依赖无效");
+  expect(reply.text).toContain("计划依赖或结果来源无效");
   expect(f.hub.sendCommand).not.toHaveBeenCalled();
 });
 

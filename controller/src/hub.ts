@@ -296,7 +296,7 @@ export class NodeHub {
       if (waiter) {
         if (persisted) waiter({ type: "result", commandId: persisted.commandId,
           status: persisted.status === "pending" ? "uncertain" : persisted.status,
-          turnId: persisted.turnId, inputReceipt: persisted.inputReceipt, output: persisted.output ?? "", error: persisted.error });
+          turnId: persisted.turnId, inputReceipt: persisted.inputReceipt, output: persisted.output, error: persisted.error });
       }
     }
   }

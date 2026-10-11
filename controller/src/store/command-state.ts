@@ -53,7 +53,8 @@ export function nextCommandState(cmd: CommandRecord, status: CommandRecord["stat
   if (cmd.status === "completed" || cmd.status === "failed" || cmd.status === "input-written") return cmd;
   return { ...cmd, status, turnId: turnId ?? cmd.turnId,
     ...(inputReceipt ? { inputReceipt: structuredClone(inputReceipt) } : {}),
-    output: output ?? cmd.output,
+    // An acceptance snapshot is not the completed turn's recorded result.
+    output: status === "completed" ? output : output ?? cmd.output,
     error: error ?? (status === "uncertain" || status === "pending" ? cmd.error : undefined),
     updatedAt: new Date().toISOString() };
 }

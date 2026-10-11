@@ -34,6 +34,27 @@ function stepDescription(step: ConsoleExecutionStep, plan: ConsoleExecution, pau
     cancelled: "未领取的后续已取消；不会停止原会话已有任务。", expired: "后续派发授权已过期。" }[step.status];
 }
 
+function ResultSources({ step }: { step: ConsoleExecutionStep }) {
+  if (!step.resultFrom.length) return null;
+  if (!step.resultSources) return <p className="execution-input-note">将使用步骤 {step.resultFrom.join("、")} 的已记录输出；尚未冻结资料。</p>;
+  return <div className="execution-input">
+    <p className="execution-input-note">已冻结输入资料 · 冻结不代表已送达</p>
+    <ul className="execution-source-list">{step.resultSources.map(source => <li key={source.step}>
+      <span>步骤 {source.step}</span>
+      <span className={source.truncated ? "execution-source-truncated" : ""}>{source.outputLength === 0 ? "已记录输出为空" : source.truncated ? `已裁剪 · 引用 ${source.excerptLength} / ${source.outputLength} 字符` : `未裁剪 · 引用 ${source.excerptLength} 字符`}</span>
+    </li>)}</ul>
+    <details className="execution-source-details"><summary>来源核对详情<ChevronDown size={14} aria-hidden="true" /></summary>
+      <p className="execution-source-boundary">仅展示已记录输出的身份与长度，不展示正文；未裁剪不等于原会话完整结果。字符按 Unicode 码点计。</p>
+      {step.resultSources.map(source => <dl className="execution-receipt" key={source.step} aria-label={`步骤 ${source.step} 的冻结来源`}>
+        <div><dt>来源步骤</dt><dd>{source.step}</dd></div>
+        <div><dt>命令</dt><dd>{source.commandId}</dd></div>
+        <div><dt>精确 Turn</dt><dd>{source.turnId}</dd></div>
+        <div><dt>记录 SHA256</dt><dd>{source.outputSHA256}</dd></div>
+      </dl>)}
+    </details>
+  </div>;
+}
+
 export function ExecutionsSection({ executions, sessions, selectedNodeId, schedulerEnabled, onOpenSession }: Props) {
   const plans = executions.items.filter(plan => !selectedNodeId || plan.steps.some(step => step.nodeId === selectedNodeId));
   return <section className="execution-section" aria-labelledby="executions-heading">
@@ -73,6 +94,7 @@ export function ExecutionsSection({ executions, sessions, selectedNodeId, schedu
                 </button>
                 <p className="execution-target-id">{step.nodeId} / {step.sessionId}{!session && " · 目标暂不可定位，不能跳转到其他会话"}</p>
                 <p className="execution-prompt">{step.prompt || "请求内容为空"}</p>{step.promptTruncated && <p className="execution-truncated">请求摘要已截断，并非完整内容。</p>}
+                <ResultSources step={step} />
                 <p className="execution-step-description">{stepDescription(step, plan, paused, schedulerEnabled)}</p>
                 {(step.commandId || step.turnId) && <dl className="execution-receipt">{step.commandId && <div><dt>指令</dt><dd>{step.commandId}</dd></div>}{step.turnId && <div><dt>精确 Turn</dt><dd>{step.turnId}</dd></div>}</dl>}
               </li>;

@@ -4,13 +4,13 @@ const PLAN_ID = '07000000-0000-4000-8000-000000000001';
 const SECOND_ID = '07000000-0000-4000-8000-000000000002';
 const THIRD_ID = '07000000-0000-4000-8000-000000000003';
 const HOUR_MS = 60 * 60 * 1000;
-export const PLAN_MODES = ['initial', 'completed', 'uncertain', 'cancelled', 'expired', 'empty', 'overflow', 'invalid'];
+export const PLAN_MODES = ['initial', 'completed', 'uncertain', 'cancelled', 'expired', 'empty', 'overflow', 'invalid', 'result-sources'];
 
 export function createPlanFixture(sessions) {
   const createdAt = Date.now() - 120_000;
   let mode = 'initial';
   const step = (number, target, status, dependsOn, prompt) => ({
-    step: number, nodeId: target.nodeId, sessionId: target.id, status, dependsOn,
+    step: number, nodeId: target.nodeId, sessionId: target.id, status, dependsOn, resultFrom: [],
     prompt, promptTruncated: false,
     ...(['completed', 'accepted', 'uncertain'].includes(status)
       ? { commandId: 'plan-browser-command-' + number, turnId: 'plan-browser-turn-' + number } : {}),
@@ -43,6 +43,17 @@ export function createPlanFixture(sessions) {
         primary.status = 'completed';
         primary.steps = primary.steps.map(item => ({ ...item, status: 'completed',
           commandId: 'plan-browser-command-' + item.step, turnId: 'plan-browser-turn-' + item.step }));
+      }
+      if (mode === 'result-sources') {
+        const source = (number, outputLength, excerptLength) => ({ step: number,
+          commandId: 'plan-browser-command-' + number, turnId: 'plan-browser-turn-' + number,
+          outputSHA256: String(number).repeat(64), outputLength, excerptLength, truncated: excerptLength < outputLength });
+        primary.steps[1].status = 'completed';
+        primary.steps[1].resultFrom = [1];
+        primary.steps[1].resultSources = [source(1, 4827, 1000)];
+        primary.steps[2].resultFrom = [2];
+        primary.steps.push({ ...step(4, sessions[1], 'claimed', [2, 1], '使用已冻结的来源摘要继续只读核对；冻结并不证明资料已送达。'),
+          resultFrom: [2, 1], resultSources: [source(2, 0, 0), source(1, 4827, 1000)] });
       }
       if (mode === 'uncertain') primary.steps[1].status = 'uncertain';
       if (mode === 'cancelled') { primary.status = 'cancelled'; primary.steps[2].status = 'cancelled'; }

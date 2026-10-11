@@ -121,6 +121,15 @@ export interface ControlPlaneStatusResponse {
 
 export type ExecutionStatus = "active" | "completed" | "failed" | "cancelled" | "expired";
 export type ExecutionStepStatus = Exclude<CommandStatus, "input-written"> | "waiting" | "claimed" | "cancelled" | "expired";
+export interface ExecutionResultSource {
+  step: number;
+  commandId: string;
+  turnId: string;
+  outputSHA256: string;
+  outputLength: number;
+  excerptLength: number;
+  truncated: boolean;
+}
 export interface ConsoleExecutionStep {
   step: number;
   nodeId: string;
@@ -128,6 +137,8 @@ export interface ConsoleExecutionStep {
   prompt: string;
   promptTruncated: boolean;
   dependsOn: number[];
+  resultFrom: number[];
+  resultSources?: ExecutionResultSource[];
   status: ExecutionStepStatus;
   commandId?: string;
   turnId?: string;
