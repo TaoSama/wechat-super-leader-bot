@@ -1,5 +1,7 @@
 # 原客户端会话路由研究
 
+2026-10-12 发布更正：本文下列“尚未部署/运行服务未更新”是各阶段研究时状态。远端 `3488d3a` 和 节点 A `058af3d` 现已发布，原 owner 路由、模型和历史已完成正式 Cookie 接口验收；最新证据见 [发布记录](../2026-10-12-release-preflight/VERIFICATION.md)。不改变本文私有协议、竞争与超限边界。
+
 核对日期：2026-10-11。本文区分已观察事实、静态协议与尚未实施的设计。Daemon 原 owner 发送已完成一次真实验收，Controller/Leader/Web 路由资格随后已接入本地源码并通过跨层 fixture 验证；尚未部署，见 [路由接线验收](../2026-10-11-desktop-send-route/VERIFICATION.md)。
 
 2026-10-12 增量：原桌面已记录历史现已在本地实现独立 reader、来源固定和分页 context。下文“研究当时未实现”保留为当时事实；当前边界、真实读取与跨层验证以 [历史设计](../2026-10-12-desktop-history/TECH.md) 和 [验收记录](../2026-10-12-desktop-history/VERIFICATION.md) 为准，运行服务仍未更新。
