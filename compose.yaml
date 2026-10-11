@@ -1,0 +1,46 @@
+name: super-leader
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: leader
+      POSTGRES_DB: leader
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - controller-db:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U leader -d leader"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+  controller:
+    build:
+      context: .
+      dockerfile: Dockerfile.controller
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8790
+      DATABASE_URL: postgresql://leader:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/leader
+      CONTROLLER_TOKEN: ${CONTROLLER_TOKEN:?set CONTROLLER_TOKEN}
+      NODE_TOKENS: ${NODE_TOKENS:?set NODE_TOKENS}
+      ALLOWED_CHAT_IDS: ${ALLOWED_CHAT_IDS:-}
+      CONSOLE_PUBLIC_URL: ${CONSOLE_PUBLIC_URL:-}
+      LEADER_MODE: ${LEADER_MODE:-rules}
+      LEADER_MODEL_BASE_URL: ${LEADER_MODEL_BASE_URL:-}
+      LEADER_MODEL_NAME: ${LEADER_MODEL_NAME:-}
+      LEADER_MODEL_API_KEY: ${LEADER_MODEL_API_KEY:-}
+      NODE_USE_ENV_PROXY: "1"
+      HTTPS_PROXY: ${CONTROLLER_HTTPS_PROXY:-}
+      HTTP_PROXY: ${CONTROLLER_HTTPS_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,postgres
+    ports:
+      - "127.0.0.1:${CONTROLLER_PORT:-8790}:8790"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    init: true
+    restart: unless-stopped
+volumes:
+  controller-db:
+    name: ${CONTROLLER_DB_VOLUME:-super-leader-controller-db}

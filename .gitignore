@@ -35,3 +35,14 @@ __pycache__/
 data/*.db
 data/*.sqlite*
 logs/
+
+# Build outputs and private runtime state
+node_modules/
+**/dist/
+daemon/bin/
+.runtime/
+**/dist-test/
+**/coverage/
+daemon/super-leader-daemon
+daemon/journal-migrate
+.DS_Store

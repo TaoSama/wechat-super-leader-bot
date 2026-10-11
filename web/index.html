@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Super Leader 会话工作台</title>
+    <script>
+      (function() {
+        try {
+         var hash = window.location.hash || "";
+         if (hash.indexOf("login=") !== -1) {
+            if (window.history && typeof window.history.replaceState === "function") {
+              window.history.replaceState(null, "", window.location.pathname || "/");
+              var match = hash.match(/(?:^#|[&#])login=([A-Za-z0-9_-]+)(?:$|[&#])/);
+              if (match && match[1] && match[1].length === 43) {
+                window.__SUPER_LEADER_LOGIN_TOKEN__ = match[1];
+              } else {
+                window.__SUPER_LEADER_LOGIN_ERROR__ = "invalid_token_format";
+              }
+            } else {
+              window.__SUPER_LEADER_LOGIN_ERROR__ = "history_api_unavailable";
+            }
+         }
+       } catch (e) {
+          window.__SUPER_LEADER_LOGIN_ERROR__ = "sanitize_failed";
+         try {
+           delete window.__SUPER_LEADER_LOGIN_TOKEN__;
+          } catch (_e) {
+            window.__SUPER_LEADER_LOGIN_TOKEN__ = undefined;
+          }
+       }
+      })();
+    </script>
+  </head>
+  <body class="antialiased selection:bg-[#0D9488]/30 selection:text-[#F0FDF4]">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

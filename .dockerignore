@@ -1,0 +1,16 @@
+**/node_modules
+**/dist
+**/.env
+**/.env.*
+.runtime
+daemon
+**/coverage
+**/dist-test
+.git
+.claude
+.codex
+.trae
+.venv
+.pytest_cache
+data
+docs
