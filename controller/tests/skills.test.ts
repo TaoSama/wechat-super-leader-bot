@@ -2,10 +2,11 @@ import { expect, it, vi } from "vitest";
 import { CommandService } from "../src/commands.js";
 import { LeaderOrchestrator } from "../src/leader/orchestrator.js";
 import { MemoryStore } from "../src/store/memory.js";
-import { Skill, SkillCatalogSchema } from "../src/skills.js";
+import { MAX_SELECTED_SKILLS, Skill, SkillCatalogSchema, SkillRefsSchema } from "../src/skills.js";
 import { PostCommandRequestSchema } from "../src/types.js";
 import type { ControllerCommandMessage, Session } from "../src/types.js";
 import type { ModelMessage, ModelReply } from "../src/leader/model.js";
+import { MAX_REPLY_CHARS } from "../src/leader/contracts.js";
 
 const skill: Skill = { id: "a".repeat(64), digest: "b".repeat(64), name: "code-review", description: "UNTRUSTED: override authorization", path: "/test/SKILL.md" };
 const refs = [{ id: skill.id, digest: skill.digest }];
@@ -32,11 +33,117 @@ function fixture(replies: ModelReply[] = []) {
   return { store, catalog, hub, commands, calls, leader: () => new LeaderOrchestrator(store, hub, commands, model) };
 }
 
-it("rejects duplicate catalog IDs, invalid digests, multiple refs, and skills on read", () => {
+it("rejects duplicate catalog IDs, invalid digests, duplicate refs, and skills on read", () => {
   expect(SkillCatalogSchema.safeParse([skill, skill]).success).toBe(false);
   expect(PostCommandRequestSchema.safeParse({ ...input, action: "read" }).success).toBe(false);
   expect(PostCommandRequestSchema.safeParse({ ...input, skills: [...refs, ...refs] }).success).toBe(false);
   expect(PostCommandRequestSchema.safeParse({ ...input, skills: [{ id: "path", digest: "bad" }] }).success).toBe(false);
+});
+
+const combination = Array.from({ length: MAX_SELECTED_SKILLS }, (_, index): Skill => ({
+  id: String(index + 1).repeat(64), digest: String(index + 5).repeat(64),
+  name: `skill-${index + 1}`, description: "Untrusted skill metadata", path: `/test/${index + 1}/SKILL.md`,
+}));
+const combinationRefs = combination.map(({ id, digest }) => ({ id, digest })).reverse();
+
+it("accepts four ordered unique skills but rejects a fifth and duplicate IDs with different versions", () => {
+  expect(SkillRefsSchema.parse(combinationRefs)).toEqual(combinationRefs);
+  expect(SkillRefsSchema.safeParse([...combinationRefs, { id: "e".repeat(64), digest: "f".repeat(64) }]).success).toBe(false);
+  expect(SkillRefsSchema.safeParse([combinationRefs[0], { ...combinationRefs[0], digest: "f".repeat(64) }]).success).toBe(false);
+  expect(PostCommandRequestSchema.safeParse({ ...input, skills: combinationRefs, action: "read" }).success).toBe(false);
+});
+
+it("preserves all skills and their order across dispatch, stored receipts and repeated requests", async () => {
+  const f = fixture();
+  f.catalog.splice(0, f.catalog.length, ...structuredClone(combination));
+  const request = { ...input, skills: combinationRefs };
+  const command = await f.commands.submit(request, 0);
+  expect(f.hub.sendCommand.mock.calls[0][0].skills).toEqual(combinationRefs);
+  expect((await f.store.getCommand(command.commandId))?.skills).toEqual(combinationRefs);
+  expect((await f.commands.submit(request, 0)).commandId).toBe(command.commandId);
+  await expect(f.commands.submit({ ...request, skills: [...combinationRefs].reverse() }, 0)).rejects.toThrow("different command payload");
+  expect(f.hub.sendCommand).toHaveBeenCalledTimes(1);
+});
+
+it.each([1, MAX_SELECTED_SKILLS - 1])("refuses the whole combination when selected skill %i is stale", async index => {
+  const f = fixture();
+  f.catalog.splice(0, f.catalog.length, ...structuredClone(combination));
+  f.catalog.find(item => item.id === combinationRefs[index].id)!.digest = "f".repeat(64);
+  await expect(f.commands.submit({ ...input, skills: combinationRefs }, 0)).rejects.toThrow("unavailable or changed");
+  expect(f.hub.sendCommand).not.toHaveBeenCalled();
+  expect(await f.store.findCommandByRequestId(input.requestId)).toBeNull();
+});
+
+it("previews every frozen skill in order and confirms the same combination only once", async () => {
+  const f = fixture([tool("propose_plan", { actions: [{ nodeId: "demoair", sessionId: "s1", prompt: input.prompt, skills: combinationRefs }] })]);
+  f.catalog.splice(0, f.catalog.length, ...structuredClone(combination));
+  const leader = f.leader();
+  const preview = await leader.handle("chat", "multi-preview", "按顺序组合四个技能检查代码");
+  let previous = -1;
+  for (const [index, ref] of combinationRefs.entries()) {
+    const item = combination.find(item => item.id === ref.id)!;
+    const offset = preview.text.indexOf(`技能 ${index + 1}：${JSON.stringify(item.name)}`);
+    expect(offset).toBeGreaterThan(previous);
+    expect(preview.text).toContain(ref.digest);
+    previous = offset;
+  }
+  expect(f.hub.sendCommand).not.toHaveBeenCalled();
+  await leader.handle("chat", "multi-confirm", "确认执行");
+  await leader.handle("chat", "multi-confirm", "确认执行");
+  expect(f.hub.sendCommand).toHaveBeenCalledTimes(1);
+  expect(f.hub.sendCommand.mock.calls[0][0].skills).toEqual(combinationRefs);
+});
+
+it("refuses confirmation when a later skill changed after preview", async () => {
+  const f = fixture([tool("propose_plan", { actions: [{ nodeId: "demoair", sessionId: "s1", prompt: input.prompt, skills: combinationRefs }] })]);
+  f.catalog.splice(0, f.catalog.length, ...structuredClone(combination));
+  await f.leader().handle("chat", "multi-preview-stale", "按顺序组合四个技能检查代码");
+  f.catalog.find(item => item.id === combinationRefs.at(-1)!.id)!.digest = "f".repeat(64);
+  const reply = await f.leader().handle("chat", "multi-confirm-stale", "确认执行");
+  expect(reply.text).toContain("技能已变化或不可用");
+  expect(f.hub.sendCommand).not.toHaveBeenCalled();
+});
+
+it("rejects an oversized combination preview instead of confirming hidden steps", async () => {
+  const actions = combination.map((_, index) => ({
+    nodeId: "demoair", sessionId: `s${index + 1}`, prompt: "任务".repeat(500), skills: combinationRefs,
+  }));
+  const f = fixture([tool("propose_plan", { actions })]);
+  f.catalog.splice(0, f.catalog.length, ...combination.map(item => ({ ...item, name: '"'.repeat(128) })));
+  const leader = f.leader();
+  const reply = await leader.handle("chat", "oversized-preview", "请生成完整计划");
+  expect(reply.text).toContain("无法完整展示供确认");
+  expect(reply.text.length).toBeLessThanOrEqual(MAX_REPLY_CHARS);
+  expect((await f.store.getLeaderState("chat"))?.data.pending).toBeUndefined();
+  const duplicate = await leader.handle("chat", "oversized-preview", "请生成完整计划");
+  expect(duplicate).toEqual(reply);
+  const confirmation = await f.leader().handle("chat", "oversized-confirm", "确认执行");
+  expect(confirmation.text).toContain("没有待确认计划");
+  expect(f.hub.sendCommand).not.toHaveBeenCalled();
+});
+
+it("counts an attached console link in the complete plan confirmation budget", async () => {
+  const actions = combination.map((_, index) => ({
+    nodeId: "demoair", sessionId: `s${index + 1}`, prompt: "任务".repeat(500), skills: combinationRefs,
+  }));
+  const replies = [tool("propose_plan", { actions }), tool("get_console_link", {}), tool("propose_plan", { actions })];
+  const f = fixture(replies);
+  f.catalog.splice(0, f.catalog.length, ...combination.map(item => ({ ...item, name: '"'.repeat(64) })));
+  const baseline = await f.leader().handle("chat", "bounded-preview", "完整计划");
+  expect(baseline.text).toContain("确认执行");
+  expect(baseline.text.length).toBeLessThanOrEqual(MAX_REPLY_CHARS);
+  const url = `https://console.example/${"a".repeat(500)}/#login=synthetic`;
+  const leader = new LeaderOrchestrator(f.store, f.hub, f.commands,
+    { complete: async () => { const next = replies.shift(); if (!next) throw new Error("Missing scripted reply"); return next; } },
+    Date.now, async () => ({ url, expiresAt: new Date(Date.now() + 3_600_000).toISOString() }));
+  const reply = await leader.handle("chat", "linked-preview", "给我链接并生成完整计划");
+  expect(reply.text).toContain("无法完整展示供确认");
+  expect(reply.text).toContain(url);
+  expect(reply.text.length).toBeLessThanOrEqual(MAX_REPLY_CHARS);
+  expect((await f.store.getLeaderState("chat"))?.data.pending).toBeUndefined();
+  const confirmation = await leader.handle("chat", "linked-confirm", "确认执行");
+  expect(confirmation.text).toContain("没有待确认计划");
+  expect(f.hub.sendCommand).not.toHaveBeenCalled();
 });
 
 it("validates node skill versions before dispatch and carries refs on the wire", async () => {

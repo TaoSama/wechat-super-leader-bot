@@ -4,10 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/skills"
-	"regexp"
 	"strings"
 	"time"
+
+	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/skills"
 )
 
 // ActionType represents supported actions: "read", "send"
@@ -120,8 +120,6 @@ type ControllerCommandMessage struct {
 	SendRoute SendRoute    `json:"sendRoute,omitempty"`
 }
 
-var digestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
-
 // ParseExpiry parses ExpiresAt in RFC3339Nano or RFC3339 format.
 func (c *ControllerCommandMessage) ParseExpiry() (time.Time, error) {
 	raw := strings.TrimSpace(c.ExpiresAt)
@@ -180,13 +178,11 @@ func (c *ControllerCommandMessage) Validate(expectedNodeID string, now time.Time
 	if c.SendRoute != "" && (c.Action != ActionSend || (c.SendRoute != RouteControlSocket && c.SendRoute != RouteDesktopOwner)) {
 		return errors.New("invalid send route")
 	}
-	if len(c.Skills) > 1 || (len(c.Skills) > 0 && c.Action != ActionSend) {
-		return errors.New("only send accepts one skill reference")
+	if len(c.Skills) > 0 && c.Action != ActionSend {
+		return errors.New("only send accepts skill references")
 	}
-	for _, ref := range c.Skills {
-		if !digestPattern.MatchString(ref.ID) || !digestPattern.MatchString(ref.Digest) {
-			return errors.New("skill id and digest must be SHA256 identifiers")
-		}
+	if err := skills.ValidateRefs(c.Skills); err != nil {
+		return err
 	}
 	exp, err := c.ParseExpiry()
 	if err != nil {

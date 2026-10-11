@@ -1,6 +1,7 @@
 package protocol_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +87,40 @@ func TestControllerCommandMessage_ValidationAndExpiry(t *testing.T) {
 	mismatchNode.NodeID = "other-node"
 	if err := mismatchNode.Validate("demoair", now); err == nil {
 		t.Fatalf("expected error for node mismatch")
+	}
+}
+
+func TestMultipleSkillCommandValidationAndOrderedFingerprint(t *testing.T) {
+	now := time.Now()
+	base := protocol.ControllerCommandMessage{Type: "command", CommandID: "selected-skills", NodeID: "node", SessionID: "session",
+		Action: protocol.ActionSend, Prompt: "task", ExpiresAt: now.Add(time.Minute).Format(time.RFC3339Nano)}
+	refs := make([]skills.Ref, skills.MaxSelectedSkills+1)
+	for index := range refs {
+		refs[index] = skills.Ref{ID: strings.Repeat(fmt.Sprintf("%x", index), 64), Digest: strings.Repeat("a", 64)}
+	}
+	for _, count := range []int{1, skills.MaxSelectedSkills, skills.MaxSelectedSkills + 1} {
+		command := base
+		command.Skills = refs[:count]
+		if err := command.Validate("node", now); (err == nil) != (count <= skills.MaxSelectedSkills) {
+			t.Fatalf("send reference count %d: %v", count, err)
+		}
+		command.Action = protocol.ActionRead
+		if err := command.Validate("node", now); err == nil {
+			t.Fatalf("read accepted %d skills", count)
+		}
+	}
+	for _, duplicate := range []skills.Ref{refs[0], {ID: refs[0].ID, Digest: strings.Repeat("b", 64)}} {
+		command := base
+		command.Skills = []skills.Ref{refs[0], duplicate}
+		if err := command.Validate("node", now); err == nil {
+			t.Fatal("duplicate skill identity accepted")
+		}
+	}
+	a, b := base, base
+	a.Skills = []skills.Ref{refs[0], refs[1]}
+	b.Skills = []skills.Ref{refs[1], refs[0]}
+	if a.PayloadFingerprint() == b.PayloadFingerprint() {
+		t.Fatal("reference order was omitted from fingerprint")
 	}
 }
 

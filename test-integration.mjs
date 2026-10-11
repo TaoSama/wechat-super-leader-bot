@@ -54,8 +54,11 @@ async function main() {
   let socket;
   let modelServer;
   const logs = [];
-  const fixtureSkill = { id: 'a'.repeat(64), digest: 'b'.repeat(64), name: 'integration-skill', description: 'Test fixture only', path: '/test/SKILL.md' };
-  const skillRefs = [{ id: fixtureSkill.id, digest: fixtureSkill.digest }];
+  const fixtureSkills = Array.from({ length: 4 }, (_, index) => ({
+    id: String(index + 1).repeat(64), digest: String(index + 5).repeat(64),
+    name: '"'.repeat(126) + index, description: 'Test fixture only', path: `/test/${index}/SKILL.md`,
+  }));
+  const skillRefs = fixtureSkills.map(({ id, digest }) => ({ id, digest })).reverse();
   const received = [];
   const inspections = [];
   await withTestCleanup(async () => {
@@ -91,6 +94,10 @@ async function main() {
           else if (last.content === '查询已记住的偏好') message = call('recall', {});
           else if (last.content === '查询桌面模型') message = call('list_sessions', { nodeId: 'desktop-fixture-node' });
           else if (last.content === '请给测试会话制定计划') message = call('propose_plan', { actions: [{ nodeId: 'test-node', sessionId: 'test-session', prompt: 'mock-plan-input', skills: skillRefs }] });
+          else if (last.content === '请制定超长组合计划') message = call('propose_plan', { actions: fixtureSkills.map((_, index) => ({
+            nodeId: 'test-node', sessionId: 'test-session', prompt: '任务'.repeat(500),
+            skills: skillRefs, dependsOn: index ? [index] : [],
+          })) });
           res.writeHead(200, { 'content-type': 'application/json' });
           const output = message.tool_calls
             ? message.tool_calls.map(call => ({ type: 'function_call', call_id: call.id, name: call.function.name, arguments: call.function.arguments }))
@@ -230,7 +237,10 @@ async function main() {
     assert([401, 403].includes((await request('/v1/status', undefined, false)).status));
     await verifyNodeIsolation({ WebSocket, base, request, nodeTokens: isolationTokens, waitFor });
     await verifyTerminalObservation({ base, request, nodeToken: terminalToken, waitFor });
-    const desktopReceipt = await verifyDesktopRoute({ base, request, nodeToken: desktopToken, waitFor });
+    let desktopSkillReceipt;
+    const desktopReceipt = await verifyDesktopRoute({ base, request, nodeToken: desktopToken, waitFor,
+      onSkillReceipt: receipt => { desktopSkillReceipt = receipt; } });
+    assert(desktopSkillReceipt, 'Missing real Go ordered skill receipt');
     const denied = await request('/v1/messages', { chatId: 'not-allowed', messageId: 'deny', text: '列出会话' });
     assert([401, 403].includes(denied.status), 'Chat allowlist must reject unauthorized senders');
     let deliveries = 0;
@@ -254,10 +264,22 @@ async function main() {
       });
       socket.send(JSON.stringify({ type: 'hello', version: 1, nodeId: 'test-node', sessions: [{
       id: 'test-session', provider: 'codex-app', title: 'integration', cwd: '/test', status: 'idle', loaded: true, capabilities: ['read', 'send'], observedAt: new Date().toISOString(),
-      }], skills: [fixtureSkill] }));
+      }], skills: fixtureSkills }));
       await waitFor(async () => (await request('/v1/status')).body.sessions.length === 1, 'Daemon registration');
     };
     await connectFake();
+    const oversized = await request('/v1/messages', {
+      chatId: 'test-chat', messageId: 'oversized-skill-preview', text: '请制定超长组合计划',
+    });
+    assert.equal(oversized.status, 200, JSON.stringify(oversized.body));
+    assert(oversized.body.text.includes('无法完整展示供确认'), 'Oversized skill preview was silently clipped');
+    const oversizedConfirm = await request('/v1/messages', {
+      chatId: 'test-chat', messageId: 'oversized-skill-confirm', text: '确认执行',
+    });
+    assert.equal(oversizedConfirm.status, 200, JSON.stringify(oversizedConfirm.body));
+    assert(oversizedConfirm.body.text.includes('没有待确认计划'));
+    assert.equal(deliveries, 0, 'Clipped plan authorized unseen steps');
+    console.log('PASS model HTTP → oversized four-step skill preview refused; explicit confirmation has no pending plan and no dispatch');
     assert([401, 403].includes((await request('/v1/skills', undefined, false)).status));
     const payload = { nodeId: 'test-node', sessionId: 'test-session', action: 'read', requestId: randomUUID() };
     const command = await request('/v1/commands', payload);
@@ -297,6 +319,8 @@ async function main() {
     await start();
     assert.deepEqual((await request(`/v1/commands/${desktopReceipt.commandId}`)).body, desktopReceipt,
       'Controller restart lost desktop route or exact native receipt');
+    assert.deepEqual((await request(`/v1/commands/${desktopSkillReceipt.commandId}`)).body, desktopSkillReceipt,
+      'Controller restart lost ordered skill refs or exact desktop skill receipt');
     assert.equal((await request(`/v1/commands/${id}`)).body.status, 'completed');
     assert.equal((await request('/v1/commands', payload)).body.commandId, id, 'Restart lost idempotency');
     await connectFake();
@@ -321,6 +345,10 @@ async function main() {
       sessionId: persistedSkillCommand.sessionId, action: 'send', prompt: persistedSkillCommand.prompt,
       requestId: persistedSkillCommand.requestId, skills: [] });
     assert.equal(altered.status, 409, 'Request ID reused with different skills');
+    const reordered = await request('/v1/commands', { nodeId: persistedSkillCommand.nodeId,
+      sessionId: persistedSkillCommand.sessionId, action: 'send', prompt: persistedSkillCommand.prompt,
+      requestId: persistedSkillCommand.requestId, skills: [...skillRefs].reverse() });
+    assert.equal(reordered.status, 409, 'Request ID reused with a different skill order');
     assert.equal((await message('confirm-fixture', '确认执行')).body.commandId, confirmation.body.commandId);
     assert.equal(deliveries, 5, 'Repeated confirmation dispatched twice');
     assert.equal((await message('confirm-fixture', '换一个任务')).status, 409);
@@ -331,7 +359,7 @@ async function main() {
     socket = undefined;
     await start();
     assert.deepEqual((await request(`/v1/commands/${confirmation.body.commandId}`)).body.skills, skillRefs, 'Restart lost persisted skill refs');
-    console.log('PASS version-bound skill plan, authenticated catalog, wire refs, persisted skill refs after restart, conflicting idempotency key rejected');
+    console.log('PASS four ordered version-bound skills: model plan, confirmation, authenticated catalog, wire refs, PostgreSQL restart persistence, reordered idempotency payload rejected');
     console.log('PASS model HTTP tools → persistent pending plan → restart → explicit confirmation; duplicate confirmation; chat memory persistence');
     console.log('PASS PostgreSQL persistence; HTTP auth; chat allowlist; WS registration; concurrent command dedupe; accepted != completed; disconnect uncertainty; Controller restart');
     console.log('PASS persisted turnId → Controller restart → readonly inspect → exact terminal output; no duplicate send; late acceptance ignored');

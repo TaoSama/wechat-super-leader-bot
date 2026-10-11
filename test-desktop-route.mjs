@@ -7,6 +7,8 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertSkillPrompt, createSkillFixtures, SKILL_OUTPUT, SKILL_TURN_ID,
+  verifySkillCombination } from './test-skill-combination.mjs';
 
 const NODE_ID = 'desktop-fixture-node';
 const SESSION_ID = '11111111-2222-4333-8444-555555555555';
@@ -19,7 +21,7 @@ const SNAPSHOT_LIMIT = 32 * 1024 * 1024;
 
 // Only called by the isolated PostgreSQL runner. Both socket and rollout paths
 // are newly created fixtures; no actual App, user session or credentials are used.
-export async function verifyDesktopRoute({ base, request, nodeToken, waitFor }) {
+export async function verifyDesktopRoute({ base, request, nodeToken, waitFor, onSkillReceipt }) {
   const directory = await mkdtemp(join(tmpdir(), 'sld-'));
   const socketPath = join(directory, 'desktop.sock');
   const binary = join(directory, 'daemon');
@@ -33,7 +35,7 @@ export async function verifyDesktopRoute({ base, request, nodeToken, waitFor }) 
     modelProvider: 'fixture-desktop-provider', latestReasoningEffort: 'high',
     threadRuntimeStatus: { type: 'idle', activeFlags: [] }, requests: [], turns: [], turnsPagination: { hasLoadedOldest: false },
     fixturePadding: 'x'.repeat(LARGE_SNAPSHOT_BYTES) };
-  let daemon, revision = 1, starts = 0, settingsReads = 0, fullHistoryLoads = 0;
+  let daemon, fixtures, revision = 1, starts = 0, settingsReads = 0, fullHistoryLoads = 0;
   const server = createServer(socket => {
     const connection = { socket, clientId: `fixture-client-${randomUUID()}`, following: false };
     connections.add(connection);
@@ -130,29 +132,35 @@ export async function verifyDesktopRoute({ base, request, nodeToken, waitFor }) 
         reply(connection, message, OWNER_ID, { revision });
         return;
       }
-      case 'thread-follower-start-turn':
+      case 'thread-follower-start-turn': {
         assert.equal(message.type, 'request');
         assert.equal(message.version, 2);
         assert.equal(message.targetClientId, OWNER_ID);
         assert.equal(message.sourceClientId, connection.clientId);
         assert.equal(params.conversationId, SESSION_ID);
         assert.equal(params.turnStart.request.threadId, SESSION_ID);
-        assert.equal(params.turnStart.request.input[0].text, 'simulated desktop request');
+        const prompt = params.turnStart.request.input[0].text;
+        assert(starts < 2, 'Unexpected additional native send');
+        const skillSend = starts === 1;
+        if (skillSend) assertSkillPrompt(prompt, fixtures.selected);
+        else assert.equal(prompt, 'simulated desktop request');
         assert.match(params.turnStart.request.clientUserMessageId, /^[0-9a-f-]{36}$/i);
         assert.deepEqual(params.turnStart.context, { inheritThreadSettings: true, useUserMessageAdmission: false });
         assert(settingsReads >= 3, 'Readiness plus both dispatch preflights must run');
         starts++;
-        assert.equal(starts, 1, 'Duplicate native send');
-        state.turns = [{ turnId: TURN_ID, status: 'completed', items: [
-          { id: 'current-user', type: 'userMessage', content: [{ type: 'text', text: 'simulated desktop request' }] },
-          { id: 'current-assistant', type: 'agentMessage', text: OUTPUT },
-        ] }];
+        const turnId = skillSend ? SKILL_TURN_ID : TURN_ID;
+        const output = skillSend ? SKILL_OUTPUT : OUTPUT;
+        state.turns.push({ turnId, status: 'completed', items: [
+          { id: skillSend ? 'skills-user' : 'current-user', type: 'userMessage', content: [{ type: 'text', text: prompt }] },
+          { id: skillSend ? 'skills-assistant' : 'current-assistant', type: 'agentMessage', text: output },
+        ] });
         revision++;
         // Publish the state mutation before acknowledging the turn. A completed
         // request may close its connection as soon as that acknowledgement is read.
         for (const peer of connections) if (peer.following) snapshot(peer);
-        reply(connection, message, OWNER_ID, { result: { turn: { id: TURN_ID } } });
+        reply(connection, message, OWNER_ID, { result: { turn: { id: turnId } } });
         return;
+      }
       default: throw new Error(`Unexpected desktop method: ${message.method}`);
     }
   }
@@ -170,6 +178,7 @@ export async function verifyDesktopRoute({ base, request, nodeToken, waitFor }) 
     if (daemon?.exitCode !== null) throw new Error(`Fixture daemon exited: ${logs.join('')}`);
   };
   try {
+    fixtures = await createSkillFixtures(directory);
     await mkdir(sessionDirectory, { recursive: true, mode: 0o700 });
     const timestamp = '2026-10-11T00:01:02.123Z';
     await writeFile(join(sessionDirectory, `rollout-2026-10-11T00-01-02-${SESSION_ID}.jsonl`), JSON.stringify({
@@ -184,7 +193,7 @@ export async function verifyDesktopRoute({ base, request, nodeToken, waitFor }) 
     daemon = spawn(binary, ['--node-id', NODE_ID, '--controller-url', `${base.replace('http:', 'ws:')}/v1/daemon`,
       '--sock', join(directory, 'missing-control.sock'), '--desktop-sock', socketPath, '--desktop-send',
       '--codex-home', codexHome, '--state-dir', join(directory, 'journal'), '--heartbeat', '1'], {
-      env: { PATH: process.env.PATH, NODE_TOKEN: nodeToken, SKILL_ROOTS: '[]' }, stdio: ['ignore', 'pipe', 'pipe'],
+      env: { PATH: process.env.PATH, NODE_TOKEN: nodeToken, SKILL_ROOTS: JSON.stringify([fixtures.root]) }, stdio: ['ignore', 'pipe', 'pipe'],
     });
     daemon.on('error', error => errors.push(error));
     for (const stream of [daemon.stdout, daemon.stderr]) stream.on('data', chunk => {
@@ -291,6 +300,11 @@ export async function verifyDesktopRoute({ base, request, nodeToken, waitFor }) 
     console.log('PASS >16 MiB original-owner snapshots across observer, readiness, dispatch preflight, exact-turn inspection and history; private padding omitted from public status');
     console.log('PASS real Go history: response-before/after patch ordering; complete older pages; active owner read; fixed context incremental updates; one full load; revision gap → HTTP 409; explicit new context recovers; no native metadata rewrite or sends');
     console.log('PASS HTTP → PostgreSQL → WS → real Go Daemon → simulated original desktop owner; model snapshot and patch preserve native facts; ready with native loaded=false; exact native turn and output; busy veto; duplicate request no resend');
+    state.threadRuntimeStatus.type = 'idle';
+    publishPatches([{ op: 'replace', path: ['threadRuntimeStatus', 'type'], value: 'idle' }]);
+    const skillReceipt = await verifySkillCombination({ request, waitFor, status, assertHealthy, starts: () => starts,
+      nodeId: NODE_ID, sessionId: SESSION_ID, fixtures, plainReceipt: receipt });
+    await onSkillReceipt?.(skillReceipt);
     return receipt;
   } finally {
     if (daemon && daemon.exitCode === null && daemon.signalCode === null) {
