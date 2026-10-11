@@ -6,6 +6,7 @@ import { resolve, extname, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { randomUUID } from "node:crypto";
 import { createPlanFixture, PLAN_MODES } from "./plan-fixture.mjs";
+import { createTerminalFixture, TERMINAL_MODES } from "./terminal-fixture.mjs";
 
 const { values } = parseArgs({ options: { port: { type: "string", default: "0" }, help: { type: "boolean", short: "h" } } });
 if (values.help) {
@@ -33,6 +34,7 @@ const commands = ["uncertain", "accepted", "completed", "failed"].map((status, i
   error: status === "uncertain" ? "连接断开，回执未确认，请先核查原请求。" : status === "failed" ? "机器暂时无法访问。" : undefined,
   createdAt: now(), updatedAt: now(), expiresAt: now(), turnId: status === "accepted" ? "fixture-turn" : undefined,
 }));
+const terminal = createTerminalFixture(sessions, commands);
 const items = Array.from({ length: 240 }, (_, i) => ({
   id: `fixture-item-${i}`, turnId: `fixture-turn-${Math.floor(i / 2)}`, kind: i % 8 === 5 ? "tool" : i % 2 ? "assistant" : "user",
   type: i % 8 === 5 ? "commandExecution" : "message", title: i % 8 === 5 ? "运行本地测试" : undefined,
@@ -49,8 +51,8 @@ let historySource = "codex-desktop";
 let authenticated = true;
 let failOlder = false;
 const status = () => ({ leaderMode: "model", leaderModel: "gpt-6.1-sol", sessions, commands, executions: plans.snapshot(), nodes: [
-  { nodeId: "macair", connected: true, lastHeartbeat: now(), sessionCount: 3 },
-  { nodeId: "macmini", connected: false, lastHeartbeat: now(), sessionCount: 1 },
+  { nodeId: "macair", connected: true, lastHeartbeat: now(), sessionCount: sessions.filter(session => session.nodeId === "macair").length },
+  { nodeId: "macmini", connected: false, lastHeartbeat: now(), sessionCount: sessions.filter(session => session.nodeId === "macmini").length },
 ] });
 function broadcast() { for (const stream of streams) stream.write(`event: status\ndata: ${JSON.stringify(status())}\n\n`); }
 function json(res, value, code = 200) { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(value)); }
@@ -68,7 +70,12 @@ async function handle(req, res) {
     server.close();
     return;
   }
-  if (path === "/fixture/metrics") return json(res, metrics);
+  if (path === "/fixture/metrics") return json(res, { ...metrics, ...terminal.metrics() });
+  if (path === "/fixture/terminal" && req.method === "POST") {
+    const mode = url.searchParams.get("mode");
+    if (!TERMINAL_MODES.includes(mode)) return json(res, { error: "unknown terminal fixture mode" }, 400);
+    terminal.setMode(mode); broadcast(); return json(res, { mode, synthetic: true });
+  }
   if (path === "/fixture/plans" && req.method === "POST") {
     const mode = url.searchParams.get("mode");
     if (!PLAN_MODES.includes(mode)) return json(res, { error: "unknown plan fixture mode" }, 400);
@@ -119,8 +126,9 @@ async function handle(req, res) {
   }
   const match = path.match(/^\/v1\/sessions\/([^/]+)\/([^/]+)\/history$/);
   if (match) {
-    const session = sessions.find((s) => s.nodeId === match[1] && s.id === match[2]);
+    const session = sessions.find((s) => s.nodeId === decodeURIComponent(match[1]) && s.id === decodeURIComponent(match[2]));
     if (!session) return json(res, { error: "unknown session" }, 404);
+    if (session.provider.startsWith("terminal/")) return json(res, { code: "history_unavailable", error: "Terminal snapshots are not native chat history" }, 502);
     const cursor = url.searchParams.get("cursor");
     metrics[cursor ? "older" : "latest"]++;
     let historyContext = url.searchParams.get("historyContext");
@@ -149,6 +157,21 @@ async function handle(req, res) {
       historyCursors.set(nextCursor, { historyContext, end: start });
     }
     return json(res, { session, historyContext, source: context.source, items: items.slice(start, end), nextCursor, fetchedAt: now(), truncated: false });
+  }
+  const commandMatch = path.match(/^\/v1\/commands\/([^/]+)$/);
+  if (commandMatch) {
+    const command = commands.find(value => value.commandId === decodeURIComponent(commandMatch[1]));
+    return json(res, command ?? { error: "unknown synthetic command" }, command ? 200 : 404);
+  }
+  const inputMatch = path.match(/^\/v1\/sessions\/([^/]+)\/([^/]+)\/messages$/);
+  if (inputMatch && req.method === "POST" && terminal.matches(decodeURIComponent(inputMatch[1]), decodeURIComponent(inputMatch[2]))) {
+    let body = "";
+    for await (const chunk of req) {
+      body += chunk;
+      if (Buffer.byteLength(body) > 64 * 1024) return json(res, { error: "synthetic input too large" }, 413);
+    }
+    const response = terminal.send(JSON.parse(body)); metrics.sends++;
+    broadcast(); return json(res, response.body, response.code);
   }
   if (path.endsWith("/messages")) { metrics.sends++; return json(res, { error: "Sending is disabled in this fixture" }, 409); }
   if (path.startsWith("/v1/")) return json(res, { error: "unknown route" }, 404);

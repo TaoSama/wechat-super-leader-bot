@@ -80,6 +80,9 @@ func GenerateSystemdUnit(binPath string, cfg *config.Config, tokenFilePath strin
 	if cfg.DesktopSend && cfg.DesktopSocketPath == "" {
 		return "", errors.New("desktop-send requires an explicit desktop-sock")
 	}
+	if err := config.ValidateTerminalSend(cfg.TerminalSendMode, cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
+		return "", err
+	}
 	rawArgs := []string{
 		binPath,
 		"--node-id", cfg.NodeID,
@@ -103,6 +106,9 @@ func GenerateSystemdUnit(binPath string, cfg *config.Config, tokenFilePath strin
 		for _, pane := range cfg.TerminalPanes {
 			rawArgs = append(rawArgs, "--terminal-pane", pane)
 		}
+	}
+	if cfg.TerminalSendMode != "" {
+		rawArgs = append(rawArgs, "--terminal-send-mode", cfg.TerminalSendMode)
 	}
 	for _, root := range cfg.SkillRoots {
 		rawArgs = append(rawArgs, "--skill-root", root)
@@ -187,6 +193,9 @@ func (m *LinuxManager) verifyExistingUnitOwnership(unitPath string) error {
 }
 
 func (m *LinuxManager) Install(ctx context.Context, cfg *config.Config) error {
+	if err := config.ValidateTerminalSend(cfg.TerminalSendMode, cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
+		return err
+	}
 	if err := config.ValidateTerminalObservation(cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
 		return err
 	}

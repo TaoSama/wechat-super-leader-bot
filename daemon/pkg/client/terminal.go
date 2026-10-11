@@ -94,6 +94,13 @@ func (d *Daemon) invalidateTerminal(updates chan<- struct{}) {
 			d.terminalSnapshot[i].Status = "unknown"
 			changed = true
 		}
+		if record, exists := d.terminalReadiness[d.terminalSnapshot[i].ID]; exists {
+			if record.Availability.State != protocol.SendUnavailable {
+				changed = true
+			}
+			record.Availability.State, record.Availability.Reason = protocol.SendUnavailable, protocol.SendReasonUnavailable
+			d.terminalReadiness[d.terminalSnapshot[i].ID] = record
+		}
 	}
 	d.snapshotMu.Unlock()
 	if changed {

@@ -1,8 +1,8 @@
 import pg from "pg";
-import { CommandRecord, MessageRecord, ScopedSession, Session, SendRouteSchema, validateCommandSendRoute } from "../types.js";
+import { CommandRecord, InputReceipt, InputReceiptSchema, MessageRecord, ScopedSession, Session, SendRouteSchema, validateCommandSendRoute } from "../types.js";
 import { IStore, CreateCommandResult, ConflictError } from "./interface.js";
 import { sameSkillRefs, SkillRefsSchema } from "../skills.js";
-import { nextCommandState, inspectionLimit } from "./command-state.js";
+import { nextCommandState, inspectionLimit, validateStoredCommandInput } from "./command-state.js";
 import type { CreateExecutionResult, ExecutionRecord } from "../leader/execution.js";
 import type { ExecutionConfirmationAuthority } from "../leader/execution-confirmation.js";
 import type { Notification, NotificationReceiptStatus } from "../notifications.js";
@@ -73,6 +73,7 @@ export class PostgresStore implements IStore {
       await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS skills JSONB NOT NULL DEFAULT '[]'::jsonb");
       await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS turn_id VARCHAR(128)");
       await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS send_route VARCHAR(32)");
+      await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS input_receipt JSONB");
       await client.query("CREATE INDEX IF NOT EXISTS commands_inspection_idx ON commands (node_id, command_id) WHERE turn_id IS NOT NULL AND action = 'send' AND status IN ('accepted', 'uncertain')");
 
       await client.query(`
@@ -125,12 +126,13 @@ export class PostgresStore implements IStore {
 
   async createCommandIfAbsent(cmd: CommandRecord): Promise<CreateCommandResult> {
     validateCommandSendRoute(cmd);
+    validateStoredCommandInput(cmd);
     const insertRes = await this.pool.query(
       `
       INSERT INTO commands (
         command_id, request_id, node_id, session_id, action, prompt,
-        status, output, error, expires_at, created_at, updated_at, skills, turn_id, send_route
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15)
+        status, output, error, expires_at, created_at, updated_at, skills, turn_id, send_route, input_receipt
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15, $16::jsonb)
       ON CONFLICT (request_id) DO NOTHING
       RETURNING *;
       `,
@@ -150,6 +152,7 @@ export class PostgresStore implements IStore {
         JSON.stringify(cmd.skills ?? []),
         cmd.turnId ?? null,
         cmd.sendRoute ?? null,
+        cmd.inputReceipt ? JSON.stringify(cmd.inputReceipt) : null,
       ]
     );
 
@@ -201,7 +204,8 @@ export class PostgresStore implements IStore {
     status: CommandRecord["status"],
     output?: string,
     error?: string,
-    turnId?: string
+    turnId?: string,
+    inputReceipt?: InputReceipt
   ): Promise<void> {
     const client = await this.pool.connect();
     try {
@@ -209,10 +213,11 @@ export class PostgresStore implements IStore {
       const result = await client.query("SELECT * FROM commands WHERE command_id = $1 FOR UPDATE", [commandId]);
       if (result.rows.length) {
         const current = this.mapCommandRow(result.rows[0]);
-        const next = nextCommandState(current, status, output, error, turnId);
+        const next = nextCommandState(current, status, output, error, turnId, inputReceipt);
         if (next !== current) {
-          await client.query(`UPDATE commands SET status=$1, output=$2, error=$3, turn_id=$4, updated_at=$5 WHERE command_id=$6`,
-            [next.status, next.output ?? null, next.error ?? null, next.turnId ?? null, next.updatedAt, commandId]);
+          await client.query(`UPDATE commands SET status=$1, output=$2, error=$3, turn_id=$4, updated_at=$5, input_receipt=$7::jsonb WHERE command_id=$6`,
+            [next.status, next.output ?? null, next.error ?? null, next.turnId ?? null, next.updatedAt, commandId,
+              next.inputReceipt ? JSON.stringify(next.inputReceipt) : null]);
         }
       }
       await client.query("COMMIT");
@@ -261,6 +266,7 @@ export class PostgresStore implements IStore {
   async listInspectableCommands(nodeId: string, limit = 50, afterCommandId = ""): Promise<CommandRecord[]> {
     const result = await this.pool.query(`SELECT * FROM commands WHERE node_id=$1 AND action='send'
       AND turn_id IS NOT NULL AND status IN ('accepted','uncertain') AND command_id > $2
+      AND send_route IS DISTINCT FROM 'terminal-pane' AND session_id NOT LIKE 'terminal:%' AND input_receipt IS NULL
       ORDER BY command_id ASC LIMIT $3`, [nodeId, afterCommandId, inspectionLimit(limit)]);
     return result.rows.map(row => this.mapCommandRow(row));
   }
@@ -475,12 +481,14 @@ export class PostgresStore implements IStore {
       output: r.output || undefined,
       error: r.error || undefined,
       turnId: r.turn_id || undefined,
+      ...(r.input_receipt == null ? {} : { inputReceipt: InputReceiptSchema.parse(typeof r.input_receipt === "string" ? JSON.parse(r.input_receipt) : r.input_receipt) }),
       ...(r.send_route == null || r.send_route === "" ? {} : { sendRoute: SendRouteSchema.parse(r.send_route) }),
       expiresAt: new Date(r.expires_at).toISOString(),
       createdAt: new Date(r.created_at).toISOString(),
       updatedAt: new Date(r.updated_at).toISOString(),
     };
     validateCommandSendRoute(command);
+    validateStoredCommandInput(command);
     return command;
   }
 }

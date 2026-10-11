@@ -1,6 +1,6 @@
 import type { IStore } from "../store/interface.js";
 import { TurnIdSchema } from "../types.js";
-import { executionRequestId, matchesExecutionCommand, type ExecutionRecord } from "./execution.js";
+import { assertNativeExecutionPlan, executionRequestId, matchesExecutionCommand, type ExecutionRecord } from "./execution.js";
 
 export interface ExecutionView {
   id: string;
@@ -15,6 +15,7 @@ export interface ExecutionView {
 }
 
 export async function readExecutionView(store: IStore, execution: ExecutionRecord, now: number): Promise<ExecutionView> {
+  assertNativeExecutionPlan(execution.plan);
   const steps: ExecutionView["steps"] = [];
   for (const [index, action] of execution.plan.actions.entries()) {
     const step = { step: index + 1, nodeId: action.nodeId, sessionId: action.sessionId,
@@ -25,7 +26,9 @@ export async function readExecutionView(store: IStore, execution: ExecutionRecor
       steps.push({ ...step, status: "uncertain", error: "Execution command identity is inconsistent" });
     } else if (command) {
       const validTurn = TurnIdSchema.safeParse(command.turnId).success;
-      const invalidReceipt = (command.status === "completed" || command.status === "accepted") && !validTurn;
+      const invalidReceipt = command.status === "input-written" || command.inputReceipt !== undefined ||
+        command.sendRoute === "terminal-pane" || command.sessionId.startsWith("terminal:") ||
+        (command.status === "completed" || command.status === "accepted") && !validTurn;
       steps.push({ ...step, status: invalidReceipt ? "uncertain" : command.status,
         commandId: command.commandId, ...(validTurn ? { turnId: command.turnId } : {}),
         output: command.output, error: invalidReceipt ? "Execution receipt has no valid exact turn" : command.error });

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
+	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/terminal"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -34,11 +35,12 @@ var (
 )
 
 type Entry struct {
-	Fingerprint  string                       `json:"fingerprint"`
-	Dispatch     *protocol.DispatchIdentity   `json:"dispatch,omitempty"`
-	Result       protocol.DaemonResultMessage `json:"result"`
-	Finished     bool                         `json:"finished"`
-	Acknowledged bool                         `json:"acknowledged"`
+	Fingerprint      string                       `json:"fingerprint"`
+	Dispatch         *protocol.DispatchIdentity   `json:"dispatch,omitempty"`
+	TerminalDelivery *terminal.DeliveryIdentity   `json:"terminalDelivery,omitempty"`
+	Result           protocol.DaemonResultMessage `json:"result"`
+	Finished         bool                         `json:"finished"`
+	Acknowledged     bool                         `json:"acknowledged"`
 }
 
 type Journal struct{ db *bolt.DB }
@@ -180,7 +182,7 @@ func decode(key, value []byte) (Entry, error) {
 	}
 	digest, err := hex.DecodeString(entry.Fingerprint)
 	if err != nil || len(digest) != sha256.Size || entry.Result.Type != "result" || entry.Result.CommandID != string(key) ||
-		(entry.Result.Status != protocol.StatusAccepted && entry.Result.Status != protocol.StatusCompleted && entry.Result.Status != protocol.StatusFailed && entry.Result.Status != protocol.StatusUncertain) ||
+		(entry.Result.Status != protocol.StatusAccepted && entry.Result.Status != protocol.StatusCompleted && entry.Result.Status != protocol.StatusFailed && entry.Result.Status != protocol.StatusUncertain && entry.Result.Status != protocol.StatusInputWritten) ||
 		(entry.Acknowledged && !entry.Finished) {
 		return Entry{}, errors.New("invalid command journal entry")
 	}
@@ -188,6 +190,9 @@ func decode(key, value []byte) (Entry, error) {
 		if err := validateDispatch(*entry.Dispatch, false); err != nil {
 			return Entry{}, err
 		}
+	}
+	if err := validateTerminalEntry(entry); err != nil {
+		return Entry{}, err
 	}
 	return entry, nil
 }
@@ -261,6 +266,13 @@ func (j *Journal) Begin(cmd protocol.ControllerCommandMessage) (Entry, bool, err
 			entry.Dispatch = &protocol.DispatchIdentity{Route: cmd.SendRoute, SessionID: cmd.SessionID,
 				ClientUserMessageID: messageID, RequestID: requestID}
 		}
+		if cmd.Action == protocol.ActionSend && cmd.SendRoute == protocol.RouteTerminalPane {
+			requestID, err := protocol.NewDispatchID()
+			if err != nil {
+				return err
+			}
+			entry.TerminalDelivery = &terminal.DeliveryIdentity{SessionID: cmd.SessionID, RequestID: requestID}
+		}
 		if err := put(records, entry); err != nil {
 			return err
 		}
@@ -281,7 +293,7 @@ func (j *Journal) Finish(result protocol.DaemonResultMessage) error {
 			return err
 		}
 		if entry.Finished {
-			if entry.Result == result {
+			if protocol.SameResult(entry.Result, result) {
 				return nil
 			}
 			return errors.New("journal result was already finalized")
@@ -303,7 +315,7 @@ func (j *Journal) Ack(ack protocol.ResultAckMessage) error {
 		if err != nil {
 			return err
 		}
-		if !entry.Finished || entry.Acknowledged || entry.Result.TurnID != ack.TurnID || entry.Result.Status != ack.Status {
+		if !entry.Finished || entry.Acknowledged || !protocol.ReceiptMatchesAck(entry.Result, ack) {
 			return nil
 		}
 		entry.Acknowledged = true

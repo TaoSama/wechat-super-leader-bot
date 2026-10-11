@@ -14,6 +14,7 @@ import { IStore } from "./store/interface.js";
 import { Skill } from "./skills.js";
 import { HistoryError, SessionHistoryRequests } from "./session-history.js";
 import { validateCommandTurnBinding } from "./store/command-state.js";
+import { sameInputReceipt } from "./input-receipt.js";
 
 export interface ConnectedNode {
   nodeId: string;
@@ -253,7 +254,7 @@ export class NodeHub {
       }
 
       try {
-        validateCommandTurnBinding(cmd, msg.status, msg.turnId);
+        validateCommandTurnBinding(cmd, msg.status, msg.turnId, msg.inputReceipt, msg.output, msg.error);
       } catch {
         console.warn(`[${nodeId}] Rejected mismatched turn result for ${msg.commandId}`);
         return;
@@ -266,7 +267,8 @@ export class NodeHub {
           msg.status,
           msg.output,
           msg.error,
-          msg.turnId
+          msg.turnId,
+          msg.inputReceipt
         );
       } catch (err) {
         console.error(`[${nodeId}] Error updating command status ${msg.commandId}:`, err);
@@ -277,17 +279,23 @@ export class NodeHub {
         node.inspection = undefined;
       }
       if (this.nodes.get(nodeId) !== node || node.ws.readyState !== WebSocket.OPEN) return;
-      node.ws.send(JSON.stringify({ type: "result_ack", commandId: msg.commandId, turnId: msg.turnId, status: msg.status }), error => {
+      const persisted = await this.store.getCommand(msg.commandId);
+      if (this.nodes.get(nodeId) !== node || node.ws.readyState !== WebSocket.OPEN) return;
+      if (!persisted) return;
+      if (cmd.sendRoute === "terminal-pane" && persisted.status !== msg.status) return;
+      if (msg.status === "input-written" && (persisted.status !== "input-written" || !persisted.inputReceipt ||
+          !msg.inputReceipt || !sameInputReceipt(persisted.inputReceipt, msg.inputReceipt))) return;
+      node.ws.send(JSON.stringify({ type: "result_ack", commandId: msg.commandId, turnId: msg.turnId, status: msg.status,
+        ...(msg.status === "input-written" ? { inputReceipt: persisted.inputReceipt } : {}) }), error => {
         if (error) console.warn(`[${nodeId}] Result acknowledgement transport failed`);
       });
 
       // Notify waiter if any
       const waiter = this.commandResultWaiters.get(msg.commandId);
       if (waiter) {
-        const persisted = await this.store.getCommand(msg.commandId);
         if (persisted) waiter({ type: "result", commandId: persisted.commandId,
           status: persisted.status === "pending" ? "uncertain" : persisted.status,
-          turnId: persisted.turnId, output: persisted.output ?? "", error: persisted.error });
+          turnId: persisted.turnId, inputReceipt: persisted.inputReceipt, output: persisted.output ?? "", error: persisted.error });
       }
     }
   }
@@ -304,7 +312,7 @@ export class NodeHub {
       }
       if (this.nodes.get(node.nodeId) !== node || node.ws.readyState !== WebSocket.OPEN) return;
       const cmd = candidates[0];
-      if (!cmd?.turnId) return;
+      if (!cmd?.turnId || cmd.sendRoute === "terminal-pane" || cmd.sessionId.startsWith("terminal:") || cmd.inputReceipt) return;
       node.inspectionCursor = cmd.commandId;
       const inspection = { commandId: cmd.commandId, turnId: cmd.turnId, deadline: Date.now() + NodeHub.INSPECTION_TIMEOUT_MS };
       node.inspection = inspection;

@@ -1,6 +1,7 @@
 import type { ScopedSession, SendAvailability, SendRoute } from "./types";
 import { isDesktopObservationFresh, isIsoTimestamp, normalizeDesktopObservation } from "./session-observation";
 import { isTerminalSession, TERMINAL_READ_ONLY_REASON } from "./terminal-session";
+import { TERMINAL_SESSION_ID } from "./input-receipt";
 
 export const MAX_SEND_AVAILABILITY_AGE_MS = 45_000;
 const AVAILABILITY_KEYS = new Set(["route", "state", "observedAt", "validUntil", "reason"]);
@@ -13,11 +14,13 @@ export function normalizeSendAvailability(raw: unknown): SendAvailability | unde
   const unavailable: SendAvailability = { route: "desktop-owner", state: "unavailable", observedAt: "", validUntil: "", reason: "unavailable" };
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return unavailable;
   const value = raw as Record<string, unknown>;
-  if (Object.keys(value).some(key => !AVAILABILITY_KEYS.has(key)) || value.route !== "desktop-owner" ||
+  const terminal = value.route === "terminal-pane";
+  if (Object.keys(value).some(key => !AVAILABILITY_KEYS.has(key) && !(terminal && key === "mode")) ||
+      (!terminal && value.route !== "desktop-owner") || terminal && value.mode !== "non-atomic" ||
       !["ready", "blocked", "unavailable"].includes(String(value.state)) ||
       !isIsoTimestamp(value.observedAt) || !isIsoTimestamp(value.validUntil) ||
       value.reason !== undefined && !REASONS.has(String(value.reason))) return unavailable;
-  return { route: "desktop-owner", state: value.state as SendAvailability["state"], observedAt: value.observedAt,
+  return { ...(terminal ? { route: "terminal-pane" as const, mode: "non-atomic" as const } : { route: "desktop-owner" as const }), state: value.state as SendAvailability["state"], observedAt: value.observedAt,
     validUntil: value.validUntil, reason: value.reason as SendAvailability["reason"] };
 }
 
@@ -29,10 +32,13 @@ export function isSendAvailabilityFresh(availability: SendAvailability, now = Da
 }
 
 export function sessionSendBlockReason(session: ScopedSession, now = Date.now()): string | null {
-  if (isTerminalSession(session)) return TERMINAL_READ_ONLY_REASON;
+  const terminal = isTerminalSession(session);
   const availability = normalizeSendAvailability(session.sendAvailability);
+  if (terminal && !availability) return TERMINAL_READ_ONLY_REASON;
   if (availability) {
+    if (terminal !== (availability.route === "terminal-pane") || terminal && !TERMINAL_SESSION_ID.test(session.id)) return terminal ? TERMINAL_READ_ONLY_REASON : "发送资格与会话路线不匹配，暂不可发送";
     if (availability.state !== "ready") {
+      if (terminal) return availability.reason === "checking" ? "正在检查原终端输入通道…" : "原终端输入通道暂不可用；默认只读，勿自动重发";
       switch (availability.reason) {
         case "checking": return "正在检查原桌面会话的发送通道…";
         case "busy": return "会话正在执行或等待处理，请在本轮结束后发送";
@@ -41,7 +47,7 @@ export function sessionSendBlockReason(session: ScopedSession, now = Date.now())
       }
     }
     if (!isSendAvailabilityFresh(availability, now)) return "发送资格已过期或时间异常，等待自动更新";
-    if (session.desktopObservation !== undefined) {
+    if (!terminal && session.desktopObservation !== undefined) {
       const desktop = normalizeDesktopObservation(session.desktopObservation);
       if (!desktop || !isDesktopObservationFresh(desktop, now)) return "桌面状态待更新，暂不可发送";
       if (desktop.status !== "idle") return desktop.status === "active" ? "桌面会话正在执行，请等待本轮结束" : "桌面会话状态未知，暂不可发送";
@@ -57,5 +63,5 @@ export function sessionSendBlockReason(session: ScopedSession, now = Date.now())
 }
 
 export function sendRouteLabel(route: SendRoute): string {
-  return route === "desktop-owner" ? "原桌面会话" : "宿主控制接口";
+  return route === "terminal-pane" ? "原终端输入（非原子）" : route === "desktop-owner" ? "原桌面会话" : "宿主控制接口";
 }

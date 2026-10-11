@@ -39,6 +39,7 @@ type Config struct {
 	DesktopSend        bool
 	TerminalSocketPath string
 	TerminalPanes      []string
+	TerminalSendMode   string
 	CodexHome          string
 	HeartbeatInterval  time.Duration
 	ProbeOnly          bool
@@ -74,6 +75,7 @@ func ParseFlags(args []string) (*Config, error) {
 	desktopSocketPath := fs.String("desktop-sock", "", "Optional existing desktop IPC socket for read-only execution-state observation")
 	desktopSend := fs.Bool("desktop-send", false, "Explicitly allow sending through the existing desktop owner (requires desktop-sock)")
 	terminalSocketPath := fs.String("terminal-sock", "", "Optional existing terminal-host Unix socket for read-only observation (requires terminal-pane)")
+	terminalSendMode := fs.String("terminal-send-mode", "", "Explicit terminal input delivery mode: non-atomic (requires terminal-sock and terminal-pane)")
 	var terminalPanes []string
 	fs.Func("terminal-pane", "Explicit terminal pane wN:pN to observe read-only (repeatable, at most 16)", func(value string) error {
 		terminalPanes = append(terminalPanes, value)
@@ -147,6 +149,9 @@ func ParseFlags(args []string) (*Config, error) {
 	if err := ValidateTerminalObservation(*terminalSocketPath, terminalPanes); err != nil {
 		return nil, err
 	}
+	if err := ValidateTerminalSend(*terminalSendMode, *terminalSocketPath, terminalPanes); err != nil {
+		return nil, err
+	}
 	if *codexHome != "" && (!filepath.IsAbs(*codexHome) || strings.ContainsAny(*codexHome, "\x00\r\n\t")) {
 		return nil, errors.New("codex-home must be an absolute directory path without control characters")
 	}
@@ -166,6 +171,7 @@ func ParseFlags(args []string) (*Config, error) {
 		DesktopSend:        *desktopSend,
 		TerminalSocketPath: *terminalSocketPath,
 		TerminalPanes:      append([]string(nil), terminalPanes...),
+		TerminalSendMode:   *terminalSendMode,
 		CodexHome:          *codexHome,
 		HeartbeatInterval:  time.Duration(*heartbeatSec) * time.Second,
 		ProbeOnly:          *probeOnly,

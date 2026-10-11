@@ -50,6 +50,7 @@ type Daemon struct {
 	outboxMu           sync.Mutex
 	outbox             map[string]protocol.DaemonResultMessage
 	journal            commandJournal
+	durableJournal     bool
 	persistenceMu      sync.Mutex
 	pendingPersistence map[string]protocol.DaemonResultMessage
 	workers            sync.WaitGroup
@@ -60,6 +61,8 @@ type Daemon struct {
 	terminalObserver   sessionCatalog
 	terminalSnapshot   []protocol.Session
 	terminalDiscovery  chan struct{}
+	terminalController *terminal.DeliveryController
+	terminalReadiness  map[string]terminalReadinessRecord
 	desktopObserver    codex.DesktopWatcher
 	desktopController  desktopController
 	desktopSnapshot    map[string]protocol.DesktopObservation
@@ -86,6 +89,7 @@ func NewDaemon(cfg *config.Config, adapter codex.SessionAdapter) *Daemon {
 		historyContexts:    newHistoryContexts(),
 		historyRequests:    newHistoryRequests(),
 		terminalDiscovery:  make(chan struct{}, 1),
+		terminalReadiness:  make(map[string]terminalReadinessRecord),
 	}
 	if cfg.DesktopSocketPath != "" {
 		d.desktopObserver = codex.NewDesktopObserver(cfg.DesktopSocketPath)
@@ -96,7 +100,11 @@ func NewDaemon(cfg *config.Config, adapter codex.SessionAdapter) *Daemon {
 		d.sessionCatalog = codex.NewRolloutCatalog(cfg.CodexHome)
 	}
 	if cfg.TerminalSocketPath != "" && len(cfg.TerminalPanes) != 0 {
-		d.terminalObserver = terminal.NewObserver(cfg.TerminalSocketPath, cfg.TerminalPanes)
+		observer := terminal.NewObserver(cfg.TerminalSocketPath, cfg.TerminalPanes)
+		d.terminalObserver = observer
+		if cfg.TerminalSendMode == protocol.TerminalNonAtomicMode {
+			d.terminalController = terminal.NewDeliveryController(observer)
+		}
 	}
 	return d
 }
@@ -501,7 +509,7 @@ func (d *Daemon) executeVolatileCommand(ctx context.Context, cmd protocol.Contro
 
 	case protocol.ActionSend:
 		if isTerminalSession(cmd.SessionID) {
-			res = protocol.DaemonResultMessage{Type: "result", CommandID: cmdID, Status: protocol.StatusFailed, Error: "terminal sessions are read-only; no input was sent"}
+			res = d.sendTerminal(execCtx, cmd)
 			break
 		}
 		prompt, prepareErr := d.prepareSkillPrompt(cmd)

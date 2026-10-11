@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { CommandError, type CommandService } from "../commands.js";
 import type { IStore } from "../store/interface.js";
-import { EXECUTION_CLAIM_MS, EXECUTION_PAGE_SIZE, EXECUTION_TICK_MS, executionRequestId,
+import { assertNativeExecutionPlan, EXECUTION_CLAIM_MS, EXECUTION_PAGE_SIZE, EXECUTION_TICK_MS, executionRequestId,
   type ExecutionRecord } from "./execution.js";
 import { readExecutionView, type ExecutionView } from "./execution-view.js";
 
@@ -100,6 +100,7 @@ export class ExecutionScheduler {
     if (this.stopped) return null;
     const execution = await this.store.getExecution(id);
     if (!execution || execution.status !== "active" || this.stopped) return null;
+    assertNativeExecutionPlan(execution.plan);
     if (execution.expiresAt <= this.now() || !this.isChatAllowed(execution.chatId)) {
       await this.transition(execution, execution.expiresAt <= this.now() ? "expired" : "failed");
       return null;

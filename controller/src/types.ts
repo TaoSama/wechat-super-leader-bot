@@ -1,19 +1,24 @@
 import { z } from "zod";
 import { SkillCatalogSchema, SkillRef, SkillRefsSchema } from "./skills.js";
 import { sanitizeModelMetadata } from "./model-metadata.js";
+import { InputReceiptSchema, TerminalSessionIdSchema, type InputReceipt } from "./input-receipt.js";
+export { InputReceiptSchema, type InputReceipt } from "./input-receipt.js";
 
 export const ActionTypeSchema = z.enum(["read", "send"]);
 export type ActionType = z.infer<typeof ActionTypeSchema>;
 
-export const SendRouteSchema = z.enum(["desktop-owner", "control-socket"]);
+export const SendRouteSchema = z.enum(["desktop-owner", "control-socket", "terminal-pane"]);
 export type SendRoute = z.infer<typeof SendRouteSchema>;
-export const SendAvailabilitySchema = z.object({
-  route: z.literal("desktop-owner"),
+const SendAvailabilityFields = {
   state: z.enum(["ready", "blocked", "unavailable"]),
   observedAt: z.string().datetime({ offset: true }),
   validUntil: z.string().datetime({ offset: true }),
   reason: z.enum(["busy", "preflight-rejected", "unavailable", "checking"]).optional(),
-}).strict();
+};
+export const SendAvailabilitySchema = z.discriminatedUnion("route", [
+  z.object({ route: z.literal("desktop-owner"), ...SendAvailabilityFields }).strict(),
+  z.object({ route: z.literal("terminal-pane"), mode: z.literal("non-atomic"), ...SendAvailabilityFields }).strict(),
+]);
 
 // Contract status: Daemon result status must be one of completed, failed, accepted, uncertain
 export const DaemonResultStatusSchema = z.enum([
@@ -21,6 +26,7 @@ export const DaemonResultStatusSchema = z.enum([
   "completed",
   "failed",
   "uncertain",
+  "input-written",
 ]);
 export type DaemonResultStatus = z.infer<typeof DaemonResultStatusSchema>;
 
@@ -30,6 +36,7 @@ export const CommandStatusSchema = z.enum([
   "completed",
   "failed",
   "uncertain",
+  "input-written",
 ]);
 export type CommandStatus = z.infer<typeof CommandStatusSchema>;
 
@@ -137,10 +144,13 @@ export const DaemonResultMessageSchema = z.object({
   output: z.string().default(""),
   error: z.string().optional(),
   turnId: TurnIdSchema.optional(),
+  inputReceipt: InputReceiptSchema.optional(),
 }).refine(value => value.status !== "accepted" || value.turnId !== undefined, {
   message: "Accepted receipt requires a turn ID",
   path: ["turnId"],
-});
+}).refine(value => value.status === "input-written"
+  ? value.inputReceipt !== undefined && value.turnId === undefined && value.output === "" && value.error === undefined
+  : value.inputReceipt === undefined, "Input-written requires only a precise input receipt and empty output");
 export type DaemonResultMessage = z.infer<typeof DaemonResultMessageSchema>;
 
 export const DaemonHistoryMessageSchema = z.object({
@@ -196,7 +206,10 @@ export const ControllerCommandMessageSchema = z.object({
   expiresAt: z.string(), // ISO8601
   skills: SkillRefsSchema.optional(),
   sendRoute: SendRouteSchema.optional(),
-}).refine(value => value.action !== "read" || value.sendRoute === undefined, "Read commands cannot carry a send route");
+}).refine(value => value.action !== "read" || value.sendRoute === undefined, "Read commands cannot carry a send route")
+  .refine(value => value.action !== "send" ||
+    (value.sendRoute === "terminal-pane" ? TerminalSessionIdSchema.safeParse(value.sessionId).success : !value.sessionId.startsWith("terminal:")),
+  "Terminal targets require the exclusive terminal-pane send route");
 export type ControllerCommandMessage = z.infer<typeof ControllerCommandMessageSchema>;
 
 export interface InspectTurnMessage {
@@ -212,6 +225,7 @@ export interface ResultAckMessage {
   commandId: string;
   turnId?: string;
   status: DaemonResultStatus;
+  inputReceipt?: InputReceipt;
 }
 
 // HTTP API schemas:
@@ -260,12 +274,16 @@ export interface CommandRecord {
   output?: string;
   error?: string;
   turnId?: string;
+  inputReceipt?: InputReceipt;
   expiresAt: string;
   createdAt: string;
   updatedAt: string;
 }
 
-export function validateCommandSendRoute(command: Pick<CommandRecord, "action" | "sendRoute">): void {
+export function validateCommandSendRoute(command: Pick<CommandRecord, "action" | "sendRoute" | "sessionId">): void {
+  const terminal = command.sessionId.startsWith("terminal:");
+  if (command.action === "send" && terminal && command.sendRoute !== "terminal-pane") throw new Error("Terminal sends require the terminal-pane route");
+  if (command.sendRoute === "terminal-pane" && !TerminalSessionIdSchema.safeParse(command.sessionId).success) throw new Error("Terminal route requires a precise terminal session");
   if (command.sendRoute === undefined) return; // Historical records remain readable, but are never replayed.
   SendRouteSchema.parse(command.sendRoute);
   if (command.action !== "send") throw new Error("Read commands cannot carry a send route");

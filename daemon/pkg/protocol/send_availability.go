@@ -26,4 +26,5 @@ type SendAvailability struct {
 	ObservedAt string                 `json:"observedAt"`
 	ValidUntil string                 `json:"validUntil"`
 	Reason     SendAvailabilityReason `json:"reason,omitempty"`
+	Mode       string                 `json:"mode,omitempty"`
 }

@@ -12,6 +12,7 @@ type SendRoute string
 const (
 	RouteControlSocket SendRoute = "control-socket"
 	RouteDesktopOwner  SendRoute = "desktop-owner"
+	RouteTerminalPane  SendRoute = "terminal-pane"
 )
 
 // DispatchIdentity binds a durable command to exactly one desktop connection

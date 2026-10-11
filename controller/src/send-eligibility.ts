@@ -2,6 +2,7 @@ import { z } from "zod";
 import { DesktopObservationSchema, SendAvailabilitySchema, SendRoute, Session } from "./types.js";
 import { MAX_DESKTOP_OBSERVATION_AGE_MS } from "./session-observation.js";
 import { isTerminalSession } from "./terminal-session.js";
+import { TerminalSessionIdSchema } from "./input-receipt.js";
 
 const isoTimestamp = z.string().datetime({ offset: true });
 type SendEligibility = { ready: true; route: SendRoute } | { ready: false; httpStatus: number; reason: string };
@@ -15,20 +16,22 @@ function freshTimestamp(value: unknown, now: number): boolean {
 
 /** A present desktop authority, including an invalid one, never falls back to native control. */
 export function selectSendRoute(session: Session, now = Date.now()): SendEligibility {
-  if (isTerminalSession(session)) return blocked("Terminal sessions support observation only; sending is unavailable");
+  const terminal = isTerminalSession(session);
+  if (terminal && !Object.hasOwn(session, "sendAvailability")) return blocked("Terminal sessions support observation only; sending is unavailable");
   if (Object.hasOwn(session, "sendAvailability")) {
     const parsed = SendAvailabilitySchema.safeParse(session.sendAvailability);
-    if (!parsed.success || parsed.data.state !== "ready") return blocked("Desktop send authority is unavailable or blocked");
+    if (!parsed.success || parsed.data.state !== "ready") return blocked("Send authority is unavailable or blocked");
+    if (terminal !== (parsed.data.route === "terminal-pane") || terminal && !TerminalSessionIdSchema.safeParse(session.id).success) return blocked("Send authority does not match the target route");
     const { observedAt, validUntil } = parsed.data;
     const observed = Date.parse(observedAt), until = Date.parse(validUntil);
     if (!Number.isFinite(now) || observed > now || now >= until || until <= observed ||
-        until - observed > MAX_DESKTOP_OBSERVATION_AGE_MS) return blocked("Desktop send authority is expired or invalid");
-    if (Object.hasOwn(session, "desktopObservation")) {
+        until - observed > MAX_DESKTOP_OBSERVATION_AGE_MS) return blocked("Send authority is expired or invalid");
+    if (!terminal && Object.hasOwn(session, "desktopObservation")) {
       const observation = DesktopObservationSchema.safeParse(session.desktopObservation);
       if (!observation.success || observation.data.availability !== "available" || observation.data.status !== "idle" ||
           !freshTimestamp(observation.data.observedAt, now)) return blocked("Desktop session is not freshly observed idle");
     }
-    return { ready: true, route: "desktop-owner" };
+    return { ready: true, route: parsed.data.route };
   }
   if (!session.capabilities.includes("send")) return blocked("Target does not support this action", 400);
   if (session.status !== "idle" || session.loaded !== true) return blocked("Target session is not idle or not loaded");

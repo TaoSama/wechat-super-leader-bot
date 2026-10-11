@@ -21,6 +21,14 @@ export type ExecutionRecord = z.infer<typeof ExecutionSchema>;
 export type ExecutionAttempt = z.infer<typeof AttemptSchema>;
 export interface CreateExecutionResult { created: boolean; execution: ExecutionRecord }
 
+export function hasTerminalTarget(plan: Pick<Plan, "actions">): boolean {
+  return plan.actions.some(action => action.sendRoute === "terminal-pane" || action.sessionId.startsWith("terminal:"));
+}
+
+export function assertNativeExecutionPlan(plan: Pick<Plan, "actions">): void {
+  if (hasTerminalTarget(plan)) throw new Error("Terminal input cannot participate in a durable execution plan");
+}
+
 // Step identity is its one-based position in the immutable, confirmed plan.
 // Reordering or editing requires a new plan UUID and another confirmation.
 export function validatePlanDependencies(plan: Pick<Plan, "actions">): void {
@@ -48,6 +56,7 @@ export function validatePlanDependencies(plan: Pick<Plan, "actions">): void {
 
 export function normalizeExecution(value: unknown): ExecutionRecord {
   const execution = ExecutionSchema.parse(value);
+  assertNativeExecutionPlan(execution.plan);
   validateChatId(execution.chatId);
   validatePlanDependencies(execution.plan);
   if (execution.id !== execution.plan.id || execution.attempts.length !== execution.plan.actions.length ||

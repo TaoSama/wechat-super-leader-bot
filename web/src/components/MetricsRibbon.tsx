@@ -38,6 +38,7 @@ export const MetricsRibbon: React.FC<MetricsRibbonProps> = ({
   const counts = {
     pending: 0,
     accepted: 0,
+    "input-written": 0,
     completed: 0,
     failed: 0,
     uncertain: 0,
@@ -145,6 +146,9 @@ export const MetricsRibbon: React.FC<MetricsRibbonProps> = ({
             <div className="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-1 tabular-nums">
               <span className="text-xs font-mono text-emerald-400">
                 完成:{counts.completed}
+              </span>
+              <span className="text-xs font-mono text-amber-300" title="仅输入投递结束，执行未确认">
+                输入已写入:{counts["input-written"]}
               </span>
               <span
                 className={`text-xs font-mono ${
