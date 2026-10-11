@@ -10,14 +10,19 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
 
 const desktopTestTimeout = 3 * time.Second
 
-// One connection per fixture makes every server goroutine joinable at cleanup.
 func desktopFixture(t *testing.T, handler func(*desktopConn) error) string {
+	return desktopConnectionsFixture(t, handler, false)
+}
+
+// Both single-connection and streaming fixtures join every accepted handler.
+func desktopConnectionsFixture(t *testing.T, handler func(*desktopConn) error, multiple bool) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "desktop-test-")
 	if err != nil {
@@ -31,46 +36,133 @@ func desktopFixture(t *testing.T, handler func(*desktopConn) error) string {
 		}
 		t.Fatal(err)
 	}
-	accepted := make(chan net.Conn, 1)
-	done := make(chan error, 1)
+	var mu sync.Mutex
+	connections := make(map[net.Conn]bool)
+	var failures []error
+	var workers sync.WaitGroup
+	done := make(chan struct{})
 	go func() {
-		conn, acceptErr := listener.Accept()
-		if acceptErr != nil {
-			done <- acceptErr
-			return
+		defer close(done)
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				if !errors.Is(acceptErr, net.ErrClosed) {
+					mu.Lock()
+					failures = append(failures, acceptErr)
+					mu.Unlock()
+				}
+				return
+			}
+			mu.Lock()
+			connections[conn] = true
+			mu.Unlock()
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				serverErr := conn.SetDeadline(time.Now().Add(desktopTestTimeout))
+				if serverErr == nil {
+					serverErr = handler(&desktopConn{Conn: conn})
+				}
+				closeErr := conn.Close()
+				mu.Lock()
+				delete(connections, conn)
+				if serverErr != nil && !errors.Is(serverErr, net.ErrClosed) {
+					failures = append(failures, serverErr)
+				}
+				if closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+					failures = append(failures, closeErr)
+				}
+				mu.Unlock()
+			}()
+			if !multiple {
+				return
+			}
 		}
-		accepted <- conn
-		defer conn.Close()
-		if deadlineErr := conn.SetDeadline(time.Now().Add(desktopTestTimeout)); deadlineErr != nil {
-			done <- deadlineErr
-			return
-		}
-		done <- handler(&desktopConn{Conn: conn})
 	}()
 	t.Cleanup(func() {
 		if closeErr := listener.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
 			t.Error(closeErr)
 		}
-		select {
-		case conn := <-accepted:
+		<-done
+		mu.Lock()
+		for conn := range connections {
 			if closeErr := conn.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
-				t.Error(closeErr)
+				failures = append(failures, closeErr)
 			}
-		default:
 		}
+		mu.Unlock()
+		joined := make(chan struct{})
+		go func() { workers.Wait(); close(joined) }()
 		select {
-		case serverErr := <-done:
-			if serverErr != nil && !errors.Is(serverErr, net.ErrClosed) {
-				t.Errorf("desktop fixture: %v", serverErr)
-			}
+		case <-joined:
 		case <-time.After(desktopTestTimeout):
 			t.Error("desktop fixture goroutine did not terminate")
 		}
+		mu.Lock()
+		for _, serverErr := range failures {
+			t.Errorf("desktop fixture: %v", serverErr)
+		}
+		mu.Unlock()
 		if cleanupErr := os.RemoveAll(dir); cleanupErr != nil {
 			t.Error(cleanupErr)
 		}
 	})
 	return path
+}
+
+func desktopWatchFixture(t *testing.T, owners map[string]string, subscribe func(*desktopConn, string) error, discovery ...func(*desktopConn, desktopEnvelope) error) string {
+	t.Helper()
+	return desktopConnectionsFixture(t, func(c *desktopConn) error {
+		if err := desktopHandshake(c); err != nil {
+			return err
+		}
+		first, err := c.read()
+		if err != nil {
+			return err
+		}
+		if first.Method == desktopDiscoverOwner {
+			if len(discovery) > 0 {
+				return discovery[0](c, first)
+			}
+			for message := first; ; {
+				var params struct {
+					ConversationID string `json:"conversationId"`
+				}
+				if err := json.Unmarshal(message.Params, &params); err != nil {
+					return err
+				}
+				if message.Type != "request" || message.Method != desktopDiscoverOwner {
+					return errors.New("discovery connection must not follow state")
+				}
+				if owner, known := owners[params.ConversationID]; known {
+					if err := desktopReply(c, message, owner, nil); err != nil {
+						return err
+					}
+				}
+				message, err = c.read()
+				if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+			}
+		}
+		var params struct {
+			ConversationID string `json:"conversationId"`
+			HostID         string `json:"hostId"`
+			Following      bool   `json:"following"`
+		}
+		if err := json.Unmarshal(first.Params, &params); err != nil {
+			return err
+		}
+		owner, known := owners[params.ConversationID]
+		if !known || first.Type != "broadcast" || first.Method != desktopFollowingChanged || first.Version != 1 ||
+			!params.Following || params.HostID != "local" || len(first.TargetClientIDs) != 1 || first.TargetClientIDs[0] != owner {
+			return errors.New("isolated subscription used unproved owner")
+		}
+		return subscribe(c, params.ConversationID)
+	}, true)
 }
 
 func desktopReply(c *desktopConn, request desktopEnvelope, owner string, result any) error {

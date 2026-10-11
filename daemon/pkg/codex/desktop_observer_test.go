@@ -261,10 +261,7 @@ func TestDesktopWatchMalformedPatchStopsPublishing(t *testing.T) {
 	invalid := desktopStateEnvelope(t, desktopPatchChange(2, 3,
 		map[string]any{"op": "replace", "path": []any{"threadRuntimeStatus", "type"}, "value": "idle"},
 		map[string]any{"op": "move", "path": []any{"turns", 0}}))
-	path := desktopFixture(t, func(c *desktopConn) error {
-		if err := desktopOwnerSubscribe(c); err != nil {
-			return err
-		}
+	path := desktopWatchFixture(t, map[string]string{"session": "owner"}, func(c *desktopConn, _ string) error {
 		if err := c.write(snapshot); err != nil {
 			return err
 		}
@@ -277,11 +274,18 @@ func TestDesktopWatchMalformedPatchStopsPublishing(t *testing.T) {
 		return desktopExpectClosed(c)
 	})
 	var observations []protocol.DesktopObservation
-	err := NewDesktopObserver(path).Watch(context.Background(), []string{"session"}, func(_ string, o protocol.DesktopObservation) {
+	observer := NewDesktopObserver(path)
+	observer.watchWindow = desktopTestOwnerTimeout
+	err := observer.Watch(context.Background(), []string{"session"}, func(_ string, o protocol.DesktopObservation) {
 		observations = append(observations, o)
 	})
-	if err == nil || len(observations) != 2 || observations[0].Availability != "unavailable" || observations[1].Status != "active" {
+	if err != nil || len(observations) < 3 || observations[0].Availability != "unavailable" || observations[1].Status != "active" || observations[len(observations)-1].Availability != "unavailable" {
 		t.Fatalf("invalid patch should stop before publishing: %v, %+v", err, observations)
+	}
+	for _, observation := range observations {
+		if observation.Availability == "available" && observation.Status != "active" {
+			t.Fatalf("partially applied malformed patch was published: %+v", observation)
+		}
 	}
 }
 
@@ -312,11 +316,8 @@ func TestDesktopMissingOwnerErrorWithoutMethod(t *testing.T) {
 func TestDesktopWatchCancellationClosesConnection(t *testing.T) {
 	envelope := desktopStateEnvelope(t, desktopSnapshotChange("active", 1))
 	closed := make(chan struct{})
-	path := desktopFixture(t, func(c *desktopConn) error {
+	path := desktopWatchFixture(t, map[string]string{"session": "owner"}, func(c *desktopConn, _ string) error {
 		defer close(closed)
-		if err := desktopOwnerSubscribe(c); err != nil {
-			return err
-		}
 		if err := c.write(envelope); err != nil {
 			return err
 		}

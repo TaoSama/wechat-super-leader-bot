@@ -135,11 +135,20 @@ func TestDesktopWatchShortWindowsReachTailAndReobserveKnownOwners(t *testing.T) 
 	owners := map[string]string{"known": "owner-known", "tail": "owner-tail"}
 	tailFound := false
 	for round := range 5 {
-		observer.socketPath = desktopFixture(t, func(c *desktopConn) error { return desktopScheduleServer(c, owners) })
+		observer.socketPath = desktopWatchFixture(t, owners, func(c *desktopConn, id string) error {
+			snapshot, err := desktopAnySessionSnapshot(id, owners[id], "active")
+			if err != nil {
+				return err
+			}
+			if err := c.write(snapshot); err != nil {
+				return err
+			}
+			return desktopOnlyUnsubscribeUntilClosed(c, owners)
+		})
 		ctx, cancel := context.WithTimeout(context.Background(), desktopTestTimeout)
 		observed := map[string]bool{}
 		err := observer.Watch(ctx, ids, func(id string, observation protocol.DesktopObservation) {
-			observed[id] = observation.Availability == "available"
+			observed[id] = observed[id] || observation.Availability == "available"
 		})
 		cancel()
 		if err != nil || !observed["known"] {

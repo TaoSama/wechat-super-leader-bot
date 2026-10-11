@@ -228,10 +228,7 @@ func TestDesktopModelWatchFramedPatchesPreserveValidStatus(t *testing.T) {
 	for _, change := range changes {
 		envelopes = append(envelopes, desktopStateEnvelope(t, change))
 	}
-	path := desktopFixture(t, func(c *desktopConn) error {
-		if err := desktopOwnerSubscribe(c); err != nil {
-			return err
-		}
+	path := desktopWatchFixture(t, map[string]string{"session": "owner"}, func(c *desktopConn, _ string) error {
 		for _, envelope := range envelopes {
 			if err := c.write(envelope); err != nil {
 				return err

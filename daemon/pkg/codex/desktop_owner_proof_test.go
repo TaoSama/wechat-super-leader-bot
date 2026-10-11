@@ -14,24 +14,11 @@ import (
 
 func TestDesktopWatchPublishesOwnerBeforeOversizedSnapshot(t *testing.T) {
 	proofPublished := make(chan struct{})
-	path := desktopFixture(t, func(c *desktopConn) error {
-		if err := desktopHandshake(c); err != nil {
-			return err
-		}
-		requests, err := desktopDiscoveryRequests(c, 1)
-		if err != nil {
-			return err
-		}
-		if err := desktopReply(c, requests["session"], "owner", nil); err != nil {
-			return err
-		}
+	path := desktopWatchFixture(t, map[string]string{"session": "owner"}, func(c *desktopConn, _ string) error {
 		select {
 		case <-proofPublished:
 		case <-time.After(desktopTestTimeout):
 			return errors.New("discovery did not publish ownership before snapshot")
-		}
-		if err := desktopExpectFollow(c, true); err != nil {
-			return err
 		}
 		// No body is needed: the observer must reject at the shared inbound bound.
 		var header [4]byte
@@ -47,7 +34,9 @@ func TestDesktopWatchPublishesOwnerBeforeOversizedSnapshot(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), desktopTestTimeout)
 	defer cancel()
 	var observations []protocol.DesktopObservation
-	err := NewDesktopObserver(path).Watch(ctx, []string{"session"}, func(id string, observation protocol.DesktopObservation) {
+	observer := NewDesktopObserver(path)
+	observer.watchWindow = desktopTestOwnerTimeout
+	err := observer.Watch(ctx, []string{"session"}, func(id string, observation protocol.DesktopObservation) {
 		if id != "session" {
 			t.Errorf("ownership attached to wrong session: %q", id)
 		}
@@ -57,8 +46,13 @@ func TestDesktopWatchPublishesOwnerBeforeOversizedSnapshot(t *testing.T) {
 		}
 	})
 	want := protocol.DesktopObservation{OwnerID: "owner", Status: "unknown", Availability: "unavailable", Source: "codex-desktop"}
-	if !errors.Is(err, errDesktopFrameTooLarge) || len(observations) != 1 || observations[0] != want {
+	if err != nil || len(observations) < 2 {
 		t.Fatalf("bounded snapshot lost ownership or granted runtime facts: err=%v observations=%+v", err, observations)
+	}
+	for _, observation := range observations {
+		if observation != want {
+			t.Fatalf("oversized target granted runtime facts: %+v", observation)
+		}
 	}
 }
 
@@ -80,23 +74,21 @@ func TestDesktopWatchRejectsUnprovenDiscoveryOwner(t *testing.T) {
 			})
 			ctx, cancel := context.WithTimeout(context.Background(), desktopTestTimeout)
 			defer cancel()
-			published := false
-			err := NewDesktopObserver(path).Watch(ctx, []string{"session"}, func(string, protocol.DesktopObservation) { published = true })
-			if err == nil || published {
-				t.Fatalf("invalid owner established desktop authority: err=%v published=%v", err, published)
+			var observations []protocol.DesktopObservation
+			observer := NewDesktopObserver(path)
+			observer.watchWindow = desktopTestOwnerTimeout
+			err := observer.Watch(ctx, []string{"session"}, func(_ string, observation protocol.DesktopObservation) {
+				observations = append(observations, observation)
+			})
+			if err != nil || len(observations) != 1 || observations[0].Availability != "unavailable" || observations[0].OwnerID != "" {
+				t.Fatalf("invalid owner established desktop authority: err=%v observations=%+v", err, observations)
 			}
 		})
 	}
 }
 
 func TestDesktopWatchOwnershipWithoutSnapshotStaysUnavailable(t *testing.T) {
-	path := desktopFixture(t, func(c *desktopConn) error {
-		if err := desktopOwnerSubscribe(c); err != nil {
-			return err
-		}
-		if err := desktopExpectFollow(c, false); err != nil {
-			return err
-		}
+	path := desktopWatchFixture(t, map[string]string{"session": "owner"}, func(c *desktopConn, _ string) error {
 		return desktopExpectClosed(c)
 	})
 	observer := NewDesktopObserver(path)
@@ -107,7 +99,7 @@ func TestDesktopWatchOwnershipWithoutSnapshotStaysUnavailable(t *testing.T) {
 	err := observer.Watch(ctx, []string{"session"}, func(_ string, observation protocol.DesktopObservation) {
 		observations = append(observations, observation)
 	})
-	if err != nil || len(observations) != 1 || observations[0].OwnerID != "owner" || observations[0].Availability != "unavailable" || observations[0].ObservedAt != "" {
+	if err != nil || len(observations) == 0 || observations[0].OwnerID != "owner" || observations[0].Availability != "unavailable" || observations[0].ObservedAt != "" {
 		t.Fatalf("discovery became a fresh snapshot: err=%v observations=%+v", err, observations)
 	}
 }
