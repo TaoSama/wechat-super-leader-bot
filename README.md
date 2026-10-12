@@ -38,7 +38,11 @@ node local.mjs --sessions --controller https://leader.taoai.site
 
 部署、原生服务及人工微信验收见 [香港运维说明](docs/runbook/hong-kong.md)。已迁移到香港的实例不要再执行本地 `--up` 启动第二个编排权威。
 
-2026-10-12 发布状态：香港 Controller/Web 与新注册的 Mini Daemon 为 `f6b2b5d`；Air 已更新到历史连接修复产物 `ef32a2f`（产品补丁 `9ef6647`）。Mini 只读，不开放发送。Air 原桌面 owner 路由已完成真实模型两步结果接力、精确 turn/输出回查与重复确认不重发；修复后正式浏览器连续242秒/97次读取、旧消息位置保留及直接发送均通过。GitHub已推送，修复提交的Ubuntu整链与macOS CI均通过。部署前已打开的Web页面需要刷新以加载同版数据合同。多会话订阅仍使用16条独立连接共享两个帧处理槽；30秒窗口重连会短暂重新检查，超过32 MiB的会话仍明确不可用。未改App transport或重启App；短时连续读取不等于长期负载保障。最新证据见 [正式发布与验收记录](docs/changes/2026-10-12-authorized-release/VERIFICATION.md)。微信真实入站与内置浏览器体验仍待用户确认。
+2026-10-13 发布状态：香港 Controller/Web 为 `79b8b34`，已上线自然语言近期历史查询及节点快照并发修复，Ubuntu 全量与 macOS CI 均通过。Mini Daemon 保持 `f6b2b5d`，只读、不开放发送；Air 保持历史连接修复产物 `ef32a2f`（产品补丁 `9ef6647`）。本轮没有更新 Daemon、改 App transport 或重启 App。
+
+真实 `gpt-6.1-sol` 已返回专用原会话的近期记录、实际来源和本次获取时间；无新增命令或计划，重复查询及 Controller 换版后重放的业务摘要均不变，验收会话已重新归档。曾发生两次模型服务临时失败，第三次查询通过，失败证据保留。详见 [自然语言历史查询验收](docs/changes/2026-10-12-leader-session-history/VERIFICATION.md) 与 [快照并发修复](docs/changes/2026-10-13-node-session-persistence.md)。这仍是服务端模拟微信入站，真实手机微信和内置浏览器体验待用户确认。
+
+此前 Air 原桌面 owner 路由的真实模型两步结果接力、精确 turn/输出回查与重复确认防重发已通过；正式浏览器连续 242 秒 / 97 次读取、旧消息位置保留及直接发送的证据见 [此前发布验收](docs/changes/2026-10-12-authorized-release/VERIFICATION.md)。多会话订阅仍使用 16 条独立连接共享两个帧处理槽，30 秒窗口重连会短暂重新检查，超过 32 MiB 的会话明确不可用；短时验证不等于长期负载保障。旧页面应刷新以加载同版数据合同。
 
 ## Web 会话工作台
 
