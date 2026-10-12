@@ -39,7 +39,7 @@ for (const kind of ["completed", "blocked", "expired"] as const) test(`goal ${ki
 });
 test("uncertain goal notification remains permanent across gateway restart", async t => {
   const item = goalNotification("blocked"), f = harness(t, { items: [item] });
-  f.hooks.send = () => ({});
+  f.hooks.send = () => ({ ret: null });
   assert.equal((await f.gateway.deliverNotificationsOnce()).uncertain, 1);
   const state = new StateManager(f.accountPath, f.statePath);
   const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.ilink, notifications: true });
@@ -149,8 +149,8 @@ test("an item expired or context lost after listing is never claimed", async t =
     assert.equal(f.sends.length, 0);
   }
 });
-for (const response of [{}, { ret: null }, { ret: "0" }, { ret: 0, errcode: null }, { ret: 0, errcode: 1 }, { errcode: 0, ret: false }, []]) {
-  test(`notification sends require explicit zero codes: ${JSON.stringify(response)}`, async t => {
+for (const response of [{ base_resp: { ret: 0 } }, { ret: null }, { ret: "0" }, { ret: 0, errcode: null }, { ret: 0, errcode: 1 }, { errcode: 0, ret: false }, []]) {
+  test(`notification rejects invalid or unrecognized receipts: ${JSON.stringify(response)}`, async t => {
     const f = harness(t); f.hooks.send = () => response;
     assert.deepEqual(await f.gateway.deliverNotificationsOnce(), { accepted: 0, uncertain: 1, skipped: 0 });
     await f.gateway.deliverNotificationsOnce();
@@ -158,11 +158,11 @@ for (const response of [{}, { ret: null }, { ret: "0" }, { ret: 0, errcode: null
     assert.equal([...f.records.values()][0].status, "uncertain");
   });
 }
-for (const response of [{ ret: 0 }, { errcode: 0 }, { ret: 0, errcode: 0 }]) test(`notification accepts explicit successful receipt: ${JSON.stringify(response)}`, async t => {
+for (const response of [{}, { message_id: "123" }, { ret: 0 }, { errcode: 0 }, { ret: 0, errcode: 0 }]) test(`notification accepts supported successful response: ${JSON.stringify(response)}`, async t => {
   const f = harness(t); f.hooks.send = () => response;
   assert.equal((await f.gateway.deliverNotificationsOnce()).accepted, 1);
 });
-test("ordinary replies preserve existing empty response behavior", async t => {
+test("ordinary replies share the empty-object success contract", async t => {
   const f = harness(t); f.hooks.send = () => ({});
   await f.ilink.sendSingleText("chat", "ordinary");
   assert.equal(f.sends.length, 1);
