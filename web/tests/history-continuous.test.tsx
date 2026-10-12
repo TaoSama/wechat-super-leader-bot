@@ -24,6 +24,54 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("持续会话快照", () => {
+  it("超限暂停自动请求，仅显式选择分页接口后以新context读取同一会话", async () => {
+    fetchHistory.mockRejectedValueOnce(new ApiHistoryError(413, "history_too_large", "历史超出读取大小限制。"));
+    const { result } = renderHook(() => useSessionHistory(session, true, vi.fn()));
+    await settle(); await advance(60_000);
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    expect(fetchHistory).toHaveBeenCalledTimes(1);
+    expect(result.current.sizeBlocked).toBe(true);
+    expect(result.current.requestedSource).toBeUndefined();
+    await act(async () => { expect(await result.current.usePagedHistory()).toBe(true); });
+    expect(fetchHistory.mock.calls[1]).toEqual(["air", "session", undefined, expect.any(AbortSignal), undefined, "control-socket"]);
+    expect(result.current.sizeBlocked).toBe(false);
+    expect(result.current.history?.source).toBe("control-socket");
+    await act(async () => { await result.current.loadOlder(); });
+    expect(fetchHistory.mock.calls[2][4]).toBe(page([]).historyContext);
+    expect(fetchHistory.mock.calls[2][5]).toBe("control-socket");
+    await advance(2000);
+    expect(fetchHistory.mock.calls.at(-1)?.[5]).toBe("control-socket");
+  });
+
+  it("显式换来源取消旧请求并清空旧页，迟到页不能混入，换会话后恢复自动选择", async () => {
+    const old = pending<SessionHistory>();
+    fetchHistory.mockResolvedValueOnce({ ...page(["old"]), source: "codex-desktop" }).mockReturnValueOnce(old.promise);
+    const { result, rerender } = renderHook(({ target }) => useSessionHistory(target, true, vi.fn()), { initialProps: { target: session } });
+    await settle();
+    act(() => { void result.current.refresh(); });
+    const signal = fetchHistory.mock.calls[1][3];
+    await act(async () => { await result.current.usePagedHistory(); });
+    expect(signal?.aborted).toBe(true);
+    expect(result.current.history?.items.map(item => item.id)).toEqual(["a", "b"]);
+    expect(fetchHistory.mock.calls[2][4]).toBeUndefined();
+    await act(async () => old.resolve({ ...page(["late"]), source: "codex-desktop" }));
+    expect(result.current.history?.items.some(item => item.id === "late")).toBe(false);
+    rerender({ target: { ...session, id: "other" } });
+    await settle();
+    expect(fetchHistory.mock.calls.at(-1)?.[5]).toBeUndefined();
+    expect(result.current.requestedSource).toBeUndefined();
+  });
+
+  it("选定分页接口时拒绝桌面来源，不自动退回或混入记录", async () => {
+    const { result } = renderHook(() => useSessionHistory(session, true, vi.fn()));
+    await settle();
+    fetchHistory.mockResolvedValue({ ...page(["wrong"]), source: "codex-desktop" });
+    await act(async () => { expect(await result.current.usePagedHistory()).toBe(false); });
+    expect(result.current.history).toBeNull();
+    expect(result.current.error).toContain("不匹配");
+    await advance(4000);
+    expect(fetchHistory.mock.calls.at(-1)?.[5]).toBe("control-socket");
+  });
   it("首次无context，最新轮询和分页始终固定context", async () => {
     const { result } = renderHook(() => useSessionHistory(session, true, vi.fn()));
     await settle();
@@ -287,8 +335,8 @@ describe("持续会话快照", () => {
   });
 });
 
-function ScrollHarness({ items, loadOlder, owner = "air" }: { items: HistoryItem[]; loadOlder: () => Promise<boolean>; owner?: string }) {
-  const scroll = useHistoryScroll({ owner, items, nextCursor: "older", loadingOlder: false, loadOlder });
+function ScrollHarness({ items, loadOlder, owner = "air", automaticLoadPaused }: { items: HistoryItem[]; loadOlder: () => Promise<boolean>; owner?: string; automaticLoadPaused?: boolean }) {
+  const scroll = useHistoryScroll({ owner, items, nextCursor: "older", loadingOlder: false, automaticLoadPaused, loadOlder });
   return <><div ref={scroll.scrollRef} onScroll={scroll.onScroll} aria-label="历史测试">{items.map((entry) => <div key={entry.id} data-history-id={entry.id}>{entry.text}</div>)}</div>
     <button onClick={() => void scroll.loadOlder()}>重试更早</button>{scroll.newContent && <button onClick={scroll.jumpLatest}>新消息</button>}{scroll.autoLoadBlocked && <span>自动加载已暂停</span>}</>;
 }
@@ -303,6 +351,25 @@ function geometry() {
 }
 
 describe("连续滚动锚点", () => {
+  it("自动加载暂停时不响应近顶滚动，手动入口仍可用，解除暂停恢复自动加载", async () => {
+    const loadOlder = vi.fn().mockResolvedValue(true);
+    const items = [item("a"), item("b"), item("c"), item("d")];
+    const { rerender } = render(<ScrollHarness items={items} loadOlder={loadOlder} automaticLoadPaused />);
+    const { container } = geometry();
+    container.scrollTop = 20;
+    fireEvent.scroll(container); fireEvent.scroll(container);
+    expect(loadOlder).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "重试更早" }));
+    await settle();
+    expect(loadOlder).toHaveBeenCalledTimes(1);
+    fireEvent.scroll(container);
+    expect(loadOlder).toHaveBeenCalledTimes(1);
+    rerender(<ScrollHarness items={items} loadOlder={loadOlder} automaticLoadPaused={false} />);
+    fireEvent.scroll(container);
+    await settle();
+    expect(loadOlder).toHaveBeenCalledTimes(2);
+  });
+
   it("慢分页期间继续从50滚到150，tail增长不算prepend，旧页200px只补到350", async () => {
     const read = pending<boolean>();
     const loadOlder = vi.fn().mockReturnValue(read.promise);

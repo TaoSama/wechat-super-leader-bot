@@ -9,6 +9,14 @@ const response = (value: unknown, status = 200) => new Response(JSON.stringify(v
 afterEach(() => vi.unstubAllGlobals());
 
 describe("history API contract", () => {
+  it("only selects the paginated source explicitly and rejects a different response source", async () => {
+    const fetch = vi.fn().mockResolvedValue(response({ ...PAGE, source: "control-socket" }));
+    vi.stubGlobal("fetch", fetch);
+    await fetchSessionHistory("node", "session", undefined, undefined, undefined, "control-socket");
+    expect(fetch.mock.calls[0][0]).toContain("source=control-socket");
+    fetch.mockResolvedValue(response(PAGE));
+    await expect(fetchSessionHistory("node", "session", undefined, undefined, undefined, "control-socket")).rejects.toThrow("所选读取来源不匹配");
+  });
   it("keeps initial reads context-free and includes context on latest/pagination requests", async () => {
     const fetch = vi.fn().mockResolvedValue(response(PAGE));
     vi.stubGlobal("fetch", fetch);

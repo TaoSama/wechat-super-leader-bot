@@ -52,6 +52,17 @@ afterEach(async () => {
 });
 
 describe("session history hub", () => {
+  it("forwards an explicit paginated source and refuses a daemon source mismatch", async () => {
+    const { hub } = fixture();
+    const ws = await connected(hub, "node");
+    const read = hub.readHistory("node", "session", { source: "control-socket" });
+    expect(ws.request().source).toBe("control-socket");
+    ws.receive(response(ws.request(), { history: { ...history, source: "codex-desktop" } }));
+    await expect(read).rejects.toMatchObject({ code: "history_invalid_response" });
+    for (const source of ["", "codex-desktop", "terminal-transcript", "unknown"]) {
+      expect(HistoryReadOptionsSchema.safeParse({ source }).success).toBe(false);
+    }
+  });
   it("requires UUID contexts and rejects legacy history and cursor-only inputs", () => {
     for (const value of [undefined, "", "not-uuid", "x".repeat(129)]) {
       expect(SessionHistorySchema.safeParse({ ...history, historyContext: value }).success).toBe(false);

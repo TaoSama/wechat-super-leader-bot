@@ -8,6 +8,7 @@ interface Options {
   items: HistoryItem[];
   nextCursor: string | null;
   loadingOlder: boolean;
+  automaticLoadPaused?: boolean;
   loadOlder: () => Promise<boolean>;
 }
 interface Anchor { element: HTMLElement; offset: number }
@@ -63,7 +64,7 @@ export function useHistoryScroll(options: Options) {
     bottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < NEAR_BOTTOM_PX;
     if (busyRef.current) anchorRef.current = bottomRef.current ? null : capture();
     if (bottomRef.current) setNewContent(false);
-    if (element.scrollTop < NEAR_TOP_PX && !blockedRef.current) void loadOlder();
+    if (element.scrollTop < NEAR_TOP_PX && !blockedRef.current && !optionsRef.current.automaticLoadPaused) void loadOlder();
   }, [loadOlder]);
 
   const jumpLatest = useCallback(() => {

@@ -33,3 +33,21 @@ func TestHistoryRequestBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestHistoryRequestAllowsOnlyExplicitControlSource(t *testing.T) {
+	base := protocol.ReadHistoryMessage{Type: "read_history", NodeID: "node", RequestID: "request", SessionID: "session"}
+	for _, source := range []string{"", protocol.HistorySourceControl} {
+		msg := base
+		msg.Source = source
+		if err := msg.Validate("node"); err != nil {
+			t.Fatalf("valid source %q rejected: %v", source, err)
+		}
+	}
+	for _, source := range []string{protocol.HistorySourceDesktop, protocol.HistorySourceTerminal, "codex-persisted", "auto", " control-socket", "control-socket "} {
+		msg := base
+		msg.Source = source
+		if err := msg.Validate("node"); err == nil || err.Error() != protocol.HistoryInvalidRequest {
+			t.Fatalf("unsupported source %q accepted: %v", source, err)
+		}
+	}
+}

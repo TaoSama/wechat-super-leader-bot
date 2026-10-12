@@ -27,6 +27,8 @@ interface HistoryState {
   pollingPaused: boolean;
   contextExpired: boolean;
   windowNotice: string | null;
+  requestedSource?: "control-socket";
+  sizeBlocked?: boolean;
 }
 interface Gap { beforeId: string; cursor: string | null; previousIds: Set<string>; seen: Set<string> }
 interface Job { older: boolean; reset: boolean; resolve: (loaded: boolean) => void; promise: Promise<boolean> }
@@ -55,6 +57,7 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
   const [state, setState] = useState<HistoryState>(EMPTY);
   const requestRef = useRef<(older?: boolean, reset?: boolean) => Promise<boolean>>(async () => false);
   const lifecycleRef = useRef<() => void>(() => undefined);
+  const sourceRef = useRef<(source?: "control-socket") => Promise<boolean>>(async () => false);
   const authRef = useRef(onAuthFailure);
   const connectedRef = useRef(connected);
   const sessionRef = useRef(session);
@@ -78,6 +81,8 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
     let failures = 0;
     let contextExpired = false;
     let needsReset = false;
+    let requestedSource: "control-socket" | undefined;
+    let sizeBlocked = false;
     const queue: Job[] = [];
     const readable = () => !!sessionRef.current && sessionKey(sessionRef.current) === owner && !terminalHistoryBlockReason(sessionRef.current);
     const available = () => connectedRef.current && readable() && navigator.onLine !== false && document.visibilityState !== "hidden";
@@ -88,7 +93,7 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
       setState({ owner, history: latest ? { ...latest, nextCursor: cursor } : null, loading: !!active,
         loadingOlder: !!active?.job.older, loadingLatest: !!active && !active.job.older, error: error ?? paginationError,
         gap: gaps.length > 0, gapBeforeId: gaps[0]?.beforeId ?? null, gapBeforeIds: gaps.map((gap) => gap.beforeId),
-        memoryGap, pollingPaused: contextExpired || !available(), contextExpired,
+        memoryGap, pollingPaused: contextExpired || sizeBlocked || !available(), contextExpired, requestedSource, sizeBlocked,
         windowNotice: memoryGap ? "历史窗口最多保留2000条：较早消息与最新30条之间部分内容未显示。继续向上可加载更早历史，重新读取最新页可释放历史窗口并恢复最新一段连续记录。" : null });
     }
 
@@ -102,7 +107,7 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
 
     function schedule() {
       window.clearTimeout(timer);
-      if (!disposed && !contextExpired && available()) timer = window.setTimeout(() => void request(), Math.min(MAX_RETRY_MS, HISTORY_POLL_MS * 2 ** failures));
+      if (!disposed && !contextExpired && !sizeBlocked && available()) timer = window.setTimeout(() => void request(), Math.min(MAX_RETRY_MS, HISTORY_POLL_MS * 2 ** failures));
     }
 
     async function pump() {
@@ -121,11 +126,12 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
       let error: string | null = null;
       try {
         const historyContext = needsReset ? undefined : latest?.historyContext;
-        const page = await fetchSessionHistory(target.nodeId, target.id, cursor ?? undefined, controller.signal, historyContext);
+        const page = await fetchSessionHistory(target.nodeId, target.id, cursor ?? undefined, controller.signal, historyContext, requestedSource);
         const current = sessionRef.current;
         if (disposed || controller.signal.aborted || active !== flight || !current || !available()) return;
         if (!isHistoryContext(page.historyContext) || page.session.nodeId !== target.nodeId || page.session.id !== target.id ||
             !isSessionHistorySource(page.source, page.session) || !isSessionHistorySource(page.source, current) ||
+            requestedSource !== undefined && page.source !== requestedSource ||
             isTerminalSession(target) && page.session.provider !== current.provider ||
             historyContext !== undefined && (page.historyContext !== historyContext || page.source !== latest?.source ||
               isTerminalSession(target) && page.session.provider !== latest?.session.provider)) {
@@ -168,6 +174,8 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
           gaps = [{ beforeId: latest.items[MAX_DISPLAY_ITEMS - LIVE_TAIL_ITEMS].id, cursor: null, previousIds: new Set(), seen: new Set() }];
         }
         failures = 0;
+        if (sizeBlocked) paginationError = null;
+        sizeBlocked = false;
         loaded = !error;
       } catch (reason) {
         if (disposed || controller.signal.aborted || active !== flight) return;
@@ -184,6 +192,11 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
         }
         failures = Math.min(failures + 1, 4);
         error = reason instanceof Error ? reason.message : "无法获取会话历史";
+        if (reason instanceof ApiHistoryError && reason.statusCode === 413) {
+          sizeBlocked = true;
+          paginationError = error;
+          for (const queued of queue.splice(0)) queued.resolve(false);
+        }
         if (reason instanceof ApiHistoryError && reason.statusCode === 409) {
           contextExpired = true;
           paginationError = error = HISTORY_CONTEXT_EXPIRED_MESSAGE;
@@ -208,6 +221,7 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
         needsReset = true;
         paginationError = null;
         failures = 0;
+        sizeBlocked = false;
       } else if (contextExpired || needsReset && older) return Promise.resolve(false);
       const duplicate = [active?.job, ...queue].find((job) => job && job.older === older && (!reset || job.reset));
       if (duplicate) return duplicate.promise;
@@ -225,12 +239,24 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
       if (current && isTerminalSession(current) && !terminalHistoryBlockReason(current)) {
         observationTimer = window.setTimeout(reconcile, Date.parse(current.observedAt) + MAX_TERMINAL_OBSERVATION_AGE_MS - Date.now() + 1);
       }
-      if (contextExpired) { publish(); return; }
+      if (contextExpired || sizeBlocked) { publish(); return; }
       if (!available()) { cancel(); publish(current && terminalHistoryBlockReason(current) ||
         (connectedRef.current && navigator.onLine !== false ? null : "机器或网络离线，已暂停实时更新，恢复连接后自动继续")); }
       else { failures = 0; void request(); }
     }
     requestRef.current = request;
+    sourceRef.current = (source) => {
+      if (disposed || isTerminalSession(target) || !available()) return Promise.resolve(false);
+      cancel();
+      requestedSource = source;
+      // Changing source starts a new reading context, never merging old pages.
+      latest = null;
+      oldestCursor = null;
+      gaps = [];
+      memoryGap = false;
+      olderSeen.clear();
+      return request(false, true);
+    };
     lifecycleRef.current = reconcile;
     function detach() {
       document.removeEventListener("visibilitychange", reconcile);
@@ -248,6 +274,7 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
       detach();
       requestRef.current = async () => false;
       lifecycleRef.current = () => undefined;
+      sourceRef.current = async () => false;
     };
   }, [owner]);
 
@@ -255,7 +282,9 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
   const refresh = useCallback(() => requestRef.current(), []);
   const loadOlder = useCallback(() => requestRef.current(true), []);
   const resetLatest = useCallback(() => requestRef.current(false, true), []);
+  const usePagedHistory = useCallback(() => sourceRef.current("control-socket"), []);
+  const useAutomaticHistory = useCallback(() => sourceRef.current(), []);
   const readBlockReason = session ? terminalHistoryBlockReason(session) : null;
   return { ...(state.owner === owner ? state : { ...EMPTY, owner, loading: !!owner }),
-    canRead: !!session && connected && !readBlockReason, readBlockReason, refresh, loadOlder, resetLatest };
+    canRead: !!session && connected && !readBlockReason, readBlockReason, refresh, loadOlder, resetLatest, usePagedHistory, useAutomaticHistory };
 }

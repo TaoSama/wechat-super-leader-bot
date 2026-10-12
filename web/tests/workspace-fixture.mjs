@@ -52,6 +52,7 @@ let historyGeneration = 0;
 let historySource = "codex-desktop";
 let authenticated = true;
 let failOlder = false;
+let desktopHistoryTooLarge = false;
 const status = () => ({ leaderMode: "model", leaderModel: "gpt-6.1-sol", sessions, commands,
   goals: goals.snapshot(), executions: plans.snapshot(), nodes: [
   { nodeId: "demoair", connected: true, lastHeartbeat: now(), sessionCount: sessions.filter(session => session.nodeId === "demoair").length },
@@ -74,6 +75,10 @@ async function handle(req, res) {
     return;
   }
   if (path === "/fixture/metrics") return json(res, { ...metrics, ...terminal.metrics() });
+  if (path === "/fixture/large-history" && req.method === "POST") {
+    desktopHistoryTooLarge = true;
+    return json(res, { synthetic: true, desktopHistoryTooLarge });
+  }
   if (path === "/fixture/goals" && req.method === "POST") {
     const mode = url.searchParams.get("mode");
     if (!GOAL_MODES.includes(mode)) return json(res, { error: "unknown goal fixture mode" }, 400);
@@ -138,21 +143,25 @@ async function handle(req, res) {
     if (!session) return json(res, { error: "unknown session" }, 404);
     if (session.provider.startsWith("terminal/")) return json(res, { code: "history_unavailable", error: "Terminal snapshots are not native chat history" }, 502);
     const cursor = url.searchParams.get("cursor");
+    const requestedSource = url.searchParams.get("source");
+    if (requestedSource !== null && requestedSource !== "control-socket") return json(res, { code: "history_invalid_request" }, 400);
     metrics[cursor ? "older" : "latest"]++;
     let historyContext = url.searchParams.get("historyContext");
     if (cursor && !historyContext) return json(res, { code: "history_invalid_request", error: "Invalid history request" }, 400);
     if (!historyContext) {
       historyContext = randomUUID();
-      historyContexts.set(historyContext, { nodeId: session.nodeId, sessionId: session.id, source: historySource, generation: historyGeneration });
+      historyContexts.set(historyContext, { nodeId: session.nodeId, sessionId: session.id, source: requestedSource ?? historySource, generation: historyGeneration });
       metrics.contexts++;
     }
     const context = historyContexts.get(historyContext);
     const pageCursor = cursor ? historyCursors.get(cursor) : undefined;
     if (!context || context.nodeId !== session.nodeId || context.sessionId !== session.id || context.generation !== historyGeneration ||
+        requestedSource !== null && requestedSource !== context.source ||
         cursor && (!pageCursor || pageCursor.historyContext !== historyContext)) {
       metrics.expiredHistoryRequests++;
       return json(res, { code: "history_context_expired", error: "History context expired" }, 409);
     }
+    if (desktopHistoryTooLarge && context.source === "codex-desktop") return json(res, { code: "history_too_large" }, 413);
     if (cursor && failOlder) return json(res, { error: "synthetic older failure" }, 503);
     const end = cursor ? pageCursor.end : items.length;
     if (!Number.isInteger(end) || end < 0 || end > items.length) return json(res, { error: "bad cursor" }, 400);

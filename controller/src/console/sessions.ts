@@ -11,6 +11,7 @@ const TargetSchema = z.object({
   sessionId: z.string().min(1).max(64).refine(value => /^[A-Za-z0-9_-]+$/.test(value) || TERMINAL_SESSION_ID_PATTERN.test(value)),
 });
 const HistoryQuerySchema = z.object({
+  source: z.literal("control-socket").optional(),
   cursor: z.string().min(1).max(4096).optional(),
   historyContext: z.string().uuid().optional(),
   limit: z.string().regex(/^(?:[1-9]|[1-4][0-9]|50)$/).transform(Number).optional(),
