@@ -1,6 +1,6 @@
 # 完整目标验收清单
 
-2026-10-13增量：香港Controller已更新至79b8b34，历史查询与快照串行化见 [查询验收](../2026-10-12-leader-session-history/VERIFICATION.md) 和 [持久化验收](../2026-10-13-node-session-persistence.md)；最近已完成CI基线aead4f8。两机Daemon均为ef32a2f，Mini现已通过原owner状态、历史分页与发送资格，实际发送仍未验证，见 [Mini验收](../2026-10-13-macmini-owner-activation.md)。下面10-12的版本、数量与运行身份保留为历史基线，不覆盖这些增量。
+2026-10-13增量：香港Controller已更新至79b8b34，历史查询与快照串行化见 [查询验收](../2026-10-12-leader-session-history/VERIFICATION.md) 和 [持久化验收](../2026-10-13-node-session-persistence.md)；最近已完成双平台CI产品基线3a750e7。两机Daemon均为ef32a2f，Mini现已通过原owner状态、历史分页与发送资格，实际发送仍未验证，见 [Mini验收](../2026-10-13-macmini-owner-activation.md)。微信通知现已启用，Gateway运行3a750e7脱敏诊断补丁；唯一既有通知为uncertain、未重发，见 [通知现场记录](../2026-10-13-wechat-notification-activation.md)。下面10-12的版本、数量与运行身份保留为历史基线，不覆盖这些增量。
 
 核对日期：2026-10-12。产品发布源码 `f6b2b5d`，已推送的 CI 通过基线 `7965626`；本轮实际重新核验香港、Air、Mini、真实模型结果接力及浏览器。此文区分已实现、已验证、已部署与未证明，不改变完整范围。最近证据见 [正式发布记录](../2026-10-12-authorized-release/VERIFICATION.md)，逐轮历史见 [VERIFICATION.md](VERIFICATION.md)。Controller 703、Gateway 104、CLI/工具 81 项为前轮回归，Web 新增真实形态回归后 400 项；不能把各轮数字相加或当作全目标完成。
 
@@ -8,7 +8,7 @@
 
 同日大快照修复：observer/control/history 入站统一 32 MiB，控制连接共享两槽、结构预算和重复引用拒绝已补齐；Go race/vet/Linux build、大帧跨层及真实只读通过。香港 `3488d3a` / Air `058af3d` 的 [历史发布证据](../2026-10-12-release-preflight/VERIFICATION.md)，以及后续香港 `a4ef93c` / Air `e1a6408` 的 [有序技能发布验收](../2026-10-12-ordered-skills-release/VERIFICATION.md) 均保留为历史证据，不代表当前运行版本。原 [大快照验收](../2026-10-12-desktop-frame-budget/VERIFICATION.md) 保留开发期事实及内存测量限制。
 
-当前发布边界：香港 Controller/Web、Air 与 Mini Daemon 已部署 f6b2b5d；通知开关仍关闭，真实微信通知未验收。[终端单步输入](../2026-10-12-terminal-control-chain/VERIFICATION.md)、[Codex/Claude/Grok 可信记录历史](../2026-10-12-terminal-history/VERIFICATION.md) 代码随包部署但未配置真实目标或开启发送。[跨步骤结果传递](../2026-10-12-plan-result-handoff/VERIFICATION.md) 已通过同一真实 Air 原会话的两步模型接力；不是不同物理机验收。
+10-12发布基线：香港 Controller/Web、Air 与 Mini Daemon 当时已部署 f6b2b5d；通知开关当时仍关闭，真实微信通知未验收。[终端单步输入](../2026-10-12-terminal-control-chain/VERIFICATION.md)、[Codex/Claude/Grok 可信记录历史](../2026-10-12-terminal-history/VERIFICATION.md) 代码随包部署但未配置真实目标或开启发送。[跨步骤结果传递](../2026-10-12-plan-result-handoff/VERIFICATION.md) 已通过同一真实 Air 原会话的两步模型接力；不是不同物理机验收。
 
 产物：f6b2b5d 的linux/amd64 Controller/Web镜像已正式运行，Mini使用该版arm64只读Daemon；Air后续更新至ef32a2f（产品修复9ef6647）。香港未构建，PG/Gateway容器未替换，token/journal/checkpoint保留。首次烟测OOM和驱动DTO错误均保留在 [候选记录](../2026-10-12-release-candidate/VERIFICATION.md)。历史reader正常广播累计误判已修复；正式浏览器242秒/97次读取及直聊通过，但不代表多天长稳。
 
@@ -35,7 +35,7 @@ TypeScript Controller 是唯一控制权威，使用 PostgreSQL；TypeScript 微
 | Codex App/CLI、Claude/Grok 等已有会话 | Codex 桌面原 owner 已真实验收；Codex/Claude/Grok 可信绑定的记录历史与 opt-in 单步输入代码已部署；Go/Controller/临时 PG/Web 合成链通过，见 [历史](../2026-10-12-terminal-history/VERIFICATION.md) 与 [输入](../2026-10-12-terminal-control-chain/VERIFICATION.md) 验收。Grok 只返回文本片段 | 终端来源和发送未启用，未配置真实记录目录/明确pane或经真实CLI验收。input-written不等于精确完成，不能参与多步/依赖/resultFrom；非原子竞争仍存在，不以resume冒充附着 |
 | 技能体系 | 两节点正式状态发现共165项技能；最多4个有序技能已部署。原会话完整读取两技能、核验SHA256、精确turn、同请求不重发及反序409的证据见 [组合发布验收](../2026-10-12-ordered-skills-release/VERIFICATION.md) | 仅证明所验技能的只读组合场景；SHA256只绑定SKILL.md，不冻结依赖目录，其他技能及复杂业务尚未逐项执行 |
 | 记忆 | PostgreSQL 聊天隔离/CAS；模型桩跨重启验证；真实模型模拟聊天的保存/回忆/忘记通过，直接查库核对写入和删除 | 真实微信体验与真实模型跨重启回忆未验收；旧记忆未迁移 |
-| 主动管理 Leader/进度 | 最多四步固定依赖计划、原子确认、24小时授权、进度/取消、重启核查和Web均已部署；显式resultFrom已完成同一Air原会话的真实模型两步接力，精确结果与冻结hash验证通过。合成跨节点证据见 [结果传递验收](../2026-10-12-plan-result-handoff/VERIFICATION.md) | 通知开关仍关闭、1条pending未领取；不同物理机接力与真微信通知未验收。持续动态自治/重新规划未实现，不把固定DAG当完整Super Leader。通知accepted非送达，领取后崩溃可漏发；视图最多12条 |
+| 主动管理 Leader/进度 | 最多四步固定依赖计划、原子确认、24小时授权、进度/取消、重启核查和Web均已部署；显式resultFrom已完成同一Air原会话的真实模型两步接力，精确结果与冻结hash验证通过。通知开关已启用，唯一既有通知领取后为uncertain，永久保留同attempt、不重发。证据见 [结果传递](../2026-10-12-plan-result-handoff/VERIFICATION.md) 与 [通知现场记录](../2026-10-13-wechat-notification-activation.md) | 不同物理机接力与微信通知成功受理/手机收取未验收；首次发送错误类别缺失，不能猜测context过期。持续动态自治/重新规划未实现，不把固定DAG当完整Super Leader。通知accepted非送达，领取后崩溃可漏发；视图最多12条 |
 | Web 会话工作台与免密登录 | 正式一次性链接无地址栏凭据、HttpOnly且storage为空；新版显示两节点、模型、计划2/2与28字符来源。旧标签页刷新后恢复；400项Web回归通过。修复后持续242秒历史、旧阅读位置保留、直接发送与logout401均通过 | 真实手机软键盘/微信内置浏览器未验收；本fixture不足30条，本轮未触发自动旧页加载（固定旧cursor已实测）。Cookie仅指定读接口与受Origin/intent约束的精确发送；认证命令详情仍含实际请求 |
 | 验收会话清理与复用 | 此前原生 fixture、App 测试及此前 5 个已完成测试共 7 个精确会话已归档，归档列表独立确认、历史可恢复；创建连接与进程退出，测试登录退出、TaskSpace 关闭；后续优先复用 `01a12a91-5777-75e0-8df3-4ee968565997` | 归档不删除历史；后续确需验收才显式恢复复用，writer 被占用时报告原因，不抢占或不断新建；当前 Task 与用户工作会话未归档 |
 | 微信 Markdown | 文本降级、链接、代码、分段/续传、UTF-16 安全边界测试通过 | 真微信渲染未验收；组合字素仍可能跨段 |
