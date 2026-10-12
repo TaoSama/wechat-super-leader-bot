@@ -54,7 +54,7 @@ Nginx 配置源为 `deploy/nginx.conf`，安装到独立 `/etc/nginx/conf.d/supe
 
 ## 原生 Daemon 用户服务
 
-demoair 与 demomini 均已安装原生用户服务并认证连接远端；节点 B 只读且没有启用 desktop-send。维护窗口、版本与验收结果见 [最新发布记录](../changes/2026-10-12-authorized-release/VERIFICATION.md)。不要另开前台 Daemon。服务直接运行 Go 二进制，不依赖 Node 包装器，也不另启 Codex app-server。
+demoair 与 demomini 均已安装原生用户服务并认证连接远端，均已显式启用 desktop-send。节点 B 已验证原owner状态、历史分页与有效发送资格，尚未向其工作会话实际发送；见 [节点 B节点验收](../changes/2026-10-13-demomini-owner-activation.md)。节点 A维护与实发证据见 [发布记录](../changes/2026-10-12-authorized-release/VERIFICATION.md)。不要另开前台 Daemon。服务直接运行 Go 二进制，不依赖 Node 包装器，也不另启 Codex app-server。
 
 | 项目 | macOS | Linux |
 | --- | --- | --- |
@@ -80,9 +80,9 @@ node local.mjs --check --controller https://leader.example.com
 
 `deploy/register-node.mjs` 的新节点 token 只接受 8–512 位 ASCII 字母、数字、`_`、`-`，避免 dotenv 注释或 Compose 插值改变凭证；正式生成使用至少 32 个随机字节的 hex/base64url。先 dry-run，确认仅新增精确 node-id 后再串行 `--apply`；同 ID 不同 token 必须停止，不能覆盖旧凭证。token/env 均为 `0600`，父目录为 `0700`。配置修改后须按排空流程重启 Controller 才生效。
 
-新增物理节点先核对实际远端用户目录、既有控制 socket、原服务和 journal；不能仅凭桌面 IPC 存在就宣称可控。demomini 当前用户目录为 `/Users/demomini`，控制 socket 缺失；已用独立凭据注册并安装只读 LaunchAgent，真实 WSS 连接成功。对唯一持久目标等待完整发现期限后返回 `no-client-found`，历史/发送未证明。详见 [当前节点证据](../changes/2026-10-12-authorized-release/VERIFICATION.md)。不要照搬 demoair 路径或启动后端/重启桌面应用。
+新增物理节点先核对实际远端用户目录、既有控制 socket、原服务和 journal；不能仅凭桌面 IPC 存在就宣称可控。demomini 用户目录为 `/Users/demomini`，共享控制 socket 仍缺失；原先精确目标返回 `no-client-found`，经已运行App正常打开该会话后，已通过独立探针与正式HTTP证明原owner/历史可用。随后更新至ef32a2f并开启desktop-send，已取得ready资格，未实际发送。详见 [当前节点证据](../changes/2026-10-13-demomini-owner-activation.md)。不要照搬 demoair 路径或启动后端/重启桌面应用。
 
-控制接口缺失不代表必须改变用户桌面配置。本地 SQLite 实验已撤回；`--codex-home` 使用纯文件元数据发现，不读取数据库、不创建后端。最近正式状态显示 节点 A 18 个、节点 B 1 个会话；两机均启用文件发现。节点 B 的精确目标未找到可处理 owner，不能以独立发现替代原进程控制。见 [文件发现验证](../changes/2026-10-11-rollout-discovery/VERIFICATION.md) 与 [当前发布状态](../changes/2026-10-12-authorized-release/VERIFICATION.md)。
+控制接口缺失不代表必须改变用户桌面配置。`--codex-home` 仍使用纯文件元数据发现，不读取数据库、不创建后端；文件发现不能替代原进程控制。对未加载目标，可在确认身份、归档状态、实际应用版本及原生路由后正常打开既有会话，再独立检查owner与历史。App正常页面载入可能自行resume，不等于Daemon另起后端；禁止根据URL返回成功就自动授权发送。见 [文件发现验证](../changes/2026-10-11-rollout-discovery/VERIFICATION.md) 与 [原生打开语义](../changes/2026-10-13-demomini-owner-activation.md)。
 
 下面是**当前 demoair 的维护命令**：使用已存在的私有 token、原 state-dir、远端地址和完整技能根目录。不要将它照搬到另一个节点；Linux 应使用该机器原生构建、独立 node-id/token、实际 socket 和技能目录。
 
