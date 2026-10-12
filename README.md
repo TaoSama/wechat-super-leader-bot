@@ -38,7 +38,11 @@ node local.mjs --sessions --controller https://leader.example.com
 
 部署、原生服务及人工微信验收见 [远端运维说明](docs/runbook/hong-kong.md)。已迁移到远端的实例不要再执行本地 `--up` 启动第二个编排权威。
 
-部署前分别核对控制平面镜像、节点 Daemon 和数据合同，并在自己的环境记录会话、微信和跨机流程的实际验收结果。相关记录：[正式发布与验收记录](docs/changes/2026-10-12-authorized-release/VERIFICATION.md)。
+部署前分别核对控制平面镜像、节点 Daemon 和数据合同，并在自己的环境记录会话、微信和跨机流程的实际验收结果。
+
+真实 `gpt-6.1-sol` 已返回专用原会话的近期记录、实际来源和本次获取时间；无新增命令或计划，重复查询及 Controller 换版后重放的业务摘要均不变，验收会话已重新归档。曾发生两次模型服务临时失败，第三次查询通过，失败证据保留。详见 [自然语言历史查询验收](docs/changes/2026-10-12-leader-session-history/VERIFICATION.md) 与 [快照并发修复](docs/changes/2026-10-13-node-session-persistence.md)。这仍是服务端模拟微信入站，真实手机微信和内置浏览器体验待用户确认。
+
+此前 节点 A 原桌面 owner 路由的真实模型两步结果接力、精确 turn/输出回查与重复确认防重发已通过；正式浏览器连续 242 秒 / 97 次读取、旧消息位置保留及直接发送的证据见 [此前发布验收](docs/changes/2026-10-12-authorized-release/VERIFICATION.md)。多会话订阅仍使用 16 条独立连接共享两个帧处理槽，30 秒窗口重连会短暂重新检查，超过 32 MiB 的会话明确不可用；短时验证不等于长期负载保障。旧页面应刷新以加载同版数据合同。
 
 ## Web 会话工作台
 
