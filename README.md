@@ -38,7 +38,7 @@ node local.mjs --sessions --controller https://leader.taoai.site
 
 部署、原生服务及人工微信验收见 [香港运维说明](docs/runbook/hong-kong.md)。已迁移到香港的实例不要再执行本地 `--up` 启动第二个编排权威。
 
-2026-10-13 发布基线：香港 Controller/Web 与 Air Daemon 为 `08e260a`，Gateway 保持 `3a750e7`，Mini Daemon 保持 `ef32a2f`。紧凑筛选与显式分页历史已上线，正式 HTTPS 浏览器和两个 Air 长会话读取通过；详见 [大历史发布验收](docs/changes/2026-10-13-history-source/VERIFICATION.md)。持续目标代码同步上线，但本轮专用会话发送资格不可用，真实持续闭环尚未验收，见 [持续目标验收记录](docs/changes/2026-10-13-continuous-goals/VERIFICATION.md)。不改 App transport、不启动额外后端。
+2026-10-13 发布基线：香港 Controller/Web 与 Air Daemon 为 `08e260a`，Gateway 保持 `3a750e7`，Mini Daemon 保持 `ef32a2f`。紧凑筛选与显式分页历史已上线，正式 HTTPS 浏览器和两个 Air 长会话读取通过；详见 [大历史发布验收](docs/changes/2026-10-13-history-source/VERIFICATION.md)。持续目标随后在 Air 专用原会话完成两轮真实纯文本闭环：一次确认后按第一轮实际输出动态生成第二任务，精确 turn、冻结输入及结果摘要交叉核对通过。微信入站为服务端模拟，不是手机验收；此前资格不可用及本次成功均保留在 [真实目标验收](docs/changes/2026-10-13-live-goal/VERIFICATION.md)。不改 App transport、不启动额外后端。
 
 真实 `gpt-6.1-sol` 已返回专用原会话的近期记录、实际来源和本次获取时间；无新增命令或计划，重复查询及 Controller 换版后重放的业务摘要均不变，验收会话已重新归档。曾发生两次模型服务临时失败，第三次查询通过，失败证据保留。详见 [自然语言历史查询验收](docs/changes/2026-10-12-leader-session-history/VERIFICATION.md) 与 [快照并发修复](docs/changes/2026-10-13-node-session-persistence.md)。该历史查询仍是服务端模拟微信入站；本次真实微信索取控制台链接及兑换已核实，内置浏览器体验和真实微信会话控制仍待验收。
 
@@ -176,4 +176,4 @@ Web 可向明确终端会话发送单步输入；微信模型模式先生成带�
 
 公开包运行示例仍仅连接自建临时 socket，可在 `daemon/` 执行 `go run -race ./examples/terminal-delivery --run`。完整合成链和 Web 验收入口、边界见 [终端控制合同](docs/changes/2026-10-12-terminal-control-chain/TECH.md) 与 [验证记录](docs/changes/2026-10-12-terminal-control-chain/VERIFICATION.md)；这不代替真实 CLI、真实模型或微信验收。
 
-现阶段重点验收香港 Controller 与 Mac Air 的 Codex 会话。结果驱动持续目标已有独立持久调度器，交付范围以增量验收记录为准；真实持续目标闭环、持续目标主动通知、微信会话控制、跨物理机闭环、公司机器及独立 CLI 的真实发送和精确完成回执仍未全部验收。真实微信索取登录链接已单独核实，不能推导其他能力可用，也不能把合成终端投递或单节点联调称为所有 Agent 的完整生产保障。历史能力矩阵见 `docs/changes/2026-10-10-control-plane/ACCEPTANCE.md` 与 `VERIFICATION.md`。
+现阶段重点验收香港 Controller 与 Mac Air 的 Codex 会话。结果驱动持续目标已有独立持久调度器，Air 单节点原会话两轮纯文本闭环已通过；持续目标主动通知、真实手机微信会话控制、跨物理机闭环、公司机器及独立 CLI 的真实发送和精确完成回执仍未全部验收。真实微信索取登录链接已单独核实，不能推导其他能力可用，也不能把合成终端投递或单节点联调称为所有 Agent 的完整生产保障。能力矩阵见 `docs/changes/2026-10-10-control-plane/ACCEPTANCE.md` 与各增量验证记录。

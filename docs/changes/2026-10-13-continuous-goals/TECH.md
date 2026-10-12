@@ -1,6 +1,6 @@
 # 持续目标编排合同
 
-本变更未部署。独立于已确认固定计划；目标调度器仍在同一 Controller 内，复用模型、CommandService、原 Daemon 和 PostgreSQL，不启动新 Agent 后端。
+本变更已随 `08e260a` 部署；Air 专用原会话两轮结果驱动闭环见 [真实验收](../2026-10-13-live-goal/VERIFICATION.md)，开发及首次资格失败见 [验证记录](VERIFICATION.md)。独立于已确认固定计划；目标调度器仍在同一 Controller 内，复用模型、CommandService、原 Daemon 和 PostgreSQL，不启动新 Agent 后端。
 
 ## 用户授权
 
