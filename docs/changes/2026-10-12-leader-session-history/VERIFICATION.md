@@ -39,6 +39,45 @@
 
 此提交时尚未构建新镜像、部署或执行真实模型查询；后续操作须在本文件另记实测身份和结果，不以本地通过推断上线完成。
 
+## 2026-10-13 正式发布增量
+
+产品提交 `75049cb9f309665cd04bfeb34b226eded84097ba` 已推送。GitHub [38274057862](https://github.com/TaoSama/wechat-super-leader-bot/actions/runs/38274057862) 的 Ubuntu 全量（5m53s）和 macOS 单元套件（1m35s）均 success，核验 headSha 与产品提交一致。
+
+使用干净 `git archive 75049cb` 在本机构建 linux/amd64 镜像，非 root `node`；镜像 ID 为 `sha256:d38a7cc05e338c93be2c66f671e943a3bfc837273b7ef4509c42a6a5c2b48ea7`，OCI revision 标签为短值 `75049cb`。本机与远端的 image ID、全部 10 层 RootFS 一致。无网络、只读根文件系统的短生命周期容器烟测通过 health、资源、鉴权、登录/Cookie、SSE、退出；正常 exit 0 并自动清理。镜像经 `docker save | gzip | ssh ... docker load` 流式上传，无镜像归档文件、无远端构建、无系统配置变更。
+
+16:07:14 UTC 正常停止原 Gateway 和 Controller，均 exit 0、OOM=false；PG 保持运行。16:07:21 停后审计与发布前五表摘要完全一致，没有未决命令、claim 或待确认计划。仅以 `--no-deps --no-build --pull never --force-recreate controller` 替换 Controller，未删除 orphan Gateway。新容器 `80c844b2f992b0d2dd40edab743d55878104aed1da5f9f3fb49295e60011b891` 使用上述精确镜像，healthy、restarts=0；16:08:34 五表再审计完全一致。随后恢复原 Gateway，16:09:58 成功轮询、errors=0、通知开关仍 false；三服务 healthy。节点 A/节点 B 均 connected，没有更新两节点 Daemon 或重启 Codex App。
+
+此次切换前后业务摘要：
+
+| 表 | 行数 | 摘要 |
+| --- | ---: | --- |
+| commands | 21 | `3d751606f40ad9c773b01d9942d2b701` |
+| messages | 32 | `c53c4a5772cc2318dac8a6fdf661a407` |
+| leader_states | 4 | `2584be986dfbe98714b75af4a7321c85` |
+| leader_executions | 1 | `50d9fd2580e6ee3999c0ec9803d8d52f` |
+| leader_notifications | 1 | `8b418d890b46446adc71c839da339f0c` |
+
+commands 摘要沿用运维审计公式，排除 `input_receipt` 列；真实模型验收脚本另使用包含全部列的整行摘要。不得混同比较这两种摘要。
+
+### 真实模型验收的失败证据
+
+复用专用会话 `c0863a5b-311c-5ab9-997b-be2e24fffb18`，不新建 Task、不发送任务。首次独立历史预查实际来源为 `control-socket`，最新助手文本 `HISTORY_FIX_OK_20261012`；本轮不能声称真实来源是 codex-desktop。来源选择是首次路由，不是失败后降级。
+
+验收脚本只模拟服务器入站，不冒充真实手机微信；使用真实 `gpt-6.1-sol`。它额外以只读 SQL 检查近期上下文和记忆均未包含最后记录 id/原文，prompt 也不提供两者；要求回复原文、未知 id、实际来源、请求窗口内的 fetchedAt，并核对全库命令/计划/通知、commandIds/记忆摘要和重复 messageId 的状态恒等。独立审查指出原本只比固定文本不足以排除上下文回声，故增加上述交叉核对；仍不声称独立测量了正式工具调用次数。
+
+- `leader_history_release_20261013_a`：HTTP 回复耗时 61009ms，明确超时，无 commandId；原文断言失败，未记作 PASS。日志参考 `6283a845b8bb`：`modelSteps=1, toolCalls=0, totalModelMs=60005, category=timeout`。16:12:07 全量审计显示 commands/executions/notifications 摘要不变，messages 32→33，聊天 revision 34→36，无 claim/pending。
+- `leader_history_release_20261013_b`：只读重试 HTTP 回复耗时 31269ms，明确模型服务暂时不可用，无 commandId；原文断言再次失败。日志参考 `dd3088b4c3e5`：`modelSteps=1, toolCalls=0, totalModelMs=30382, category=transport, attempts=1`。16:14:40 全量审计确认 commands/executions/notifications 摘要仍不变，messages 33→34，聊天 revision 36→38，无 claim/pending。没有因未知执行状态重发会话任务。
+
+验收同时发现 节点 A 心跳入库反复 `23505 / node_sessions_pkey`。同刻 `/v1/status` 19 条会话按节点/ID 无重复；该缓存表故障与模型首次调用超时是两个独立问题。交由独立协作者检查快照替换事务及重连顺序，修复前不宣称线上验收完整通过。
+
+### 真实模型只读验收通过
+
+`leader_history_release_20261013_c` 的第三次查询耗时 27238ms，原文与历史记录 id 均精确匹配，返回 `source=control-socket`、`fetchedAt=2026-10-12T16:16:14.664934Z`、`scope=recent_recorded_history`，并正确说明 8 条、`completeHistory=false`、`hasOlder=true`、`omittedItems=0`、`truncated=false`。最后助手记录 id 为 `msg_0bebcd83b33148fe016accfb1f95a487d0847a07f5267c4240`；事前 SQL 已证实它与原文均不在当前聊天历史/记忆中，验收 prompt 也未提供。
+
+验收脚本完成并 exit 0：全库 commands 21→21 且完整行摘要恒等；executions、notifications、聊天 commandIds 和 memories 摘要恒等；messages 34→35；无 claim/pending，无返回 commandId。同 messageId 重放后响应及全部验收摘要完全相同。此前两次失败记录如实保留，没有删除状态或延长模型预算来掩盖故障。
+
+这证明真实模型返回了原记录与本次时间、HTTP 持久去重且无新增持久派发；不等于对正式每次工具/owner 调用做了独立计数，也不证明真实微信手机入站、当前桌面 owner 控制或终端发送。已调用桌面归档接口重新归档复用验收会话，未删除其历史。
+
 ## 其他实机检查与仍未证明项
 
 - 节点 A 当前为 macOS 设备。进程和 Unix socket 两通道未发现已有终端宿主；唯一既有 tmux pane 前台为 python3.11，无 Agent 子进程；无 TTY 且 stdio 指向 `/dev/null` 的后台 Codex 进程不能冒充 CLI pane。因此未开启终端参数、不生成虚假 terminal ID、不启动替代 worker。

@@ -3,6 +3,7 @@ import { CommandRecord, InputReceipt, InputReceiptSchema, MessageRecord, ScopedS
 import { IStore, CreateCommandResult, ConflictError } from "./interface.js";
 import { sameSkillRefs, SkillRefsSchema } from "../skills.js";
 import { nextCommandState, inspectionLimit, validateStoredCommandInput } from "./command-state.js";
+import { validateNodeSessionInventory, withNodeSessionsLock } from "./node-sessions.js";
 import type { CreateExecutionResult, ExecutionRecord } from "../leader/execution.js";
 import type { ExecutionConfirmationAuthority } from "../leader/execution-confirmation.js";
 import type { Notification, NotificationReceiptStatus } from "../notifications.js";
@@ -300,9 +301,8 @@ export class PostgresStore implements IStore {
   }
 
   async upsertNodeSessions(nodeId: string, sessions: Session[]): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
+    validateNodeSessionInventory(sessions);
+    await withNodeSessionsLock(this.pool, nodeId, async client => {
       await client.query("DELETE FROM node_sessions WHERE node_id = $1", [nodeId]);
       const now = new Date().toISOString();
       for (const s of sessions) {
@@ -314,13 +314,7 @@ export class PostgresStore implements IStore {
           [nodeId, s.id, JSON.stringify(s), now]
         );
       }
-      await client.query("COMMIT");
-    } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   async getNodeSessions(nodeId: string): Promise<ScopedSession[]> {
@@ -343,7 +337,9 @@ export class PostgresStore implements IStore {
   }
 
   async removeNodeSessions(nodeId: string): Promise<void> {
-    await this.pool.query("DELETE FROM node_sessions WHERE node_id = $1", [nodeId]);
+    await withNodeSessionsLock(this.pool, nodeId, async client => {
+      await client.query("DELETE FROM node_sessions WHERE node_id = $1", [nodeId]);
+    });
   }
 
   async getLeaderState(chatId: string): Promise<LeaderState | null> {
