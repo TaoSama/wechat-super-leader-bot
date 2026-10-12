@@ -2,6 +2,7 @@ import { CommandRecord, InputReceipt, MessageRecord, ScopedSession, Session, val
 import { IStore, CreateCommandResult, ConflictError } from "./interface.js";
 import { sameSkillRefs } from "../skills.js";
 import { nextCommandState, inspectionLimit, validateStoredCommandInput } from "./command-state.js";
+import { validateNodeSessionInventory } from "./node-sessions.js";
 import { executionListQuery } from "./execution-list.js";
 import { createTerminalNotification, readNotification, claimNotificationRecord, receiptNotificationRecord,
   NotificationIdSchema, NotificationReceiptStatusSchema, validateNotificationTime, NOTIFICATION_BATCH_LIMIT,
@@ -157,6 +158,7 @@ export class MemoryStore implements IStore {
   }
 
   async upsertNodeSessions(nodeId: string, sessions: Session[]): Promise<void> {
+    validateNodeSessionInventory(sessions);
     this.nodeSessions.set(nodeId, sessions.map((s) => ({ ...s })));
   }
 

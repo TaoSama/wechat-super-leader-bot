@@ -15,6 +15,7 @@ import { Skill } from "./skills.js";
 import { HistoryError, SessionHistoryRequests } from "./session-history.js";
 import { validateCommandTurnBinding } from "./store/command-state.js";
 import { sameInputReceipt } from "./input-receipt.js";
+import { InvalidSessionInventoryError, validateNodeSessionInventory } from "./store/node-sessions.js";
 
 export interface ConnectedNode {
   nodeId: string;
@@ -44,6 +45,7 @@ export class NodeHub {
 
   // Monotonic generation counter per nodeId to prevent async disconnect/reconnect races
   private nodeGenerations = new Map<string, number>();
+  private nodeSessionWrites = new Map<string, Promise<void>>();
 
   // Maximum heartbeat timeout: if no heartbeat received for 45s, close connection
   private static readonly HEARTBEAT_TIMEOUT_MS = 45000;
@@ -139,6 +141,17 @@ export class NodeHub {
         }
 
         const msg: DaemonMessage = parseResult.data;
+        if (msg.type === "hello" || msg.type === "heartbeat") {
+          try {
+            validateNodeSessionInventory(msg.sessions);
+          } catch (error) {
+            if (!(error instanceof InvalidSessionInventoryError)) throw error;
+            console.warn(`[${nodeId}] Rejected duplicate session identities in inventory`);
+            nodeRecord.sessions = [];
+            ws.close(4000, "Invalid session inventory");
+            return;
+          }
+        }
         resetHeartbeatWatchdog();
         await this.handleDaemonMessage(nodeRecord, msg);
         this.onStatusChanged?.();
@@ -153,24 +166,21 @@ export class NodeHub {
       if (this.nodes.get(nodeId)?.ws === ws) {
         this.nodes.delete(nodeId);
 
-        try {
-          // Remove stale sessions for this disconnected node
-          await this.store.removeNodeSessions(nodeId);
-        } catch (err) {
-          console.error(`[${nodeId}] Error removing node sessions on disconnect:`, err);
-        }
-
-        // Only mark uncertain if a newer connection hasn't taken over in the meantime
-        if (this.nodeGenerations.get(nodeId) === currentGen) {
+        await this.queueNodeSessionWrite(nodeId, async () => {
           try {
-            await this.store.markNodeActiveCommandsUncertain(
-              nodeId,
-              "Node disconnected after dispatch"
-            );
+            await this.store.removeNodeSessions(nodeId);
           } catch (err) {
-            console.error(`[${nodeId}] Error marking active commands uncertain on disconnect:`, err);
+            console.error(`[${nodeId}] Error removing node sessions on disconnect:`, err);
           }
-        }
+          // Check after persistence: a queued cleanup must not revoke a new generation.
+          if (this.nodeGenerations.get(nodeId) === currentGen) {
+            try {
+              await this.store.markNodeActiveCommandsUncertain(nodeId, "Node disconnected after dispatch");
+            } catch (err) {
+              console.error(`[${nodeId}] Error marking active commands uncertain on disconnect:`, err);
+            }
+          }
+        });
         this.onStatusChanged?.();
       }
     });
@@ -203,7 +213,7 @@ export class NodeHub {
       node.lastHeartbeat = new Date();
       node.isHelloCompleted = true;
       try {
-        await this.store.upsertNodeSessions(nodeId, msg.sessions);
+        await this.persistNodeSessions(node, msg.sessions);
       } catch (err) {
         console.error(`[${nodeId}] Error upserting node sessions on hello:`, err);
       }
@@ -223,7 +233,7 @@ export class NodeHub {
       node.skills = msg.skills;
       node.lastHeartbeat = new Date();
       try {
-        await this.store.upsertNodeSessions(nodeId, msg.sessions);
+        await this.persistNodeSessions(node, msg.sessions);
       } catch (err) {
         console.error(`[${nodeId}] Error upserting node sessions on heartbeat:`, err);
       }
@@ -299,6 +309,26 @@ export class NodeHub {
           turnId: persisted.turnId, inputReceipt: persisted.inputReceipt, output: persisted.output, error: persisted.error });
       }
     }
+  }
+
+  /** Only inventory persistence is queued; history and exact receipts remain independent. */
+  private queueNodeSessionWrite(nodeId: string, operation: () => Promise<void>): Promise<void> {
+    const previous = this.nodeSessionWrites.get(nodeId);
+    // The caller reports each failure. A failed write must not poison the next inventory.
+    const write = previous ? previous.then(operation, operation) : Promise.resolve().then(operation);
+    this.nodeSessionWrites.set(nodeId, write);
+    const release = () => {
+      if (this.nodeSessionWrites.get(nodeId) === write) this.nodeSessionWrites.delete(nodeId);
+    };
+    write.then(release, release);
+    return write;
+  }
+
+  private persistNodeSessions(node: ConnectedNode, sessions: Session[]): Promise<void> {
+    return this.queueNodeSessionWrite(node.nodeId, async () => {
+      if (this.nodes.get(node.nodeId) !== node || node.ws.readyState !== WebSocket.OPEN) return;
+      await this.store.upsertNodeSessions(node.nodeId, sessions);
+    });
   }
 
   /** One bounded read-only query per heartbeat. A cursor prevents unavailable turns starving others. */
@@ -428,11 +458,17 @@ export class NodeHub {
         console.error(`[${nodeId}] Error closing websocket during closeAll:`, err);
       }
       try {
-        await this.store.removeNodeSessions(nodeId);
+        await this.queueNodeSessionWrite(nodeId, () => this.store.removeNodeSessions(nodeId));
         await this.store.markNodeActiveCommandsUncertain(nodeId, "Controller shutting down; execution result unconfirmed");
       } catch (err) {
         console.error(`[${nodeId}] Error persisting shutdown uncertainty:`, err);
       }
+    }
+    // Disconnected nodes are already absent from `nodes`, but their complete
+    // cleanup (including uncertain receipts) must finish before Store shutdown.
+    const drained = await Promise.allSettled([...this.nodeSessionWrites.values()]);
+    for (const result of drained) {
+      if (result.status === "rejected") console.error("Error draining node inventory persistence on shutdown:", result.reason);
     }
     for (const settle of this.commandResultWaiters.values()) settle(null);
   }

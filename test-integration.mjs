@@ -12,6 +12,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { verifyNodeIsolation } from './test-node-isolation.mjs';
+import { verifyNodeSessionStore } from './test-node-session-store.mjs';
 import { verifyDesktopRoute } from './test-desktop-route.mjs';
 import { createLeaderHistoryModelFixture, verifyLeaderSessionHistory } from './test-leader-session-history.mjs';
 import { verifyTerminalObservation, terminalModelCall, TERMINAL_NODE } from './test-terminal-observation.mjs';
@@ -167,6 +168,7 @@ async function main() {
     const fixturePool = new Pool({ connectionString: env.DATABASE_URL });
     await withTestCleanup(async () => {
       await stores[0].init();
+      await verifyNodeSessionStore({ stores, pool: fixturePool, waitFor });
       await verifyTerminalStore({ stores });
       await verifyPlanStore({ stores, reopenStore: () => new PostgresStore(env.DATABASE_URL) });
       await verifyPlanConfirmationStore({ stores, pool: fixturePool, waitFor });
