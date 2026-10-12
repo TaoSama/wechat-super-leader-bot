@@ -38,11 +38,11 @@ node local.mjs --sessions --controller https://leader.example.com
 
 部署、原生服务及人工微信验收见 [远端运维说明](docs/runbook/hong-kong.md)。已迁移到远端的实例不要再执行本地 `--up` 启动第二个编排权威。
 
-部署前分别核对控制平面镜像、节点 Daemon 和数据合同，并在自己的环境记录会话、微信和跨机流程的实际验收结果。相关记录：[持续目标验收记录](docs/changes/2026-10-13-continuous-goals/VERIFICATION.md)。
+部署前分别核对控制平面镜像、节点 Daemon 和数据合同，并在自己的环境记录会话、微信和跨机流程的实际验收结果。相关记录：[大历史发布验收](docs/changes/2026-10-13-history-source/VERIFICATION.md)、[持续目标验收记录](docs/changes/2026-10-13-continuous-goals/VERIFICATION.md)。
 
-真实 `gpt-6.1-sol` 已返回专用原会话的近期记录、实际来源和本次获取时间；无新增命令或计划，重复查询及 Controller 换版后重放的业务摘要均不变，验收会话已重新归档。曾发生两次模型服务临时失败，第三次查询通过，失败证据保留。详见 [自然语言历史查询验收](docs/changes/2026-10-12-leader-session-history/VERIFICATION.md) 与 [快照并发修复](docs/changes/2026-10-13-node-session-persistence.md)。这仍是服务端模拟微信入站，真实手机微信和内置浏览器体验待用户确认。
+真实 `gpt-6.1-sol` 已返回专用原会话的近期记录、实际来源和本次获取时间；无新增命令或计划，重复查询及 Controller 换版后重放的业务摘要均不变，验收会话已重新归档。曾发生两次模型服务临时失败，第三次查询通过，失败证据保留。详见 [自然语言历史查询验收](docs/changes/2026-10-12-leader-session-history/VERIFICATION.md) 与 [快照并发修复](docs/changes/2026-10-13-node-session-persistence.md)。该历史查询仍是服务端模拟微信入站；本次真实微信索取控制台链接及兑换已核实，内置浏览器体验和真实微信会话控制仍待验收。
 
-此前 节点 A 原桌面 owner 路由的真实模型两步结果接力、精确 turn/输出回查与重复确认防重发已通过；正式浏览器连续 242 秒 / 97 次读取、旧消息位置保留及直接发送的证据见 [此前发布验收](docs/changes/2026-10-12-authorized-release/VERIFICATION.md)。多会话订阅仍使用 16 条独立连接共享两个帧处理槽，30 秒窗口重连会短暂重新检查，超过 32 MiB 的会话明确不可用；短时验证不等于长期负载保障。旧页面应刷新以加载同版数据合同。
+此前 节点 A 原桌面 owner 路由的真实模型两步结果接力、精确 turn/输出回查与重复确认防重发已通过；正式浏览器连续 242 秒 / 97 次读取、旧消息位置保留及直接发送的证据见 [此前发布验收](docs/changes/2026-10-12-authorized-release/VERIFICATION.md)。多会话订阅仍使用 16 条独立连接共享两个帧处理槽，30 秒窗口重连会短暂重新检查，超过 32 MiB 的桌面帧明确拒绝；下述分页历史只提供替代读取，不恢复桌面观测或发送资格。短时验证不等于长期负载保障。旧页面应刷新以加载同版数据合同。
 
 ## Web 会话工作台
 
@@ -56,7 +56,7 @@ node local.mjs --sessions --controller https://leader.example.com
 
 已接入原桌面已记录历史：配置 `--desktop-sock` 后，精确 owner 证明决定首次来源；连续刷新和旧页通过不透明 `historyContext` 固定来源，不会在原桌面与控制接口之间偷偷换路。完整加载等待同 owner 的 revision 和完整性证明，不合并尚未记录的 UI 暂态。来源失效时保留已读内容、停止自动请求，并在详情顶部提供“重新读取最新页”。历史连接最多 4 个目标，闲置 60 秒回收；原始帧超过 32 MiB 明确报超限，不返回部分结果冒充完整历史。远端与 节点 A 已部署并完成真实 Cookie 接口分页回查；开发期证据与限制见 [原桌面历史验收](docs/changes/2026-10-12-desktop-history/VERIFICATION.md)。
 
-状态/模型、控制预检和历史的桌面入站上限统一为 32 MiB，出站仍限 16 MiB；控制读取共享两个连接槽，完整展开前检查深度和节点预算，并拒绝重复历史索引引用。已部署；超过上限的会话仍不可观测或完整读取，不会提高上限掩盖资源问题。帧上限不是内存上限，详见 [大快照资源边界](docs/changes/2026-10-12-desktop-frame-budget/TECH.md) 与 [验收记录](docs/changes/2026-10-12-desktop-frame-budget/VERIFICATION.md)。
+状态/模型、控制预检和历史的桌面入站上限统一为 32 MiB，出站仍限 16 MiB；控制读取共享两个连接槽，完整展开前检查深度和节点预算，并拒绝重复历史索引引用。已部署；超过上限仍不能通过桌面全量帧观测或读取，分页读取另需既有控制 socket，不会提高上限掩盖资源问题。帧上限不是内存上限，详见 [大快照资源边界](docs/changes/2026-10-12-desktop-frame-budget/TECH.md) 与 [验收记录](docs/changes/2026-10-12-desktop-frame-budget/VERIFICATION.md)。
 
 长会话读取失败时，Web 提供“使用分页历史接口”，显式改读同一会话在既有控制 socket 中保存的分页记录；可能稍有延迟，不改变发送通道。换源会清空旧阅读窗口并建立新 context，不静默混合记录；413 后暂停自动重试，仍可手动读取。该接口单帧仍限 8 MiB，没有控制 socket 的机器不能使用；缺少该接口时可使用原桌面历史。机器/状态筛选同时收紧为桌面 32px、触控 44px。代码和正式发布状态见 [大历史修复记录](docs/changes/2026-10-13-history-source/VERIFICATION.md)。
 
@@ -143,7 +143,7 @@ Web 的“持续目标”卡实时显示状态、预算、逐项条件和动作�
 
 部署入口见 [Gateway 说明](gateway/README.md) 与 [远端运维说明](docs/runbook/hong-kong.md)。同一账号只能在一个位置轮询；远端启用后不要在 Mac 再运行 `node local.mjs --gateway`，本机允许名单维持为空。不要用本地 `--up` 更新远端。
 
-健康检查仅确认本次 Gateway 进程近期成功完成轮询；空轮询不证明模型或会话控制可用。远端 Controller 与 Gateway 已完成构建与启动（沿用既有 PostgreSQL 卷，服务均为 healthy，Gateway `last_poll_succeeded_at` 为 2026-10-11T09:05:17.641Z 且 errors 为 0，已加载本人 allowlist）。服务端已使用本人 chatId 模拟文本“给我控制台链接”，真实 `gpt-6.1-sol`（12093ms）返回可用免密链接，经兑换（200）与退出（200）验证，未外发微信消息；真实浏览器初次自动登录后 URL 仅保留 `https://leader.example.com/`，无 token 输入框，本地 storage 为 0，HttpOnly Cookie 不可脚本读取，刷新 session（200）正常展示 demoair 节点。目前仍待用户微信实际入站与内置浏览器点击确认，不能提前宣称全链路最终验收。
+健康检查仅确认本次 Gateway 进程近期成功完成轮询；空轮询不证明模型或会话控制可用。远端沿用既有 PostgreSQL 卷和 Gateway 状态，2026-10-13 本轮发布后三服务均为 healthy。此前服务端使用本人 chatId 模拟文本“给我控制台链接”，真实 `gpt-6.1-sol`（12093ms）返回可用免密链接，经兑换（200）与退出（200）验证，未外发该模拟请求的微信消息；浏览器自动登录后 URL 仅保留 `https://leader.example.com/`，无 token 输入框，本地 storage 为 0，HttpOnly Cookie 不可脚本读取，刷新 session（200）正常展示 demoair 节点。该模拟与下面的真实微信请求分开记录。
 
 2026-10-13 补充真实证据：用户本次微信索取控制台链接，正式入站记录与准确回复链接的兑换记录已关联，确认请求、回复及兑换成功。未补发消息，未输出凭证；服务器记录不能识别是否使用微信内置浏览器。详见 [本轮核验](docs/changes/2026-10-13-history-source/VERIFICATION.md)。
 
@@ -162,7 +162,7 @@ node verify.mjs --list              # 只列计划，不运行检查
 
 `test-console-auth.mjs` 默认只显示帮助，统一入口明确带 `--run`，验证真实临时 PostgreSQL 中的一次性兑换、1 小时到期、Cookie、并发和重启。收到 SIGINT/SIGTERM 后，入口等待当前检查正常收尾，再停止后续步骤；异常断连不会因重复等待 WebSocket close 而跳过其他资源清理。强制终止、掉电及未响应退出的子进程不在此保证内。
 
-仓库 `.github/workflows/verify.yml`：Ubuntu 运行完整验证，macOS 运行不依赖 Docker 的单测与构建，CI 使用 Node 24。当前本机实际为 Node 26；GitHub run [38262955582](https://github.com/TaoSama/wechat-super-leader-bot/actions/runs/38262955582) 已通过 Ubuntu 16 checks / macOS 13 checks。前两次失败及修复保留在 [发布证据](docs/changes/2026-10-12-authorized-release/VERIFICATION.md)。实现、命令和交付边界见 [可复现验证](docs/changes/2026-10-12-reproducible-verification/TECH.md)。
+仓库 `.github/workflows/verify.yml`：Ubuntu 运行完整验证，macOS 运行不依赖 Docker 的单测与构建，CI 使用 Node 24。当前本机实际为 Node 26；已部署产品提交 `08e260a` 的 GitHub run [38295230409](https://github.com/TaoSama/wechat-super-leader-bot/actions/runs/38295230409) 已通过 Ubuntu 全量 / macOS unit。早期发布失败及修复保留在 [此前发布证据](docs/changes/2026-10-12-authorized-release/VERIFICATION.md)。实现、命令和交付边界见 [可复现验证](docs/changes/2026-10-12-reproducible-verification/TECH.md)。
 
 已有终端 Agent 支持显式只读观测：Daemon 配置 `--terminal-sock <已有绝对路径>` 与可重复 `--terminal-pane <明确wN:pN>` 后，每 15 秒独立刷新状态；Web 标注终端来源，状态超过 45 秒失效，默认不读取聊天历史、不开放发送。显式管理诊断命令仍可读取有裁剪提示的有限终端快照；模型的 `read_session` 改用下述显式启用的已记录历史，不暗中改读屏幕，也不作为精确任务回执。`--probe` 可无 token 检查该来源，不写 journal，不启动终端宿主。当前只接受已核对的 protocol 22，默认关闭，macOS/Linux 用户服务可保存相同参数。观测代码已随构建产物部署，但未配置真实终端目标、未启用观测，见 [终端观测设计与边界](docs/changes/2026-10-12-terminal-observation/TECH.md)。
 
@@ -176,4 +176,4 @@ Web 可向明确终端会话发送单步输入；微信模型模式先生成带�
 
 公开包运行示例仍仅连接自建临时 socket，可在 `daemon/` 执行 `go run -race ./examples/terminal-delivery --run`。完整合成链和 Web 验收入口、边界见 [终端控制合同](docs/changes/2026-10-12-terminal-control-chain/TECH.md) 与 [验证记录](docs/changes/2026-10-12-terminal-control-chain/VERIFICATION.md)；这不代替真实 CLI、真实模型或微信验收。
 
-现阶段重点验收远端 Controller 与 demoair 的 Codex 会话。结果驱动持续目标已有独立持久调度器，交付范围以增量验收记录为准；真实手机入站、持续目标主动通知、跨物理机闭环、公司机器及独立 CLI 的真实发送和精确完成回执仍未全部验收。不能把合成终端投递或单节点联调称为所有 Agent 的完整生产保障。历史能力矩阵见 `docs/changes/2026-10-10-control-plane/ACCEPTANCE.md` 与 `VERIFICATION.md`。
+现阶段重点验收远端 Controller 与 demoair 的 Codex 会话。结果驱动持续目标已有独立持久调度器，交付范围以增量验收记录为准；真实持续目标闭环、持续目标主动通知、微信会话控制、跨物理机闭环、公司机器及独立 CLI 的真实发送和精确完成回执仍未全部验收。真实微信索取登录链接已单独核实，不能推导其他能力可用，也不能把合成终端投递或单节点联调称为所有 Agent 的完整生产保障。历史能力矩阵见 `docs/changes/2026-10-10-control-plane/ACCEPTANCE.md` 与 `VERIFICATION.md`。
