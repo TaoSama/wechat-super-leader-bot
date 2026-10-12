@@ -194,16 +194,19 @@ describe("Leader list-only and explicit-output tool guidance", () => {
 
   it("retains read_session for an explicit known-session progress request without granting send", async () => {
     const target = session("active-session", "notLoaded", desktop());
+    const readHistory = vi.fn().mockResolvedValue({ session: target, source: "codex-desktop",
+      fetchedAt: iso(), historyContext: "98a0e32c-423a-421f-83bc-2eb14fb57621", nextCursor: null, truncated: false,
+      items: [{ id: "item", turnId: "turn", kind: "assistant", type: "agentMessage", text: "最新输出" }] });
     const hub = { getAllSessions: async () => [target], getNodeStatusList: () => [], getAllSkills: () => [],
-      getNodeSkills: () => [], getNodeSession: () => target, isNodeConnected: () => true };
-    const commands = { submit: vi.fn().mockResolvedValue({ commandId: "read-command", status: "completed", output: "最新输出" }) };
+      getNodeSkills: () => [], getNodeSession: () => target, isNodeConnected: () => true, readHistory };
+    const commands = { submit: vi.fn() };
     let calls = 0;
     const model: LeaderModel = { complete: async () => ++calls === 1 ? { content: null, toolCalls: [{ id: "read", type: "function", function: {
       name: "read_session", arguments: JSON.stringify({ nodeId: "node", sessionId: "active-session" }),
     } }] } : { content: "已取得最新输出。", toolCalls: [] } };
     await new LeaderOrchestrator(new MemoryStore(), hub, commands, model, () => NOW).handle("chat", "progress", "读取 node 上 active-session 的最新输出，说明具体进度");
-    expect(commands.submit).toHaveBeenCalledTimes(1);
-    expect(commands.submit).toHaveBeenCalledWith(expect.objectContaining({ nodeId: "node", sessionId: "active-session", action: "read" }), 2000);
+    expect(commands.submit).not.toHaveBeenCalled();
+    expect(readHistory).toHaveBeenCalledExactlyOnceWith("node", "active-session", { limit: 8 }, expect.any(AbortSignal));
     expect(target.capabilities).toEqual(["read"]);
   });
 });

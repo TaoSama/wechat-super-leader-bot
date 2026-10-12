@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { verifyNodeIsolation } from './test-node-isolation.mjs';
 import { verifyDesktopRoute } from './test-desktop-route.mjs';
+import { createLeaderHistoryModelFixture, verifyLeaderSessionHistory } from './test-leader-session-history.mjs';
 import { verifyTerminalObservation, terminalModelCall, TERMINAL_NODE } from './test-terminal-observation.mjs';
 import { verifyTerminalControl, terminalInputModelCall, TERMINAL_INPUT_NODE } from './test-terminal-control.mjs';
 import { verifyTerminalStore } from './test-terminal-store.mjs';
@@ -68,6 +69,8 @@ async function main() {
   const skillRefs = fixtureSkills.map(({ id, digest }) => ({ id, digest })).reverse();
   const received = [];
   const inspections = [];
+  const leaderHistoryModel = createLeaderHistoryModelFixture({ nodeId: 'desktop-fixture-node',
+    sessionId: '11111111-2222-4333-8444-555555555555' });
   await withTestCleanup(async () => {
     docker(['run', '--detach', '--rm', '--name', name, '-e', 'POSTGRES_PASSWORD', '-e', 'POSTGRES_USER=leader', '-e', 'POSTGRES_DB=leader', '-p', '127.0.0.1::5432', 'postgres:16-alpine']);
     containerCreated = true;
@@ -96,7 +99,9 @@ async function main() {
           const resultCall = resultModelCall(last.content);
           const terminalCall = terminalModelCall(last.content);
           const terminalInputCall = terminalInputModelCall(last.content);
-          if (last.type === 'function_call_output') message.content = `Tool evidence: ${last.output}`;
+          const historyReply = leaderHistoryModel.respond(last);
+          if (historyReply) message = historyReply;
+          else if (last.type === 'function_call_output') message.content = `Tool evidence: ${last.output}`;
           else if (planCall) message = call(planCall.name, planCall.args);
           else if (resultCall) message = call(resultCall.name, resultCall.args);
           else if (terminalCall) message = call(terminalCall.name, terminalCall.args);
@@ -254,8 +259,17 @@ async function main() {
       openStore: () => new PostgresStore(env.DATABASE_URL),
       restart: async () => { await stop(controller); controller = undefined; await start(); } });
     let desktopSkillReceipt;
-    const desktopReceipt = await verifyDesktopRoute({ base, request, nodeToken: desktopToken, waitFor,
-      onSkillReceipt: receipt => { desktopSkillReceipt = receipt; } });
+    let desktopReceipt, leaderHistoryVerified = false;
+    const desktopHistoryPool = new Pool({ connectionString: env.DATABASE_URL });
+    await withTestCleanup(async () => {
+      desktopReceipt = await verifyDesktopRoute({ base, request, nodeToken: desktopToken, waitFor,
+        onSkillReceipt: receipt => { desktopSkillReceipt = receipt; },
+        onHistoryReady: async fixture => {
+          await verifyLeaderSessionHistory({ request, pool: desktopHistoryPool, model: leaderHistoryModel, ...fixture });
+          leaderHistoryVerified = true;
+        } });
+    }, [{ label: 'desktop history PostgreSQL pool', cleanup: () => desktopHistoryPool.end() }]);
+    assert(leaderHistoryVerified, 'Leader history regression was not exercised');
     assert(desktopSkillReceipt, 'Missing real Go ordered skill receipt');
     const denied = await request('/v1/messages', { chatId: 'not-allowed', messageId: 'deny', text: '列出会话' });
     assert([401, 403].includes(denied.status), 'Chat allowlist must reject unauthorized senders');
