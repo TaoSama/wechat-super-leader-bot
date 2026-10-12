@@ -38,7 +38,7 @@ node local.mjs --sessions --controller https://leader.example.com
 
 部署、原生服务及人工微信验收见 [远端运维说明](docs/runbook/hong-kong.md)。已迁移到远端的实例不要再执行本地 `--up` 启动第二个编排权威。
 
-部署前分别核对控制平面镜像、节点 Daemon 和数据合同，并在自己的环境记录会话、微信和跨机流程的实际验收结果。相关记录：[大历史发布验收](docs/changes/2026-10-13-history-source/VERIFICATION.md)、[真实目标验收](docs/changes/2026-10-13-live-goal/VERIFICATION.md)、[通知现场验收](docs/changes/2026-10-13-goal-notifications/LIVE.md)。
+部署前分别核对控制平面镜像、节点 Daemon 和数据合同，并在自己的环境记录会话、微信和跨机流程的实际验收结果。相关记录：[大历史发布验收](docs/changes/2026-10-13-history-source/VERIFICATION.md)、[真实目标验收](docs/changes/2026-10-13-live-goal/VERIFICATION.md)、[通知现场验收](docs/changes/2026-10-13-goal-notifications/LIVE.md)、[回执修复验收](docs/changes/2026-10-13-send-receipt/VERIFICATION.md)。
 
 真实 `gpt-6.1-sol` 已返回专用原会话的近期记录、实际来源和本次获取时间；无新增命令或计划，重复查询及 Controller 换版后重放的业务摘要均不变，验收会话已重新归档。曾发生两次模型服务临时失败，第三次查询通过，失败证据保留。详见 [自然语言历史查询验收](docs/changes/2026-10-12-leader-session-history/VERIFICATION.md) 与 [快照并发修复](docs/changes/2026-10-13-node-session-persistence.md)。该历史查询仍是服务端模拟微信入站；本次真实微信索取控制台链接及兑换已核实，内置浏览器体验和真实微信会话控制仍待验收。
 
