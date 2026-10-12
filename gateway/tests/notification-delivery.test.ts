@@ -209,7 +209,8 @@ test("closed real stderr pipe exits CLI with code 2 after uncertainty, without r
       const body = JSON.parse(init.body);
       if (pathname.endsWith("pending")) return json({ items: item.status === "pending" ? [item] : [] });
       if (pathname.endsWith("claim")) {
-        item = { ...item, status: "claimed", attemptId: body.attemptId, attemptedAt: Date.now(), attemptExpiresAt: Date.now() + 60000 };
+        const attemptedAt = Date.now();
+        item = { ...item, status: "claimed", attemptId: body.attemptId, attemptedAt, attemptExpiresAt: attemptedAt + 60000 };
         return json({ notification: item });
       }
       if (pathname.endsWith("receipt")) { item = { ...item, status: body.status }; return json({ notification: item }); }

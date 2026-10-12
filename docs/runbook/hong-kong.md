@@ -189,11 +189,11 @@ docker compose --env-file .runtime/controller.env \
 
 同一微信账号不得在两台机器并行轮询。远端启用后，本机 `.runtime/local.json` 的允许名单维持为空，不运行 `node local.mjs --gateway`。停用时只 `stop gateway`，保留账号、state 和数据库；不要 `down -v` 或清除 checkpoint。实际部署与验收结果见 [验证记录](../changes/2026-10-10-control-plane/VERIFICATION.md)。
 
-### 计划终态通知（代码已部署，尚未启用）
+### 计划终态通知（已启用，首次回执未知）
 
 默认关闭。完成、失败或授权到期时，Controller 在计划终态事务内保存一条通知；取消仍通过原请求同步回复，不另外通知。只通知计划 ID、总步数和状态，不附带原会话输出、错误细节或控制台登录凭证。
 
-经确认更新运行服务后，可在既有私有 `.runtime/controller.env` 中显式设置 `GATEWAY_PLAN_NOTIFICATIONS=true`，并沿用上面的外部构建、加载、排空及无构建切换流程更新 Controller 和 Gateway。该变量仅注入 Gateway，不需要修改模型配置或重建基线。不要运行第二份 Gateway；不要重置 state、cursor、数据库或 journal。若关闭，将变量设为 `false` 后正常更新 Gateway，保留全部通知记录。
+远端已在既有私有 `.runtime/controller.env` 中设置 `GATEWAY_PLAN_NOTIFICATIONS=true`。2026-10-13首次启用仅正常更新唯一Gateway，Controller/PG未重启；唯一既有待发通知现为uncertain，未重发，见 [现场记录](../changes/2026-10-13-wechat-notification-activation.md)。仓库模板仍默认关闭。该变量仅注入Gateway；当现有Controller/Gateway已包含通知实现时，只需核对原镜像tag、解析配置与状态挂载并更新Gateway，不需要构建、更新Controller、修改模型或重建基线。若确需换版，先在外部构建验证并加载镜像。不要运行第二份Gateway或重置state、cursor、数据库、journal。若关闭，将变量设为false后正常更新Gateway，保留全部通知记录。
 
 通知列表只请求当前有聊天 context 的目标，并与 Controller 当前允许名单求交；无 context 不领取，超过128个目标会轮转。`--run` 每次入站轮询前最多处理4条，`--poll-once` 在正常入站周期成功后处理。繁忙的模型调用和长轮询可能延迟通知；现有 context 也可能过期，不能保证永久主动触达。
 
@@ -201,7 +201,9 @@ docker compose --env-file .runtime/controller.env \
 
 持管理 Bearer 可通过 `GET /v1/notifications/<计划ID>` 核查 `{notification}`（Cookie/节点 token 不可用）；不要打印 Bearer、context 或账号信息。不要通过重新 claim 或造新计划来验证未知发送结果。旧终态计划不会自动回填通知；重新开启开关后，已有且未过期、未领取的 pending 仍可能被发送，开启前应确认其范围。
 
-通知处理在健康检查中拥有最多235秒的有界 processing 阶段，结束清理不覆盖其他阶段；不会增加入站计数或刷新 `last_poll_succeeded_at`。超过预算仍报告不健康。通知错误独立报告，不中断正常入站轮询。当前仅通过本地模拟微信验证，证据见 [通知验收记录](../changes/2026-10-12-plan-notifications/VERIFICATION.md)。
+通知处理在健康检查中拥有最多235秒的有界processing阶段，结束清理不覆盖其他阶段；不会增加入站计数或刷新`last_poll_succeeded_at`。超过预算仍报告不健康。入站健康不证明通知成功；首次真实通知为uncertain且原部署没有保存发送错误类别，不能从空日志/入站错误0推断原因。合成场景证据见 [通知验收记录](../changes/2026-10-12-plan-notifications/VERIFICATION.md)，真实启用与限制见 [现场记录](../changes/2026-10-13-wechat-notification-activation.md)。
+
+远端Gateway现运行诊断补丁`3a750e7`：发送失败的uncertain回执持久化成功后，记录`notification_send_failed`，仅含notificationId、attemptId和安全errorType。原始异常、账号/context、正文不进入日志。诊断管道短写或关闭时正常收尾并退出2，不再对同一坏stderr写错误；服务重启后原claim仍不可重领。该事件不补记历史原因，receipt本身保存失败仍按既有cycle错误报告，不能因没有该事件便认定发送成功。不要为复现日志再发旧通知。
 
 ## 微信人工验收
 
