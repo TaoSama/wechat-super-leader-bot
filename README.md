@@ -38,7 +38,7 @@ node local.mjs --sessions --controller https://leader.taoai.site
 
 部署、原生服务及人工微信验收见 [香港运维说明](docs/runbook/hong-kong.md)。已迁移到香港的实例不要再执行本地 `--up` 启动第二个编排权威。
 
-2026-10-13 当前发布基线：香港 Controller/Web 与 Gateway 均为 `0230727`，Air Daemon 为 `08e260a`，Mini Daemon 为 `ef32a2f`。紧凑筛选与显式分页历史已上线，正式 HTTPS 浏览器和两个 Air 长会话读取通过；详见 [大历史发布验收](docs/changes/2026-10-13-history-source/VERIFICATION.md)。持续目标已在 Air 专用原会话完成两轮真实纯文本闭环，精确 turn、冻结输入及结果摘要交叉核对通过，见 [真实目标验收](docs/changes/2026-10-13-live-goal/VERIFICATION.md)。通知升级后，复用同一会话完成一次独立单动作目标；正式 Gateway 尝试投递，但回执为 `uncertain`、错误分类为 `ILinkSendMessageError`，不重发、不声称受理或手机收到，见 [通知现场验收](docs/changes/2026-10-13-goal-notifications/LIVE.md)。这些目标入站是服务端模拟，不是手机验收。不改 App transport、不启动额外后端。
+2026-10-13 当前发布基线：香港 Controller/Web 为 `0230727`、Gateway 为 `69a298b`，Air Daemon 为 `08e260a`，Mini Daemon 为 `ef32a2f`。紧凑筛选与显式分页历史已上线，正式 HTTPS 浏览器和两个 Air 长会话读取通过；详见 [大历史发布验收](docs/changes/2026-10-13-history-source/VERIFICATION.md)。持续目标已在 Air 专用原会话完成两轮真实纯文本闭环，精确 turn、冻结输入及结果摘要交叉核对通过，见 [真实目标验收](docs/changes/2026-10-13-live-goal/VERIFICATION.md)。通知升级后，复用同一会话完成一次独立单动作目标；正式 Gateway 尝试投递，但回执为 `uncertain`、错误分类为 `ILinkSendMessageError`，不重发、不声称受理或手机收到，见 [通知现场验收](docs/changes/2026-10-13-goal-notifications/LIVE.md)。随后已修复发送成功响应可省略零码的判定及微信401/403错误分类；真实CLI/合成TLS和临时PG整链通过，Gateway独立发布后旧业务与通知全行不变，见 [回执修复验收](docs/changes/2026-10-13-send-receipt/VERIFICATION.md)。旧未知回执没有追溯改写。这些目标入站是服务端模拟，不是手机验收。不改 App transport、不启动额外后端。
 
 真实 `gpt-6.1-sol` 已返回专用原会话的近期记录、实际来源和本次获取时间；无新增命令或计划，重复查询及 Controller 换版后重放的业务摘要均不变，验收会话已重新归档。曾发生两次模型服务临时失败，第三次查询通过，失败证据保留。详见 [自然语言历史查询验收](docs/changes/2026-10-12-leader-session-history/VERIFICATION.md) 与 [快照并发修复](docs/changes/2026-10-13-node-session-persistence.md)。该历史查询仍是服务端模拟微信入站；本次真实微信索取控制台链接及兑换已核实，内置浏览器体验和真实微信会话控制仍待验收。
 
