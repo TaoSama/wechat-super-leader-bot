@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parseConsoleExecutions } from "../src/execution-contract";
 import { normalizeControlPlaneStatus } from "../src/api";
 import type { ConsoleExecutionStep, ExecutionResultSource } from "../src/types";
-import { completedRelayFixture, emptyExecutions, executionFixture } from "./status-fixtures";
+import { emptyGoals, completedRelayFixture, emptyExecutions, executionFixture  } from "./status-fixtures";
 
 const source = (step: number, outputLength = 2000, excerptLength = 1000): ExecutionResultSource => ({ step,
   commandId: `command-${step}`, turnId: `turn-${step}`, outputSHA256: "a".repeat(64),
@@ -24,12 +24,12 @@ describe("frozen result source projection", () => {
     expect(parsed.items[0].steps[0]).not.toHaveProperty("resultSources");
     expect(parsed.items[0].steps[1].resultSources![0]).toMatchObject({ outputLength: 28, excerptLength: 28, truncated: false });
     expect(parseConsoleExecutions(parsed)).toEqual(value);
-    expect(normalizeControlPlaneStatus({ nodes: [], sessions: [], commands: [], executions: wire }).executions).toEqual(value);
+    expect(normalizeControlPlaneStatus({ nodes: [], sessions: [], commands: [], goals: emptyGoals(), executions: wire }).executions).toEqual(value);
   });
   it("requires explicit selections and retains source order, empty records and clipping through HTTP/SSE normalization", () => {
     const value = snapshot(), before = structuredClone(value);
     expect(parseConsoleExecutions(value)).toEqual(value);
-    expect(normalizeControlPlaneStatus({ nodes: [], sessions: [], commands: [], executions: value }).executions).toEqual(value);
+    expect(normalizeControlPlaneStatus({ nodes: [], sessions: [], commands: [], goals: emptyGoals(), executions: value }).executions).toEqual(value);
     const parsed = parseConsoleExecutions(value);
     parsed.items[0].steps[3].resultFrom.reverse();
     parsed.items[0].steps[3].resultSources![0].outputLength = 100;

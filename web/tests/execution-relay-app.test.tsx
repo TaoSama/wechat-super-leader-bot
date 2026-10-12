@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { resetAuthHelperForTesting } from "../src/auth";
-import { completedRelayFixture, emptyExecutions } from "./status-fixtures";
+import { emptyGoals, completedRelayFixture, emptyExecutions  } from "./status-fixtures";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -14,7 +14,7 @@ it("loads the completed two-step HTTP relay and refreshes its plan status withou
   window.location.hash = "";
   const plan = completedRelayFixture("active");
   const payload = { nodes: [], sessions: [], commands: [], leaderMode: "model",
-    executions: { ...emptyExecutions(), items: [plan] } };
+    goals: emptyGoals(), executions: { ...emptyExecutions(), items: [plan] } };
   const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
     const url = input.toString();
     if (url === "/auth/session") return new Response(JSON.stringify({ authenticated: true }));

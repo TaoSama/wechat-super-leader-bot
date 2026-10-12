@@ -7,6 +7,7 @@ import { parseArgs } from "node:util";
 import { randomUUID } from "node:crypto";
 import { createPlanFixture, PLAN_MODES } from "./plan-fixture.mjs";
 import { createTerminalFixture, TERMINAL_MODES } from "./terminal-fixture.mjs";
+import { createGoalFixture, GOAL_MODES } from "./goal-fixture.mjs";
 
 const { values } = parseArgs({ options: { port: { type: "string", default: "0" }, help: { type: "boolean", short: "h" } } });
 if (values.help) {
@@ -27,6 +28,7 @@ const sessions = [
   { id: "fixture-offline", nodeId: "macmini", title: "离线机器上的架构研究", status: "unknown", model: "gpt-6.1-sol", cwd: "/Users/demo/Workspaces/research", preview: "机器离线时保留最后已知状态。" },
 ].map((s) => ({ ...s, provider: "codex-app", modelProvider: "openai_http", reasoningEffort: "high", capabilities: ["read", "send"], loaded: true, observedAt: now(), updatedAt: now() }));
 const plans = createPlanFixture(sessions);
+const goals = createGoalFixture(sessions);
 const commands = ["uncertain", "accepted", "completed", "failed"].map((status, i) => ({
   commandId: `fixture-command-${i}`, requestId: `fixture-request-${i}`, nodeId: "macair", sessionId: sessions[i % 3].id,
   action: "send", prompt: ["检查实时刷新是否正常", "复核查询预算与重试边界", "阅读测试结果并总结", "确认节点连接状态"][i], status,
@@ -50,7 +52,8 @@ let historyGeneration = 0;
 let historySource = "codex-desktop";
 let authenticated = true;
 let failOlder = false;
-const status = () => ({ leaderMode: "model", leaderModel: "gpt-6.1-sol", sessions, commands, executions: plans.snapshot(), nodes: [
+const status = () => ({ leaderMode: "model", leaderModel: "gpt-6.1-sol", sessions, commands,
+  goals: goals.snapshot(), executions: plans.snapshot(), nodes: [
   { nodeId: "macair", connected: true, lastHeartbeat: now(), sessionCount: sessions.filter(session => session.nodeId === "macair").length },
   { nodeId: "macmini", connected: false, lastHeartbeat: now(), sessionCount: sessions.filter(session => session.nodeId === "macmini").length },
 ] });
@@ -71,6 +74,11 @@ async function handle(req, res) {
     return;
   }
   if (path === "/fixture/metrics") return json(res, { ...metrics, ...terminal.metrics() });
+  if (path === "/fixture/goals" && req.method === "POST") {
+    const mode = url.searchParams.get("mode");
+    if (!GOAL_MODES.includes(mode)) return json(res, { error: "unknown goal fixture mode" }, 400);
+    goals.setMode(mode); broadcast(); return json(res, { mode, synthetic: true });
+  }
   if (path === "/fixture/terminal" && req.method === "POST") {
     const mode = url.searchParams.get("mode");
     if (!TERMINAL_MODES.includes(mode)) return json(res, { error: "unknown terminal fixture mode" }, 400);

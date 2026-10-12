@@ -1,4 +1,4 @@
-import { emptyExecutions } from "./status-fixtures";
+import { emptyGoals, emptyExecutions  } from "./status-fixtures";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { normalizeControlPlaneStatus } from "../src/api";
@@ -45,7 +45,7 @@ describe("read-only desktop display selection", () => {
 
   it("normalizes only the frozen desktop fields without touching control status", () => {
     const raw = session("notLoaded", desktop());
-    const normalized = normalizeControlPlaneStatus({ nodes, sessions: [raw], commands: [], executions: emptyExecutions() }).sessions[0];
+    const normalized = normalizeControlPlaneStatus({ nodes, sessions: [raw], commands: [], goals: emptyGoals(), executions: emptyExecutions() }).sessions[0];
     expect(normalized).toMatchObject(raw);
     for (const bad of [{ ...desktop(), availability: "offline" }, { ...desktop(), source: "other" },
       { ...desktop(), status: "busy" }, desktop({ observedAt: "now" }),
@@ -79,7 +79,7 @@ describe("workspace desktop observations", () => {
   it.each(["active", "idle"] as const)("shows desktop %s in list and detail while retaining read-only send", status => {
     vi.spyOn(Date, "now").mockReturnValue(NOW);
     const raw = session("notLoaded", desktop({ status }));
-    render(<SessionWorkspace data={{ nodes, sessions: [raw], commands: [], executions: emptyExecutions() }} nodes={nodes} stale={false}
+    render(<SessionWorkspace data={{ nodes, sessions: [raw], commands: [], goals: emptyGoals(), executions: emptyExecutions() }} nodes={nodes} stale={false}
       active={false} onAuthFailure={vi.fn()} />);
     const row = screen.getByTestId("session-row-node-session");
     expect(row.querySelector(".session-state")).toHaveTextContent(status === "active" ? "执行中" : "空闲");
@@ -95,7 +95,7 @@ describe("workspace desktop observations", () => {
 
   it("reports desktop loss while retaining the raw control state", () => {
     vi.spyOn(Date, "now").mockReturnValue(NOW);
-    render(<SessionWorkspace data={{ nodes, sessions: [session("notLoaded", desktop({ availability: "unavailable" }))], commands: [], executions: emptyExecutions() }}
+    render(<SessionWorkspace data={{ nodes, sessions: [session("notLoaded", desktop({ availability: "unavailable" }))], commands: [], goals: emptyGoals(), executions: emptyExecutions() }}
       nodes={nodes} stale={false} active={false} onAuthFailure={vi.fn()} />);
     const row = screen.getByTestId("session-row-node-session");
     expect(within(row).getByText("未加载")).toBeInTheDocument();
@@ -105,7 +105,7 @@ describe("workspace desktop observations", () => {
   it("expires desktop status after 45 seconds even without a new status event", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const { unmount } = render(<SessionWorkspace data={{ nodes, sessions: [session("notLoaded", desktop())], commands: [], executions: emptyExecutions() }}
+    const { unmount } = render(<SessionWorkspace data={{ nodes, sessions: [session("notLoaded", desktop())], commands: [], goals: emptyGoals(), executions: emptyExecutions() }}
       nodes={nodes} stale={false} onAuthFailure={vi.fn()} />);
     const row = screen.getByTestId("session-row-node-session");
     expect(row.querySelector(".session-state")).toHaveTextContent("执行中");
@@ -123,7 +123,7 @@ describe("workspace desktop observations", () => {
     vi.setSystemTime(NOW);
     const first = { ...session("notLoaded", desktop({ observedAt: iso(-1000) })), id: "first" };
     const second = { ...session("notLoaded", desktop()), id: "second" };
-    const data = { nodes, sessions: [first, second], commands: [], executions: emptyExecutions() };
+    const data = { nodes, sessions: [first, second], commands: [], goals: emptyGoals(), executions: emptyExecutions() };
     const { rerender, unmount } = render(<SessionWorkspace data={data} nodes={nodes} stale={false} onAuthFailure={vi.fn()} />);
     expect(vi.getTimerCount()).toBe(1);
     await act(async () => { await vi.advanceTimersByTimeAsync(MAX_DESKTOP_OBSERVATION_AGE_MS - 999); });

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Buffer } from "node:buffer";
 import { fetchSessionHistory, normalizeControlPlaneStatus } from "../src/api";
-import { emptyExecutions } from "./status-fixtures";
+import { emptyGoals, emptyExecutions  } from "./status-fixtures";
 
 const SESSION_ID = "terminal:" + Buffer.alloc(32, 7).toString("base64url");
 const session = { id: SESSION_ID, provider: "terminal/codex", loaded: false, capabilities: ["read"],
@@ -14,7 +14,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("terminal history API isolation", () => {
   it.each(["codex", "claude", "grok"])("normalizes the %s marker without granting send or loaded state", provider => {
-    const status = normalizeControlPlaneStatus({ nodes: [], commands: [], executions: emptyExecutions(),
+    const status = normalizeControlPlaneStatus({ nodes: [], commands: [], goals: emptyGoals(), executions: emptyExecutions(),
       sessions: [{ ...session, provider: `terminal/${provider}`, nodeId: "node" }] });
     expect(status.sessions[0]).toMatchObject({ historySource: "terminal-transcript", capabilities: ["read"], loaded: false });
     expect(status.sessions[0].sendAvailability).toBeUndefined();
@@ -24,7 +24,7 @@ describe("terminal history API isolation", () => {
     { historySource: undefined }, { historySource: "codex-desktop" }, { provider: "terminal/unknown" },
     { provider: "codex-app" }, { id: "native" }, { id: `terminal:${"a".repeat(43)}` }, { id: SESSION_ID + "\n" },
   ])("does not preserve an invalid history marker %#", change => {
-    const status = normalizeControlPlaneStatus({ nodes: [], commands: [], executions: emptyExecutions(),
+    const status = normalizeControlPlaneStatus({ nodes: [], commands: [], goals: emptyGoals(), executions: emptyExecutions(),
       sessions: [{ ...session, ...change, nodeId: "node" }] });
     expect(status.sessions[0].historySource).toBeUndefined();
   });

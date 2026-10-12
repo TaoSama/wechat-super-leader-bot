@@ -1,4 +1,4 @@
-import { emptyExecutions } from "./status-fixtures";
+import { emptyGoals, emptyExecutions  } from "./status-fixtures";
 import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
@@ -20,7 +20,7 @@ function installFetch(onRequest?: (url: string, init?: RequestInit) => Promise<R
     if (url === "/auth/session") return response({ authenticated: true });
     if (url === "/auth/logout") return response({ authenticated: false });
     if (url === "/health") return response({ status: "ok" });
-    if (url === "/v1/status") return response({ nodes: ["air", "mini"].map((nodeId) => ({ nodeId, connected: true, sessionCount: 1 })), sessions: [session, second], commands: [], executions: emptyExecutions() });
+    if (url === "/v1/status") return response({ nodes: ["air", "mini"].map((nodeId) => ({ nodeId, connected: true, sessionCount: 1 })), sessions: [session, second], commands: [], goals: emptyGoals(), executions: emptyExecutions() });
     if (url.includes("/history")) return response({ ...page, session: url.includes("/mini/") ? second : session });
     if (url.endsWith("/messages")) return response(command);
     if (url.startsWith("/v1/commands/")) return response({ ...command, status: "completed", output: "完成输出" });

@@ -25,6 +25,8 @@ import { verifyNotificationStore } from './test-notification-store.mjs';
 import { verifyPlanNotifications } from './test-plan-notifications.mjs';
 import { verifyPlanExecution, planModelCall, PLAN_CHAT, PLAN_NODE } from './test-plan-execution.mjs';
 import { verifyPlanResultHandoff, resultModelCall, RESULT_NODES } from './test-plan-result-handoff.mjs';
+import { verifyGoalStore } from './test-goal-store.mjs';
+import { verifyGoals, goalModelCall, GOAL_NODE, GOAL_CHAT } from './test-goals.mjs';
 import { closeTestWebSocket, withTestCleanup } from './scripts/test-cleanup.mjs';
 
 const { values } = parseArgs({ options: {
@@ -50,6 +52,7 @@ async function main() {
   const terminalInputToken = randomBytes(24).toString('hex');
   const terminalHistoryToken = randomBytes(24).toString('hex');
   const planToken = randomBytes(24).toString('hex');
+  const goalToken = randomBytes(24).toString('hex');
   const resultTokens = Object.fromEntries(RESULT_NODES.map(id => [id, randomBytes(24).toString('hex')]));
   const name = `super-leader-test-${randomUUID()}`;
   const docker = (args) => execFileSync('docker', args, {
@@ -100,8 +103,10 @@ async function main() {
           const resultCall = resultModelCall(last.content);
           const terminalCall = terminalModelCall(last.content);
           const terminalInputCall = terminalInputModelCall(last.content);
+          const goalCall = goalModelCall(last, request.tools);
           const historyReply = leaderHistoryModel.respond(last);
-          if (historyReply) message = historyReply;
+          if (goalCall) message = call(goalCall.name, goalCall.args);
+          else if (historyReply) message = historyReply;
           else if (last.type === 'function_call_output') message.content = `Tool evidence: ${last.output}`;
           else if (planCall) message = call(planCall.name, planCall.args);
           else if (resultCall) message = call(resultCall.name, resultCall.args);
@@ -132,9 +137,9 @@ async function main() {
     const env = {
       ...process.env, HOST: '127.0.0.1', PORT: String(port), PERSISTENCE_MODE: 'postgres',
       DATABASE_URL: `postgresql://leader:${password}@127.0.0.1:${dbPort}/leader`,
-      CONTROLLER_TOKEN: token, NODE_TOKENS: JSON.stringify({ [values.live ? 'macair' : 'test-node']: nodeToken, ...(!values.live ? { ...isolationTokens, ...resultTokens, 'desktop-fixture-node': desktopToken, [TERMINAL_NODE]: terminalToken, [TERMINAL_INPUT_NODE]: terminalInputToken, [TERMINAL_HISTORY_NODE]: terminalHistoryToken, [PLAN_NODE]: planToken } : {}) }),
+      CONTROLLER_TOKEN: token, NODE_TOKENS: JSON.stringify({ [values.live ? 'macair' : 'test-node']: nodeToken, ...(!values.live ? { ...isolationTokens, ...resultTokens, 'desktop-fixture-node': desktopToken, [TERMINAL_NODE]: terminalToken, [TERMINAL_INPUT_NODE]: terminalInputToken, [TERMINAL_HISTORY_NODE]: terminalHistoryToken, [PLAN_NODE]: planToken, [GOAL_NODE]: goalToken } : {}) }),
       CONSOLE_PUBLIC_URL: base,
-      ALLOWED_CHAT_IDS: 'test-chat,' + PLAN_CHAT,
+      ALLOWED_CHAT_IDS: ['test-chat', PLAN_CHAT, GOAL_CHAT].join(','),
       LEADER_MODE: values.live ? 'rules' : 'model',
       LEADER_MODEL_BASE_URL: values.live ? '' : `http://127.0.0.1:${modelPort}/v1`,
       LEADER_MODEL_NAME: values.live ? '' : 'local-fixture-only',
@@ -173,6 +178,7 @@ async function main() {
       await verifyPlanStore({ stores, reopenStore: () => new PostgresStore(env.DATABASE_URL) });
       await verifyPlanConfirmationStore({ stores, pool: fixturePool, waitFor });
       await verifyNotificationStore({ stores, pool: fixturePool, reopenStore: () => new PostgresStore(env.DATABASE_URL) });
+      await verifyGoalStore({ stores, pool: fixturePool, reopenStore: () => new PostgresStore(env.DATABASE_URL), waitFor });
       await start();
       const creates = await Promise.all(stores.map((store, index) => store.compareAndSetLeaderState('cas-fixture', 0, { index })));
       assert.equal(creates.filter(Boolean).length, 1, 'Concurrent state creation must have one winner');
@@ -402,13 +408,14 @@ async function main() {
       const restart = async (allowed = true) => {
           await stop(controller);
           controller = undefined;
-          env.ALLOWED_CHAT_IDS = allowed ? 'test-chat,' + PLAN_CHAT : 'test-chat';
+          env.ALLOWED_CHAT_IDS = allowed ? ['test-chat', PLAN_CHAT, GOAL_CHAT].join(',') : 'test-chat';
           await start();
       };
       const planIds = await verifyPlanExecution({ WebSocket, base, request, nodeToken: planToken, store: planStore, waitFor, restart });
       await verifyPlanNotifications({ base, token, request, store: planStore, restart, planIds });
       await verifyPlanResultHandoff({ WebSocket, base, request, nodeTokens: resultTokens, store: planStore,
         reopenStore: () => new PostgresStore(env.DATABASE_URL), restart, waitFor });
+      await verifyGoals({ WebSocket, base, request, nodeToken: goalToken, store: planStore, restart, waitFor });
     }, [{ label: 'plan PostgreSQL store', cleanup: () => planStore.close() }]);
   }, [
     { label: 'fixture WebSocket', cleanup: () => closeTestWebSocket(socket) },

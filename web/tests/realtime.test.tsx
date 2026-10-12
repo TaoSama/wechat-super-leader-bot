@@ -1,4 +1,4 @@
-import { completedRelayFixture, emptyExecutions, executionFixture } from "./status-fixtures";
+import { emptyGoals, completedRelayFixture, emptyExecutions, executionFixture, goalFixture } from "./status-fixtures";
 import { act, renderHook, cleanup } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useStatusPolling } from "../src/hooks/useStatusPolling";
@@ -9,9 +9,9 @@ class FakeEventSource extends EventTarget {
   onerror: (() => void) | null = null;
   constructor(public readonly url: string) { super(); FakeEventSource.instances.push(this); }
   close() { this.closed = true; }
-  status(title = "初始会话", executions: unknown = emptyExecutions()) {
+  status(title = "初始会话", executions: unknown = emptyExecutions(), goals: unknown = emptyGoals()) {
     this.dispatchEvent(new MessageEvent("status", { data: JSON.stringify({
-      nodes: [], commands: [], executions, leaderMode: "model", leaderModel: "gpt-6.1-sol",
+      nodes: [], commands: [], goals, executions, leaderMode: "model", leaderModel: "gpt-6.1-sol",
       sessions: [{ id: "session", nodeId: "macair", title, status: "active", capabilities: ["read"] }],
     }) }));
   }
@@ -33,6 +33,23 @@ it("accepts the short-output relay on SSE before and after plan completion witho
   expect(result.current.error).toBeNull();
   expect(fetch).not.toHaveBeenCalled();
   unmount(); expect(stream.closed).toBe(true); expect(vi.getTimerCount()).toBe(0);
+});
+
+it("replaces goal evidence on the existing stream without polling, extra timers or replay, and rejects malformed updates", () => {
+  const fetch = vi.fn(() => new Promise<Response>(() => {})); vi.stubGlobal("fetch", fetch);
+  const { result, unmount } = renderHook(() => useStatusPolling(true, 1000));
+  const stream = FakeEventSource.instances[0], goals = { ...emptyGoals(), items: [goalFixture()] };
+  act(() => stream.status("原会话", emptyExecutions(), goals));
+  expect(result.current.data?.goals).toEqual(goals);
+  goals.items[0].status = "completed"; goals.items[0].actions[1].status = "completed";
+  goals.items[0].criteria[0] = { ...goals.items[0].criteria[0], supported: true, actions: [2] };
+  act(() => stream.status("原会话", emptyExecutions(), goals));
+  expect(result.current.data?.goals).toEqual(goals);
+  expect(fetch).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
+  act(() => stream.status("坏投影", emptyExecutions(), { ...goals, items: [null] }));
+  expect(result.current.data?.goals).toEqual(goals);
+  expect(result.current.error).toBe("实时状态格式无效，正在重新连接");
+  expect(stream.closed).toBe(true); unmount(); expect(vi.getTimerCount()).toBe(0);
 });
 
 it("updates exact plan receipts on the existing same-origin stream with no poll, write or second timer", async () => {
@@ -136,7 +153,7 @@ it("auth-expired events clear data and halt all transports without another reque
 
 it("falls back after a transient disconnect then removes polling when the stream recovers", async () => {
   const fetch = vi.fn(async (url: string) => new Response(JSON.stringify(
-    url === "/auth/session" ? { authenticated: true } : url === "/health" ? { status: "ok" } : { nodes: [], sessions: [], commands: [], executions: emptyExecutions() }
+    url === "/auth/session" ? { authenticated: true } : url === "/health" ? { status: "ok" } : { nodes: [], sessions: [], commands: [], goals: emptyGoals(), executions: emptyExecutions() }
   )));
   vi.stubGlobal("fetch", fetch);
   const { result } = renderHook(() => useStatusPolling(true, 1000));
@@ -192,7 +209,7 @@ it("keeps slow fallback polls single-flight, manual refresh does not abort them,
   act(() => result.current.manualRefresh());
   expect(fetch.mock.calls.filter(([url]) => url === "/v1/status")).toHaveLength(1);
   expect(signal?.aborted).toBe(false);
-  await act(async () => { finish(new Response('{"nodes":[],"sessions":[],"commands":[],"executions":{"observedAt":0,"limit":12,"hasMore":false,"items":[]}}')); await vi.advanceTimersByTimeAsync(0); });
+  await act(async () => { finish(new Response(JSON.stringify({ nodes: [], sessions: [], commands: [], goals: emptyGoals(), executions: emptyExecutions() }))); await vi.advanceTimersByTimeAsync(0); });
   expect(result.current.data).not.toBeNull();
   await act(async () => vi.advanceTimersByTimeAsync(1000));
   expect(fetch.mock.calls.filter(([url]) => url === "/v1/status")).toHaveLength(2);
@@ -210,7 +227,7 @@ it.each([401, 403])("immediately clears stale data on status HTTP %s even if the
     if (init.signal) signals.push(init.signal);
     if (url === "/health" && fail) return new Promise<Response>(() => {});
     return Promise.resolve(new Response(JSON.stringify(url === "/health" ? { status: "ok" } :
-      { nodes: [], sessions: [], commands: [], executions: emptyExecutions() }), { status: url === "/v1/status" && fail ? code : 200 }));
+      { nodes: [], sessions: [], commands: [], goals: emptyGoals(), executions: emptyExecutions() }), { status: url === "/v1/status" && fail ? code : 200 }));
   });
   vi.stubGlobal("fetch", fetch);
   const { result, unmount } = renderHook(() => useStatusPolling(true, 1000, failure));
@@ -233,7 +250,7 @@ it.each([401, 403])("immediately clears stale data on status HTTP %s even if the
 it("repeated manual refreshes retain exactly one fallback timer and unmount removes it", async () => {
   vi.stubGlobal("EventSource", undefined);
   const fetch = vi.fn(async (url: string) => new Response(JSON.stringify(
-    url === "/health" ? { status: "ok" } : { nodes: [], sessions: [], commands: [], executions: emptyExecutions() }
+    url === "/health" ? { status: "ok" } : { nodes: [], sessions: [], commands: [], goals: emptyGoals(), executions: emptyExecutions() }
   )));
   vi.stubGlobal("fetch", fetch);
   const { result, unmount } = renderHook(() => useStatusPolling(true, 1000));

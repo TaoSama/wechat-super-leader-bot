@@ -3,6 +3,7 @@
  * Strictly Read-Only Telemetry Types
  */
 
+import type { ConsoleGoals } from "./goal-contract";
 export type ActionType = "read" | "send";
 
 export type CommandStatus =
@@ -117,6 +118,7 @@ export interface ControlPlaneStatusResponse {
   sessions: ScopedSession[];
   commands: CommandRecord[];
   executions: ConsoleExecutions;
+  goals: ConsoleGoals;
 }
 
 export type ExecutionStatus = "active" | "completed" | "failed" | "cancelled" | "expired";

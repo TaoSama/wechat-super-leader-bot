@@ -4,6 +4,9 @@ import { sameSkillRefs } from "../skills.js";
 import { nextCommandState, inspectionLimit, validateStoredCommandInput } from "./command-state.js";
 import { validateNodeSessionInventory } from "./node-sessions.js";
 import { executionListQuery } from "./execution-list.js";
+import { normalizeGoal, assertGoalConfirmation, validateGoalUpdate, goalIsOpen, type GoalRecord,
+  type GoalConfirmationAuthority, type CreateGoalResult } from "../leader/goal.js";
+import { validateGoalProofs } from "../leader/goal-view.js";
 import { createTerminalNotification, readNotification, claimNotificationRecord, receiptNotificationRecord,
   NotificationIdSchema, NotificationReceiptStatusSchema, validateNotificationTime, NOTIFICATION_BATCH_LIMIT,
   type Notification, type StoredNotification, type NotificationReceiptStatus } from "../notifications.js";
@@ -36,6 +39,7 @@ export class MemoryStore implements IStore {
   private nodeSessions = new Map<string, Session[]>(); // nodeId -> Session[]
   private leaderStates = new Map<string, LeaderState>(); // chatId -> LeaderState
   private executions = new Map<string, ExecutionRecord>();
+  private goals = new Map<string, GoalRecord>();
   private notifications = new Map<string, StoredNotification>();
   private consoleLinks = new Map<string, ConsoleLinkRecord>(); // tokenHash -> ConsoleLinkRecord
   private consoleSessions = new Map<string, ConsoleSessionRecord>(); // tokenHash -> ConsoleSessionRecord
@@ -250,7 +254,8 @@ export class MemoryStore implements IStore {
       }
       return { created: false, execution: structuredClone(existing) };
     }
-    if ([...this.executions.values()].some(execution => execution.chatId === normalized.chatId && execution.status === "active")) {
+    if ([...this.goals.values()].some(goal => goal.chatId === normalized.chatId && goalIsOpen(goal)) ||
+      [...this.executions.values()].some(execution => execution.chatId === normalized.chatId && execution.status === "active")) {
       throw new ConflictError("Chat already has an active execution");
     }
     this.executions.set(normalized.id, normalized);
@@ -298,6 +303,49 @@ export class MemoryStore implements IStore {
       .sort((a, b) => Number(b.status === "active") - Number(a.status === "active") ||
         b.createdAt - a.createdAt || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
       .slice(0, query.count).map(execution => structuredClone(normalizeExecution(execution)));
+  }
+
+  async confirmGoal(record: GoalRecord, authority: GoalConfirmationAuthority, now = Date.now): Promise<CreateGoalResult> {
+    const goal = structuredClone(normalizeGoal(record));
+    if (goal.revision !== 1 || goal.status !== "active" || goal.actions.length || goal.decisions.length || goal.decisionAttempts || goal.lease) throw new ConflictError("Goal must be initial");
+    assertGoalConfirmation(goal, authority, this.leaderStates.get(goal.chatId) ?? null, now());
+    const existing = this.goals.get(goal.id);
+    if (existing) {
+      if (existing.chatId !== goal.chatId || JSON.stringify(existing.proposal) !== JSON.stringify(goal.proposal)) throw new ConflictError("Goal ID already used");
+      return { created: false, goal: structuredClone(existing) };
+    }
+    if ([...this.goals.values()].some(g => g.chatId === goal.chatId && goalIsOpen(g)) ||
+      [...this.executions.values()].some(e => e.chatId === goal.chatId && e.status === "active")) throw new ConflictError("Chat already has an open authorization");
+    this.goals.set(goal.id, goal);
+    return { created: true, goal: structuredClone(goal) };
+  }
+  async getGoal(id: string): Promise<GoalRecord | null> {
+    const goal = this.goals.get(id); return goal ? structuredClone(normalizeGoal(goal)) : null;
+  }
+  async getLatestGoal(chatId: string): Promise<GoalRecord | null> {
+    validateChatId(chatId);
+    return (await this.listRecentGoals([chatId], 1))[0] ?? null;
+  }
+  async compareAndSetGoal(next: GoalRecord, revision: number, now = Date.now): Promise<GoalRecord | null> {
+    validateExpectedRevision(revision);
+    const goal = structuredClone(normalizeGoal(next)), current = this.goals.get(goal.id);
+    if (!current || current.revision !== revision || !goalIsOpen(current)) return null;
+    validateGoalUpdate(current, goal, now());
+    await validateGoalProofs(this, current, goal, now());
+    if (this.goals.get(goal.id)?.revision !== revision) return null;
+    validateGoalUpdate(current, goal, now());
+    this.goals.set(goal.id, goal); return structuredClone(goal);
+  }
+  async listRunnableGoals(limit = 8, afterId = ""): Promise<GoalRecord[]> {
+    executionListQuery([], limit);
+    return [...this.goals.values()].filter(g => goalIsOpen(g) && g.id > afterId).sort((a, b) => a.id.localeCompare(b.id))
+      .slice(0, limit).map(g => structuredClone(normalizeGoal(g)));
+  }
+  async listRecentGoals(chats: readonly string[], limit: number): Promise<GoalRecord[]> {
+    const query = executionListQuery(chats, limit);
+    return [...this.goals.values()].filter(g => query.chatIds.includes(g.chatId))
+      .sort((a, b) => Number(goalIsOpen(b)) - Number(goalIsOpen(a)) || b.createdAt - a.createdAt || b.id.localeCompare(a.id))
+      .slice(0, query.count).map(g => structuredClone(normalizeGoal(g)));
   }
 
   async listPendingNotifications(chatIds: readonly string[], now: number): Promise<Notification[]> {

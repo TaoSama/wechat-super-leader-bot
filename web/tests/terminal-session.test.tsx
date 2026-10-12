@@ -6,7 +6,7 @@ import { selectModelObservation } from "../src/model-observation";
 import { sessionSendBlockReason } from "../src/send-availability";
 import { TERMINAL_READ_ONLY_REASON } from "../src/terminal-session";
 import type { ScopedSession } from "../src/types";
-import { emptyExecutions } from "./status-fixtures";
+import { emptyGoals, emptyExecutions  } from "./status-fixtures";
 
 const now = Date.parse("2026-10-12T12:00:00Z");
 const terminal: ScopedSession = { id: `terminal:${"a".repeat(43)}`, nodeId: "fixture", provider: "terminal/claude",
@@ -29,7 +29,7 @@ describe("terminal observation workspace", () => {
   it("shows snapshot limits without history requests, retries or send access; expires status locally", async () => {
     const fetchMock = vi.fn(() => Promise.reject(new Error("Terminal view must not request history")));
     vi.stubGlobal("fetch", fetchMock);
-    const { unmount } = render(<SessionWorkspace data={{ nodes, sessions: [terminal], commands: [], executions: emptyExecutions() }}
+    const { unmount } = render(<SessionWorkspace data={{ nodes, sessions: [terminal], commands: [], goals: emptyGoals(), executions: emptyExecutions() }}
       nodes={nodes} stale={false} onAuthFailure={vi.fn()} />);
     fireEvent.click(screen.getByTestId(`session-row-fixture-${terminal.id}`));
     expect(screen.getAllByText("等待处理")).toHaveLength(2);

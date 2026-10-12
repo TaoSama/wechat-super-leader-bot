@@ -49,7 +49,8 @@ function status() {
     if (target.observationMode === "fresh") target.session.observedAt = now();
     return target.session;
   });
-  return { sessions, commands: [], executions: { observedAt: Date.now(), limit: 12, hasMore: false, items: [] },
+  return { sessions, commands: [], goals: { observedAt: Date.now(), limit: 12, hasMore: false, items: [] },
+    executions: { observedAt: Date.now(), limit: 12, hasMore: false, items: [] },
     nodes: [{ nodeId: NODE_ID, connected: true, lastHeartbeat: now(), sessionCount: sessions.length }] };
 }
 function json(res, value, code = 200) {

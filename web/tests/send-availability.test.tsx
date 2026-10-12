@@ -1,4 +1,4 @@
-import { emptyExecutions } from "./status-fixtures";
+import { emptyGoals, emptyExecutions  } from "./status-fixtures";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeControlPlaneStatus } from "../src/api";
@@ -28,7 +28,7 @@ const command = { commandId: "desktop-command", requestId: "request", nodeId: "a
   action: "send", status: "completed", sendRoute: "desktop-owner", turnId: "native-turn", output: "ok",
   createdAt: iso(), updatedAt: iso(), expiresAt: iso(60_000) };
 const response = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
-const normalize = (raw: unknown) => normalizeControlPlaneStatus({ nodes, sessions: [raw], commands: [], executions: emptyExecutions() }).sessions[0];
+const normalize = (raw: unknown) => normalizeControlPlaneStatus({ nodes, sessions: [raw], commands: [], goals: emptyGoals(), executions: emptyExecutions() }).sessions[0];
 
 describe("send qualification contract", () => {
   it("permits a qualified desktop without rewriting native loaded/status/capabilities or time", () => {
@@ -102,7 +102,7 @@ describe("workspace send route feedback", () => {
       return response({ session, historyContext: "cf7e282f-d6d2-4a98-a517-9fb753f2549b", source: "control-socket", fetchedAt: iso(), items: [], nextCursor: null, truncated: false });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const result = render(<SessionWorkspace data={{ nodes, sessions: [session], commands: [], executions: emptyExecutions() }}
+    const result = render(<SessionWorkspace data={{ nodes, sessions: [session], commands: [], goals: emptyGoals(), executions: emptyExecutions() }}
       nodes={nodes} stale={false} onAuthFailure={vi.fn()} />);
     fireEvent.click(screen.getByTestId("session-row-air-fixture"));
     fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "继续原会话" } });

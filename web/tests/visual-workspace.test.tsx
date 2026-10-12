@@ -1,4 +1,4 @@
-import { emptyExecutions } from "./status-fixtures";
+import { emptyGoals, emptyExecutions  } from "./status-fixtures";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "../src/App";
@@ -9,7 +9,7 @@ import { CommandsSection } from "../src/components/CommandsSection";
 const session: ScopedSession = { id: "session-one", nodeId: "local", provider: "codex-app", title: "整理项目的下一步", cwd: "/workspace/editorial-project", status: "idle", loaded: true, capabilities: ["read", "send"], model: "gpt-6.1-sol", modelProvider: "openai", reasoningEffort: "high", preview: "已经完成分析，接下来验证边界", observedAt: "2026-10-11T10:00:00Z" };
 const second: ScopedSession = { ...session, id: "session-two", nodeId: "remote", title: "检查远程构建", model: "gpt-6-astra", preview: "构建等待确认", cwd: "/remote/build-project" };
 const command = (status: CommandRecord["status"], index: number, target = session): CommandRecord => ({ commandId: `command-${index}`, requestId: `request-${index}`, nodeId: target.nodeId, sessionId: target.id, action: "send", prompt: `请求摘要 ${index}`, output: status === "completed" ? "完整输出只在详情中展开" : undefined, status, createdAt: `2026-10-11T10:${String(index).padStart(2, "0")}:00Z`, updatedAt: "2026-10-11T11:00:00Z", expiresAt: "2026-10-11T12:00:00Z" });
-const data: ControlPlaneStatusResponse = { executions: emptyExecutions(), leaderMode: "model", leaderModel: "leader-config-model", nodes: [session, second].map((value) => ({ nodeId: value.nodeId, connected: true, sessionCount: 1, lastHeartbeat: "2026-10-11T10:00:00Z" })), sessions: [session, second], commands: [command("uncertain", 1), command("failed", 2, second), command("accepted", 3), command("pending", 4), command("completed", 5)] };
+const data: ControlPlaneStatusResponse = { goals: emptyGoals(), executions: emptyExecutions(), leaderMode: "model", leaderModel: "leader-config-model", nodes: [session, second].map((value) => ({ nodeId: value.nodeId, connected: true, sessionCount: 1, lastHeartbeat: "2026-10-11T10:00:00Z" })), sessions: [session, second], commands: [command("uncertain", 1), command("failed", 2, second), command("accepted", 3), command("pending", 4), command("completed", 5)] };
 const response = (value: unknown) => new Response(JSON.stringify(value));
 
 beforeEach(() => {
