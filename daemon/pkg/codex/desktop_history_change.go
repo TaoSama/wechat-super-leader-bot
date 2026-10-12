@@ -27,7 +27,7 @@ func (entry *desktopHistoryEntry) change(raw json.RawMessage) error {
 	switch change["type"] {
 	case "snapshot":
 		if entry.ready && revision < entry.revision {
-			return historyError(protocol.HistoryContextExpired)
+			return historyFailure(protocol.HistoryContextExpired, historyFailureRevision)
 		}
 		encoded, err = json.Marshal(change["conversationState"])
 		if err != nil {
@@ -38,12 +38,12 @@ func (entry *desktopHistoryEntry) change(raw json.RawMessage) error {
 			return err
 		}
 		if entry.ready && revision == entry.revision && !bytes.Equal(encoded, entry.raw) {
-			return historyError(protocol.HistoryContextExpired)
+			return historyFailure(protocol.HistoryContextExpired, historyFailureSnapshot)
 		}
 	case "patches":
 		base, ok := historyRevision(change["baseRevision"])
 		if !entry.ready || !ok || base != entry.revision || revision <= entry.revision {
-			return historyError(protocol.HistoryContextExpired)
+			return historyFailure(protocol.HistoryContextExpired, historyFailurePatch)
 		}
 		patches, err := historyPatches(change["patches"])
 		if err != nil {
@@ -70,16 +70,16 @@ func (entry *desktopHistoryEntry) change(raw json.RawMessage) error {
 		return err
 	}
 	if entry.ready && entry.view.canonicalGeneration != view.canonicalGeneration {
-		return historyError(protocol.HistoryContextExpired)
+		return historyFailure(protocol.HistoryContextExpired, historyFailureGeneration)
 	}
 	if view.complete {
 		if len(view.items) < len(entry.order) {
-			return historyError(protocol.HistoryContextExpired)
+			return historyFailure(protocol.HistoryContextExpired, historyFailurePrefix)
 		}
 		for i, anchor := range entry.order {
 			item := view.items[i]
 			if item.TurnID != anchor.turnID || item.ID != anchor.itemID {
-				return historyError(protocol.HistoryContextExpired)
+				return historyFailure(protocol.HistoryContextExpired, historyFailurePrefix)
 			}
 		}
 		entry.order = make([]desktopHistoryAnchor, len(view.items))

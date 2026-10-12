@@ -1,4 +1,4 @@
-import { emptyExecutions, executionFixture } from "./status-fixtures";
+import { completedRelayFixture, emptyExecutions, executionFixture } from "./status-fixtures";
 import { act, renderHook, cleanup } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useStatusPolling } from "../src/hooks/useStatusPolling";
@@ -17,6 +17,23 @@ class FakeEventSource extends EventTarget {
   }
   fail() { this.onerror?.(); }
 }
+
+it("accepts the short-output relay on SSE before and after plan completion without changing its receipts", () => {
+  const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
+  const { result, unmount } = renderHook(() => useStatusPolling(true, 1000));
+  const stream = FakeEventSource.instances[0];
+  const executions = { ...emptyExecutions(), items: [completedRelayFixture("active")] };
+  act(() => stream.status("会话", executions));
+  expect(result.current.data?.executions).toEqual(executions);
+  expect(result.current.error).toBeNull();
+  expect(result.current.connectionState).toBe("live");
+  executions.items[0].status = "completed";
+  act(() => stream.status("会话", executions));
+  expect(result.current.data?.executions).toEqual(executions);
+  expect(result.current.error).toBeNull();
+  expect(fetch).not.toHaveBeenCalled();
+  unmount(); expect(stream.closed).toBe(true); expect(vi.getTimerCount()).toBe(0);
+});
 
 it("updates exact plan receipts on the existing same-origin stream with no poll, write or second timer", async () => {
   const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);

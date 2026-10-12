@@ -66,6 +66,7 @@ func TestDesktopHistoryPreSubscriptionBroadcastsPreserveHandshake(t *testing.T) 
 					t.Fatalf("broadcast not counted as noise: %d", stream.noise)
 				}
 				stream.noise = before.noise
+				stream.noiseKinds = before.noiseKinds
 				if !reflect.DeepEqual(stream, before) || entry.ready || entry.delivered || entry.revision != 0 || entry.changed != changed ||
 					len(entry.raw) != 0 || len(entry.view.items) != 0 || len(entry.order) != 0 || len(entry.cursors) != 0 || entry.loadRequested || entry.err != nil {
 					t.Fatal("unsubscribed broadcast changed request, deadline, owner or history state")

@@ -13,3 +13,15 @@ export function executionFixture(): ConsoleExecution {
         dependsOn: [1], resultFrom: [], status: "waiting" },
     ] };
 }
+
+export function completedRelayFixture(status: ConsoleExecution["status"] = "completed"): ConsoleExecution {
+  const plan = executionFixture();
+  plan.status = status;
+  Object.assign(plan.steps[0], { status: "completed", commandId: "cmd_00000000-0000-4000-8000-000000000011",
+    turnId: "00000000-0000-4000-8000-000000000021" });
+  Object.assign(plan.steps[1], { status: "completed", commandId: "cmd_00000000-0000-4000-8000-000000000012",
+    turnId: "00000000-0000-4000-8000-000000000022", resultFrom: [1], resultSources: [{ step: 1,
+      commandId: plan.steps[0].commandId!, turnId: plan.steps[0].turnId!, outputSHA256: "a".repeat(64),
+      outputLength: 28, excerptLength: 28, truncated: false }] });
+  return plan;
+}

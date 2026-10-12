@@ -33,18 +33,21 @@ var errDesktopUnavailable = errors.New("desktop owner unavailable")
 var errDesktopFrameTooLarge = errors.New("desktop frame too large")
 
 type desktopEnvelope struct {
-	Type              string          `json:"type"`
-	RequestID         string          `json:"requestId,omitempty"`
-	SourceClientID    string          `json:"sourceClientId,omitempty"`
-	TargetClientIDs   []string        `json:"targetClientIds,omitempty"`
-	TargetClientID    string          `json:"targetClientId,omitempty"`
-	Version           int             `json:"version"`
-	Method            string          `json:"method,omitempty"`
-	Params            json.RawMessage `json:"params,omitempty"`
-	ResultType        string          `json:"resultType,omitempty"`
-	HandledByClientID string          `json:"handledByClientId,omitempty"`
-	Result            json.RawMessage `json:"result,omitempty"`
-	TimeoutMS         int             `json:"timeoutMs,omitempty"`
+	Type                    string          `json:"type"`
+	RequestID               string          `json:"requestId,omitempty"`
+	SourceClientID          string          `json:"sourceClientId,omitempty"`
+	TargetClientIDs         []string        `json:"targetClientIds,omitempty"`
+	TargetClientID          string          `json:"targetClientId,omitempty"`
+	Version                 int             `json:"version"`
+	Method                  string          `json:"method,omitempty"`
+	Params                  json.RawMessage `json:"params,omitempty"`
+	Request                 json.RawMessage `json:"request,omitempty"`
+	Response                json.RawMessage `json:"response,omitempty"`
+	ResultType              string          `json:"resultType,omitempty"`
+	HandledByClientID       string          `json:"handledByClientId,omitempty"`
+	Result                  json.RawMessage `json:"result,omitempty"`
+	TimeoutMS               int             `json:"timeoutMs,omitempty"`
+	historyControlMalformed bool
 }
 type desktopConn struct {
 	net.Conn
@@ -148,6 +151,7 @@ func (c *desktopConn) readBody(size int) (desktopEnvelope, error) {
 	if err := json.Unmarshal(data, &result); err != nil {
 		return result, errors.New("invalid desktop frame JSON")
 	}
+	result.historyControlMalformed = !historyControlFrameShape(data, result)
 	return result, nil
 }
 

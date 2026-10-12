@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parseConsoleExecutions } from "../src/execution-contract";
 import { normalizeControlPlaneStatus } from "../src/api";
 import type { ConsoleExecutionStep, ExecutionResultSource } from "../src/types";
-import { emptyExecutions, executionFixture } from "./status-fixtures";
+import { completedRelayFixture, emptyExecutions, executionFixture } from "./status-fixtures";
 
 const source = (step: number, outputLength = 2000, excerptLength = 1000): ExecutionResultSource => ({ step,
   commandId: `command-${step}`, turnId: `turn-${step}`, outputSHA256: "a".repeat(64),
@@ -16,6 +16,16 @@ function snapshot() {
   return { ...emptyExecutions(), items: [plan] };
 }
 describe("frozen result source projection", () => {
+  it.each(["active", "completed"] as const)("accepts the serialized two-step relay while the plan is %s", status => {
+    const value = { ...emptyExecutions(), items: [completedRelayFixture(status)] };
+    const wire: unknown = JSON.parse(JSON.stringify(value));
+    const parsed = parseConsoleExecutions(wire);
+    expect(parsed).toEqual(value);
+    expect(parsed.items[0].steps[0]).not.toHaveProperty("resultSources");
+    expect(parsed.items[0].steps[1].resultSources![0]).toMatchObject({ outputLength: 28, excerptLength: 28, truncated: false });
+    expect(parseConsoleExecutions(parsed)).toEqual(value);
+    expect(normalizeControlPlaneStatus({ nodes: [], sessions: [], commands: [], executions: wire }).executions).toEqual(value);
+  });
   it("requires explicit selections and retains source order, empty records and clipping through HTTP/SSE normalization", () => {
     const value = snapshot(), before = structuredClone(value);
     expect(parseConsoleExecutions(value)).toEqual(value);
