@@ -1,4 +1,4 @@
-import { emptyExecutions } from "./status-fixtures";
+import { emptyGoals, emptyExecutions  } from "./status-fixtures";
 import React from "react";
 import { render, screen, waitFor, fireEvent, act } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -104,7 +104,7 @@ describe("Web Console One-Time Link Authentication Flow", () => {
             leaderMode: "model",
             nodes: [{ nodeId: "demomini", connected: true, lastHeartbeat: "", sessionCount: 1 }],
             sessions: [],
-            commands: [], executions: emptyExecutions(),
+            commands: [], goals: emptyGoals(), executions: emptyExecutions(),
           }),
         };
       }
@@ -172,7 +172,7 @@ describe("Web Console One-Time Link Authentication Flow", () => {
             leaderMode: "model",
             nodes: [{ nodeId: "demomini", connected: true, lastHeartbeat: "", sessionCount: 1 }],
             sessions: [],
-            commands: [], executions: emptyExecutions(),
+            commands: [], goals: emptyGoals(), executions: emptyExecutions(),
           }),
         });
       }
@@ -264,7 +264,7 @@ describe("Web Console One-Time Link Authentication Flow", () => {
             json: async () => ({
               nodes: [{ nodeId: "demomini", connected: true, lastHeartbeat: "", sessionCount: 1 }],
               sessions: [],
-              commands: [], executions: emptyExecutions(),
+              commands: [], goals: emptyGoals(), executions: emptyExecutions(),
             }),
           });
         }
@@ -315,7 +315,7 @@ describe("Web Console One-Time Link Authentication Flow", () => {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ nodes: [], sessions: [], commands: [], executions: emptyExecutions() }),
+          json: async () => ({ nodes: [], sessions: [], commands: [], goals: emptyGoals(), executions: emptyExecutions() }),
         });
       }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
@@ -382,7 +382,7 @@ describe("Web Console One-Time Link Authentication Flow", () => {
           json: async () => ({
             nodes: [{ nodeId: "demomini", connected: true, lastHeartbeat: "", sessionCount: 1 }],
             sessions: [],
-            commands: [], executions: emptyExecutions(),
+            commands: [], goals: emptyGoals(), executions: emptyExecutions(),
           }),
         });
       }

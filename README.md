@@ -10,7 +10,7 @@
 微信 → Gateway (TypeScript) → Controller / Super Leader (TypeScript)
                                   ├─ Responses API 模型工具循环
 会话 Web (React/TypeScript) ────────┤
-                                  ├─ PostgreSQL：命令、计划、聊天记忆
+                                  ├─ PostgreSQL：命令、计划、持续目标、聊天记忆
                                   └─ WebSocket ← 原生 Daemon (Go，每台宿主机)
                                                      └─ 已运行的 Codex 控制接口
 ```
@@ -38,7 +38,7 @@ node local.mjs --sessions --controller https://leader.example.com
 
 部署、原生服务及人工微信验收见 [远端运维说明](docs/runbook/hong-kong.md)。已迁移到远端的实例不要再执行本地 `--up` 启动第二个编排权威。
 
-部署前分别核对控制平面镜像、节点 Daemon 和数据合同，并在自己的环境记录会话、微信和跨机流程的实际验收结果。
+部署前分别核对控制平面镜像、节点 Daemon 和数据合同，并在自己的环境记录会话、微信和跨机流程的实际验收结果。相关记录：[持续目标验收记录](docs/changes/2026-10-13-continuous-goals/VERIFICATION.md)。
 
 真实 `gpt-6.1-sol` 已返回专用原会话的近期记录、实际来源和本次获取时间；无新增命令或计划，重复查询及 Controller 换版后重放的业务摘要均不变，验收会话已重新归档。曾发生两次模型服务临时失败，第三次查询通过，失败证据保留。详见 [自然语言历史查询验收](docs/changes/2026-10-12-leader-session-history/VERIFICATION.md) 与 [快照并发修复](docs/changes/2026-10-13-node-session-persistence.md)。这仍是服务端模拟微信入站，真实手机微信和内置浏览器体验待用户确认。
 
@@ -66,7 +66,7 @@ Daemon 可显式通过 `--desktop-sock` 订阅既有桌面应用的运行状态�
 
 已修复大量无响应 ID 导致后部桌面会话无法被探测的问题，并提供显式 `--codex-home` 文件发现：只读首条会话元数据、按稳定会话 ID 处理回退后的多份记录，不读取 SQLite 或启动后端。发现、桌面观测、控制权限独立；文件发现不提供历史或发送权限。节点 A 与 节点 B 均已启用，节点 B 控制 socket 缺失时仍发现 1 个持久会话。开发期证据见 [文件发现验证与限制](docs/changes/2026-10-11-rollout-discovery/VERIFICATION.md)。
 
-节点 B 最新定点复核：正式只读 LaunchAgent 已安装、独立节点凭据已注册且 WSS 认证连接成功。对精确持久会话的 IPC 初始化成功；将诊断等待从 6 秒延长至路由器 10 秒期限之后，得到明确 `no-client-found`。仅证明该目标当时无可处理 owner，不代表整机无 owner；其历史与发送仍未验收。见 [最新节点与 owner 证据](docs/changes/2026-10-12-authorized-release/VERIFICATION.md)。
+节点 B 最新定点复核：通过已运行 App 的正常精确会话导航恢复原 owner，未改连接方式、重启 App 或新建会话；正式历史连续读取、旧页和独立只读探针通过。LaunchAgent 已更新为同版 `ef32a2f`，显式启用 `--desktop-send`；正式状态报告有效的 `desktop-owner/ready` 资格。此前的 `no-client-found` 已被现场证据解释为当时该会话未加载，不能据此要求更换后端。节点 B 真实发送仍未验收，详见 [最新节点与 owner 证据](docs/changes/2026-10-13-demomini-owner-activation.md)。
 
 发送后展示受理/完成回执。网络不确定时先使用原请求核查，不能另发一遍；切换会话保留各自的内存草稿，退出登录清除。精确 HTTP 与数据契约见 [会话工作台设计](docs/changes/2026-10-10-control-plane/SESSION_WORKSPACE.md)。前轮部署见 [验证记录](docs/changes/2026-10-10-control-plane/VERIFICATION.md)，本轮增量结果见 [体验与查询修复验收](docs/changes/2026-10-11-workspace-experience/VERIFICATION.md)。
 
@@ -121,7 +121,17 @@ Web：`http://127.0.0.1:8790`。前端无手输 token 入口；本机若需签�
 
 已部署每任务最多 4 个有序技能组合，例如“按顺序使用设计和 UX 技能优化页面”。预览列出全部技能及 SHA256，确认与派发均核对整组；任一失配不部分执行，同请求调换顺序也拒绝。预览过长时不保存可确认计划，避免授权未显示的内容。正式原会话已验证两技能按指定顺序完整读取与实算 SHA256、精确 turn 完成、相同请求不重发及反序 HTTP 409；这是管理接口验收，不代替微信自然语言实测，也不冻结技能依赖目录。见 [开发合同](docs/changes/2026-10-12-ordered-skills/VERIFICATION.md) 与 [正式发布验收](docs/changes/2026-10-12-ordered-skills-release/VERIFICATION.md)。
 
-已确认计划可生成终态微信通知：完成、失败或授权到期后，在原聊天提示计划 ID、总步数和状态，不包含任务正文、会话输出或登录链接。默认关闭，需 Gateway 显式开启 `GATEWAY_PLAN_NOTIFICATIONS=true`（或 `--plan-notifications`）；只在既有基线和聊天 context 可用时处理。通知与计划终态同事务保存，每条只领取一次；结果不明不自动重发，`accepted` 仅表示微信接口受理，不保证送达或已读。代码已随远端镜像部署，但通知开关未启用，未做真实外发验收，不等于持续动态自治已经完成。真实临时 PostgreSQL/Controller/Gateway 与模拟微信验收见 [计划通知验证](docs/changes/2026-10-12-plan-notifications/VERIFICATION.md)。
+已确认固定计划可生成终态微信通知：完成、失败或授权到期后，在原聊天提示计划 ID、总步数和状态，不包含任务正文、会话输出或登录链接。Gateway 默认关闭，远端已显式开启 `GATEWAY_PLAN_NOTIFICATIONS=true`；只在既有基线和聊天 context 可用时处理。通知与计划终态同事务保存，每条只领取一次；结果不明不自动重发，`accepted` 仅表示微信接口受理，不保证送达或已读。正式唯一通知目前为 `uncertain`，没有补发、删除或重建基线；后续失败会记录脱敏错误分类。真实过程见 [通知启用与未知回执](docs/changes/2026-10-13-wechat-notification-activation.md)，合成整链见 [计划通知验证](docs/changes/2026-10-12-plan-notifications/VERIFICATION.md)。
+
+## 持续目标：依据结果决定下一步
+
+与预先写死的四步计划分开，持续目标允许 Super Leader 在授权范围内读取精确任务结果，再决定下一步任务或判断条件是否满足。模型只提出决策；Controller 负责资格检查、持久化、预算、派发和防重发。
+
+自然语言示例：“在 节点 A 的验收会话中持续检查这个问题，根据结果安排下一步；完成条件是得到测试结果及复核结论。只读、不改文件，最多派发 3 次、判断 5 次，30 分钟内结束。”系统先展示精确会话、条件、技能、限制、结果共享范围与实际预算；确认无误后回复预览中的 `确认目标 <目标ID>`，才开始后台推进。没有 slash command，不需要每一步再发消息。
+
+可说“目标进展怎么样”查询，或“取消目标”停止后继；取消不会终止原会话已运行的任务。结果不明、任务失败、证据不足或预算耗尽时停止并保留记录，不换请求重发。每个聊天同时只允许一个未结束的目标或固定计划；需要处理的目标须取消或到期后才释放授权位置。
+
+Web 的“持续目标”卡实时显示状态、预算、逐项条件和动作，展开后可跳到准确原会话。完成显示“模型判断条件已满足”，不把模型结论当作独立业务验收；证据缺失或矛盾显示待核查。当前持续目标终态**尚无主动微信通知**，通过查询或 Web 查看；固定计划通知不能代替它。仅精确原生完成回执可参与闭环，CLI 的 `input-written` 不可参与。完整边界、开发验证与部署状态见 [持续目标合同](docs/changes/2026-10-13-continuous-goals/TECH.md) 和 [验收记录](docs/changes/2026-10-13-continuous-goals/VERIFICATION.md)。
 
 ## 微信实测边界
 
@@ -162,4 +172,4 @@ Web 可向明确终端会话发送单步输入；微信模型模式先生成带�
 
 公开包运行示例仍仅连接自建临时 socket，可在 `daemon/` 执行 `go run -race ./examples/terminal-delivery --run`。完整合成链和 Web 验收入口、边界见 [终端控制合同](docs/changes/2026-10-12-terminal-control-chain/TECH.md) 与 [验证记录](docs/changes/2026-10-12-terminal-control-chain/VERIFICATION.md)；这不代替真实 CLI、真实模型或微信验收。
 
-现阶段重点验收远端 Controller 与 demoair 的 Codex 会话。独立 CLI 的真实发送验收与精确完成回执、所有会话附着和持续自治调度尚未完成；合成终端投递、单节点部署与联调不代表完整生产保障。准确证据见 `docs/changes/2026-10-10-control-plane/ACCEPTANCE.md` 与 `VERIFICATION.md`。
+现阶段重点验收远端 Controller 与 demoair 的 Codex 会话。结果驱动持续目标已有独立持久调度器，交付范围以增量验收记录为准；真实手机入站、持续目标主动通知、跨物理机闭环、公司机器及独立 CLI 的真实发送和精确完成回执仍未全部验收。不能把合成终端投递或单节点联调称为所有 Agent 的完整生产保障。历史能力矩阵见 `docs/changes/2026-10-10-control-plane/ACCEPTANCE.md` 与 `VERIFICATION.md`。

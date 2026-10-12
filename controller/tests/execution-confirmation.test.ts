@@ -49,6 +49,7 @@ class ConfirmationPool {
   async query(sql: string, params: unknown[] = []) {
     const statement = sql.replace(/\s+/g, " ").trim();
     this.queries.push(statement);
+    if (statement.startsWith("SELECT pg_advisory_xact_lock(") || statement.startsWith("SELECT id FROM leader_goals WHERE chat_id=$1")) return { rows: [] };
     if (statement === "SELECT * FROM leader_executions WHERE id=$1") {
       const row = this.rows.get(params[0] as string);
       return { rows: row ? [structuredClone(row)] : [] };

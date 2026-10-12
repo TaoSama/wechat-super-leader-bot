@@ -7,9 +7,11 @@ import { validateNodeSessionInventory, withNodeSessionsLock } from "./node-sessi
 import type { CreateExecutionResult, ExecutionRecord } from "../leader/execution.js";
 import type { ExecutionConfirmationAuthority } from "../leader/execution-confirmation.js";
 import type { Notification, NotificationReceiptStatus } from "../notifications.js";
+import type { GoalRecord, GoalConfirmationAuthority, CreateGoalResult } from "../leader/goal.js";
+import { initGoalTables, pgConfirmGoal, pgGetGoal, pgGetLatestGoal, pgCompareAndSetGoal, pgListRunnableGoals, pgListRecentGoals } from "./goal-postgres.js";
 import { pgListPendingNotifications, pgGetNotification, pgClaimNotification, pgRecordNotificationReceipt } from "./notification-postgres.js";
 import { initExecutionTables, pgCreateExecutionIfAbsent, pgGetExecution, pgGetLatestExecution,
-  pgCompareAndSetExecution, pgListActiveExecutions, pgConfirmExecution, pgListRecentExecutions } from "./execution-postgres.js";
+  pgCompareAndSetExecution, pgListActiveExecutions, pgConfirmExecution, pgListRecentExecutions, pgCreateLockedExecution } from "./execution-postgres.js";
 import {
   LeaderState,
   cloneLeaderState,
@@ -99,6 +101,7 @@ export class PostgresStore implements IStore {
       // Additive console auth tables
       await initConsoleAuthTables(client);
       await initExecutionTables(client);
+      await initGoalTables(client);
 
       // At controller startup: clear stale node_sessions from previous instance
       await client.query(`DELETE FROM node_sessions;`);
@@ -397,8 +400,20 @@ export class PostgresStore implements IStore {
   }
 
   async createExecutionIfAbsent(record: ExecutionRecord): Promise<CreateExecutionResult> {
-    return pgCreateExecutionIfAbsent(this.pool, record);
+    return pgCreateLockedExecution(this.pool, record);
   }
+
+  confirmGoal(record: GoalRecord, authority: GoalConfirmationAuthority, now = Date.now): Promise<CreateGoalResult> { return pgConfirmGoal(this.pool, record, authority, now); }
+  getGoal(id: string): Promise<GoalRecord | null> { return pgGetGoal(this.pool, id); }
+  getLatestGoal(chatId: string): Promise<GoalRecord | null> { return pgGetLatestGoal(this.pool, chatId); }
+  compareAndSetGoal(next: GoalRecord, revision: number, now = Date.now): Promise<GoalRecord | null> {
+    return pgCompareAndSetGoal(this.pool, next, revision, client => ({ findCommandByRequestId: async requestId => {
+      const result = await client.query("SELECT * FROM commands WHERE request_id = $1", [requestId]);
+      return result.rows[0] ? this.mapCommandRow(result.rows[0]) : null;
+    } }), now);
+  }
+  listRunnableGoals(limit?: number, afterId?: string): Promise<GoalRecord[]> { return pgListRunnableGoals(this.pool, limit, afterId); }
+  listRecentGoals(chats: readonly string[], limit: number): Promise<GoalRecord[]> { return pgListRecentGoals(this.pool, chats, limit); }
 
   async getExecution(id: string): Promise<ExecutionRecord | null> {
     return pgGetExecution(this.pool, id);

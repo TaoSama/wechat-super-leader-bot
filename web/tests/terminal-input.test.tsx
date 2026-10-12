@@ -7,7 +7,7 @@ import { SessionWorkspace } from "../src/components/SessionWorkspace";
 import { CommandsSection } from "../src/components/CommandsSection";
 import { parseConsoleExecutions } from "../src/execution-contract";
 import type { CommandRecord, InputReceipt, ScopedSession } from "../src/types";
-import { emptyExecutions } from "./status-fixtures";
+import { emptyGoals, emptyExecutions  } from "./status-fixtures";
 
 const NOW = Date.parse("2026-10-12T12:00:00Z");
 const iso = (offset = 0) => new Date(NOW + offset).toISOString();
@@ -21,7 +21,7 @@ const nodes = [{ nodeId: "fixture", connected: true, sessionCount: 1, lastHeartb
 const command: CommandRecord = { commandId: "terminal-cmd", requestId: "http-id", nodeId: "fixture", sessionId,
   action: "send", status: "input-written", sendRoute: "terminal-pane", inputReceipt: proof, output: "",
   createdAt: iso(), updatedAt: iso(), expiresAt: iso(60000) };
-const normalizeCommands = (commands: unknown[]) => normalizeControlPlaneStatus({ nodes, sessions: [], commands, executions: emptyExecutions() }).commands;
+const normalizeCommands = (commands: unknown[]) => normalizeControlPlaneStatus({ nodes, sessions: [], commands, goals: emptyGoals(), executions: emptyExecutions() }).commands;
 const response = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
 
 describe("terminal proof normalization and route isolation", () => {
@@ -81,7 +81,7 @@ describe("terminal composer and receipt behavior", () => {
       throw new Error(`Unexpected synthetic request: ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
-    const rendered = render(<SessionWorkspace data={{ nodes, sessions: [target], commands: [], executions: emptyExecutions() }} nodes={nodes} stale={false} onAuthFailure={vi.fn()} />);
+    const rendered = render(<SessionWorkspace data={{ nodes, sessions: [target], commands: [], goals: emptyGoals(), executions: emptyExecutions() }} nodes={nodes} stale={false} onAuthFailure={vi.fn()} />);
     fireEvent.click(screen.getByTestId(`session-row-fixture-${sessionId}`));
     fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "synthetic input" } });
     return { ...rendered, fetchMock };

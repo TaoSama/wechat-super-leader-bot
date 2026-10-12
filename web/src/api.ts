@@ -16,6 +16,7 @@ import { normalizeSendAvailability } from "./send-availability";
 import { HISTORY_CONTEXT_EXPIRED_MESSAGE, isHistoryContext, isSessionHistorySource } from "./history-contract";
 import { isTerminalHistoryTarget } from "./terminal-session";
 import { parseConsoleExecutions } from "./execution-contract";
+import { parseConsoleGoals } from "./goal-contract";
 import { normalizeInputReceipt, TERMINAL_SESSION_ID } from "./input-receipt";
 
 export class ApiAuthError extends Error {
@@ -431,7 +432,7 @@ export function normalizeControlPlaneStatus(raw: unknown): ControlPlaneStatusRes
 
   const leaderMode = data.leaderMode === "rules" || data.leaderMode === "model" ? data.leaderMode : "unknown";
   const leaderModel = typeof data.leaderModel === "string" && data.leaderModel.trim() ? data.leaderModel : undefined;
-  return { nodes, sessions, commands, leaderMode, leaderModel, executions: parseConsoleExecutions(data.executions) };
+  return { nodes, sessions, commands, leaderMode, leaderModel, executions: parseConsoleExecutions(data.executions), goals: parseConsoleGoals(data.goals) };
 }
 
 /**

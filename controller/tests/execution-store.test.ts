@@ -49,6 +49,7 @@ class FakeExecutionPool {
   async query(sql: string, params: unknown[] = []) {
     const normalized = sql.replace(/\s+/g, " ").trim();
     this.queries.push(normalized);
+    if (normalized.startsWith("SELECT pg_advisory_xact_lock(") || normalized.startsWith("SELECT id FROM leader_goals WHERE chat_id=$1")) return this.result([]);
     if (/^(CREATE (UNIQUE )?(TABLE|INDEX)|ALTER TABLE|DELETE FROM node_sessions|UPDATE commands)/.test(normalized)) {
       return this.result([]);
     }
@@ -94,11 +95,18 @@ class FakeExecutionPool {
           if (normalized !== "BEGIN") { staged = undefined; unlock?.(); unlock = undefined; }
           return this.result([]);
         }
-        if (normalized.endsWith("FOR UPDATE")) {
+        if ((normalized.endsWith("FOR UPDATE") || normalized.startsWith("SELECT pg_advisory_xact_lock(")) && !unlock) {
           const previous = this.lockTail;
           this.lockTail = new Promise<void>(resolve => { unlock = resolve; });
           await previous;
           return this.query(sql, params);
+        }
+        if (normalized.startsWith("INSERT INTO leader_executions")) {
+          this.queries.push(normalized);
+          const input = JSON.parse(params[4] as string) as ExecutionRecord;
+          if (this.rows.has(input.id) || [...this.rows.values()].some(row => row.chat_id === input.chatId && row.status === "active")) return this.result([]);
+          staged = this.row(input);
+          return this.result([staged]);
         }
         if (normalized.startsWith("UPDATE leader_executions")) {
           this.queries.push(normalized);
@@ -312,13 +320,15 @@ describe("postgres execution transaction safety", () => {
     expect(pool.queries.some(sql => sql.startsWith("DELETE FROM node_sessions"))).toBe(true);
     expect(pool.queries.some(sql => sql.startsWith("UPDATE commands") && sql.includes("status = 'uncertain'"))).toBe(true);
     expect(pool.queries.some(sql => sql.startsWith("DELETE FROM leader_executions"))).toBe(false);
-    expect(pool.released).toBe(1);
+    expect(pool.released).toBe(2);
   });
 
   it("rolls back and releases clients on validation, SQL or row-decoding failure", async () => {
     const { store, pool } = postgres();
     const original = record();
     await store.createExecutionIfAbsent(original);
+    pool.queries.length = 0;
+    pool.released = 0;
     await expect(store.compareAndSetExecution(updated(original, { chatId: "different" }), 1)).rejects.toThrow();
     pool.failUpdate = true;
     await expect(store.compareAndSetExecution(claim(original), 1)).rejects.toThrow("Simulated execution update failure");

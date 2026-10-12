@@ -34,6 +34,7 @@ class NotificationPool {
   async query(sql: string, params: unknown[] = []) {
     const query = sql.replace(/\s+/g, " ").trim();
     this.queries.push(query);
+    if (query.startsWith("SELECT pg_advisory_xact_lock(") || query.startsWith("SELECT id FROM leader_goals WHERE chat_id=$1")) return this.result();
     if (/^(CREATE |ALTER |DELETE FROM node_sessions|UPDATE commands)/.test(query)) return this.result();
     if (query.startsWith("INSERT INTO leader_executions")) {
       const record = JSON.parse(params[4] as string) as ExecutionRecord;
@@ -73,11 +74,18 @@ class NotificationPool {
           if (query !== "BEGIN") { stagedExecution = undefined; stagedNotification = undefined; unlock?.(); }
           return this.result();
         }
-        if (query.endsWith("FOR UPDATE")) {
+        if ((query.endsWith("FOR UPDATE") || query.startsWith("SELECT pg_advisory_xact_lock(")) && !unlock) {
           const previous = this.tail;
           this.tail = new Promise<void>(resolve => { unlock = resolve; });
           await previous;
           return this.query(sql, params);
+        }
+        if (query.startsWith("INSERT INTO leader_executions")) {
+          this.queries.push(query);
+          const input = JSON.parse(params[4] as string) as ExecutionRecord;
+          if (this.executions.has(input.id)) return this.result();
+          stagedExecution = executionRow(input);
+          return this.result([stagedExecution]);
         }
         if (query.startsWith("UPDATE leader_executions")) {
           this.queries.push(query);
@@ -241,6 +249,8 @@ it("rolls back execution and outbox together when INSERT fails, then creates bot
   const { store, pool } = postgres();
   const record = execution();
   await store.createExecutionIfAbsent(record);
+  pool.queries.length = 0;
+  pool.released = 0;
   pool.failInsert = true;
   await expect(store.compareAndSetExecution({ ...record, revision: 2, status: "completed" }, 1, NOW)).rejects.toThrow("Outbox INSERT failed");
   expect(await store.getExecution(record.id)).toEqual(record);

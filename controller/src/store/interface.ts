@@ -3,6 +3,7 @@ import { LeaderState } from "../leader/state.js";
 import type { CreateExecutionResult, ExecutionRecord } from "../leader/execution.js";
 import type { ExecutionConfirmationAuthority } from "../leader/execution-confirmation.js";
 import type { Notification, NotificationReceiptStatus } from "../notifications.js";
+import type { GoalRecord, GoalConfirmationAuthority, CreateGoalResult } from "../leader/goal.js";
 import {
   ConsoleLinkRecord,
   ConsoleSessionRecord,
@@ -77,6 +78,13 @@ export interface IStore extends IConsoleAuthStore {
   compareAndSetExecution(next: ExecutionRecord, expectedRevision: number, now?: number): Promise<ExecutionRecord | null>;
   listActiveExecutions(limit?: number, afterId?: string): Promise<ExecutionRecord[]>;
   listRecentExecutions(chatIds: readonly string[], limit: number): Promise<ExecutionRecord[]>;
+
+  confirmGoal(record: GoalRecord, authority: GoalConfirmationAuthority, now?: () => number): Promise<CreateGoalResult>;
+  getGoal(id: string): Promise<GoalRecord | null>;
+  getLatestGoal(chatId: string): Promise<GoalRecord | null>;
+  compareAndSetGoal(next: GoalRecord, revision: number, now?: () => number): Promise<GoalRecord | null>;
+  listRunnableGoals(limit?: number, afterId?: string): Promise<GoalRecord[]>;
+  listRecentGoals(chatIds: readonly string[], limit: number): Promise<GoalRecord[]>;
 
   listPendingNotifications(chatIds: readonly string[], now: number): Promise<Notification[]>;
   getNotification(id: string, now: number): Promise<Notification | null>;

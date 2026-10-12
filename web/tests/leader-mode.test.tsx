@@ -1,4 +1,4 @@
-import { emptyExecutions } from "./status-fixtures";
+import { emptyGoals, emptyExecutions  } from "./status-fixtures";
 import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import App from "../src/App";
@@ -24,7 +24,7 @@ it.each([
       return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
     }
     if (url === "/v1/status") {
-      return new Response(JSON.stringify({ leaderMode: mode, nodes: [], sessions: [], commands: [], executions: emptyExecutions() }), { status: 200 });
+      return new Response(JSON.stringify({ leaderMode: mode, nodes: [], sessions: [], commands: [], goals: emptyGoals(), executions: emptyExecutions() }), { status: 200 });
     }
     return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
   });

@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionWorkspace } from "../src/components/SessionWorkspace";
 import { useSessionHistory } from "../src/hooks/useSessionHistory";
 import type { ScopedSession, SessionHistory } from "../src/types";
-import { emptyExecutions } from "./status-fixtures";
+import { emptyGoals, emptyExecutions  } from "./status-fixtures";
 
 const NOW = Date.parse("2026-10-12T12:00:00Z");
 const SESSION_ID = "terminal:" + Buffer.alloc(32, 7).toString("base64url");
@@ -27,7 +27,7 @@ function installFetch() {
   return fetch;
 }
 function workspace(target = session) {
-  return <SessionWorkspace data={{ nodes, sessions: [target], commands: [], executions: emptyExecutions() }}
+  return <SessionWorkspace data={{ nodes, sessions: [target], commands: [], goals: emptyGoals(), executions: emptyExecutions() }}
     nodes={nodes} stale={false} onAuthFailure={vi.fn()} />;
 }
 

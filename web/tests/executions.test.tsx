@@ -3,7 +3,7 @@ import { expect, it, vi } from "vitest";
 import { ExecutionsSection } from "../src/components/ExecutionsSection";
 import { LeaderOverview } from "../src/components/LeaderOverview";
 import type { ConsoleExecution, ScopedSession } from "../src/types";
-import { emptyExecutions, executionFixture, FIXTURE_NOW } from "./status-fixtures";
+import { emptyGoals, emptyExecutions, executionFixture, FIXTURE_NOW  } from "./status-fixtures";
 
 const sessions: ScopedSession[] = ["air", "mini"].map(nodeId => ({ nodeId, id: "same-session", provider: "codex-app",
   title: `${nodeId} 原会话`, cwd: "/fixture", status: "idle", loaded: true, capabilities: ["read", "send"],
@@ -90,7 +90,7 @@ it("disables missing exact targets rather than navigating to the same ID on anot
 });
 it("places plans before commands and distinguishes empty-window from a filter with no match", () => {
   const plan = executionFixture();
-  const data = { nodes: [], sessions, commands: [], executions: { ...emptyExecutions(), items: [plan] } };
+  const data = { nodes: [], sessions, commands: [], goals: emptyGoals(), executions: { ...emptyExecutions(), items: [plan] } };
   const { container, rerender } = render(<LeaderOverview data={data} nodes={[]} selectedNodeId={null}
     onSelectNodeId={vi.fn()} onOpenSession={vi.fn()} onBrowseSessions={vi.fn()} />);
   const headings = [...container.querySelectorAll(".leader-grid h2")];
@@ -118,7 +118,7 @@ it.each(["uncertain", "accepted", "waiting", "failed"] as const)("does not claim
 });
 it.each(["rules", "unknown", undefined] as const)("does not imply automatic scheduling in %s mode", leaderMode => {
   const plan = executionFixture(); plan.steps[0].status = "completed";
-  const data = { nodes: [], sessions, commands: [], leaderMode, executions: { ...emptyExecutions(), items: [plan] } };
+  const data = { nodes: [], sessions, commands: [], leaderMode, goals: emptyGoals(), executions: { ...emptyExecutions(), items: [plan] } };
   render(<LeaderOverview data={data} nodes={[]} selectedNodeId={null} onSelectNodeId={vi.fn()} onOpenSession={vi.fn()} onBrowseSessions={vi.fn()} />);
   const card = screen.getByTestId(`execution-${plan.id}`);
   expect(card).toHaveTextContent("调度未启用");

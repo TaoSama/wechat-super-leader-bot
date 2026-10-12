@@ -12,6 +12,10 @@ import { assertTerminalSingleStep, submitTerminalPlan, TERMINAL_INPUT_WARNING } 
 import { ExecutionScheduler } from "./execution-scheduler.js";
 import { executionSummary } from "./execution-presentation.js";
 import { readSessionHistory } from "./session-history.js";
+import { GoalConversation, goalConfirmation, goalCancellation } from "./goal-conversation.js";
+import { GoalScheduler } from "./goal-scheduler.js";
+import { createGoalDecider } from "./goal-model.js";
+import { goalPreview } from "./goal-presentation.js";
 import {
   CLAIM_TTL_MS, ConsoleLinkIssued, ConsoleLinkIssuer, LEADER_TOOLS, LeaderData, LeaderDataSchema, LeaderReply, MAX_HISTORY_ITEMS,
   MAX_MODEL_STEPS, MAX_RECEIPTS, MAX_REPLY_CHARS, MAX_RESULT_CODE_POINTS, MAX_RESULT_JSON_CHARS, MAX_TOOL_CALLS, PLAN_TTL_MS, Plan,
@@ -48,10 +52,12 @@ interface QueryTrace { modelSteps: number; toolCalls: number; lastTool?: string;
 export class LeaderOrchestrator {
   private active = new Map<string, { messageId: string; inputHash: string; promise: Promise<LeaderReply> }>();
   private executions: ExecutionScheduler;
+  private goals: GoalConversation;
   constructor(private store: IStore, private hub: Hub, private commands: Pick<CommandService, "submit">,
     private model: LeaderModel, private now: () => number = Date.now, private consoleLinkIssuer?: ConsoleLinkIssuer,
-    executions?: ExecutionScheduler) {
+    executions?: ExecutionScheduler, goals?: GoalScheduler) {
     this.executions = executions ?? new ExecutionScheduler(store, commands, { now });
+    this.goals = new GoalConversation(store, hub, goals ?? new GoalScheduler(store, commands, createGoalDecider(model), { now }), now);
   }
 
   handle(chatId: string, messageId: string, text: string): Promise<LeaderReply> {
@@ -72,6 +78,7 @@ export class LeaderOrchestrator {
   private async run(chatId: string, messageId: string, text: string, inputHash: string): Promise<LeaderReply> {
     const saved = await this.store.getLeaderState(chatId);
     const data = LeaderDataSchema.parse(saved?.data ?? {});
+    const pendingGoalBefore = data.pendingGoal;
     const receipt = data.receipts.find(item => item.messageId === messageId);
     if (receipt) {
       if (receipt.inputHash !== inputHash) throw new ConflictError("Message ID already used with different text");
@@ -82,7 +89,7 @@ export class LeaderOrchestrator {
       const prior = data.inflight;
       const recovered = prior.plan ? await this.executions.view(prior.plan.id, chatId) : null;
       for (const step of recovered?.steps ?? []) if (step.commandId) data.commandIds.push(step.commandId);
-      const recoveryText = `上次对话处理被中断，未自动重试原指令。${recovered
+      const recoveryText = `上次对话处理被中断，未自动重试原指令。${prior.goal ? await this.goals.recovery(chatId, prior.goal.id) : recovered
         ? `已确认计划仍按持久记录核查与推进：\n${executionSummary(recovered)}`
         : "尚无可确认的持久执行记录，不自动创建或派发。请先核查会话状态。"}`;
       data.receipts.push({ messageId: prior.messageId, inputHash: prior.inputHash, text: recoveryText });
@@ -96,18 +103,32 @@ export class LeaderOrchestrator {
     }
     const previousPlan = data.pending;
     const plan = confirmation.test(text.trim()) ? previousPlan : undefined;
+    const goalId = goalConfirmation(text.trim());
+    const goal = goalId && data.pendingGoal?.id === goalId ? data.pendingGoal : undefined;
     data.pending = undefined;
-    data.inflight = { messageId, inputHash, expiresAt: this.now() + CLAIM_TTL_MS, plan };
+    if (goal) data.pendingGoal = undefined;
+    data.inflight = { messageId, inputHash, expiresAt: this.now() + CLAIM_TTL_MS, plan, goal };
     const claimed = await this.save(chatId, saved?.revision ?? 0, data);
     let reply: LeaderReply;
     const linkContext: LinkContext = {
       requestId: `console_link_${hash([chatId, messageId])}`,
     };
-    if (cancellation.test(text.trim())) {
-      const latest = await this.store.getLatestExecution(chatId);
-      const cancelled = latest?.status === "active" ? await this.executions.cancel(latest.id, chatId) : null;
-      reply = { text: cancelled ? `已取消待确认计划；以下已确认计划停止后续派发。\n${executionSummary(cancelled)}`
-        : "已取消待确认计划；当前没有活动执行计划。没有新增派发，不会停止原会话已有任务。" };
+    if (goalCancellation(text.trim())) {
+      data.pendingGoal = undefined;
+      reply = await this.goals.cancel(chatId);
+    } else if (goalId || text.trim().startsWith("确认目标")) {
+      reply = goal ? await this.goals.confirm(chatId, claimed.revision, goal, data)
+        : { text: "没有该ID的待确认目标；未派发。请先核对目标预览，并回复‘确认目标 <UUID>’。" };
+    } else if (cancellation.test(text.trim())) {
+      if (await this.goals.hasUnfinished(chatId)) {
+        data.pendingGoal = undefined;
+        reply = await this.goals.cancel(chatId);
+      } else {
+        const latest = await this.store.getLatestExecution(chatId);
+        const cancelled = latest?.status === "active" ? await this.executions.cancel(latest.id, chatId) : null;
+        reply = { text: cancelled ? `已取消待确认计划；以下已确认计划停止后续派发。\n${executionSummary(cancelled)}`
+          : "已取消待确认计划；当前没有活动执行计划。没有新增派发，不会停止原会话已有任务。" };
+      }
     } else if (confirmation.test(text.trim())) {
       reply = plan ? await this.executePlan(chatId, claimed.revision, plan, data)
         : { text: "当前没有待确认计划。请告诉我希望哪些会话完成什么任务。" };
@@ -125,12 +146,14 @@ export class LeaderOrchestrator {
         });
         data.memories = memoriesBefore;
         data.pending = undefined;
+        data.pendingGoal = pendingGoalBefore;
         reply = { text: failureReply(error, reference) };
       }
     }
     // Confirmation must never authorize steps or skill versions hidden by clipping.
-    if (data.pending && reply.text.length > MAX_REPLY_CHARS) {
+    if ((data.pending || data.pendingGoal && data.pendingGoal !== pendingGoalBefore) && reply.text.length > MAX_REPLY_CHARS) {
       data.pending = undefined;
+      data.pendingGoal = undefined;
       reply = { text: this.attachConsoleLink("计划内容过长，无法完整展示供确认，未保存待确认计划，也未派发。请缩短任务内容或分批提出。", linkContext) };
     }
     reply.text = clip(reply.text, MAX_REPLY_CHARS);
@@ -173,7 +196,15 @@ export class LeaderOrchestrator {
     if (current?.revision !== revision || data.inflight!.expiresAt <= this.now()) {
       return { text: "处理所有权或时限已变化，没有创建新的执行计划，请核验已有回执。" };
     }
-    if (hasTerminalTarget(plan)) return submitTerminalPlan(this.store, this.commands, chatId, revision, plan, data, this.now);
+    if (hasTerminalTarget(plan)) {
+      if (await this.goals.hasUnfinished(chatId)) return { text: "已有active/blocked持续目标，未派发终端计划；请先查询或取消目标。" };
+      const guardedCommands: Pick<CommandService, "submit"> = { submit: (request, waitMs, guard, route) =>
+        this.commands.submit(request, waitMs, async () => {
+          if (await this.goals.hasUnfinished(chatId)) throw new CommandError(409, "持续目标仍占用当前聊天授权");
+          await guard?.();
+        }, route) };
+      return submitTerminalPlan(this.store, guardedCommands, chatId, revision, plan, data, this.now);
+    }
     try {
       await this.store.confirmExecution(createExecution(chatId, plan, this.now()), {
         revision, messageId: data.inflight!.messageId, inputHash: data.inflight!.inputHash,
@@ -225,9 +256,11 @@ export class LeaderOrchestrator {
         toolCount++;
         trace.toolCalls = toolCount;
         trace.lastTool = Object.hasOwn(ToolArguments, call.function.name) ? call.function.name : "unsupported";
+        const priorGoal = data.pendingGoal;
         const output = await this.callTool(call, chatId, data, memoryChanges, linkContext, signal);
         signal.throwIfAborted();
         if (data.pending) return { text: this.attachConsoleLink(this.preview(data.pending), linkContext) };
+        if (data.pendingGoal && data.pendingGoal !== priorGoal) return { text: this.attachConsoleLink(goalPreview(data.pendingGoal, node => this.hub.getNodeSkills(node)), linkContext) };
         const content = JSON.stringify(output);
         messages.push({ role: "tool", tool_call_id: call.id, content: content.length > 12000
           ? JSON.stringify({ truncated: true, data: clip(content, 12000) }) : content });
@@ -323,12 +356,13 @@ export class LeaderOrchestrator {
         return readSessionHistory(this.hub, args, signal);
       }
       case "get_command": {
-        const { commandId, planId } = ToolArguments.get_command.parse(raw);
+        const { commandId, planId, goalId } = ToolArguments.get_command.parse(raw);
         if (!data.commandIds.includes(commandId)) {
           const execution = planId ? await this.store.getExecution(planId) : await this.store.getLatestExecution(chatId);
           const command = await this.store.getCommand(commandId);
-          if (!execution || execution.chatId !== chatId || !command || !execution.plan.actions.some((_, index) =>
-            execution.attempts[index] && matchesExecutionCommand(execution, index, command))) {
+          const executionOwns = !!execution && execution.chatId === chatId && !!command && execution.plan.actions.some((_, index) =>
+            execution.attempts[index] && matchesExecutionCommand(execution, index, command));
+          if (!executionOwns && !await this.goals.ownsCommand(chatId, commandId, goalId)) {
             return { error: "Command does not belong to this chat" };
           }
         }
@@ -340,6 +374,17 @@ export class LeaderOrchestrator {
         const id = planId ?? (await this.store.getLatestExecution(chatId))?.id;
         return id ? (await this.executions.view(id, chatId) ?? { error: "Plan does not belong to this chat" }) : { plan: null };
       }
+      case "get_goal_progress": {
+        const { goalId } = ToolArguments.get_goal_progress.parse(raw);
+        return this.goals.progress(chatId, goalId);
+      }
+      case "propose_goal": {
+        const proposal = await this.goals.propose(chatId, ToolArguments.propose_goal.parse(raw));
+        if ("error" in proposal) return proposal;
+        data.pending = undefined;
+        data.pendingGoal = proposal;
+        return { pending: true };
+      }
       case "propose_plan": {
         const { actions } = ToolArguments.propose_plan.parse(raw);
         data.pending = undefined;
@@ -348,6 +393,7 @@ export class LeaderOrchestrator {
         try { validatePlanDependencies({ actions }); }
         catch { return { error: "Invalid plan dependencies or result sources; resultFrom must select distinct direct earlier dependencies, and same-session tasks must form a chain" }; }
         if ((await this.store.getLatestExecution(chatId))?.status === "active") return { error: "An active plan already exists; query its progress or ask the user to cancel it" };
+        if (await this.goals.hasUnfinished(chatId)) return { error: "An active or blocked goal already exists; query its progress or cancel it" };
         const boundActions: Plan["actions"] = [];
         for (const action of actions) {
           const session = this.hub.getNodeSession(action.nodeId, action.sessionId);
@@ -363,6 +409,7 @@ export class LeaderOrchestrator {
         try { assertTerminalSingleStep({ actions: boundActions }); }
         catch { data.pending = undefined; return { error: "终端输入无法证明任务完成，只支持独立单步，不能加入多步或依赖计划" }; }
         data.pending = { id: randomUUID(), expiresAt: this.now() + PLAN_TTL_MS, actions: boundActions };
+        data.pendingGoal = undefined;
         return { pending: true };
       }
       case "recall": return data.memories;

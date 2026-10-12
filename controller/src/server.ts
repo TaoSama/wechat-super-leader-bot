@@ -15,12 +15,15 @@ import { CommandService, CommandError } from "./commands.js";
 import { HttpLeaderModel, LeaderModel } from "./leader/model.js";
 import { LeaderOrchestrator } from "./leader/orchestrator.js";
 import { ExecutionScheduler } from "./leader/execution-scheduler.js";
+import { GoalScheduler } from "./leader/goal-scheduler.js";
+import { createGoalDecider } from "./leader/goal-model.js";
 import { ConsoleAuthError, ConsoleAuthService } from "./console/auth.js";
 import { createConsoleAuthRouter, extractSessionCookie, checkOriginMatches } from "./console/routes.js";
 import { isConsoleRead, isConsoleMessage, isSameOriginMessage } from "./console/access.js";
 import { createSessionRouter } from "./console/sessions.js";
 import { StatusEvents } from "./status-events.js";
 import { readConsoleExecutions } from "./console/executions.js";
+import { readConsoleGoals } from "./console/goals.js";
 import { createNotificationRouter } from "./notification-routes.js";
 
 function makeMessageRequestId(chatId: string, messageId: string): string {
@@ -40,6 +43,7 @@ export class ControllerServer {
   private commands: CommandService;
   private leader?: LeaderOrchestrator;
   private executions?: ExecutionScheduler;
+  private goals?: GoalScheduler;
   private consoleAuth: ConsoleAuthService;
   private now: () => number;
   private statusEvents: StatusEvents<Awaited<ReturnType<ControllerServer["statusSnapshot"]>>>;
@@ -65,8 +69,16 @@ export class ControllerServer {
         },
         onChanged: () => this.statusEvents?.changed(),
       });
+      this.goals = new GoalScheduler(store, this.commands, createGoalDecider(leaderModel), { now,
+        isChatAllowed: chatId => this.config.allowedChatIds.has(chatId),
+        canDispatch: (goal, targetIndex) => {
+          const target = goal.proposal.targets[targetIndex];
+          return !!target && this.commands.canDispatchSend(target, target.sendRoute);
+        },
+        onChanged: () => this.statusEvents?.changed(),
+      });
       this.leader = new LeaderOrchestrator(store, this.hub, this.commands, leaderModel, now,
-        requestId => this.consoleAuth.issueLink(requestId), this.executions);
+        requestId => this.consoleAuth.issueLink(requestId), this.executions, this.goals);
     }
     this.resolver = new NaturalLanguageResolver();
     this.statusEvents = new StatusEvents(() => this.statusSnapshot());
@@ -143,7 +155,8 @@ export class ControllerServer {
     const sessions = await this.hub.getAllSessions();
     const commands = await this.store.listRecentCommands(50);
     const executions = await readConsoleExecutions(this.store, [...this.config.allowedChatIds], this.now());
-    return { nodes, sessions, commands, executions, skills: this.hub.getAllSkills(),
+    const goals = await readConsoleGoals(this.store, [...this.config.allowedChatIds], this.now());
+    return { nodes, sessions, commands, executions, goals, skills: this.hub.getAllSkills(),
       leaderMode: this.leader ? "model" : "rules", leaderModel: this.config.leader?.model };
   }
 
@@ -397,10 +410,11 @@ export class ControllerServer {
       });
     });
     this.executions?.start();
+    this.goals?.start();
   }
 
   async stop(): Promise<void> {
-    await this.executions?.stop();
+    await Promise.all([this.executions?.stop(), this.goals?.stop()]);
     this.statusEvents.stop();
     // Proactively close all active node websocket connections first
     await this.hub.closeAll();

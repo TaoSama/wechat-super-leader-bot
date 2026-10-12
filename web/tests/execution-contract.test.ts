@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { fetchControlPlaneStatus, normalizeControlPlaneStatus } from "../src/api";
 import { parseConsoleExecutions } from "../src/execution-contract";
-import { emptyExecutions, executionFixture } from "./status-fixtures";
+import { emptyGoals, emptyExecutions, executionFixture  } from "./status-fixtures";
 
 const snapshot = () => ({ ...emptyExecutions(), items: [executionFixture()] });
 describe("required bounded console execution contract", () => {
@@ -11,7 +11,7 @@ describe("required bounded console execution contract", () => {
     value.items[0].steps[0].promptTruncated = true;
     const original = structuredClone(value);
     expect(parseConsoleExecutions(value)).toEqual(original);
-    expect(normalizeControlPlaneStatus({ nodes: [], sessions: [], commands: [], executions: value }).executions).toEqual(original);
+    expect(normalizeControlPlaneStatus({ nodes: [], sessions: [], commands: [], goals: emptyGoals(), executions: value }).executions).toEqual(original);
     const parsed = parseConsoleExecutions(value);
     parsed.items[0].steps[1].dependsOn.push(3);
     expect(value).toEqual(original);
@@ -70,7 +70,7 @@ describe("required bounded console execution contract", () => {
   it.each(invalidCases)("rejects %s instead of inventing an empty plan window", (_name, mutate) => {
     const bad = mutate(snapshot());
     expect(() => parseConsoleExecutions(bad)).toThrow("持久计划状态格式无效");
-    expect(() => normalizeControlPlaneStatus({ nodes: [], sessions: [], commands: [], executions: bad })).toThrow("持久计划状态格式无效");
+    expect(() => normalizeControlPlaneStatus({ nodes: [], sessions: [], commands: [], goals: emptyGoals(), executions: bad })).toThrow("持久计划状态格式无效");
   });
   it("rejects a missing HTTP contract, then parses the same valid projection used by SSE", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ nodes: [], sessions: [], commands: [] })));
@@ -78,7 +78,7 @@ describe("required bounded console execution contract", () => {
     try {
       await expect(fetchControlPlaneStatus()).rejects.toThrow("持久计划状态格式无效");
       const executions = snapshot();
-      fetchMock.mockResolvedValue(new Response(JSON.stringify({ nodes: [], sessions: [], commands: [], executions })));
+      fetchMock.mockResolvedValue(new Response(JSON.stringify({ nodes: [], sessions: [], commands: [], goals: emptyGoals(), executions })));
       expect((await fetchControlPlaneStatus()).executions).toEqual(executions);
       expect(fetchMock).toHaveBeenCalledWith("/v1/status", expect.objectContaining({ method: "GET", credentials: "same-origin" }));
     } finally { vi.unstubAllGlobals(); }

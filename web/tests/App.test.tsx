@@ -1,4 +1,4 @@
-import { emptyExecutions } from "./status-fixtures";
+import { emptyGoals, emptyExecutions  } from "./status-fixtures";
 // React 17+ JSX transform
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -9,7 +9,7 @@ import { resetAuthHelperForTesting } from "../src/auth";
 const VALID_43_TOKEN = "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789_-abcde"; // exactly 43 chars
 
 const MOCK_STATUS_PAYLOAD: ControlPlaneStatusResponse = {
-  executions: emptyExecutions(),
+  goals: emptyGoals(), executions: emptyExecutions(),
   nodes: [
     {
       nodeId: "demomini",
@@ -418,7 +418,7 @@ describe("Super Leader 会话工作台", () => {
     const emptyPayload: ControlPlaneStatusResponse = {
       nodes: [],
       sessions: [],
-      commands: [], executions: emptyExecutions(),
+      commands: [], goals: emptyGoals(), executions: emptyExecutions(),
     };
     const fetchMock = createStandardFetchMock(emptyPayload, 200);
     vi.stubGlobal("fetch", fetchMock);

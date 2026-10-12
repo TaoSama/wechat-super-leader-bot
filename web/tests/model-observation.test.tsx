@@ -1,4 +1,4 @@
-import { emptyExecutions } from "./status-fixtures";
+import { emptyGoals, emptyExecutions  } from "./status-fixtures";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { normalizeControlPlaneStatus } from "../src/api";
@@ -36,7 +36,7 @@ describe("model metadata normalization", () => {
       status: "active", source: "codex-desktop", availability: "available", observedAt: iso(), modelProvider: "desktop-provider",
     });
     const raw = { ...session(), desktopObservation: observation };
-    const normalized = normalizeControlPlaneStatus({ nodes, sessions: [raw], commands: [], executions: emptyExecutions() }).sessions[0];
+    const normalized = normalizeControlPlaneStatus({ nodes, sessions: [raw], commands: [], goals: emptyGoals(), executions: emptyExecutions() }).sessions[0];
     expect(normalized.desktopObservation?.status).toBe("active");
     expect(selectModelObservation(normalized, NOW)).toEqual({ source: "unknown" });
     expect(sendBlockReason(normalized, true, false, NOW)).not.toBeNull();
@@ -79,7 +79,7 @@ describe("model observation selection", () => {
   });
 });
 
-function workspaceData(raw: ScopedSession) { return { nodes, sessions: [raw], commands: [], executions: emptyExecutions() }; }
+function workspaceData(raw: ScopedSession) { return { nodes, sessions: [raw], commands: [], goals: emptyGoals(), executions: emptyExecutions() }; }
 
 describe("workspace model views", () => {
   it("shows one model group in list, detail and composer, with source and time", () => {

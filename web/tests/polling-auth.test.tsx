@@ -1,4 +1,4 @@
-import { emptyExecutions } from "./status-fixtures";
+import { emptyGoals, emptyExecutions  } from "./status-fixtures";
 import { act, renderHook, cleanup } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { useStatusPolling } from "../src/hooks/useStatusPolling";
@@ -19,7 +19,7 @@ it.each([401, 403])("stops automatic polling after %s, clears stale data and tri
     if (url === "/health") return new Response(JSON.stringify({ status: "ok" }));
     requests++;
     return new Response(
-      JSON.stringify(status === 200 ? { nodes: [], sessions: [], commands: [], executions: emptyExecutions() } : { error: "denied" }),
+      JSON.stringify(status === 200 ? { nodes: [], sessions: [], commands: [], goals: emptyGoals(), executions: emptyExecutions() } : { error: "denied" }),
       { status }
     );
   }));
@@ -77,7 +77,7 @@ it("continues automatic recovery after transient HTTP failures", async () => {
     requests++;
     return requests === 1
       ? new Response("{}", { status: 502 })
-      : new Response(JSON.stringify({ nodes: [], sessions: [], commands: [], executions: emptyExecutions() }));
+      : new Response(JSON.stringify({ nodes: [], sessions: [], commands: [], goals: emptyGoals(), executions: emptyExecutions() }));
   }));
 
   const { result } = renderHook(() => useStatusPolling(true, 1000));
@@ -100,7 +100,7 @@ it("stops polling and clears telemetry when enabled is toggled to false", async 
   vi.stubGlobal("fetch", vi.fn(async (url: string) => {
     if (url === "/health") return new Response(JSON.stringify({ status: "ok" }));
     requests++;
-    return new Response(JSON.stringify({ nodes: [], sessions: [], commands: [], executions: emptyExecutions() }));
+    return new Response(JSON.stringify({ nodes: [], sessions: [], commands: [], goals: emptyGoals(), executions: emptyExecutions() }));
   }));
 
   const { result, rerender } = renderHook(

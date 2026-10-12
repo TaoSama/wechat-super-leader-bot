@@ -6,6 +6,7 @@ import { ConflictError } from "./interface.js";
 import { executionListQuery } from "./execution-list.js";
 import { createTerminalNotification, validateNotificationTime } from "../notifications.js";
 import { initNotificationTables, insertTerminalNotification } from "./notification-postgres.js";
+import { lockChatAuthorization } from "./goal-postgres.js";
 import { assertExecutionConfirmation, normalizeExecutionConfirmation,
   type ExecutionConfirmationAuthority } from "../leader/execution-confirmation.js";
 
@@ -78,6 +79,16 @@ export async function pgCreateExecutionIfAbsent(pool: ExecutionQueryClient, reco
   if (normalized.revision !== 1 || normalized.status !== "active" || normalized.attempts.some(attempt => attempt !== null)) {
     throw new Error("New executions must be active, unclaimed revision one records");
   }
+  await lockChatAuthorization(pool, normalized.chatId);
+  const previous = await pgGetExecution(pool, normalized.id);
+  if (previous) {
+    if (previous.chatId !== normalized.chatId || JSON.stringify(previous.plan) !== JSON.stringify(normalized.plan)) {
+      throw new ConflictError("Execution ID already used with different chat or plan");
+    }
+    return { created: false, execution: previous };
+  }
+  const occupied = await pool.query("SELECT id FROM leader_goals WHERE chat_id=$1 AND status IN ('active','blocked') LIMIT 1", [normalized.chatId]);
+  if (occupied.rows.length) throw new ConflictError("Chat already has an open goal");
   const result = await pool.query<ExecutionRow>(`INSERT INTO leader_executions
     (id,chat_id,revision,status,data,created_at) VALUES ($1,$2,$3,$4,$5::jsonb,$6)
     ON CONFLICT DO NOTHING RETURNING *`,
@@ -89,6 +100,13 @@ export async function pgCreateExecutionIfAbsent(pool: ExecutionQueryClient, reco
     throw new ConflictError("Execution ID already used with different chat or plan");
   }
   return { created: false, execution: existing };
+}
+
+export async function pgCreateLockedExecution(pool: pg.Pool, record: ExecutionRecord): Promise<CreateExecutionResult> {
+  const snapshot = structuredClone(record), client = await pool.connect();
+  try { await client.query("BEGIN"); const result = await pgCreateExecutionIfAbsent(client, snapshot); await client.query("COMMIT"); return result; }
+  catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
 }
 
 export async function pgGetExecution(pool: ExecutionQueryClient, id: string): Promise<ExecutionRecord | null> {
