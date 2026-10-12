@@ -2,15 +2,15 @@
 
 WeChat Gateway 是 Super Leader 的独立微信接入网关组件。负责与微信 iLink 轮询通信并将消息转发给 Controller 的 `/v1/messages` 接口，接收回复后通过 iLink 发回用户。
 
-## 已确认计划的状态通知
+## 计划与持续目标的状态通知
 
-`--plan-notifications` 或 `GATEWAY_PLAN_NOTIFICATIONS=true` 显式开启计划终态通知，默认关闭。仅在完成入站基线后运行；`--check`、`--healthcheck` 和 `--establish-baseline` 即使开启也不通知。`--run` 每轮先处理通知再轮询入站，通知错误独立报告，不阻断入站；`--poll-once` 在入站周期成功后处理通知。此次实现仅用于本地模拟验收，不代表已部署或已真实外发。
+`--notifications` 或 `GATEWAY_NOTIFICATIONS=true` 显式开启通知，默认关闭；旧参数不再支持，旧环境变量不会启用通知。仅在完成入站基线后运行；`--check`、`--healthcheck` 和 `--establish-baseline` 即使开启也不通知。`--run` 每轮先处理通知再轮询入站，通知错误独立报告，不阻断入站；`--poll-once` 在入站周期成功后处理通知。本轮持续目标通知的合成测试不代表已部署或已真实外发。
 
-Gateway 只负责交付 Controller 持久保存的完成、失败、授权到期通知，不调用模型或新建任务。只提交已有非空聊天 context 的列表（每批128个聊天、超过时排序轮转），每轮最多4条、串行发送；没有 context 不消耗领取机会。现有 context 不保证永久可主动触达。
+Gateway 只交付 Controller 持久保存的文本，不生成文案、不调用模型或新建任务。唯一合同为 `source: { type: "plan" | "goal", id: UUID }`，通知 `id` 必须等于 `source.id`；拒绝旧 `executionId`、未知字段及混型。计划 kind 为 `completed/failed/expired`，目标 kind 为 `completed/blocked/expired`。目标首次从 active 离开至这三态时由 Controller 生成一条通知；取消不通知，blocked 后到期不重复。只提交已有非空聊天 context 的列表（每批128个聊天、超过时排序轮转），每轮最多4条、串行发送；没有 context 不消耗领取机会。现有 context 不保证永久可主动触达。
 
 每条通知领取只尝试一次，领取响应丢失不发送；领取后复核通知内容、身份、context、截止与停止状态。只发送一次纯文本，并要求微信明确返回成功码。`super-leader:notification:<id>` 仅关联证据，不是微信幂等保证。空回执、网络异常或超时记为 `uncertain`，不重领、不重发；回执提交最多3次相同请求，失败时原 claim 可通过 Controller Bearer 管理接口核查。`accepted` 只表示微信接口受理，不证明用户收到或已读。
 
-领取后崩溃可能漏发，允许名单撤销与外部发送仍有竞争窗口；不保证 exactly-once 或必达。失败、授权到期不等于停止原会话已运行任务。更新不重置微信游标、context、去重记录或回复进度。
+领取后崩溃可能漏发，允许名单撤销与外部发送仍有竞争窗口；不保证 exactly-once 或必达。持续目标完成是模型依据精确完成记录作出的判断，不是独立业务验收；失败、阻塞、授权到期不等于停止原会话已运行任务。更新不重置微信游标、context、去重记录或回复进度。
 
 ## 运行与容器化部署
 

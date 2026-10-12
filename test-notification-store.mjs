@@ -32,7 +32,8 @@ export async function verifyNotificationStore({ stores, pool, reopenStore }) {
     assert.equal(transitions.filter(Boolean).length, 1);
     const notification = await stores[0].getNotification(race.id, now);
     assert.equal(notification.id, race.id);
-    assert.equal(notification.executionId, race.id);
+    assert.deepEqual(notification.source, { type: 'plan', id: race.id });
+    assert.equal(notification.executionId, undefined);
     assert.equal(notification.kind, 'completed');
     assert.equal(notification.status, 'pending');
     assert.equal(notification.expiresAt - notification.createdAt, DAY_MS);

@@ -50,7 +50,7 @@ export class WeChatGateway {
   public readonly splitMaxChars: number;
   public readonly splitMultiPart: boolean;
   public readonly healthTracker?: HealthTracker;
-  public readonly planNotifications: boolean;
+  public readonly notifications: boolean;
   private stopped: boolean = false;
   private deliveringNotifications: boolean = false;
   private notificationChatCursor = 0;
@@ -62,7 +62,7 @@ export class WeChatGateway {
     splitMaxChars?: number;
     splitMultiPart?: boolean;
     healthTracker?: HealthTracker;
-    planNotifications?: boolean;
+    notifications?: boolean;
   }) {
     this.stateManager = options.stateManager;
     this.ilink = options.ilink;
@@ -70,7 +70,7 @@ export class WeChatGateway {
     this.splitMaxChars = options.splitMaxChars ?? DEFAULT_MESSAGE_MAX_CHARS;
     this.splitMultiPart = options.splitMultiPart ?? true;
     this.healthTracker = options.healthTracker;
-    this.planNotifications = options.planNotifications ?? false;
+    this.notifications = options.notifications ?? false;
   }
 
   public stop(): void {
@@ -80,7 +80,7 @@ export class WeChatGateway {
   /** At most one send per claim. A deterministic client ID correlates evidence, not delivery idempotence. */
   public async deliverNotificationsOnce(): Promise<NotificationDeliverySummary> {
     const summary: NotificationDeliverySummary = { accepted: 0, uncertain: 0, skipped: 0 };
-    if (!this.planNotifications || this.stopped || this.deliveringNotifications || !this.stateManager.isReadyForActivePolling()) return summary;
+    if (!this.notifications || this.stopped || this.deliveringNotifications || !this.stateManager.isReadyForActivePolling()) return summary;
     const chatIds = Object.keys(this.stateManager.contextTokens).filter(chatId => chatId.trim() &&
       typeof this.stateManager.contextTokens[chatId] === "string" && this.stateManager.contextTokens[chatId].trim()).sort();
     if (!chatIds.length || !this.stateManager.account?.token) return summary;

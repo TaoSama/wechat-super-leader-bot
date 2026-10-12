@@ -5,7 +5,7 @@ import { validateChatId, validateExpectedRevision } from "../leader/state.js";
 import { ConflictError } from "./interface.js";
 import { executionListQuery } from "./execution-list.js";
 import { createTerminalNotification, validateNotificationTime } from "../notifications.js";
-import { initNotificationTables, insertTerminalNotification } from "./notification-postgres.js";
+import { insertTerminalNotification } from "./notification-postgres.js";
 import { lockChatAuthorization } from "./goal-postgres.js";
 import { assertExecutionConfirmation, normalizeExecutionConfirmation,
   type ExecutionConfirmationAuthority } from "../leader/execution-confirmation.js";
@@ -43,7 +43,6 @@ export async function initExecutionTables(client: pg.PoolClient): Promise<void> 
   await client.query("CREATE UNIQUE INDEX IF NOT EXISTS leader_executions_active_chat_idx ON leader_executions (chat_id) WHERE status='active'");
   await client.query("CREATE INDEX IF NOT EXISTS leader_executions_active_id_idx ON leader_executions (id) WHERE status='active'");
   await client.query("CREATE INDEX IF NOT EXISTS leader_executions_chat_recent_idx ON leader_executions (chat_id, (status='active') DESC, created_at DESC, id DESC)");
-  await initNotificationTables(client);
 }
 
 export async function pgConfirmExecution(pool: pg.Pool, record: ExecutionRecord,

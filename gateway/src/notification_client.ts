@@ -1,6 +1,6 @@
 import type { FetchLike } from "./ilink.js";
 import { NOTIFICATION_LIMIT, NOTIFICATION_CHAT_LIMIT, NOTIFICATION_TIMEOUT_MS, NOTIFICATION_RESPONSE_BYTES, NOTIFICATION_RECEIPT_RETRIES,
-  notificationObject, notificationUuid, parseNotification, type PlanNotification } from "./notifications.js";
+  notificationObject, notificationUuid, parseNotification, type Notification } from "./notifications.js";
 
 class NotificationHttpError extends Error {
   constructor(public readonly status: number) { super(`Controller notification request HTTP ${status}`); }
@@ -64,7 +64,7 @@ export class NotificationClient {
       }
     }
   }
-  public async listNotifications(chatIds: string[]): Promise<PlanNotification[]> {
+  public async listNotifications(chatIds: string[]): Promise<Notification[]> {
     if (!Array.isArray(chatIds) || chatIds.length > NOTIFICATION_CHAT_LIMIT || new Set(chatIds).size !== chatIds.length ||
         chatIds.some(id => typeof id !== "string" || !id.trim())) throw new Error("Invalid notification chatIds");
     const value = notificationObject(await this.request("/pending", { chatIds }), ["items"]);
@@ -75,21 +75,21 @@ export class NotificationClient {
     }
     return items;
   }
-  private async record(path: string, id: string, body?: Record<string, unknown>, retries = 0): Promise<PlanNotification> {
+  private async record(path: string, id: string, body?: Record<string, unknown>, retries = 0): Promise<Notification> {
     notificationUuid(id);
     const value = notificationObject(await this.request(`/${id}${path}`, body, retries), ["notification"]);
     const notification = parseNotification(value.notification);
     if (notification.id !== id) throw new Error("Controller notification identity mismatch");
     return notification;
   }
-  public getNotification(id: string): Promise<PlanNotification> { return this.record("", id); }
-  public async claimNotification(id: string, attemptId: string): Promise<PlanNotification> {
+  public getNotification(id: string): Promise<Notification> { return this.record("", id); }
+  public async claimNotification(id: string, attemptId: string): Promise<Notification> {
     notificationUuid(attemptId);
     const item = await this.record("/claim", id, { attemptId });
     if (item.status !== "claimed" || item.attemptId !== attemptId) throw new Error("Controller notification claim identity mismatch");
     return item;
   }
-  public async recordNotificationReceipt(id: string, attemptId: string, status: "accepted" | "uncertain"): Promise<PlanNotification> {
+  public async recordNotificationReceipt(id: string, attemptId: string, status: "accepted" | "uncertain"): Promise<Notification> {
     notificationUuid(attemptId);
     if (status !== "accepted" && status !== "uncertain") throw new Error("Invalid notification receipt status");
     const item = await this.record("/receipt", id, { attemptId, status }, NOTIFICATION_RECEIPT_RETRIES);

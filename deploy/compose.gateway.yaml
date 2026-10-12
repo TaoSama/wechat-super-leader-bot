@@ -27,7 +27,7 @@ services:
       WECHAT_CREDENTIALS_PATH: /etc/super-leader/wechat-account.json
       WECHAT_STATE_PATH: /var/lib/super-leader-gateway/state.json
       GATEWAY_HEALTH_PATH: /var/lib/super-leader-gateway/health.json
-      GATEWAY_PLAN_NOTIFICATIONS: ${GATEWAY_PLAN_NOTIFICATIONS:-false}
+      GATEWAY_NOTIFICATIONS: ${GATEWAY_NOTIFICATIONS:-false}
     volumes:
       - type: bind
         source: ${WECHAT_ACCOUNT_FILE:-.runtime/wechat/account.json}

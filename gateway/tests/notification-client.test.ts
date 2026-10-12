@@ -2,8 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 import { ControllerClient } from "../src/controller_client.js";
-import { parseNotification, NOTIFICATION_RESPONSE_BYTES } from "../src/notifications.js";
-import { ATTEMPT, ID, claimed, json, notification } from "./notification-fixtures.js";
+import { parseNotification, sameNotification, NOTIFICATION_RESPONSE_BYTES } from "../src/notifications.js";
+import { ATTEMPT, ID, claimed, json, notification, goalNotification } from "./notification-fixtures.js";
 
 test("notification client uses bounded pending POST, exact Bearer paths and strict claim/receipt/get", async () => {
   const calls: { url: string; body: unknown; method: string | undefined }[] = [];
@@ -26,7 +26,17 @@ test("notification client uses bounded pending POST, exact Bearer paths and stri
 });
 for (const [name, change] of [
   ["extra field", (item: Record<string, unknown>) => { item.token = "forbidden"; }],
-  ["foreign execution", (item: Record<string, unknown>) => { item.executionId = ATTEMPT; }],
+  ["legacy execution field", (item: Record<string, unknown>) => { item.executionId = item.id; }],
+  ["missing source", (item: Record<string, unknown>) => { delete item.source; }],
+  ["null source", (item: Record<string, unknown>) => { item.source = null; }],
+  ["array source", (item: Record<string, unknown>) => { item.source = []; }],
+  ["foreign source ID", (item: Record<string, unknown>) => { item.source = { type: "plan", id: ATTEMPT }; }],
+  ["invalid source ID", (item: Record<string, unknown>) => { item.source = { type: "plan", id: "not-uuid" }; }],
+  ["unknown source type", (item: Record<string, unknown>) => { item.source = { type: "session", id: item.id }; }],
+  ["missing source type", (item: Record<string, unknown>) => { item.source = { id: item.id }; }],
+  ["extra source field", (item: Record<string, unknown>) => { item.source = { type: "plan", id: item.id, executionId: item.id }; }],
+  ["blocked plan", (item: Record<string, unknown>) => { item.kind = "blocked"; }],
+  ["failed goal", (item: Record<string, unknown>) => { item.source = { type: "goal", id: item.id }; item.kind = "failed"; }],
   ["empty chat", (item: Record<string, unknown>) => { item.chatId = ""; }],
   ["overlong text", (item: Record<string, unknown>) => { item.text = "😀".repeat(1001); }],
   ["missing text", (item: Record<string, unknown>) => { delete item.text; }],
@@ -42,6 +52,22 @@ test("notification parser allows expired pending projection, uncertain claim and
   assert.equal(parseNotification({ ...claimed(), status: "uncertain" }).status, "uncertain");
   assert.equal(parseNotification({ ...notification(), text: "😀".repeat(1000) }).text.length, 2000);
 });
+test("notification parser allows only source-specific kinds and preserves generic source", () => {
+  for (const kind of ["completed", "failed", "expired"] as const) {
+    const item = { ...notification(), kind };
+    assert.deepEqual(parseNotification(item), item);
+  }
+  for (const kind of ["completed", "blocked", "expired"] as const) {
+    const item = goalNotification(kind);
+    assert.deepEqual(parseNotification(item), item);
+  }
+});
+test("notification identity binds source type and ID even for shared kind and text", () => {
+  const item = notification();
+  assert.equal(sameNotification(item, claimed(item)), true);
+  assert.equal(sameNotification(item, { ...item, source: { type: "goal", id: item.id } }), false);
+  assert.equal(sameNotification(item, { ...item, source: { type: "plan", id: ATTEMPT } }), false);
+});
 for (const mode of ["network", "5xx", "409", "invalid-schema", "wrong-attempt", "wrong-id"]) test(`claim never retries ${mode}`, async () => {
   let calls = 0;
   const client = new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic", fetchImpl: async () => {
@@ -49,7 +75,7 @@ for (const mode of ["network", "5xx", "409", "invalid-schema", "wrong-attempt", 
     if (mode === "network") throw new Error("lost claim response");
     if (mode === "5xx" || mode === "409") return json({}, mode === "5xx" ? 502 : 409);
     if (mode === "invalid-schema") return json({ notification: {} });
-    return json({ notification: { ...claimed(), ...(mode === "wrong-id" ? { id: ATTEMPT, executionId: ATTEMPT } : { attemptId: ID }) } });
+    return json({ notification: { ...claimed(), ...(mode === "wrong-id" ? { id: ATTEMPT, source: { type: "plan", id: ATTEMPT } } : { attemptId: ID }) } });
   } });
   await assert.rejects(client.claimNotification(ID, ATTEMPT));
   assert.equal(calls, 1);

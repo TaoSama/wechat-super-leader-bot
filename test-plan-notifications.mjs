@@ -51,7 +51,7 @@ export async function verifyPlanNotifications({ base, token, request, store, res
       stateManager: options.state ?? state,
       ilink: new ILinkClient({ stateManager: options.state ?? state, fetchImpl: transport }),
       controller: new ControllerClient({ controllerUrl: base, controllerToken: token, fetchImpl: options.fetchImpl ?? fetch }),
-      planNotifications: options.enabled ?? true,
+      notifications: options.enabled ?? true,
     });
     gateways.push(instance);
     return instance;

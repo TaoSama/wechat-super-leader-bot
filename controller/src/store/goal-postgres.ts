@@ -7,6 +7,8 @@ import type { LeaderState } from "../leader/state.js";
 import type { IStore } from "./interface.js";
 import { validateGoalProofs } from "../leader/goal-view.js";
 import { validateChatId, validateExpectedRevision } from "../leader/state.js";
+import { createGoalNotification } from "../notifications.js";
+import { insertTerminalNotification } from "./notification-postgres.js";
 
 export async function lockChatAuthorization(client: Pick<pg.PoolClient, "query">, chatId: string): Promise<void> {
   validateChatId(chatId);
@@ -76,8 +78,11 @@ export async function pgCompareAndSetGoal(pool: pg.Pool, next: GoalRecord, revis
     const result = await client.query<GoalRow>("UPDATE leader_goals SET revision=$2,status=$3,data=$4::jsonb WHERE id=$1 AND revision=$5 RETURNING *",
       [input.id, input.revision, input.status, JSON.stringify(input), revision]);
     if (result.rows.length !== 1) throw new Error("Goal locked update lost record");
-    validateGoalUpdate(current, input, now());
+    const commitTime = now();
+    validateGoalUpdate(current, input, commitTime);
     const saved = fromRow(result.rows[0]);
+    const notification = createGoalNotification(current, saved, commitTime);
+    if (notification) await insertTerminalNotification(client, notification);
     await client.query("COMMIT"); return saved;
   } catch (error) { await client.query("ROLLBACK"); throw error; }
   finally { client.release(); }

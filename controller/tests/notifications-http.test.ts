@@ -4,7 +4,9 @@ import { ControllerServer } from "../src/server.js";
 import { MemoryStore } from "../src/store/memory.js";
 import type { Config } from "../src/config.js";
 import { createExecution } from "../src/leader/execution.js";
-import { NOTIFICATION_TTL_MS, NOTIFICATION_ATTEMPT_MS } from "../src/notifications.js";
+import { createGoal } from "../src/leader/goal.js";
+import { authorize, proposal } from "./goal-contracts-fixtures.js";
+import { goalNotificationText, NOTIFICATION_TTL_MS, NOTIFICATION_ATTEMPT_MS } from "../src/notifications.js";
 
 const NOW = 1_700_000_000_000;
 const ADMIN = "notification-admin";
@@ -58,7 +60,8 @@ it("only management Bearer can list, read, claim and receipt; Cookie/node creden
   const response = await call(`/v1/notifications/${id}`);
   expect(response.status).toBe(200);
   expect(response.headers.get("cache-control")).toBe("no-store");
-  expect(response.body.notification).toMatchObject({ id, executionId: id, chatId: "allowed", status: "pending" });
+  expect(response.body.notification).toMatchObject({ id, source: { type: "plan", id }, chatId: "allowed", status: "pending" });
+  expect(response.body.notification).not.toHaveProperty("executionId");
   expect(response.body.notification.text).not.toContain("private prompt");
 });
 
@@ -126,4 +129,32 @@ it("expired unclaimed notifications are not delivered; unknown UUIDs return 404"
   expect((await call(`/v1/notifications/${missing}`)).status).toBe(404);
   expect((await call(`/v1/notifications/${missing}/claim`, { attemptId: uuid(100) })).status).toBe(404);
   expect((await call(`/v1/notifications/${missing}/receipt`, { attemptId: uuid(100), status: "accepted" })).status).toBe(404);
+});
+
+it("goal notifications share management authorization, allowlist, claim and late receipt without exposing model prose", async () => {
+  const goal = createGoal("allowed", { ...proposal(NOW), objective: "private objective" }, NOW);
+  await store.confirmGoal(goal, await authorize(store, goal), () => NOW);
+  await store.compareAndSetGoal({ ...goal, revision: 2, status: "blocked", blockedReason: "private model reason" }, 1, () => NOW);
+  const path = `/v1/notifications/${goal.id}`;
+  expect((await call(path, undefined, { Cookie: cookie })).status).toBe(401);
+  expect((await call(path, undefined, { Authorization: `Bearer ${NODE}` })).status).toBe(403);
+  const pending = await call("/v1/notifications/pending", { chatIds: ["allowed"] });
+  expect(pending.body.items).toHaveLength(1);
+  expect(pending.body.items[0]).toMatchObject({ source: { type: "goal", id: goal.id }, kind: "blocked", text: goalNotificationText(goal.id, "blocked") });
+  expect(JSON.stringify(pending.body)).not.toContain("private"); expect(pending.body.items[0]).not.toHaveProperty("executionId");
+  expect((await call("/v1/notifications/pending", { chatIds: ["other"] })).body.items).toEqual([]);
+  config.allowedChatIds.delete("allowed");
+  expect((await call(`${path}/claim`, { attemptId: uuid(100) })).status).toBe(409);
+  config.allowedChatIds.add("allowed");
+  const claimed = await call(`${path}/claim`, { attemptId: uuid(100) }); expect(claimed.status).toBe(200);
+  expect((await call(`${path}/claim`, { attemptId: uuid(101) })).status).toBe(409);
+  now = goal.expiresAt;
+  const current = (await store.getGoal(goal.id))!;
+  await store.compareAndSetGoal({ ...current, revision: 3, status: "expired" }, 2, () => now);
+  const uncertain = await call(path); expect(uncertain.body.notification).toMatchObject({ kind: "blocked", status: "uncertain", attemptId: uuid(100) });
+  expect(uncertain.body.notification.text).toBe(claimed.body.notification.text);
+  config.allowedChatIds.clear();
+  expect((await call(`${path}/receipt`, { attemptId: uuid(101), status: "accepted" })).status).toBe(409);
+  const accepted = await call(`${path}/receipt`, { attemptId: uuid(100), status: "accepted" });
+  expect(accepted.body.notification).toMatchObject({ source: { type: "goal", id: goal.id }, kind: "blocked", status: "accepted" });
 });

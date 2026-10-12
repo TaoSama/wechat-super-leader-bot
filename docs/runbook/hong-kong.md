@@ -189,17 +189,19 @@ docker compose --env-file .runtime/controller.env \
 
 同一微信账号不得在两台机器并行轮询。远端启用后，本机 `.runtime/local.json` 的允许名单维持为空，不运行 `node local.mjs --gateway`。停用时只 `stop gateway`，保留账号、state 和数据库；不要 `down -v` 或清除 checkpoint。实际部署与验收结果见 [验证记录](../changes/2026-10-10-control-plane/VERIFICATION.md)。
 
-### 计划终态通知（已启用，首次回执未知）
+### 计划与持续目标通知
 
-默认关闭。完成、失败或授权到期时，Controller 在计划终态事务内保存一条通知；取消仍通过原请求同步回复，不另外通知。只通知计划 ID、总步数和状态，不附带原会话输出、错误细节或控制台登录凭证。
+默认关闭。完成、失败或授权到期时，Controller 在计划终态事务内保存一条通知；持续目标首次 active→completed/blocked/expired 在目标 CAS 事务保存一条通知。取消不另外通知，blocked 后 cancelled/expired 不重写或二次发送；目标 completed 明确只是根据精确记录作出的模型判断。只通知来源 ID 和静态状态摘要，不附带目标/条件/原会话输出、错误细节或控制台登录凭证。
 
-远端已在既有私有 `.runtime/controller.env` 中设置 `GATEWAY_PLAN_NOTIFICATIONS=true`。2026-10-13首次启用仅正常更新唯一Gateway，Controller/PG未重启；唯一既有待发通知现为uncertain，未重发，见 [现场记录](../changes/2026-10-13-wechat-notification-activation.md)。仓库模板仍默认关闭。该变量仅注入Gateway；当现有Controller/Gateway已包含通知实现时，只需核对原镜像tag、解析配置与状态挂载并更新Gateway，不需要构建、更新Controller、修改模型或重建基线。若确需换版，先在外部构建验证并加载镜像。不要运行第二份Gateway或重置state、cursor、数据库、journal。若关闭，将变量设为false后正常更新Gateway，保留全部通知记录。
+当前唯一开关为 `GATEWAY_NOTIFICATIONS=true` / `--notifications`，仅注入 Gateway，仓库模板默认 false。历史远端曾用旧开关启用固定计划通知，唯一既有通知为 uncertain，见 [原记录](../changes/2026-10-13-wechat-notification-activation.md)；新版本不识别旧开关，发布前须精确迁移项目私有 env 中的布尔值，不动其他凭据或配置。
+
+本次通知 JSON 从 executionId 统一为 `source:{type:plan|goal,id}`，须 Controller/Gateway 成对升级，不能只更新 Gateway 或继续旧 Gateway 领取新合同。旧记录事务迁移只改来源表达，保留原 status/attempt/time/text；旧终态不回填。先在外部构建验证、远端加载镜像，再排空并正常停唯一 Gateway/Controller，迁移后复核旧通知及非通知业务摘要，启动同合同 Gateway。迁移成功后不能直接回退旧二进制，应关闭通知并保留记录或使用同合同修复版；具体步骤见 [升级合同](../changes/2026-10-13-goal-notifications/TECH.md) 与 [验证状态](../changes/2026-10-13-goal-notifications/VERIFICATION.md)。不要运行第二份 Gateway 或重置 state/cursor、数据库、journal。关闭时设新变量 false 后正常更新 Gateway。
 
 通知列表只请求当前有聊天 context 的目标，并与 Controller 当前允许名单求交；无 context 不领取，超过128个目标会轮转。`--run` 每次入站轮询前最多处理4条，`--poll-once` 在正常入站周期成功后处理。繁忙的模型调用和长轮询可能延迟通知；现有 context 也可能过期，不能保证永久主动触达。
 
 每条通知的事件期限是24小时，领取期限是60秒。领取响应丢失不发送，也不自动重领。微信回执缺失或结果不明保存为 `uncertain`；记录回执可以重试，但绝不再次发送。`accepted` 只证明微信接口明确受理，不证明人已收到或已读。领取后、发送前崩溃可能漏发；允许名单撤销和外发之间仍有竞争窗口，不能宣称 exactly-once 或必达。pending 过期只显示 expired，claimed 过期只显示 uncertain，均不重放。
 
-持管理 Bearer 可通过 `GET /v1/notifications/<计划ID>` 核查 `{notification}`（Cookie/节点 token 不可用）；不要打印 Bearer、context 或账号信息。不要通过重新 claim 或造新计划来验证未知发送结果。旧终态计划不会自动回填通知；重新开启开关后，已有且未过期、未领取的 pending 仍可能被发送，开启前应确认其范围。
+持管理 Bearer 可通过 `GET /v1/notifications/<计划或目标ID>` 核查 `{notification}`，并复核 source（Cookie/节点 token 不可用）；不要打印 Bearer、context 或账号信息。不要通过重新 claim 或造新计划来验证未知发送结果。旧终态计划/目标不会自动回填通知；重新开启开关后，已有且未过期、未领取的 pending 仍可能被发送，开启前应确认其范围。
 
 通知处理在健康检查中拥有最多235秒的有界processing阶段，结束清理不覆盖其他阶段；不会增加入站计数或刷新`last_poll_succeeded_at`。超过预算仍报告不健康。入站健康不证明通知成功；首次真实通知为uncertain且原部署没有保存发送错误类别，不能从空日志/入站错误0推断原因。合成场景证据见 [通知验收记录](../changes/2026-10-12-plan-notifications/VERIFICATION.md)，真实启用与限制见 [现场记录](../changes/2026-10-13-wechat-notification-activation.md)。
 
