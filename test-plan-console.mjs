@@ -83,11 +83,18 @@ export async function openPlanConsoleProbe({ base, request, waitFor }) {
       assert.equal(status.commands.find(command => command.commandId === commandId)?.prompt, prompt);
     },
     async assertPlan(id, expectedStatus, expectedSteps) {
-      const response = await get('/v1/status');
-      assert.equal(response.status, 200);
-      const group = (await response.json()).executions;
-      assertProjection(group);
-      const plan = group.items.find(item => item.id === id);
+      let plan;
+      // HTTP may join an SSE snapshot already in flight before the durable state changed.
+      await waitFor(async () => {
+        if (errors.length) throw errors[0];
+        const response = await get('/v1/status');
+        assert.equal(response.status, 200);
+        const group = (await response.json()).executions;
+        assertProjection(group);
+        plan = group.items.find(item => item.id === id);
+        return plan?.status === expectedStatus &&
+          JSON.stringify(plan.steps.map(step => step.status)) === JSON.stringify(expectedSteps);
+      }, `Console HTTP plan ${id} becomes ${expectedStatus} with exact steps ${JSON.stringify(expectedSteps)}`);
       assert(plan, 'Confirmed execution missing from authenticated console');
       assert.equal(plan.status, expectedStatus);
       assert.deepEqual(plan.steps.map(step => step.status), expectedSteps);
