@@ -7,7 +7,7 @@ import { executionListQuery } from "./execution-list.js";
 import { normalizeGoal, assertGoalConfirmation, validateGoalUpdate, goalIsOpen, type GoalRecord,
   type GoalConfirmationAuthority, type CreateGoalResult } from "../leader/goal.js";
 import { validateGoalProofs } from "../leader/goal-view.js";
-import { createTerminalNotification, readNotification, claimNotificationRecord, receiptNotificationRecord,
+import { createTerminalNotification, createGoalNotification, readNotification, claimNotificationRecord, receiptNotificationRecord,
   NotificationIdSchema, NotificationReceiptStatusSchema, validateNotificationTime, NOTIFICATION_BATCH_LIMIT,
   type Notification, type StoredNotification, type NotificationReceiptStatus } from "../notifications.js";
 import { normalizeExecution, validateExecutionUpdate, executionPageLimit, EXECUTION_PAGE_SIZE,
@@ -333,8 +333,14 @@ export class MemoryStore implements IStore {
     validateGoalUpdate(current, goal, now());
     await validateGoalProofs(this, current, goal, now());
     if (this.goals.get(goal.id)?.revision !== revision) return null;
-    validateGoalUpdate(current, goal, now());
-    this.goals.set(goal.id, goal); return structuredClone(goal);
+    const commitTime = now();
+    validateGoalUpdate(current, goal, commitTime);
+    const notification = createGoalNotification(current, goal, commitTime);
+    if (notification && this.notifications.has(notification.id)) throw new ConflictError("Goal notification already exists");
+    // All validation precedes synchronous publication of both records.
+    this.goals.set(goal.id, goal);
+    if (notification) this.notifications.set(notification.id, notification);
+    return structuredClone(goal);
   }
   async listRunnableGoals(limit = 8, afterId = ""): Promise<GoalRecord[]> {
     executionListQuery([], limit);

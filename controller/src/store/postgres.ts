@@ -9,7 +9,7 @@ import type { ExecutionConfirmationAuthority } from "../leader/execution-confirm
 import type { Notification, NotificationReceiptStatus } from "../notifications.js";
 import type { GoalRecord, GoalConfirmationAuthority, CreateGoalResult } from "../leader/goal.js";
 import { initGoalTables, pgConfirmGoal, pgGetGoal, pgGetLatestGoal, pgCompareAndSetGoal, pgListRunnableGoals, pgListRecentGoals } from "./goal-postgres.js";
-import { pgListPendingNotifications, pgGetNotification, pgClaimNotification, pgRecordNotificationReceipt } from "./notification-postgres.js";
+import { initNotificationTables, pgListPendingNotifications, pgGetNotification, pgClaimNotification, pgRecordNotificationReceipt } from "./notification-postgres.js";
 import { initExecutionTables, pgCreateExecutionIfAbsent, pgGetExecution, pgGetLatestExecution,
   pgCompareAndSetExecution, pgListActiveExecutions, pgConfirmExecution, pgListRecentExecutions, pgCreateLockedExecution } from "./execution-postgres.js";
 import {
@@ -102,6 +102,7 @@ export class PostgresStore implements IStore {
       await initConsoleAuthTables(client);
       await initExecutionTables(client);
       await initGoalTables(client);
+      await initNotificationTables(client);
 
       // At controller startup: clear stale node_sessions from previous instance
       await client.query(`DELETE FROM node_sessions;`);

@@ -16,7 +16,9 @@ function execution(index = 1, chatId = "allowed", now = NOW): ExecutionRecord {
 }
 const executionRow = (record: ExecutionRecord) => ({ id: record.id, chat_id: record.chatId, revision: String(record.revision),
   status: record.status, created_at: String(record.createdAt), data: structuredClone(record) });
-const notificationRow = (record: StoredNotification) => ({ id: record.id, execution_id: record.executionId, chat_id: record.chatId,
+const notificationRow = (record: StoredNotification) => ({ id: record.id,
+  execution_id: record.source.type === "plan" ? record.source.id : null,
+  goal_id: record.source.type === "goal" ? record.source.id : null, chat_id: record.chatId,
   kind: record.kind, status: record.status, created_at: String(record.createdAt), expires_at: String(record.expiresAt), data: structuredClone(record) });
 type ExecutionRow = ReturnType<typeof executionRow>;
 type NotificationRow = ReturnType<typeof notificationRow>;
@@ -36,6 +38,7 @@ class NotificationPool {
     this.queries.push(query);
     if (query.startsWith("SELECT pg_advisory_xact_lock(") || query.startsWith("SELECT id FROM leader_goals WHERE chat_id=$1")) return this.result();
     if (/^(CREATE |ALTER |DELETE FROM node_sessions|UPDATE commands)/.test(query)) return this.result();
+    if (query === "SELECT * FROM leader_notifications ORDER BY id FOR UPDATE") return this.result([...this.notifications.values()]);
     if (query.startsWith("INSERT INTO leader_executions")) {
       const record = JSON.parse(params[4] as string) as ExecutionRecord;
       const row = executionRow(record);
@@ -95,7 +98,9 @@ class NotificationPool {
         if (query.startsWith("INSERT INTO leader_notifications")) {
           this.queries.push(query);
           if (this.failInsert) throw new Error("Outbox INSERT failed");
-          const record = normalizeNotification(JSON.parse(params[7] as string));
+          const record = normalizeNotification(JSON.parse(params[8] as string));
+          expect(params[1]).toBe(record.source.type === "plan" ? record.source.id : null);
+          expect(params[2]).toBe(record.source.type === "goal" ? record.source.id : null);
           if (this.notifications.has(record.id)) throw new Error("Duplicate outbox ID");
           stagedNotification = notificationRow(record);
           return this.result();
@@ -135,7 +140,7 @@ for (const [name, factory] of [["memory", () => new MemoryStore()], ["postgres S
         const notification = await store.getNotification(record.id, NOW);
         if (status === "cancelled") expect(notification).toBeNull();
         else {
-          expect(notification).toMatchObject({ id: record.id, executionId: record.id, chatId: record.chatId, kind: status,
+          expect(notification).toMatchObject({ id: record.id, source: { type: "plan", id: record.id }, chatId: record.chatId, kind: status,
             status: "pending", createdAt: NOW, expiresAt: NOW + NOTIFICATION_TTL_MS });
           expect(notification!.text.length).toBeLessThanOrEqual(2000);
           expect(notification!.text).not.toContain("private prompt");

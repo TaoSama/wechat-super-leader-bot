@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GOAL_LEASE_MS, GOAL_SEND_CLAIM_MS, type GoalDecision } from "../src/leader/goal.js";
 import { schedulers, fixture, deferred, lease, nextDecision } from "./goal-contracts-fixtures.js";
+import { goalNotificationText } from "../src/notifications.js";
 
 afterEach(async () => {
   await Promise.all(schedulers.splice(0).map(s => s.stop()));
@@ -34,6 +35,12 @@ describe("durable continuous goal scheduler", () => {
     expect(current.decisions.at(-1)!.inputSHA256).toMatch(/^[a-f0-9]{64}$/);
     expect(decide).toHaveBeenCalledTimes(3);
     expect(f.errors).not.toHaveBeenCalled();
+    const notification = (await f.store.getNotification(f.goal.id, f.now()))!;
+    expect(notification).toMatchObject({ source: { type: "goal", id: f.goal.id }, kind: "completed", status: "pending" });
+    expect(notification.text).toBe(goalNotificationText(f.goal.id, "completed"));
+    expect(notification.text).not.toContain("泄漏秘密");
+    await f.create().advance(f.goal.id);
+    expect(await f.store.listPendingNotifications(["chat"], f.now())).toEqual([notification]);
   });
 
   it("pending and accepted are not completed and never invoke another decision", async () => {
@@ -55,6 +62,7 @@ describe("durable continuous goal scheduler", () => {
     await f.create().advance(f.goal.id); await f.scheduler.advance(f.goal.id);
     expect((await f.current()).status).toBe("blocked");
     expect(f.sendCommand).toHaveBeenCalledTimes(1); expect(decide).toHaveBeenCalledTimes(1);
+    expect(await f.store.getNotification(f.goal.id, f.now())).toMatchObject({ source: { type: "goal", id: f.goal.id }, kind: "blocked" });
   });
 
   it("never reclaims a persisted send claim after loss of command creation", async () => {
@@ -112,6 +120,7 @@ describe("durable continuous goal scheduler", () => {
     response.resolve(nextDecision());
     expect((await f.current()).status).toBe("cancelled");
     expect((await f.current()).actions).toEqual([]); expect(f.sendCommand).not.toHaveBeenCalled();
+    expect(await f.store.getNotification(f.goal.id, f.now())).toBeNull();
   });
 
   it("checks cancellation at CommandService's final guard and never transmits", async () => {
@@ -167,8 +176,13 @@ describe("durable continuous goal scheduler", () => {
   it("expiry and revoked allowlist fence future decisions and sends", async () => {
     const f = await fixture(); await f.scheduler.advance(f.goal.id); f.revoke(); await f.scheduler.advance(f.goal.id);
     expect((await f.current()).status).toBe("blocked"); expect(f.sendCommand).not.toHaveBeenCalled();
+    const firstNotification = await f.store.getNotification(f.goal.id, f.now());
     f.tick(f.goal.expiresAt - f.now()); await f.scheduler.advance(f.goal.id);
     expect((await f.current()).status).toBe("expired");
+    expect(await f.store.getNotification(f.goal.id, f.now())).toEqual(firstNotification);
+    const active = await fixture(); active.tick(active.goal.expiresAt - active.now());
+    await active.scheduler.advance(active.goal.id);
+    expect(await active.store.getNotification(active.goal.id, active.now())).toMatchObject({ kind: "expired", source: { type: "goal", id: active.goal.id } });
   });
 
   it("consumes the decision budget on claims, blocks exhaustion and never spins", async () => {

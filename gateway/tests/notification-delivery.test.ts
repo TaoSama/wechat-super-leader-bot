@@ -8,7 +8,7 @@ import { StateManager } from "../src/state.js";
 import { WeChatGateway } from "../src/gateway.js";
 import { parseGatewayCli, runCli, NOTIFICATION_DIAGNOSTIC_EXIT_CODE } from "../src/index.js";
 import { HealthTracker, checkGatewayHealth } from "../src/health.js";
-import { harness, notification } from "./notification-fixtures.js";
+import { harness, notification, goalNotification } from "./notification-fixtures.js";
 
 test("terminal notification is one plain-text send with deterministic evidence ID and no state reset", async t => {
   const f = harness(t);
@@ -26,6 +26,38 @@ test("terminal notification is one plain-text send with deterministic evidence I
   assert.deepEqual(await f.gateway.deliverNotificationsOnce(), { accepted: 0, uncertain: 0, skipped: 0 });
   assert.equal(f.sends.length, 1);
 });
+for (const kind of ["completed", "blocked", "expired"] as const) test(`goal ${kind} is delivered unchanged to synthetic iLink exactly once`, async t => {
+  const item = goalNotification(kind), f = harness(t, { items: [item] });
+  assert.deepEqual(await f.gateway.deliverNotificationsOnce(), { accepted: 1, uncertain: 0, skipped: 0 });
+  assert.equal(f.records.get(item.id)?.source.type, "goal");
+  assert.equal(f.records.get(item.id)?.status, "accepted");
+  assert.deepEqual(f.sends[0].item_list, [{ type: 1, text_item: { text: item.text } }]);
+  assert.equal(f.sends[0].client_id, `super-leader:notification:${item.id}`);
+  assert.equal(f.sends[0].to_user_id, item.chatId);
+  await f.gateway.deliverNotificationsOnce();
+  assert.equal(f.sends.length, 1);
+});
+test("uncertain goal notification remains permanent across gateway restart", async t => {
+  const item = goalNotification("blocked"), f = harness(t, { items: [item] });
+  f.hooks.send = () => ({});
+  assert.equal((await f.gateway.deliverNotificationsOnce()).uncertain, 1);
+  const state = new StateManager(f.accountPath, f.statePath);
+  const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.ilink, notifications: true });
+  await restarted.deliverNotificationsOnce();
+  assert.equal(f.records.get(item.id)?.status, "uncertain");
+  assert.equal(f.sends.length, 1);
+  assert.equal(f.requests.filter(request => request.url.endsWith("claim")).length, 1);
+});
+for (const sourceType of ["plan", "goal"] as const) test(`claim cannot change ${sourceType} source type with the same ID, kind and text`, async t => {
+  const item = sourceType === "plan" ? notification() : goalNotification(), f = harness(t, { items: [item] });
+  f.hooks.claim = value => ({ ...value, source: { type: sourceType === "plan" ? "goal" : "plan", id: value.id } });
+  await assert.rejects(f.gateway.deliverNotificationsOnce(), /identity mismatch/);
+  assert.equal(f.sends.length, 0);
+  assert.equal(f.records.get(item.id)?.status, "claimed");
+  await f.gateway.deliverNotificationsOnce();
+  assert.equal(f.sends.length, 0);
+  assert.equal(f.requests.filter(request => request.url.endsWith("claim")).length, 1);
+});
 test("default disabled, missing baseline/context/account and stop perform no list/claim/send", async t => {
   for (const mode of ["disabled", "baseline", "context", "account", "stop"]) {
     const f = harness(t, { enabled: mode !== "disabled", baseline: mode !== "baseline" });
@@ -37,7 +69,7 @@ test("default disabled, missing baseline/context/account and stop perform no lis
   }
   const f = harness(t);
   const defaultGateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink });
-  assert.equal(defaultGateway.planNotifications, false);
+  assert.equal(defaultGateway.notifications, false);
   await defaultGateway.deliverNotificationsOnce(); assert.equal(f.requests.length, 0);
 });
 test("missing-context older records do not block reachable chat notifications", async t => {
@@ -75,7 +107,7 @@ test("lost claim receipt is not retried, sent, or replayed after restart", async
   assert.equal(f.sends.length, 0);
   assert.equal(f.requests.filter(request => request.url.endsWith("claim")).length, 1);
   const state = new StateManager(f.accountPath, f.statePath);
-  const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.ilink, planNotifications: true });
+  const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.ilink, notifications: true });
   await restarted.deliverNotificationsOnce();
   assert.equal(f.sends.length, 0);
   assert.equal(f.requests.filter(request => request.url.endsWith("claim")).length, 1);
@@ -191,7 +223,7 @@ test("closed real stderr pipe exits CLI with code 2 after uncertainty, without r
   const f = harness(t), healthPath = path.join(path.dirname(f.statePath), "health.json");
   f.state.saveState();
   const moduleUrl = new URL("../src/index.js", import.meta.url).href;
-  const args = ["--run", "--plan-notifications", "--credentials-path", f.accountPath, "--state-path", f.statePath,
+  const args = ["--run", "--notifications", "--credentials-path", f.accountPath, "--state-path", f.statePath,
     "--health-path", healthPath];
   const source = `
     import { runCli } from ${JSON.stringify(moduleUrl)};
@@ -293,7 +325,7 @@ test("notification processing has a finite healthy phase without fabricating inb
   const healthPath = path.join(path.dirname(f.statePath), "health.json");
   const health = new HealthTracker(healthPath); health.startRun(); health.recordPollSuccess();
   const before = JSON.parse(fs.readFileSync(healthPath, "utf8"));
-  const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink, planNotifications: true, healthTracker: health });
+  const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink, notifications: true, healthTracker: health });
   let release!: () => void;
   f.hooks.pending = async () => new Promise<void>(resolve => { release = resolve; });
   const pending = gateway.deliverNotificationsOnce();
@@ -317,7 +349,7 @@ test("notification cleanup does not erase a concurrent inbound polling health ph
   const f = harness(t);
   const healthPath = path.join(path.dirname(f.statePath), "health.json");
   const health = new HealthTracker(healthPath); health.startRun();
-  const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink, planNotifications: true, healthTracker: health });
+  const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink, notifications: true, healthTracker: health });
   let release!: () => void;
   f.hooks.pending = async () => new Promise<void>(resolve => { release = resolve; });
   const pending = gateway.deliverNotificationsOnce();
@@ -343,7 +375,7 @@ test("CLI poll-once processes notifications only after a successful inbound cycl
     return new Response(JSON.stringify({ items: [] }));
   };
   t.after(() => { globalThis.fetch = original; });
-  const args = ["--poll-once", "--plan-notifications", "--credentials-path", f.accountPath, "--state-path", f.statePath];
+  const args = ["--poll-once", "--notifications", "--credentials-path", f.accountPath, "--state-path", f.statePath];
   assert.equal(await runCli(args, { CONTROLLER_TOKEN: "synthetic" }), 0);
   assert.deepEqual(calls, ["/ilink/bot/getupdates", "/v1/notifications/pending"]);
   calls.length = 0; failPoll = true;
@@ -351,10 +383,12 @@ test("CLI poll-once processes notifications only after a successful inbound cycl
   assert.deepEqual(calls, ["/ilink/bot/getupdates"]);
 });
 test("CLI notification opt-in is explicit and check/healthcheck/baseline never list or send", async t => {
-  assert.equal(parseGatewayCli([], {}).planNotifications, false);
-  assert.equal(parseGatewayCli(["--plan-notifications"], {}).planNotifications, true);
-  assert.equal(parseGatewayCli([], { GATEWAY_PLAN_NOTIFICATIONS: "true" }).planNotifications, true);
-  assert.equal(parseGatewayCli([], { GATEWAY_PLAN_NOTIFICATIONS: "1" }).planNotifications, false);
+  assert.equal(parseGatewayCli([], {}).notifications, false);
+  assert.equal(parseGatewayCli(["--notifications"], {}).notifications, true);
+  assert.equal(parseGatewayCli([], { GATEWAY_NOTIFICATIONS: "true" }).notifications, true);
+  assert.equal(parseGatewayCli([], { GATEWAY_NOTIFICATIONS: "1" }).notifications, false);
+  assert.equal(parseGatewayCli([], { GATEWAY_PLAN_NOTIFICATIONS: "true" }).notifications, false);
+  assert.throws(() => parseGatewayCli(["--plan-notifications"], {}), /Unknown option/);
   const f = harness(t, { baseline: false });
   const original = globalThis.fetch;
   let polls = 0;
@@ -363,7 +397,7 @@ test("CLI notification opt-in is explicit and check/healthcheck/baseline never l
     polls++; return new Response(JSON.stringify({ ret: 0, msgs: [], get_updates_buf: "baseline" }));
   };
   t.after(() => { globalThis.fetch = original; });
-  const args = ["--plan-notifications", "--credentials-path", f.accountPath, "--state-path", f.statePath];
+  const args = ["--notifications", "--credentials-path", f.accountPath, "--state-path", f.statePath];
   assert.equal(await runCli(["--check", ...args], { CONTROLLER_TOKEN: "synthetic" }), 0);
   await runCli(["--healthcheck", ...args], {});
   assert.equal(await runCli(["--establish-baseline", ...args], { CONTROLLER_TOKEN: "synthetic" }), 0);

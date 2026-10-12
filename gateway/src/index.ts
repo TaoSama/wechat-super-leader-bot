@@ -32,7 +32,7 @@ export interface ParsedCliOptions {
   pollIntervalMs: number;
   pollTimeoutMs: number;
   maxChars: number;
-  planNotifications: boolean;
+  notifications: boolean;
 }
 
 export function getHelpText(): string {
@@ -61,7 +61,7 @@ export function getHelpText(): string {
     "      --poll-interval-ms <ms>    Interval between poll cycles in ms (env: GATEWAY_POLL_INTERVAL_MS, default: 1000)",
     "      --poll-timeout-ms <ms>     Timeout for iLink getupdates in ms (env: GATEWAY_POLL_TIMEOUT_MS, default: 35000)",
     "      --max-chars <count>        Max characters per WeChat message chunk (default: 4000)",
-    "      --plan-notifications       Deliver confirmed plan terminal notifications (env: GATEWAY_PLAN_NOTIFICATIONS=true, default: false)",
+    "      --notifications            Deliver plan and goal state notifications (env: GATEWAY_NOTIFICATIONS=true, default: false)",
   ].join("\n");
 }
 
@@ -88,7 +88,7 @@ export function parseGatewayCli(args: string[], env: NodeJS.ProcessEnv = process
       "poll-interval-ms": { type: "string" },
       "poll-timeout-ms": { type: "string" },
       "max-chars": { type: "string" },
-      "plan-notifications": { type: "boolean" },
+      notifications: { type: "boolean" },
     },
   });
 
@@ -175,7 +175,7 @@ export function parseGatewayCli(args: string[], env: NodeJS.ProcessEnv = process
     pollIntervalMs,
     pollTimeoutMs,
     maxChars,
-    planNotifications: values["plan-notifications"] ?? env.GATEWAY_PLAN_NOTIFICATIONS === "true",
+    notifications: values.notifications ?? env.GATEWAY_NOTIFICATIONS === "true",
   };
 }
 
@@ -222,7 +222,7 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
       baselineEstablished: stateManager.baselineEstablished,
       baselineInProgress: stateManager.baselineInProgress,
       baselineEstablishedAt: stateManager.baselineEstablishedAt || null,
-      planNotifications: opts.planNotifications,
+      notifications: opts.notifications,
     };
     process.stdout.write(JSON.stringify(summary, null, 2) + "\n");
     return summary.ok ? 0 : 1;
@@ -241,7 +241,7 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
     controller,
     splitMaxChars: opts.maxChars,
     healthTracker,
-    planNotifications: opts.planNotifications,
+    notifications: opts.notifications,
   });
 
   if (opts.mode === "establish-baseline") {

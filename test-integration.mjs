@@ -22,6 +22,9 @@ import { verifyTerminalHistory, TERMINAL_HISTORY_NODE } from './test-terminal-hi
 import { verifyPlanStore } from './test-plan-store.mjs';
 import { verifyPlanConfirmationStore } from './test-plan-confirmation-store.mjs';
 import { verifyNotificationStore } from './test-notification-store.mjs';
+import { verifyNotificationMigration } from './test-notification-migration.mjs';
+import { verifyGoalNotifications } from './test-goal-notifications.mjs';
+import { verifyGoalNotificationStore } from './test-goal-notification-store.mjs';
 import { verifyPlanNotifications } from './test-plan-notifications.mjs';
 import { verifyPlanExecution, planModelCall, PLAN_CHAT, PLAN_NODE } from './test-plan-execution.mjs';
 import { verifyPlanResultHandoff, resultModelCall, RESULT_NODES } from './test-plan-result-handoff.mjs';
@@ -172,6 +175,7 @@ async function main() {
     const { Pool } = require('pg');
     const fixturePool = new Pool({ connectionString: env.DATABASE_URL });
     await withTestCleanup(async () => {
+      await verifyNotificationMigration({ databaseUrl: env.DATABASE_URL, Pool, PostgresStore, pool: fixturePool });
       await stores[0].init();
       await verifyNodeSessionStore({ stores, pool: fixturePool, waitFor });
       await verifyTerminalStore({ stores });
@@ -179,6 +183,7 @@ async function main() {
       await verifyPlanConfirmationStore({ stores, pool: fixturePool, waitFor });
       await verifyNotificationStore({ stores, pool: fixturePool, reopenStore: () => new PostgresStore(env.DATABASE_URL) });
       await verifyGoalStore({ stores, pool: fixturePool, reopenStore: () => new PostgresStore(env.DATABASE_URL), waitFor });
+      await verifyGoalNotificationStore({ stores, pool: fixturePool, reopenStore: () => new PostgresStore(env.DATABASE_URL) });
       await start();
       const creates = await Promise.all(stores.map((store, index) => store.compareAndSetLeaderState('cas-fixture', 0, { index })));
       assert.equal(creates.filter(Boolean).length, 1, 'Concurrent state creation must have one winner');
@@ -415,7 +420,8 @@ async function main() {
       await verifyPlanNotifications({ base, token, request, store: planStore, restart, planIds });
       await verifyPlanResultHandoff({ WebSocket, base, request, nodeTokens: resultTokens, store: planStore,
         reopenStore: () => new PostgresStore(env.DATABASE_URL), restart, waitFor });
-      await verifyGoals({ WebSocket, base, request, nodeToken: goalToken, store: planStore, restart, waitFor });
+      const goalIds = await verifyGoals({ WebSocket, base, request, nodeToken: goalToken, store: planStore, restart, waitFor });
+      await verifyGoalNotifications({ base, token, request, store: planStore, restart, goalIds });
     }, [{ label: 'plan PostgreSQL store', cleanup: () => planStore.close() }]);
   }, [
     { label: 'fixture WebSocket', cleanup: () => closeTestWebSocket(socket) },

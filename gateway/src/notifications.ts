@@ -8,11 +8,11 @@ export const NOTIFICATION_ATTEMPT_MS = 60_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_TIMESTAMP = 8_640_000_000_000_000;
 
-export interface PlanNotification {
+export interface Notification {
   id: string;
-  executionId: string;
+  source: { type: "plan" | "goal"; id: string };
   chatId: string;
-  kind: "completed" | "failed" | "expired";
+  kind: "completed" | "failed" | "blocked" | "expired";
   text: string;
   createdAt: number;
   expiresAt: number;
@@ -37,17 +37,20 @@ function timestamp(value: unknown): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > MAX_TIMESTAMP) return invalid();
   return value;
 }
-export function parseNotification(raw: unknown): PlanNotification {
-  const value = notificationObject(raw, ["id", "executionId", "chatId", "kind", "text", "createdAt", "expiresAt", "status", "attemptId", "attemptedAt", "attemptExpiresAt"]);
-  const id = notificationUuid(value.id), executionId = notificationUuid(value.executionId);
-  if (id !== executionId || typeof value.chatId !== "string" || !value.chatId.trim() ||
+export function parseNotification(raw: unknown): Notification {
+  const value = notificationObject(raw, ["id", "source", "chatId", "kind", "text", "createdAt", "expiresAt", "status", "attemptId", "attemptedAt", "attemptExpiresAt"]);
+  const id = notificationUuid(value.id), source = notificationObject(value.source, ["type", "id"]);
+  const sourceId = notificationUuid(source.id);
+  if (source.type !== "plan" && source.type !== "goal") return invalid();
+  const kinds = source.type === "plan" ? ["completed", "failed", "expired"] : ["completed", "blocked", "expired"];
+  if (id !== sourceId || typeof value.chatId !== "string" || !value.chatId.trim() ||
       typeof value.text !== "string" || !value.text.trim() || value.text.length > NOTIFICATION_TEXT_LIMIT ||
-      typeof value.kind !== "string" || !["completed", "failed", "expired"].includes(value.kind) ||
+      typeof value.kind !== "string" || !kinds.includes(value.kind) ||
       typeof value.status !== "string" || !["pending", "claimed", "accepted", "uncertain", "expired"].includes(value.status)) return invalid();
   const createdAt = timestamp(value.createdAt), expiresAt = timestamp(value.expiresAt);
   if (expiresAt <= createdAt) return invalid();
   const hasAttempt = value.attemptId !== undefined || value.attemptedAt !== undefined || value.attemptExpiresAt !== undefined;
-  let attempt: Pick<PlanNotification, "attemptId" | "attemptedAt" | "attemptExpiresAt"> = {};
+  let attempt: Pick<Notification, "attemptId" | "attemptedAt" | "attemptExpiresAt"> = {};
   if (hasAttempt) {
     const attemptId = notificationUuid(value.attemptId), attemptedAt = timestamp(value.attemptedAt), attemptExpiresAt = timestamp(value.attemptExpiresAt);
     if (attemptedAt < createdAt || attemptExpiresAt <= attemptedAt || attemptExpiresAt > expiresAt ||
@@ -55,10 +58,10 @@ export function parseNotification(raw: unknown): PlanNotification {
     attempt = { attemptId, attemptedAt, attemptExpiresAt };
   }
   if (["pending", "expired"].includes(value.status) ? hasAttempt : !hasAttempt) return invalid();
-  return { id, executionId, chatId: value.chatId, kind: value.kind as PlanNotification["kind"], text: value.text,
-    createdAt, expiresAt, status: value.status as PlanNotification["status"], ...attempt };
+  return { id, source: { type: source.type, id: sourceId }, chatId: value.chatId, kind: value.kind as Notification["kind"], text: value.text,
+    createdAt, expiresAt, status: value.status as Notification["status"], ...attempt };
 }
-export function sameNotification(a: PlanNotification, b: PlanNotification): boolean {
-  return a.id === b.id && a.executionId === b.executionId && a.chatId === b.chatId && a.kind === b.kind &&
+export function sameNotification(a: Notification, b: Notification): boolean {
+  return a.id === b.id && a.source.type === b.source.type && a.source.id === b.source.id && a.chatId === b.chatId && a.kind === b.kind &&
     a.text === b.text && a.createdAt === b.createdAt && a.expiresAt === b.expiresAt;
 }

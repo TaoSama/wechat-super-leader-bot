@@ -48,6 +48,7 @@ class CommandPool {
     }
     if (sql.startsWith("SELECT * FROM commands ORDER BY")) return { rows: [...this.rows.values()].map(row => structuredClone(row)) };
     if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql) || /^(CREATE|ALTER|DELETE FROM node_sessions|UPDATE commands)/.test(sql)) return { rows: [] };
+    if (sql === "SELECT * FROM leader_notifications ORDER BY id FOR UPDATE") return { rows: [] };
     throw new Error(`Unexpected fixture SQL: ${sql}`);
   }
   async connect() { return { query: this.query.bind(this), release: () => {} }; }

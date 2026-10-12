@@ -137,7 +137,7 @@ export async function verifyGoals({ WebSocket, base, request, nodeToken, store, 
     assert(!JSON.stringify(publicGoal).includes(RESULT_PREFIX), 'Goal public projection exposed a result body');
     return durable.actions[1].prompt;
   };
-  await withTestCleanup(async () => {
+  return withTestCleanup(async () => {
     await connect(); probe = await openGoalConsoleProbe({ base, request, waitFor });
     const a = await propose('chain-a');
     await delay(TICK_WINDOW_MS); healthy();
