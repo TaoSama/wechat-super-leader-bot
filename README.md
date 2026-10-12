@@ -38,7 +38,7 @@ node local.mjs --sessions --controller https://leader.taoai.site
 
 部署、原生服务及人工微信验收见 [香港运维说明](docs/runbook/hong-kong.md)。已迁移到香港的实例不要再执行本地 `--up` 启动第二个编排权威。
 
-2026-10-13 发布基线：香港 Controller/Web 与 Air Daemon 为 `08e260a`，Gateway 保持 `3a750e7`，Mini Daemon 保持 `ef32a2f`。紧凑筛选与显式分页历史已上线，正式 HTTPS 浏览器和两个 Air 长会话读取通过；详见 [大历史发布验收](docs/changes/2026-10-13-history-source/VERIFICATION.md)。持续目标随后在 Air 专用原会话完成两轮真实纯文本闭环：一次确认后按第一轮实际输出动态生成第二任务，精确 turn、冻结输入及结果摘要交叉核对通过。微信入站为服务端模拟，不是手机验收；此前资格不可用及本次成功均保留在 [真实目标验收](docs/changes/2026-10-13-live-goal/VERIFICATION.md)。不改 App transport、不启动额外后端。
+2026-10-13 当前发布基线：香港 Controller/Web 与 Gateway 均为 `0230727`，Air Daemon 为 `08e260a`，Mini Daemon 为 `ef32a2f`。紧凑筛选与显式分页历史已上线，正式 HTTPS 浏览器和两个 Air 长会话读取通过；详见 [大历史发布验收](docs/changes/2026-10-13-history-source/VERIFICATION.md)。持续目标已在 Air 专用原会话完成两轮真实纯文本闭环，精确 turn、冻结输入及结果摘要交叉核对通过，见 [真实目标验收](docs/changes/2026-10-13-live-goal/VERIFICATION.md)。通知升级后，复用同一会话完成一次独立单动作目标；正式 Gateway 尝试投递，但回执为 `uncertain`、错误分类为 `ILinkSendMessageError`，不重发、不声称受理或手机收到，见 [通知现场验收](docs/changes/2026-10-13-goal-notifications/LIVE.md)。这些目标入站是服务端模拟，不是手机验收。不改 App transport、不启动额外后端。
 
 真实 `gpt-6.1-sol` 已返回专用原会话的近期记录、实际来源和本次获取时间；无新增命令或计划，重复查询及 Controller 换版后重放的业务摘要均不变，验收会话已重新归档。曾发生两次模型服务临时失败，第三次查询通过，失败证据保留。详见 [自然语言历史查询验收](docs/changes/2026-10-12-leader-session-history/VERIFICATION.md) 与 [快照并发修复](docs/changes/2026-10-13-node-session-persistence.md)。该历史查询仍是服务端模拟微信入站；本次真实微信索取控制台链接及兑换已核实，内置浏览器体验和真实微信会话控制仍待验收。
 
@@ -162,7 +162,7 @@ node verify.mjs --list              # 只列计划，不运行检查
 
 `test-console-auth.mjs` 默认只显示帮助，统一入口明确带 `--run`，验证真实临时 PostgreSQL 中的一次性兑换、1 小时到期、Cookie、并发和重启。收到 SIGINT/SIGTERM 后，入口等待当前检查正常收尾，再停止后续步骤；异常断连不会因重复等待 WebSocket close 而跳过其他资源清理。强制终止、掉电及未响应退出的子进程不在此保证内。
 
-仓库 `.github/workflows/verify.yml`：Ubuntu 运行完整验证，macOS 运行不依赖 Docker 的单测与构建，CI 使用 Node 24。当前本机实际为 Node 26；已部署产品提交 `08e260a` 的 GitHub run [38295230409](https://github.com/TaoSama/wechat-super-leader-bot/actions/runs/38295230409) 已通过 Ubuntu 全量 / macOS unit。早期发布失败及修复保留在 [此前发布证据](docs/changes/2026-10-12-authorized-release/VERIFICATION.md)。实现、命令和交付边界见 [可复现验证](docs/changes/2026-10-12-reproducible-verification/TECH.md)。
+仓库 `.github/workflows/verify.yml`：Ubuntu 运行完整验证，macOS 运行不依赖 Docker 的单测与构建，CI 使用 Node 24。当前本机实际为 Node 26；已部署产品提交 `0230727` 的 GitHub run [38301190490](https://github.com/TaoSama/wechat-super-leader-bot/actions/runs/38301190490) 与随后文档提交 `80c1ee1` 的 run [38302709098](https://github.com/TaoSama/wechat-super-leader-bot/actions/runs/38302709098) 均已通过 Ubuntu 全量 / macOS unit，不替代真实微信验收。早期发布失败及修复保留在 [此前发布证据](docs/changes/2026-10-12-authorized-release/VERIFICATION.md)。实现、命令和交付边界见 [可复现验证](docs/changes/2026-10-12-reproducible-verification/TECH.md)。
 
 已有终端 Agent 支持显式只读观测：Daemon 配置 `--terminal-sock <已有绝对路径>` 与可重复 `--terminal-pane <明确wN:pN>` 后，每 15 秒独立刷新状态；Web 标注终端来源，状态超过 45 秒失效，默认不读取聊天历史、不开放发送。显式管理诊断命令仍可读取有裁剪提示的有限终端快照；模型的 `read_session` 改用下述显式启用的已记录历史，不暗中改读屏幕，也不作为精确任务回执。`--probe` 可无 token 检查该来源，不写 journal，不启动终端宿主。当前只接受已核对的 protocol 22，默认关闭，macOS/Linux 用户服务可保存相同参数。观测代码已随构建产物部署，但未配置真实终端目标、未启用观测，见 [终端观测设计与边界](docs/changes/2026-10-12-terminal-observation/TECH.md)。
 
