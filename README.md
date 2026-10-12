@@ -38,7 +38,7 @@ node local.mjs --sessions --controller https://leader.example.com
 
 部署、原生服务及人工微信验收见 [远端运维说明](docs/runbook/hong-kong.md)。已迁移到远端的实例不要再执行本地 `--up` 启动第二个编排权威。
 
-部署前分别核对控制平面镜像、节点 Daemon 和数据合同，并在自己的环境记录会话、微信和跨机流程的实际验收结果。相关记录：[大历史发布验收](docs/changes/2026-10-13-history-source/VERIFICATION.md)、[持续目标验收记录](docs/changes/2026-10-13-continuous-goals/VERIFICATION.md)。
+部署前分别核对控制平面镜像、节点 Daemon 和数据合同，并在自己的环境记录会话、微信和跨机流程的实际验收结果。相关记录：[大历史发布验收](docs/changes/2026-10-13-history-source/VERIFICATION.md)、[真实目标验收](docs/changes/2026-10-13-live-goal/VERIFICATION.md)。
 
 真实 `gpt-6.1-sol` 已返回专用原会话的近期记录、实际来源和本次获取时间；无新增命令或计划，重复查询及 Controller 换版后重放的业务摘要均不变，验收会话已重新归档。曾发生两次模型服务临时失败，第三次查询通过，失败证据保留。详见 [自然语言历史查询验收](docs/changes/2026-10-12-leader-session-history/VERIFICATION.md) 与 [快照并发修复](docs/changes/2026-10-13-node-session-persistence.md)。该历史查询仍是服务端模拟微信入站；本次真实微信索取控制台链接及兑换已核实，内置浏览器体验和真实微信会话控制仍待验收。
 
@@ -176,4 +176,4 @@ Web 可向明确终端会话发送单步输入；微信模型模式先生成带�
 
 公开包运行示例仍仅连接自建临时 socket，可在 `daemon/` 执行 `go run -race ./examples/terminal-delivery --run`。完整合成链和 Web 验收入口、边界见 [终端控制合同](docs/changes/2026-10-12-terminal-control-chain/TECH.md) 与 [验证记录](docs/changes/2026-10-12-terminal-control-chain/VERIFICATION.md)；这不代替真实 CLI、真实模型或微信验收。
 
-现阶段重点验收远端 Controller 与 demoair 的 Codex 会话。结果驱动持续目标已有独立持久调度器，交付范围以增量验收记录为准；真实持续目标闭环、持续目标主动通知、微信会话控制、跨物理机闭环、公司机器及独立 CLI 的真实发送和精确完成回执仍未全部验收。真实微信索取登录链接已单独核实，不能推导其他能力可用，也不能把合成终端投递或单节点联调称为所有 Agent 的完整生产保障。历史能力矩阵见 `docs/changes/2026-10-10-control-plane/ACCEPTANCE.md` 与 `VERIFICATION.md`。
+现阶段重点验收远端 Controller 与 demoair 的 Codex 会话。结果驱动持续目标已有独立持久调度器，节点 A 单节点原会话两轮纯文本闭环已通过；持续目标主动通知、真实手机微信会话控制、跨物理机闭环、公司机器及独立 CLI 的真实发送和精确完成回执仍未全部验收。真实微信索取登录链接已单独核实，不能推导其他能力可用，也不能把合成终端投递或单节点联调称为所有 Agent 的完整生产保障。能力矩阵见 `docs/changes/2026-10-10-control-plane/ACCEPTANCE.md` 与各增量验证记录。
