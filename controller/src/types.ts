@@ -182,11 +182,12 @@ export type DaemonMessage = z.infer<typeof DaemonMessageSchema>;
 
 // Wire v1 protocol messages: Controller -> Daemon
 export const HistoryReadOptionsSchema = z.object({
+  source: z.literal("control-socket").optional(),
   cursor: z.string().min(1).max(HISTORY_MAX_CURSOR_LENGTH).optional(),
   historyContext: z.string().uuid().optional(),
   limit: z.number().int().min(1).max(HISTORY_MAX_LIMIT).default(HISTORY_DEFAULT_LIMIT),
 }).strict().refine(value => !value.cursor || !!value.historyContext, "History cursor requires context");
-export interface HistoryReadOptions { cursor?: string; limit?: number; historyContext?: string }
+export interface HistoryReadOptions { cursor?: string; limit?: number; historyContext?: string; source?: "control-socket" }
 
 export const ControllerReadHistoryMessageSchema = z.object({
   type: z.literal("read_history"),

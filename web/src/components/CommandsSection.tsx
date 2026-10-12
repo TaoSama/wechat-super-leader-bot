@@ -25,7 +25,7 @@ export function CommandsSection({ commands, selectedNodeId, sessions = [], onOpe
 
   return <section className="command-section" aria-labelledby="commands-heading">
     <div className="section-heading"><div><p className="eyebrow">COMMAND ACTIVITY</p><h2 id="commands-heading">指令动态 <span>{filtered.length}</span></h2></div>
-      <label className="status-filter">状态筛选<select aria-label="按指令状态过滤" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as CommandStatus | "ALL")}><option value="ALL">全部状态</option>{Object.entries(COMMAND_STATUS_SEMANTICS).map(([key, value]) => <option key={key} value={key}>{value.label}</option>)}</select></label>
+      <label className="status-filter">状态筛选<select className="filter-select" aria-label="按指令状态过滤" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as CommandStatus | "ALL")}><option value="ALL">全部状态</option>{Object.entries(COMMAND_STATUS_SEMANTICS).map(([key, value]) => <option key={key} value={key}>{value.label}</option>)}</select></label>
     </div>
     <p className="section-description">最近 {RECENT_COMMAND_LIMIT} 条记录 · 点会话标题继续阅读，展开详情查看完整回执。</p>
     {!filtered.length && <div role="status" className="empty-panel"><Clock size={24} aria-hidden="true" /><h3>暂无匹配的指令审计记录</h3><p>{commands.length ? "更换状态或机器筛选，查看其他记录。" : "从微信或已有会话发送消息后，指令状态会显示在这里。"}</p></div>}

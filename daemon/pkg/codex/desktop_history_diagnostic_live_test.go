@@ -3,6 +3,7 @@ package codex
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,6 +16,49 @@ import (
 )
 
 const desktopHistoryDiagnosticTimeout = 8 * time.Second
+
+// Opt-in verification against an already running control socket. It only uses
+// the existing read-only history adapter and never logs bodies or identities.
+func TestLiveCodexControlReadonlyHistoryDiagnostic(t *testing.T) {
+	path, sessionID := os.Getenv("CODEX_APP_SERVER_SOCKET"), os.Getenv("LIVE_CODEX_HISTORY_SESSION")
+	if os.Getenv("LIVE_CODEX_CONTROL_HISTORY_DIAGNOSTIC") != "1" || path == "" || sessionID == "" {
+		t.Skip("requires explicit socket, session and LIVE_CODEX_CONTROL_HISTORY_DIAGNOSTIC=1")
+	}
+	if !protocol.ValidHistoryIdentity(sessionID) || !protocol.ValidTurnID(sessionID) {
+		t.Fatal("diagnostic invalid target identity; no connection attempted")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), desktopHistoryDiagnosticTimeout)
+	defer cancel()
+	reader := NewAppServerAdapter(path)
+	page, err := reader.ReadHistory(ctx, sessionID, "", 1)
+	if err != nil {
+		t.Fatalf("source=control-socket stage=first-page error=%s", historyDiagnosticError(err))
+	}
+	if page.Session.ID != sessionID || len(page.Items) > 1 {
+		t.Fatal("source=control-socket stage=first-page public_schema_valid=false")
+	}
+	t.Logf("source=control-socket stage=first-page session_match=true items=%d older_page=%t", len(page.Items), page.NextCursor != nil)
+	if page.NextCursor == nil {
+		return
+	}
+	older, err := reader.ReadHistory(ctx, sessionID, *page.NextCursor, 1)
+	if err != nil {
+		t.Fatalf("source=control-socket stage=older-page error=%s", historyDiagnosticError(err))
+	}
+	if older.Session.ID != sessionID || len(older.Items) > 1 ||
+		(len(page.Items) > 0 && len(older.Items) > 0 && page.Items[0].ID == older.Items[0].ID) {
+		t.Fatal("source=control-socket stage=older-page public_schema_valid=false")
+	}
+	t.Logf("source=control-socket stage=older-page session_match=true items=%d distinct_page=true older_page=%t", len(older.Items), older.NextCursor != nil)
+	recent, err := reader.ReadHistory(ctx, sessionID, "", protocol.DefaultHistoryLimit)
+	if err != nil {
+		t.Fatalf("source=control-socket stage=default-page error=%s", historyDiagnosticError(err))
+	}
+	if recent.Session.ID != sessionID || len(recent.Items) > protocol.DefaultHistoryLimit {
+		t.Fatal("source=control-socket stage=default-page public_schema_valid=false")
+	}
+	t.Logf("source=control-socket stage=default-page session_match=true items=%d older_page=%t", len(recent.Items), recent.NextCursor != nil)
+}
 
 // Explicit opt-in, existing owner only. The production history stream may only
 // initialize, discover, read settings, follow and load the recorded history.
@@ -67,10 +111,10 @@ func TestLiveCodexDesktopReadonlyHistoryDiagnostic(t *testing.T) {
 		if err := connection.SetReadDeadline(readDeadline); err != nil {
 			t.Fatalf("stage=%s read_deadline_error=%s", stage, historyDiagnosticError(err))
 		}
-		message, err := connection.readWithLimit(desktopHistoryRawLimit)
+		message, declaredBytes, err := historyDiagnosticRead(connection)
 		if err != nil {
-			t.Fatalf("stage=%s method=%s type=unknown error=%s noise=%d ready=%t complete=%t items=%d",
-				stage, historyDiagnosticMethod(stream.method), historyDiagnosticError(err), stream.noise,
+			t.Fatalf("stage=%s method=%s type=unknown error=%s declared_frame_bytes=%d frame_limit_bytes=%d noise=%d ready=%t complete=%t items=%d",
+				stage, historyDiagnosticMethod(stream.method), historyDiagnosticError(err), declaredBytes, desktopHistoryRawLimit, stream.noise,
 				entry.ready, entry.view.complete, len(entry.view.items))
 		}
 		beforeRevision, beforeGeneration, beforeReady := entry.revision, entry.view.canonicalGeneration, entry.ready
@@ -110,6 +154,35 @@ func TestLiveCodexDesktopReadonlyHistoryDiagnostic(t *testing.T) {
 		if !time.Now().Before(deadline) {
 			t.Fatal("stage=total-deadline error=timeout")
 		}
+	}
+}
+
+// Record only the size header. Keep the production bound and reject an
+// oversized frame without allocating, reading or logging any of its body.
+func historyDiagnosticRead(connection *desktopConn) (desktopEnvelope, uint32, error) {
+	var header [4]byte
+	if _, err := io.ReadFull(connection, header[:]); err != nil {
+		return desktopEnvelope{}, 0, err
+	}
+	size := binary.LittleEndian.Uint32(header[:])
+	if size == 0 {
+		return desktopEnvelope{}, size, errors.New("invalid desktop frame size")
+	}
+	if uint64(size) > uint64(desktopHistoryRawLimit) {
+		return desktopEnvelope{}, size, errDesktopFrameTooLarge
+	}
+	message, err := connection.readBody(int(size))
+	return message, size, err
+}
+
+func TestDesktopHistoryDiagnosticReadRecordsRejectedHeaderWithoutBody(t *testing.T) {
+	var header [4]byte
+	const declaredBytes = desktopHistoryRawLimit + 1
+	binary.LittleEndian.PutUint32(header[:], declaredBytes)
+	connection := &historyCountingConn{reader: bytes.NewReader(header[:])}
+	_, size, err := historyDiagnosticRead(&desktopConn{Conn: connection})
+	if !errors.Is(err, errDesktopFrameTooLarge) || size != declaredBytes || len(connection.requests) != 1 || connection.requests[0] != len(header) {
+		t.Fatalf("size=%d err=%v reads=%v", size, err, connection.requests)
 	}
 }
 

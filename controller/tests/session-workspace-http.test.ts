@@ -40,6 +40,19 @@ describe("Session workspace HTTP boundary", () => {
   let loginSequence: number;
   const daemons: FakeDaemon[] = [];
 
+  it("Cookie history request explicitly selects pagination without sending a command", async () => {
+    const air = await connect();
+    const response = await fetch(baseUrl + HISTORY_PATH + "?source=control-socket", { headers: { Cookie: cookie } });
+    expect(response.status).toBe(200);
+    expect((await response.json()).source).toBe("control-socket");
+    expect(air.frames).toHaveLength(1);
+    expect(air.frames[0]).toMatchObject({ type: "read_history", source: "control-socket" });
+    for (const source of ["codex-desktop", "terminal-transcript", "invalid"]) {
+      expect((await fetch(baseUrl + HISTORY_PATH + "?source=" + source, { headers: { Cookie: cookie } })).status).toBe(400);
+    }
+    expect(air.frames).toHaveLength(1);
+  });
+
   function browserHeaders(overrides: Record<string, string> = {}): Record<string, string> {
     return {
       Cookie: cookie, Origin: CONSOLE_ORIGIN, "Content-Type": "application/json",

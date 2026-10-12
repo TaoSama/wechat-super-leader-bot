@@ -30,6 +30,7 @@ type ReadHistoryMessage struct {
 	RequestID      string `json:"requestId"`
 	NodeID         string `json:"nodeId"`
 	SessionID      string `json:"sessionId"`
+	Source         string `json:"source,omitempty"`
 	Cursor         string `json:"cursor,omitempty"`
 	HistoryContext string `json:"historyContext,omitempty"`
 	Limit          int    `json:"limit,omitempty"`
@@ -37,6 +38,7 @@ type ReadHistoryMessage struct {
 
 func (m ReadHistoryMessage) Validate(expectedNodeID string) error {
 	if m.Type != "read_history" || m.NodeID != expectedNodeID || !ValidHistoryIdentity(m.RequestID) || !ValidHistoryIdentity(m.SessionID) || len(m.Cursor) > MaxHistoryCursorLength || m.Limit < 0 || m.Limit > MaxHistoryLimit ||
+		(m.Source != "" && m.Source != HistorySourceControl) ||
 		(m.HistoryContext != "" && !ValidHistoryIdentity(m.HistoryContext)) || (m.Cursor != "" && m.HistoryContext == "") {
 		return errors.New(HistoryInvalidRequest)
 	}

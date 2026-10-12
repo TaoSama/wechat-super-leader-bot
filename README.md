@@ -58,6 +58,8 @@ node local.mjs --sessions --controller https://leader.taoai.site
 
 状态/模型、控制预检和历史的桌面入站上限统一为 32 MiB，出站仍限 16 MiB；控制读取共享两个连接槽，完整展开前检查深度和节点预算，并拒绝重复历史索引引用。已部署；超过上限的会话仍不可观测或完整读取，不会提高上限掩盖资源问题。帧上限不是内存上限，详见 [大快照资源边界](docs/changes/2026-10-12-desktop-frame-budget/TECH.md) 与 [验收记录](docs/changes/2026-10-12-desktop-frame-budget/VERIFICATION.md)。
 
+长会话读取失败时，Web 提供“使用分页历史接口”，显式改读同一会话在既有控制 socket 中保存的分页记录；可能稍有延迟，不改变发送通道。换源会清空旧阅读窗口并建立新 context，不静默混合记录；413 后暂停自动重试，仍可手动读取。该接口单帧仍限 8 MiB，没有控制 socket 的机器不能使用；Mini 目前仍走原桌面历史。机器/状态筛选同时收紧为桌面 32px、触控 44px。代码和正式发布状态见 [大历史修复记录](docs/changes/2026-10-13-history-source/VERIFICATION.md)。
+
 Daemon 可显式通过 `--desktop-sock` 订阅既有桌面应用的运行状态。桌面端 `active/idle` 只在观测可用且过去 45 秒内时补足控制接口的 `notLoaded/unknown`；微信查询与 Web 显示使用同一规则，注明来源和观测时间。控制接口的原始状态、loaded 和发送权限保持不变；桌面空闲不等于可以发送。此订阅依赖当前桌面内部协议，不是官方稳定 API；故障或过期会降级，不猜测状态。实现和验收见 [桌面状态观测](docs/changes/2026-10-11-desktop-observation/VERIFICATION.md)。
 
 输入框直接发送到所选原会话，不经过 Leader 再猜目标。控制接口路径要求在线、明确 loaded=true、idle、send 能力和过去 45 秒内的观测；桌面 owner 路径使用独立完整预检产生的 `sendAvailability`，不改写 native loaded/status/capabilities。字段存在但被撤销、非法或过期时，不自动换路；没有可用发送路径时只读，不隐式恢复、不抢占 writer。
@@ -142,6 +144,8 @@ Web 的“持续目标”卡实时显示状态、预算、逐项条件和动作�
 部署入口见 [Gateway 说明](gateway/README.md) 与 [香港运维说明](docs/runbook/hong-kong.md)。同一账号只能在一个位置轮询；香港启用后不要在 Mac 再运行 `node local.mjs --gateway`，本机允许名单维持为空。不要用本地 `--up` 更新香港。
 
 健康检查仅确认本次 Gateway 进程近期成功完成轮询；空轮询不证明模型或会话控制可用。香港 Controller 与 Gateway 已完成构建与启动（沿用既有 PostgreSQL 卷，服务均为 healthy，Gateway `last_poll_succeeded_at` 为 2026-10-11T09:05:17.641Z 且 errors 为 0，已加载本人 allowlist）。服务端已使用本人 chatId 模拟文本“给我控制台链接”，真实 `gpt-6.1-sol`（12093ms）返回可用免密链接，经兑换（200）与退出（200）验证，未外发微信消息；真实浏览器初次自动登录后 URL 仅保留 `https://leader.taoai.site/`，无 token 输入框，本地 storage 为 0，HttpOnly Cookie 不可脚本读取，刷新 session（200）正常展示 macair 节点。目前仍待用户微信实际入站与内置浏览器点击确认，不能提前宣称全链路最终验收。
+
+2026-10-13 补充真实证据：用户本次微信索取控制台链接，正式入站记录与准确回复链接的兑换记录已关联，确认请求、回复及兑换成功。未补发消息，未输出凭证；服务器记录不能识别是否使用微信内置浏览器。详见 [本轮核验](docs/changes/2026-10-13-history-source/VERIFICATION.md)。
 
 ## 验证与限制
 

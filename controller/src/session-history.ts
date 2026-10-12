@@ -41,6 +41,7 @@ interface PendingHistory {
   ws: WebSocket;
   limit: number;
   historyContext?: string;
+  source?: "control-socket";
   terminalProvider?: string;
   settle: (history?: SessionHistory, error?: HistoryError) => void;
 }
@@ -56,6 +57,9 @@ export class SessionHistoryRequests {
       ...options, type: "read_history", requestId: randomUUID(), nodeId, sessionId,
     });
     if (!parsed.success) throw new HistoryError(400, "history_invalid_request", "Invalid history request");
+    if (options.source && session && isTerminalSession(session)) {
+      throw new HistoryError(400, "history_invalid_request", "Invalid history request");
+    }
     if (signal?.aborted) throw aborted();
     const nodePending = this.pendingByNode.get(nodeId) ?? 0;
     if (this.pending.size >= HISTORY_MAX_PENDING || nodePending >= HISTORY_MAX_PENDING_PER_NODE) {
@@ -80,7 +84,7 @@ export class SessionHistoryRequests {
       const onAbort = () => cancelPending(aborted());
       const timer = setTimeout(() => cancelPending(timeout()), HISTORY_TIMEOUT_MS);
       const pending: PendingHistory = {
-        nodeId, sessionId, ws, limit: request.limit, historyContext: request.historyContext,
+        nodeId, sessionId, ws, limit: request.limit, historyContext: request.historyContext, source: request.source,
         terminalProvider: session && isTerminalSession(session) ? session.provider : undefined,
         settle: (history, error) => {
           if (settled) return;
@@ -123,6 +127,7 @@ export class SessionHistoryRequests {
     const response = parsed.data;
     if (response.error !== undefined) pending.settle(undefined, remoteError(response.error));
     else if (response.history?.session.id !== pending.sessionId || response.history.items.length > pending.limit ||
+        pending.source !== undefined && response.history.source !== pending.source ||
         pending.terminalProvider !== undefined && response.history.session.provider !== pending.terminalProvider ||
         pending.historyContext !== undefined && response.history.historyContext !== pending.historyContext) {
       pending.settle(undefined, invalidResponse());

@@ -179,9 +179,11 @@ function sessionPath(nodeId: string, sessionId: string): string {
   return `/v1/sessions/${encodeURIComponent(nodeId)}/${encodeURIComponent(sessionId)}`;
 }
 
-export async function fetchSessionHistory(nodeId: string, sessionId: string, cursor?: string, signal?: AbortSignal, historyContext?: string): Promise<SessionHistory> {
+export async function fetchSessionHistory(nodeId: string, sessionId: string, cursor?: string, signal?: AbortSignal, historyContext?: string, source?: "control-socket"): Promise<SessionHistory> {
   if (historyContext !== undefined && !isHistoryContext(historyContext) || cursor && !historyContext) throw new Error("历史读取参数无效");
+  if (source !== undefined && source !== "control-socket") throw new Error("历史读取参数无效");
   const query = new URLSearchParams({ limit: String(HISTORY_LIMIT) });
+  if (source) query.set("source", source);
   if (cursor) query.set("cursor", cursor);
   if (historyContext) query.set("historyContext", historyContext);
   const raw = await sessionRequest(`${sessionPath(nodeId, sessionId)}/history?${query}`, { method: "GET", headers: { Accept: "application/json" }, signal }, true);
@@ -192,6 +194,7 @@ export async function fetchSessionHistory(nodeId: string, sessionId: string, cur
   const session = normalizeSession({ ...(typeof data.session === "object" ? data.session : {}), nodeId });
   if (!session || session.id !== sessionId || !Array.isArray(data.items) || typeof data.fetchedAt !== "string") throw new Error("历史响应与当前会话不匹配");
   if (!isSessionHistorySource(data.source, session)) throw new Error("历史响应与当前读取来源不匹配");
+  if (source !== undefined && data.source !== source) throw new Error("历史响应与所选读取来源不匹配");
   const items = data.items.map((item: unknown): HistoryItem => {
     if (typeof item !== "object" || item === null) throw new Error("历史条目格式无效");
     const value = item as Record<string, unknown>;

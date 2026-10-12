@@ -86,7 +86,8 @@ func (h *historyContexts) acquire(ctx context.Context, msg protocol.ReadHistoryM
 			gate: make(chan struct{}, 1), cursors: make(map[string]string), cursorTokens: make(map[string]string)}
 		h.bindings[token] = binding
 	}
-	if binding == nil || binding.nodeID != msg.NodeID || binding.sessionID != msg.SessionID {
+	if binding == nil || binding.nodeID != msg.NodeID || binding.sessionID != msg.SessionID ||
+		(msg.Source != "" && binding.source != msg.Source) {
 		h.mu.Unlock()
 		return nil, "", errors.New(protocol.HistoryContextExpired)
 	}
@@ -154,7 +155,11 @@ func (d *Daemon) preferredHistorySource(sessionID string) string {
 }
 
 func (d *Daemon) readRoutedHistory(ctx context.Context, msg protocol.ReadHistoryMessage, limit int) (history protocol.SessionHistory, err error) {
-	binding, cursor, err := d.historyContexts.acquire(ctx, msg, d.preferredHistorySource(msg.SessionID))
+	source := msg.Source
+	if source == "" {
+		source = d.preferredHistorySource(msg.SessionID)
+	}
+	binding, cursor, err := d.historyContexts.acquire(ctx, msg, source)
 	if err != nil {
 		return history, err
 	}
@@ -214,6 +219,9 @@ func (d *Daemon) readRoutedHistory(ctx context.Context, msg protocol.ReadHistory
 			return history, errors.New(protocol.HistoryContextExpired)
 		}
 	case protocol.HistorySourceControl:
+		if isTerminalSession(msg.SessionID) {
+			return history, errors.New(protocol.HistoryUnavailable)
+		}
 		reader, ok := d.adapter.(codex.HistoryReader)
 		if !ok {
 			return history, errors.New(protocol.HistoryUnavailable)

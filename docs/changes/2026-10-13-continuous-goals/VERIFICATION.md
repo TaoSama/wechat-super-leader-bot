@@ -56,7 +56,7 @@ PG 验证包含双客户端并发确认、决策 CAS、永久 claim、目标/固
 | leader_executions | 1 | `50d9fd2580e6ee3999c0ec9803d8d52f` |
 | leader_notifications | 1 | `c6d5deec003490f2d6dc72b4ac634bbf` |
 
-当前仅完成上述开发验证。固定提交 CI、镜像、香港切换及真实模型/专用原会话的持续闭环验收随后补录；不得据此宣称已正式交付。
+固定提交 `e18856e` 的 [CI 38291658905](https://github.com/TaoSama/wechat-super-leader-bot/actions/runs/38291658905) 已最终通过 Ubuntu 全量和 macOS unit。Ubuntu 首次在 `docker compose version` 返回 255，失败任务重跑后成功；没有独立证据将首次失败武断归为环境问题。该提交已本机构建 linux/amd64 镜像并预载香港，尚未切换；后续 UI/历史修复将使用新的固定提交候选，不能直接上线过期候选。香港切换及真实模型/专用原会话的持续闭环验收随后补录，不能据此宣称已正式交付。
 
 ## 保留边界与回退
 

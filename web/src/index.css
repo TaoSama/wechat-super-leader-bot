@@ -63,8 +63,9 @@ button:active:enabled { background-color: var(--bg-elevated); }
 .search-field { display: flex; align-items: center; gap: 10px; margin: 0 20px; padding: 0 12px; min-height: 44px; border: 1px solid var(--border-subtle); border-radius: 8px; color: var(--text-muted); background: var(--bg-surface); }
 .search-field input { min-width: 0; width: 100%; background: transparent; border: 0; font-size: 13px; padding: 12px 0; color: var(--text-primary); }
 .search-field input::placeholder { color: var(--text-muted); }
-.machine-filter { margin: 12px 20px 4px; display: flex; align-items: center; gap: 10px; color: var(--text-muted); font-size: 12px; }
-.machine-filter select { flex: 1; width: 0; min-height: 44px; background: transparent; color: var(--text-secondary); border: 0; font-size: 12px; padding: 8px 0; }
+.filter-select { min-width: 44px; min-height: 32px; max-width: 180px; width: auto; flex: 0 1 auto; align-self: center; border: 1px solid var(--border-subtle); border-radius: 6px; padding: 4px 8px; background: var(--bg-panel); color: var(--text-secondary); font-size: 12px; line-height: 20px; cursor: pointer; touch-action: manipulation; }
+.machine-filter { margin: 12px 20px 4px; display: flex; align-items: center; gap: 10px; min-width: 0; color: var(--text-muted); font-size: 12px; }
+.machine-filter > span { flex-shrink: 0; }
 .session-list { flex: 1; overflow-y: auto; padding: 0 12px 24px; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 .machine-group h3 { display: flex; align-items: center; gap: 8px; padding: 20px 12px 10px; font-size: 11px; color: var(--text-secondary); font-weight: 600; }
 .machine-group h3 > span:first-of-type { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -184,8 +185,8 @@ button:active:enabled { background-color: var(--bg-elevated); }
 .section-heading h2 { font-size: 21px; font-weight: 600; margin-top: 5px; }
 .section-heading h2 span { color: var(--text-muted); font-size: 12px; margin-left: 6px; font-weight: 400; }
 .section-description { font-size: 11px; color: var(--text-muted); line-height: 1.7; margin-bottom: 20px; }
-.status-filter { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-muted); }
-.status-filter select { min-height: 44px; border: 1px solid var(--border-subtle); border-radius: 7px; padding: 8px 12px; background: var(--bg-panel); font-size: 12px; color: var(--text-secondary); max-width: 190px; }
+.status-filter { display: flex; align-items: center; gap: 8px; flex-shrink: 0; font-size: 11px; color: var(--text-muted); }
+.status-filter .filter-select { max-width: 156px; }
 .command-group { margin-bottom: 28px; }
 .group-heading { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
 .group-heading h3 { font-size: 13px; font-weight: 600; white-space: nowrap; }
@@ -341,7 +342,7 @@ button:active:enabled { background-color: var(--bg-elevated); }
   .session-preview { font-size: 13px; }
   .session-bottom-line, .session-state { font-size: 11px; }
   .search-field input { font-size: 16px; }
-  .machine-filter, .machine-filter select { font-size: 13px; }
+  .machine-filter { font-size: 13px; }
   .machine-group h3 { font-size: 12px; }
   .mobile-back { display: flex; align-items: center; gap: 6px; min-height: 44px; font-size: 12px; color: var(--text-secondary); margin: -8px 0 4px; }
   .detail-heading { padding: 12px 20px 4px; }
@@ -384,7 +385,6 @@ button:active:enabled { background-color: var(--bg-elevated); }
   .leader-footnote { display: none; }
   .section-heading h2 { font-size: 19px; }
   .status-filter { flex-direction: column; align-items: start; gap: 2px; }
-  .status-filter select { max-width: 156px; font-size: 11px; padding: 8px; }
   .group-heading { align-items: start; gap: 12px; }
   .command-main { padding: 14px 16px 12px; }
   .command-title-line { align-items: start; gap: 8px; }
@@ -392,6 +392,9 @@ button:active:enabled { background-color: var(--bg-elevated); }
   .command-session-link { font-size: 14px; }
   .command-preview { font-size: 13px; }
   .auth-card { margin: 8vh 20px; padding: 28px 24px; }
+}
+@media (max-width: 767px), (pointer: coarse) {
+  .filter-select { min-height: 44px; font-size: 13px; padding-block: 10px; }
 }
 @media (max-height: 560px) and (min-width: 768px) {
   .app-header { min-height: 64px; padding-block: 8px; }

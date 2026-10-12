@@ -1,10 +1,11 @@
 import { emptyGoals, emptyExecutions  } from "./status-fixtures";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { resetAuthHelperForTesting } from "../src/auth";
 import { CommandRecord, ControlPlaneStatusResponse, ScopedSession } from "../src/types";
 import { CommandsSection } from "../src/components/CommandsSection";
+import userEvent from "@testing-library/user-event";
 
 const session: ScopedSession = { id: "session-one", nodeId: "local", provider: "codex-app", title: "整理项目的下一步", cwd: "/workspace/editorial-project", status: "idle", loaded: true, capabilities: ["read", "send"], model: "gpt-6.1-sol", modelProvider: "openai", reasoningEffort: "high", preview: "已经完成分析，接下来验证边界", observedAt: "2026-10-11T10:00:00Z" };
 const second: ScopedSession = { ...session, id: "session-two", nodeId: "remote", title: "检查远程构建", model: "gpt-6-astra", preview: "构建等待确认", cwd: "/remote/build-project" };
@@ -44,6 +45,58 @@ it("会话三行突出标题、最近消息和模型，技术字段在详情中"
   expect(within(metadata).getByText(session.cwd)).toBeVisible();
 });
 
+it("历史超限提供显式分页入口，选择后标注来源且不发送消息", async () => {
+  const baseFetch = vi.mocked(fetch).getMockImplementation()!;
+  const calls: string[] = [];
+  vi.mocked(fetch).mockImplementation(async (url, init) => {
+    calls.push(String(url));
+    if (String(url).includes("/history") && !String(url).includes("source=control-socket")) {
+      return new Response(JSON.stringify({ code: "history_too_large" }), { status: 413 });
+    }
+    return baseFetch(url, init);
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByTestId("session-row-local-session-one"));
+  fireEvent.click(await screen.findByRole("button", { name: "使用分页历史接口" }));
+  await screen.findByText("可读的历史消息");
+  expect(screen.getByText(/原生分页历史 · 读取同一会话/)).toBeInTheDocument();
+  expect(screen.queryByText("历史超出读取大小限制。")).toBeNull();
+  expect(calls.some(url => url.includes("source=control-socket"))).toBe(true);
+  expect(calls.some(url => url.includes("/messages"))).toBe(false);
+});
+
+it("已有旧页游标时最新页413停止近顶自动加载，保留手动旧页重试", async () => {
+  const baseFetch = vi.mocked(fetch).getMockImplementation()!;
+  const historyCalls: string[] = [];
+  vi.mocked(fetch).mockImplementation(async (url, init) => {
+    const path = String(url);
+    if (!path.includes("/history")) return baseFetch(url, init);
+    historyCalls.push(path);
+    if (historyCalls.length === 2) {
+      return new Response(JSON.stringify({ code: "history_too_large" }), { status: 413 });
+    }
+    const older = path.includes("cursor=older");
+    return response({ session, historyContext: "cf7e282f-d6d2-4a98-a517-9fb753f2549b", source: "control-socket",
+      items: [{ id: older ? "old-message" : "message-one", turnId: "turn-one", type: "agentMessage", kind: "assistant", text: older ? "手动加载的旧消息" : "可读的历史消息" }],
+      fetchedAt: "2026-10-11T11:00:00Z", nextCursor: older ? null : "older", truncated: false });
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByTestId("session-row-local-session-one"));
+  await screen.findByText("可读的历史消息");
+  fireEvent.click(screen.getByRole("button", { name: "刷新会话历史" }));
+  await screen.findByText("历史超出读取大小限制。");
+  expect(historyCalls).toHaveLength(2);
+  const history = screen.getByLabelText("会话历史");
+  history.scrollTop = 20;
+  await act(async () => { fireEvent.scroll(history); fireEvent.scroll(history); });
+  expect(historyCalls).toHaveLength(2);
+  fireEvent.click(screen.getByRole("button", { name: "加载更早的消息" }));
+  await screen.findByText("手动加载的旧消息");
+  expect(historyCalls).toHaveLength(3);
+  expect(historyCalls[2]).toContain("cursor=older");
+  expect(historyCalls[2]).toContain("historyContext=cf7e282f-d6d2-4a98-a517-9fb753f2549b");
+});
+
 it("机器和模型搜索可以交叉筛选，并提供匹配为空的反馈", async () => {
   render(<App />);
   await screen.findByTestId("session-row-local-session-one");
@@ -55,6 +108,33 @@ it("机器和模型搜索可以交叉筛选，并提供匹配为空的反馈", a
   fireEvent.change(screen.getByLabelText("筛选机器"), { target: { value: "" } });
   expect(screen.getByTestId("session-row-local-session-one")).toBeInTheDocument();
   expect(screen.queryByTestId("session-row-remote-session-two")).toBeNull();
+});
+
+it("紧凑机器与状态筛选保留原生选择语义、Tab焦点和选中后的控件身份", async () => {
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByTestId("session-row-local-session-one");
+  const machine = screen.getByRole("combobox", { name: "筛选机器" });
+  expect(machine.tagName).toBe("SELECT");
+  expect(machine).toHaveClass("filter-select");
+  screen.getByRole("textbox", { name: "搜索会话" }).focus();
+  await user.tab();
+  expect(machine).toHaveFocus();
+  await user.selectOptions(machine, "remote");
+  expect(machine).toHaveValue("remote");
+  expect(machine).toHaveFocus();
+  expect(screen.getByRole("combobox", { name: "筛选机器" })).toBe(machine);
+  expect(screen.queryByTestId("session-row-local-session-one")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Super Leader" }));
+  const status = screen.getByRole("combobox", { name: "按指令状态过滤" });
+  expect(status.tagName).toBe("SELECT");
+  expect(status).toHaveClass("filter-select");
+  await user.selectOptions(status, "uncertain");
+  expect(status).toHaveFocus();
+  expect(status).toHaveValue("uncertain");
+  expect(screen.getByRole("combobox", { name: "按指令状态过滤" })).toBe(status);
+  expect(screen.getByTestId("command-item-command-1")).toBeInTheDocument();
+  expect(screen.queryByTestId("command-item-command-3")).toBeNull();
 });
 
 it("Leader按注意事项、进行中、完成分组且筛选不混淆执行状态", async () => {
