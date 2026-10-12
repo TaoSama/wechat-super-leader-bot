@@ -8,7 +8,7 @@
 
 当前发布边界：远端 Controller/Web、节点 A 与 节点 B Daemon 已部署 f6b2b5d；通知开关仍关闭，真实微信通知未验收。[终端单步输入](../2026-10-12-terminal-control-chain/VERIFICATION.md)、[Codex/Claude/Grok 可信记录历史](../2026-10-12-terminal-history/VERIFICATION.md) 代码随包部署但未配置真实目标或开启发送。[跨步骤结果传递](../2026-10-12-plan-result-handoff/VERIFICATION.md) 已通过同一真实 节点 A 原会话的两步模型接力；不是不同物理机验收。
 
-产物：f6b2b5d 的 linux/amd64 Controller/Web 镜像经本地 Node 24/x64 内存与临时 PG 烟测后已上传并切换；节点 A/节点 B 使用同一已核验 arm64 二进制。远端未构建、PG/Gateway 容器未替换、token/journal/checkpoint 保留。首次烟测 OOM 和驱动 DTO 断言错误均保留在 [候选记录](../2026-10-12-release-candidate/VERIFICATION.md)。历史 reader 的长期正常广播累计误判仍需本轮补丁完成后更新验收，不能以一次历史查询通过代替长稳。
+产物：f6b2b5d 的linux/amd64 Controller/Web镜像已正式运行，节点 B使用该版arm64只读Daemon；节点 A后续更新至ef32a2f（产品修复9ef6647）。远端未构建，PG/Gateway容器未替换，token/journal/checkpoint保留。首次烟测OOM和驱动DTO错误均保留在 [候选记录](../2026-10-12-release-candidate/VERIFICATION.md)。历史reader正常广播累计误判已修复；正式浏览器242秒/97次读取及直聊通过，但不代表多天长稳。
 
 开发期证据仍保留：[桌面历史](../2026-10-12-desktop-history/VERIFICATION.md)、[技能组合](../2026-10-12-ordered-skills/VERIFICATION.md)、[文件发现](../2026-10-11-rollout-discovery/VERIFICATION.md)、[路由研究](DESKTOP_ROUTING.md)、[持久计划](../2026-10-12-persistent-plans/VERIFICATION.md)；其中旧部署状态不覆盖最近发布记录。
 
@@ -18,7 +18,7 @@ TypeScript Controller 是唯一控制权威，使用 PostgreSQL；TypeScript 微
 
 最新 GitHub CI run [38262955582](https://github.com/TaoSama/wechat-super-leader-bot/actions/runs/38262955582) 全通过：Ubuntu all 16 checks、macOS unit 13 checks，包含 Go race/vet、平台构建与真实临时 PG/HTTP/WS 合成整链。前两轮时钟、fixture 连接寿命、Compose 序列化测试失败及修复保留在 [发布记录](../2026-10-12-authorized-release/VERIFICATION.md)。这些测试仍不替代真实目标验收。
 
-本轮正式验证：远端 Controller 容器 `4460349d838a`、节点 A Daemon PID 77741、节点 B Daemon PID 90884；实际产物 SHA256 与固定候选一致。两节点真实 WSS 认证连接，18/1 会话、165 技能。全量只读数据库审计和真实模型接力后的状态均留证；20 命令（18 completed、2 failed）、1 completed 计划、1 未领取 pending 通知，不删状态排空。浏览器旧页面刷新后计划和结果来源正常；持续历史误报已定位，修复状态以本轮记录为准。
+本轮正式验证：远端Controller容器`4460349d838a`未替换，节点 A更新历史修复后PID437，节点 B仍PID90884；产物SHA256与各自固定候选一致。两节点真实WSS认证连接、共165技能。接力和最终Web验收后全量状态为21命令（19completed/2failed）、1completed计划、1未领取pending通知，无未决项。浏览器旧页刷新后计划来源正常；持续历史修复、正式读取及直聊均通过。复用fixture已归档并从正式列表消失。
 
 | 用户要求 | 当前证据 | 未达到的门槛 |
 | --- | --- | --- |
@@ -26,7 +26,7 @@ TypeScript Controller 是唯一控制权威，使用 PostgreSQL；TypeScript 微
 | 本地项目与 Task 目录 | 源码已迁至 `~/Workspaces/wechat-super-leader-bot`，原生服务和复用验收会话 cwd 正确；主任务已归属该项目 | 项目归属 1/6、原有 cwd 迁移 0/6。首个已归档测试 Task 的移动接口返回 `The task is not available in the sidebar.`，未继续更改其余目标、未解归档或写 DB；归属不等于 cwd |
 | 微信扫码与接入 | 用户曾确认收到前条测试消息；本人允许名单已加载；最近发布记录中远端独立 Gateway healthy、轮询成功且错误为 0，见 [发布验收](../2026-10-12-ordered-skills-release/VERIFICATION.md) | 真实入站→模型→微信回复仍待用户发消息验收；历史健康检查及本轮 HTTP 存活不等于全链路可用 |
 | 微信自然语言指挥 | leaderMode=model、gpt-6.1-sol；Responses 工具闭环和模拟微信计划/确认/会话执行通过；正式 /v1/messages 模拟本人说“给我控制台链接”，12.093 秒返回 1 条链接，兑换/撤销均 200 | 此次是直接调用 Controller 的模拟入站，不冒称来自真实微信；新版工作台链接主动发送退出 1、投递未确认且未自动重发；微信内置浏览器点击体验待用户确认 |
-| demoair 原会话管理 | f6b2b5d 已部署；复用专用原会话，两条真实任务按依赖精确完成，结果来源 command/turn/SHA256 与原生历史独立一致；重复确认命令数20→20 | 发送预检非原子、snapshot 无 nonce；30秒观察窗口会重新检查资格。持续历史广播误判需本轮修复；不保证所有 owner 可用、并发人工输入无干扰或长期在线 |
+| demoair 原会话管理 | 已更新历史修复ef32a2f；真实两步接力command/turn/SHA256与原生历史一致，重复确认20→20；修复后97次浏览器历史请求无失败，Web直聊精确完成 | 发送预检非原子、snapshot无nonce；30秒观察窗口会重新检查资格。不保证所有owner可用、并发人工输入无干扰或长期在线 |
 | demomini 原会话管理 | 独立节点凭据、正式只读 LaunchAgent 与真实认证 WSS 已完成；1 个持久会话可发现。对精确目标初始化成功，延长至完整发现期限后 10001ms 返回 `no-client-found`，与 App 路由器期限交叉验证 | 原目标 owner 历史/发送未证明；只证明该目标当时无可处理 client，不是全机无 owner。不改 App transport、不启动共享后端或重启 App |
 | 平台原生服务 | 单一 Go 管理入口；macOS LaunchAgent 实装，Linux systemd --user 参数/权限/生命周期单测及 amd64 交叉编译通过；卸载保留 token/journal | Linux 尚未实机安装；不自动开启 linger；macOS 文件日志轮转未配置 |
 | 公司机器会话管理 | 历史核查中 devbox/devsg 别名无法解析；devos 两次失败，macpro 跳板独立检查超时 | 可用连接入口、组织数据边界、远端协议与执行能力均未验证 |
@@ -34,7 +34,7 @@ TypeScript Controller 是唯一控制权威，使用 PostgreSQL；TypeScript 微
 | 技能体系 | 两节点正式状态发现共165项技能；最多4个有序技能已部署。原会话完整读取两技能、核验SHA256、精确turn、同请求不重发及反序409的证据见 [组合发布验收](../2026-10-12-ordered-skills-release/VERIFICATION.md) | 仅证明所验技能的只读组合场景；SHA256只绑定SKILL.md，不冻结依赖目录，其他技能及复杂业务尚未逐项执行 |
 | 记忆 | PostgreSQL 聊天隔离/CAS；模型桩跨重启验证；真实模型模拟聊天的保存/回忆/忘记通过，直接查库核对写入和删除 | 真实微信体验与真实模型跨重启回忆未验收；旧记忆未迁移 |
 | 主动管理 Leader/进度 | 最多四步固定依赖计划、原子确认、24小时授权、进度/取消、重启核查和Web均已部署；显式resultFrom已完成同一节点 A原会话的真实模型两步接力，精确结果与冻结hash验证通过。合成跨节点证据见 [结果传递验收](../2026-10-12-plan-result-handoff/VERIFICATION.md) | 通知开关仍关闭、1条pending未领取；不同物理机接力与真微信通知未验收。持续动态自治/重新规划未实现，不把固定DAG当完整Super Leader。通知accepted非送达，领取后崩溃可漏发；视图最多12条 |
-| Web 会话工作台与免密登录 | 正式一次性链接登录后地址栏无凭据、HttpOnly且storage为空；新版真实显示两个节点、模型、计划2/2与28字符来源。旧页面跨部署不认识新合同，正常刷新后恢复；400项Web回归通过 | 真实手机软键盘/微信内置浏览器未验收；持续历史误报已定位并在修复。Cookie只开放指定读接口和受Origin/intent约束的精确发送；认证命令详情仍包含实际请求，不提升管理权限 |
+| Web 会话工作台与免密登录 | 正式一次性链接无地址栏凭据、HttpOnly且storage为空；新版显示两节点、模型、计划2/2与28字符来源。旧标签页刷新后恢复；400项Web回归通过。修复后持续242秒历史、旧阅读位置保留、直接发送与logout401均通过 | 真实手机软键盘/微信内置浏览器未验收；本fixture不足30条，本轮未触发自动旧页加载（固定旧cursor已实测）。Cookie仅指定读接口与受Origin/intent约束的精确发送；认证命令详情仍含实际请求 |
 | 验收会话清理与复用 | 此前原生 fixture、App 测试及此前 5 个已完成测试共 7 个精确会话已归档，归档列表独立确认、历史可恢复；创建连接与进程退出，测试登录退出、TaskSpace 关闭；后续优先复用 `c0863a5b-311c-5ab9-997b-be2e24fffb18` | 归档不删除历史；后续确需验收才显式恢复复用，writer 被占用时报告原因，不抢占或不断新建；当前 Task 与用户工作会话未归档 |
 | 微信 Markdown | 文本降级、链接、代码、分段/续传、UTF-16 安全边界测试通过 | 真微信渲染未验收；组合字素仍可能跨段 |
 | 可靠性与生产能力 | 历史 Controller 201/Web 41 工作台基线与清理后状态见 [原验证](VERIFICATION.md)；最新本地 unit 13/integration 6 checks PASS，Controller 703/Web 396/Gateway 104/CLI工具 81、Go race/vet 与 macOS/Linux 构建通过，见 [最新回归](../2026-10-12-plan-result-handoff/VERIFICATION.md)。最近发布记录另有精确命令、幂等和历史回查证据 | 本地/合成回归不等于生产负载保障；压力、物理掉电、长期故障与灾难恢复仍待验证；单节点 PG、未建自动备份；安全审查不等于完整攻防保障，不宣称 exactly-once/生产就绪 |
