@@ -2,14 +2,31 @@ import { StateManager } from "./state.js";
 import { ILinkClient } from "./ilink.js";
 import { ControllerClient, ChatNotAllowedError } from "./controller_client.js";
 import { DEFAULT_MESSAGE_MAX_CHARS } from "./markdown.js";
-import { HealthTracker } from "./health.js";
+import { HealthTracker, sanitizeErrorType } from "./health.js";
 import { CHECKPOINT_MARGIN_MS, REPLY_TIMEOUT_MS, SEND_REQUEST_TIMEOUT_MS } from "./budgets.js";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import { NOTIFICATION_CHAT_LIMIT, NOTIFICATION_TIMEOUT_MS, NOTIFICATION_RECEIPT_RETRIES, NOTIFICATION_LIMIT,
   parseNotification, sameNotification, type NotificationDeliverySummary } from "./notifications.js";
 
 const NOTIFICATION_CYCLE_BUDGET_MS = NOTIFICATION_TIMEOUT_MS + NOTIFICATION_LIMIT *
   (NOTIFICATION_TIMEOUT_MS + SEND_REQUEST_TIMEOUT_MS + NOTIFICATION_TIMEOUT_MS * (NOTIFICATION_RECEIPT_RETRIES + 1)) + CHECKPOINT_MARGIN_MS;
+const NOTIFICATION_SEND_FAILED_EVENT = "notification_send_failed";
+const STDERR_FD = 2;
+
+export class NotificationDiagnosticError extends Error {
+  constructor() { super("Notification diagnostic write failed"); }
+}
+
+function reportNotificationSendFailure(notificationId: string, attemptId: string, errorType: string): void {
+  try {
+    const line = JSON.stringify({ event: NOTIFICATION_SEND_FAILED_EVENT, notificationId, attemptId, errorType }) + "\n";
+    if (fs.writeSync(STDERR_FD, line) !== Buffer.byteLength(line)) throw new NotificationDiagnosticError();
+  } catch {
+    // The permanent receipt is already saved; a diagnostic failure must never reopen sending.
+    throw new NotificationDiagnosticError();
+  }
+}
 
 export interface PollCycleSummary {
   polledCount: number;
@@ -95,11 +112,16 @@ export class WeChatGateway {
           continue;
         }
         let status: "accepted" | "uncertain" = "accepted";
+        let sendErrorType: string | undefined;
         try {
           await this.ilink.sendSingleText(item.chatId, item.text, `super-leader:notification:${item.id}`, undefined, { strictReceipt: true });
-        } catch { status = "uncertain"; } // A send failure is evidence uncertainty, never a resend instruction.
+        } catch (error) {
+          status = "uncertain"; // A send failure is evidence uncertainty, never a resend instruction.
+          sendErrorType = sanitizeErrorType(error);
+        }
         await this.controller.recordNotificationReceipt(item.id, attemptId, status);
         summary[status]++;
+        if (sendErrorType !== undefined) reportNotificationSendFailure(item.id, attemptId, sendErrorType);
       }
       return summary;
     } finally {
@@ -240,6 +262,10 @@ export class WeChatGateway {
     while (!this.stopped) {
       try { await this.deliverNotificationsOnce(); }
       catch (err) {
+        if (err instanceof NotificationDiagnosticError) {
+          this.stop();
+          throw err;
+        }
         const error = err instanceof Error ? err : new Error("Notification delivery failed");
         if (onNotificationError) onNotificationError(error);
         else if (onError) onError(error);

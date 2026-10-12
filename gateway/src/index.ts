@@ -4,12 +4,13 @@ import { fileURLToPath } from "node:url";
 import { StateManager, resolvePath } from "./state.js";
 import { ILinkClient } from "./ilink.js";
 import { ControllerClient, validateControllerUrl } from "./controller_client.js";
-import { WeChatGateway } from "./gateway.js";
+import { WeChatGateway, NotificationDiagnosticError } from "./gateway.js";
 import { DEFAULT_MESSAGE_MAX_CHARS } from "./markdown.js";
 import { checkGatewayHealth, HealthTracker, resolveHealthPath, DEFAULT_HEALTH_MAX_AGE_MS, sanitizeErrorType } from "./health.js";
 import { MAX_POLL_TIMEOUT_MS } from "./budgets.js";
 
 export type GatewayCliMode = "check" | "establish-baseline" | "poll-once" | "run" | "healthcheck";
+export const NOTIFICATION_DIAGNOSTIC_EXIT_CODE = 2;
 
 export interface ParsedCliOptions {
   help: boolean;
@@ -281,6 +282,9 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
     // Desensitized error logging: only log sanitized error classification to prevent leaking server body, tokens, or errmsg
     process.stderr.write(`[gateway] poll cycle error: ${sanitizeErrorType(err)}\n`);
     }, err => { process.stderr.write(`[gateway] notification cycle error: ${sanitizeErrorType(err)}\n`); });
+  } catch (error) {
+    if (error instanceof NotificationDiagnosticError) return NOTIFICATION_DIAGNOSTIC_EXIT_CODE;
+    throw error;
   } finally {
     process.removeListener("SIGINT", handleSignal);
     process.removeListener("SIGTERM", handleSignal);
@@ -306,6 +310,10 @@ if (isDirectRun) {
       process.exitCode = code;
     },
     (err: unknown) => {
+      if (err instanceof NotificationDiagnosticError) {
+        process.exitCode = NOTIFICATION_DIAGNOSTIC_EXIT_CODE;
+        return;
+      }
       // Desensitized fatal error logging: only log sanitized error classification
       process.stderr.write(`[gateway] fatal: ${sanitizeErrorType(err)}\n`);
       process.exitCode = 1;

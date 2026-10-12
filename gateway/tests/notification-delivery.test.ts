@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import nodeFs from "node:fs";
 import * as path from "node:path";
+import { spawn } from "node:child_process";
 import { StateManager } from "../src/state.js";
 import { WeChatGateway } from "../src/gateway.js";
-import { parseGatewayCli, runCli } from "../src/index.js";
+import { parseGatewayCli, runCli, NOTIFICATION_DIAGNOSTIC_EXIT_CODE } from "../src/index.js";
 import { HealthTracker, checkGatewayHealth } from "../src/health.js";
 import { harness, notification } from "./notification-fixtures.js";
 
@@ -141,6 +143,128 @@ test("network send errors record uncertainty and receipt retry never resends", a
   assert.equal(f.sends.length, 1); assert.equal(receipts, 3);
   const bodies = f.requests.filter(request => request.url.endsWith("receipt")).map(request => JSON.stringify(request.body));
   assert.equal(new Set(bodies).size, 1);
+});
+for (const [error, errorType] of [
+  [new TypeError("private network token/context/text/chatId"), "NetworkError"],
+  [new Error("private timeout token/context/text/chatId"), "TimeoutError"],
+  [new Error("WeChat sendmessage failed: private token/context/text/chatId"), "ILinkSendMessageError"],
+] as const) test(`notification failure diagnostic is sanitized and follows permanent receipt: ${errorType}`, async t => {
+  const f = harness(t), diagnostics: string[] = [], item = notification();
+  f.hooks.send = () => { throw error; };
+  t.mock.method(nodeFs, "writeSync", (fd: number, chunk: string) => {
+    assert.equal(fd, 2);
+    assert.equal(f.records.get(item.id)?.status, "uncertain", "persist receipt before diagnostics");
+    diagnostics.push(String(chunk));
+    return Buffer.byteLength(chunk);
+  });
+  assert.deepEqual(await f.gateway.deliverNotificationsOnce(), { accepted: 0, uncertain: 1, skipped: 0 });
+  assert.equal(diagnostics.length, 1);
+  assert.deepEqual(JSON.parse(diagnostics[0]), { event: "notification_send_failed", notificationId: item.id,
+    attemptId: f.records.get(item.id)!.attemptId, errorType });
+  for (const privateValue of [error.message, error.stack!, item.text, "synthetic", "synthetic-context", '"chat"']) {
+    assert.ok(!diagnostics[0].includes(privateValue));
+  }
+  await f.gateway.deliverNotificationsOnce();
+  assert.equal(f.sends.length, 1); assert.equal(diagnostics.length, 1);
+});
+test("notification diagnostic write failure keeps uncertainty permanent and never resends", async t => {
+  const f = harness(t);
+  f.hooks.send = () => { throw new TypeError("private send failure"); };
+  t.mock.method(nodeFs, "writeSync", () => { throw new Error("private diagnostic sink failure"); });
+  await assert.rejects(f.gateway.deliverNotificationsOnce(), { message: "Notification diagnostic write failed" });
+  assert.equal([...f.records.values()][0].status, "uncertain");
+  await f.gateway.deliverNotificationsOnce();
+  assert.equal(f.sends.length, 1);
+});
+test("a short diagnostic write stops the run loop without its stderr error callback or another send", async t => {
+  const f = harness(t);
+  f.hooks.send = () => { throw new TypeError("private send failure"); };
+  t.mock.method(nodeFs, "writeSync", () => 1);
+  const callback = () => { assert.fail("do not write to the failed diagnostic sink again"); };
+  await assert.rejects(f.gateway.runLoop(0, callback, callback), { message: "Notification diagnostic write failed" });
+  assert.equal([...f.records.values()][0].status, "uncertain");
+  await f.gateway.runLoop(0, callback, callback);
+  assert.equal(f.requests.filter(request => request.url.endsWith("pending")).length, 1);
+  assert.equal(f.sends.length, 1);
+});
+test("closed real stderr pipe exits CLI with code 2 after uncertainty, without replay on restart", { timeout: 10_000 }, async t => {
+  const f = harness(t), healthPath = path.join(path.dirname(f.statePath), "health.json");
+  f.state.saveState();
+  const moduleUrl = new URL("../src/index.js", import.meta.url).href;
+  const args = ["--run", "--plan-notifications", "--credentials-path", f.accountPath, "--state-path", f.statePath,
+    "--health-path", healthPath];
+  const source = `
+    import { runCli } from ${JSON.stringify(moduleUrl)};
+    import fs from "node:fs";
+    let item = ${JSON.stringify(notification())}, sends = 0, polls = 0, restarting = false;
+    const json = value => new Response(JSON.stringify(value));
+    globalThis.fetch = async (url, init) => {
+      const pathname = new URL(String(url)).pathname;
+      if (pathname.endsWith("getupdates")) {
+        polls++;
+        if (restarting) process.emit("SIGTERM");
+        return json({ ret: 0, msgs: [], get_updates_buf: "original-cursor" });
+      }
+      if (pathname.endsWith("sendmessage")) { sends++; throw new TypeError("private token/context/text/chatId"); }
+      const body = JSON.parse(init.body);
+      if (pathname.endsWith("pending")) return json({ items: item.status === "pending" ? [item] : [] });
+      if (pathname.endsWith("claim")) {
+        item = { ...item, status: "claimed", attemptId: body.attemptId, attemptedAt: Date.now(), attemptExpiresAt: Date.now() + 60000 };
+        return json({ notification: item });
+      }
+      if (pathname.endsWith("receipt")) { item = { ...item, status: body.status }; return json({ notification: item }); }
+      throw new Error("unexpected fixture request");
+    };
+    await new Promise(resolve => process.stdin.once("data", resolve));
+    const code = await runCli(${JSON.stringify(args)}, { CONTROLLER_URL: "http://127.0.0.1:8790", CONTROLLER_TOKEN: "synthetic" });
+    const stopped = JSON.parse(fs.readFileSync(${JSON.stringify(healthPath)}, "utf8")).status;
+    process.stdout.write(JSON.stringify({ code, sends, polls, status: item.status, stopped }) + "\\n");
+    restarting = true;
+    const restartCode = await runCli(${JSON.stringify(args)}, { CONTROLLER_URL: "http://127.0.0.1:8790", CONTROLLER_TOKEN: "synthetic" });
+    process.stdout.write(JSON.stringify({ restartCode, sends, polls, status: item.status }) + "\\n");
+    process.exitCode = code;
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", source], { stdio: ["pipe", "pipe", "pipe"] });
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill(); });
+  let output = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", chunk => { output += chunk; });
+  child.stderr.once("close", () => { child.stdin.end("go\n"); });
+  child.stderr.destroy();
+  const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  });
+  assert.deepEqual(result, { code: NOTIFICATION_DIAGNOSTIC_EXIT_CODE, signal: null });
+  const lines = output.trim().split("\n").map(line => JSON.parse(line));
+  assert.deepEqual(lines, [
+    { code: NOTIFICATION_DIAGNOSTIC_EXIT_CODE, sends: 1, polls: 0, status: "uncertain", stopped: "stopped" },
+    { restartCode: 0, sends: 1, polls: 1, status: "uncertain" },
+  ]);
+});
+test("failed notification receipt persistence does not emit a persisted-failure diagnostic or resend", async t => {
+  const f = harness(t), diagnostics: string[] = [];
+  f.hooks.send = () => { throw new TypeError("private send failure"); };
+  f.hooks.receipt = () => { throw new Error("receipt unavailable"); };
+  t.mock.method(nodeFs, "writeSync", (_fd: number, chunk: string) => { diagnostics.push(chunk); return Buffer.byteLength(chunk); });
+  await assert.rejects(f.gateway.deliverNotificationsOnce(), /receipt unavailable/);
+  assert.equal([...f.records.values()][0].status, "claimed");
+  assert.equal(diagnostics.length, 0);
+  await f.gateway.deliverNotificationsOnce();
+  assert.equal(f.sends.length, 1);
+});
+test("run loop reports a sanitized send failure even without consuming the delivery summary", async t => {
+  const f = harness(t), diagnostics: string[] = [], cycleErrors: Error[] = [];
+  f.hooks.send = () => { throw new TypeError("private token/context/text/chatId"); };
+  f.hooks.poll = () => { f.gateway.stop(); };
+  t.mock.method(nodeFs, "writeSync", (_fd: number, chunk: string) => { diagnostics.push(chunk); return Buffer.byteLength(chunk); });
+  await f.gateway.runLoop(0, error => cycleErrors.push(error), error => cycleErrors.push(error));
+  assert.equal(cycleErrors.length, 0);
+  assert.equal(diagnostics.length, 1);
+  assert.equal(JSON.parse(diagnostics[0]).errorType, "NetworkError");
+  assert.equal([...f.records.values()][0].status, "uncertain");
+  assert.equal(f.state.syncBuf, "new-cursor");
+  assert.equal(f.sends.length, 1);
 });
 test("accepted send with exhausted receipt retries leaves claim queryable, never sends again", async t => {
   const f = harness(t); f.hooks.receipt = () => { throw new Error("receipt unavailable"); };
