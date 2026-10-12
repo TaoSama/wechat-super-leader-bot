@@ -16,6 +16,27 @@ const fakeEnv = {
   NODE_TOKENS: '{"fixture":"synthetic-node-token"}',
 };
 
+// Compose versions differ on whether true or false is omitted from JSON. Probe
+// both explicit policies instead of guessing the meaning of an absent field.
+const bindPolicyFixture = JSON.parse(execCompose([
+  '--env-file', '/dev/null', '-f', '-', 'config', '--format', 'json',
+], { encoding: 'utf8', timeout: 10000, env: fakeEnv, input: JSON.stringify({ services: {
+  fixture: { image: 'alpine:synthetic-not-run', volumes: [false, true].map(createHostPath => ({
+    type: 'bind', source: '/synthetic-not-created', target: createHostPath ? '/enabled' : '/disabled',
+    bind: { create_host_path: createHostPath },
+  })) },
+} }) })).services.fixture.volumes;
+const disabledBind = bindPolicyFixture.find(volume => volume.target === '/disabled');
+const enabledBind = bindPolicyFixture.find(volume => volume.target === '/enabled');
+assert.ok(disabledBind && enabledBind, 'Compose must render both bind policy fixtures');
+assert.notEqual(disabledBind.bind?.create_host_path, enabledBind.bind?.create_host_path,
+  'Compose must distinguish disabled and enabled host path creation');
+
+function assertHostPathCreationDisabled(volume) {
+  assert.equal(volume.bind?.create_host_path, disabledBind.bind?.create_host_path,
+    'bind mount must not create missing host paths');
+}
+
 test('without --profile wechat, gateway is omitted from active services', () => {
   const configJson = execCompose([
     '--env-file', '/dev/null',
@@ -84,13 +105,18 @@ test('with --profile wechat, gateway is configured with exact production constra
   assert.ok(roBind, 'readonly account bind mount must be configured');
   assert.equal(roBind.type, 'bind');
   assert.equal(roBind.read_only, true);
-  assert.equal(roBind.bind?.create_host_path, false);
+  assertHostPathCreationDisabled(roBind);
 
   const stateBind = gateway.volumes.find((v) => v.target === '/var/lib/super-leader-gateway');
   assert.ok(stateBind, 'state read-write bind mount must be configured');
   assert.equal(stateBind.type, 'bind');
   assert.notEqual(stateBind.read_only, true);
-  assert.equal(stateBind.bind?.create_host_path, false);
+  assertHostPathCreationDisabled(stateBind);
+
+  // Also require explicit opt-outs in source, independent of JSON omission.
+  const gatewaySource = readFileSync(composeGatewayPath, 'utf8');
+  assert.match(gatewaySource, /target: \/etc\/super-leader\/wechat-account\.json\r?\n\s+read_only: true\r?\n\s+bind:\r?\n\s+create_host_path: false(?:\r?\n|$)/);
+  assert.match(gatewaySource, /target: \/var\/lib\/super-leader-gateway\r?\n\s+bind:\r?\n\s+create_host_path: false(?:\r?\n|$)/);
 
   // tmpfs
   assert.deepEqual(gateway.tmpfs, ['/tmp:size=16m,mode=1777']);
@@ -101,6 +127,28 @@ test('with --profile wechat, gateway is configured with exact production constra
   assert.equal(gateway.healthcheck?.timeout, '5s');
   assert.equal(gateway.healthcheck?.retries, 3);
   assert.equal(gateway.healthcheck?.start_period, '1m0s'); // 60s
+});
+
+test('bind policy accepts canonical false but rejects canonical true and invalid values', () => {
+  assertHostPathCreationDisabled(disabledBind);
+  assert.throws(() => assertHostPathCreationDisabled(enabledBind), assert.AssertionError);
+  for (const value of [null, 0, 'false']) {
+    assert.throws(() => assertHostPathCreationDisabled({ bind: { create_host_path: value } }), assert.AssertionError);
+  }
+});
+
+test('bind policy rejects explicit host path creation after Compose normalization', () => {
+  const unsafeSource = readFileSync(composeGatewayPath, 'utf8').replaceAll('create_host_path: false', 'create_host_path: true');
+  const parsed = JSON.parse(execCompose([
+    '--env-file', '/dev/null', '--profile', 'wechat',
+    '-f', composeYamlPath, '-f', composeProdPath, '-f', '-',
+    'config', '--format', 'json',
+  ], { encoding: 'utf8', timeout: 10000, env: fakeEnv, input: unsafeSource }));
+  assert.equal(parsed.services.gateway.volumes.length, 2);
+  for (const volume of parsed.services.gateway.volumes) {
+    assert.equal(volume.bind?.create_host_path, enabledBind.bind?.create_host_path);
+    assert.throws(() => assertHostPathCreationDisabled(volume), assert.AssertionError);
+  }
 });
 
 test('plan notifications require an explicit gateway-only opt-in', () => {
