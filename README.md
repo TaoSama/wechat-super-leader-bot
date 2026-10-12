@@ -38,7 +38,7 @@ node local.mjs --sessions --controller https://leader.taoai.site
 
 部署、原生服务及人工微信验收见 [香港运维说明](docs/runbook/hong-kong.md)。已迁移到香港的实例不要再执行本地 `--up` 启动第二个编排权威。
 
-2026-10-12 发布状态：香港运行 `a4ef93c` 镜像，Air 运行 `e1a6408`，已启用文件发现、原桌面 owner 发送和有序技能组合。正式 Cookie 接口此前完成原会话发送、精确 turn 回查、历史分页和重复请求防重发；本轮真实两技能任务完成，并修复握手阶段广播导致首次历史误报过期的问题，正式 HTTP 精确回查同一 assistant 输出、固定上下文分页通过。多会话订阅使用 16 条独立连接共享两个帧处理槽，前轮采样确认 9 个健康 owner 同时可用；30 秒窗口重连仍会短暂重新检查，超过 32 MiB 的会话仍明确不可用。没有改 App transport 或重启 App，不代表所有会话可控或完整生产保障。最新运行情况见 [发布与验收记录](docs/changes/2026-10-12-ordered-skills-release/VERIFICATION.md)，历史文档保留各开发阶段事实。微信真实入站与内置浏览器体验仍待用户确认。
+2026-10-12 发布状态：香港 Controller/Web、Air 与新注册的 Mini Daemon 已部署 `f6b2b5d` 产品源码；Mini 只读，不开放发送。Air 原桌面 owner 路由已完成真实模型两步结果接力、精确 turn/输出回查与重复确认不重发。GitHub 已推送，Ubuntu 完整整链与 macOS CI 均通过。部署前已打开的 Web 页面需要刷新以加载同版数据合同。多会话订阅仍使用 16 条独立连接共享两个帧处理槽；30 秒窗口重连会短暂重新检查，超过 32 MiB 的会话仍明确不可用。未改 App transport 或重启 App；历史持续读取发现的广播累计问题正在修复，不将单次成功视为长稳保障。最新证据见 [正式发布与验收记录](docs/changes/2026-10-12-authorized-release/VERIFICATION.md)。微信真实入站与内置浏览器体验仍待用户确认。
 
 ## Web 会话工作台
 
@@ -60,9 +60,9 @@ Daemon 可显式通过 `--desktop-sock` 订阅既有桌面应用的运行状态�
 
 原桌面 owner 适配器通过持久 journal 追踪原会话，不更改 App transport、不启动额外后端。Controller/Leader/Web 已接入：新命令服务端选择并持久化路线，确认和派发时复验同一路线，重复 requestId 返回原记录；Web 显示通道和不可用原因，资格过期自动禁用，点击时再检查。Daemon 必须显式启用 `--desktop-send`（要求 `--desktop-sock`），默认仍只读。香港与 Air 已启用，并完成正式 Cookie 接口到专用原会话的真实发送、精确 turn 回查及重复请求防重发。预检仍非原子。开发期证据见 [原 owner 真实发送](docs/changes/2026-10-11-desktop-owner-send/VERIFICATION.md) 与 [跨层路由验证](docs/changes/2026-10-11-desktop-send-route/VERIFICATION.md)。
 
-已修复大量无响应 ID 导致后部桌面会话无法被探测的问题，并提供显式 `--codex-home` 文件发现：只读首条会话元数据、按稳定会话 ID 处理回退后的多份记录，不读取 SQLite 或启动后端。发现、桌面观测、控制权限独立；文件发现不提供历史或发送权限。Air 已启用；Mini 的只读探测在控制 socket 缺失时发现 1 个，但未找到可用桌面 owner，也未安装本项目服务。开发期证据见 [文件发现验证与限制](docs/changes/2026-10-11-rollout-discovery/VERIFICATION.md)。
+已修复大量无响应 ID 导致后部桌面会话无法被探测的问题，并提供显式 `--codex-home` 文件发现：只读首条会话元数据、按稳定会话 ID 处理回退后的多份记录，不读取 SQLite 或启动后端。发现、桌面观测、控制权限独立；文件发现不提供历史或发送权限。Air 与 Mini 均已启用，Mini 控制 socket 缺失时仍发现 1 个持久会话。开发期证据见 [文件发现验证与限制](docs/changes/2026-10-11-rollout-discovery/VERIFICATION.md)。
 
-Mini 最新定点复核：已确认持久化会话 ID，本机 IPC 两次初始化成功，但对该 ID 的 owner discovery 两次超时。这不是整个 Mini 无 owner 的证明；共享控制 socket 缺失也不构成必须重启或改造 App 的理由。未安装正式节点，见 [精确目标复核](docs/changes/2026-10-12-macmini-owner-check/VERIFICATION.md)。
+Mini 最新定点复核：正式只读 LaunchAgent 已安装、独立节点凭据已注册且 WSS 认证连接成功。对精确持久会话的 IPC 初始化成功；将诊断等待从 6 秒延长至路由器 10 秒期限之后，得到明确 `no-client-found`。仅证明该目标当时无可处理 owner，不代表整机无 owner；其历史与发送仍未验收。见 [最新节点与 owner 证据](docs/changes/2026-10-12-authorized-release/VERIFICATION.md)。
 
 发送后展示受理/完成回执。网络不确定时先使用原请求核查，不能另发一遍；切换会话保留各自的内存草稿，退出登录清除。精确 HTTP 与数据契约见 [会话工作台设计](docs/changes/2026-10-10-control-plane/SESSION_WORKSPACE.md)。前轮部署见 [验证记录](docs/changes/2026-10-10-control-plane/VERIFICATION.md)，本轮增量结果见 [体验与查询修复验收](docs/changes/2026-10-11-workspace-experience/VERIFICATION.md)。
 
@@ -111,7 +111,7 @@ Web：`http://127.0.0.1:8790`。前端无手输 token 入口；本机若需签�
 
 已支持最多四步的持久依赖计划，例如“先让这个会话检查测试，完成后再让另一个会话检查文档”。预览冻结每步的目标、内容、技能版本和依赖，10 分钟内确认后最多自动推进 24 小时；只有精确完成回执才解锁后继，同一会话还要等待空闲资格。可说“计划到哪了”查询，或“停止后续任务”取消；取消不终止原会话已运行的任务，已领取项可能已发送。结果不明时不重发；重启后查原回执，不另起后端。后续内容不会自动吸收前项输出，需动态决定时应查询结果后另提计划。已随香港镜像部署；原子确认、取消、真实临时 PG 和 HTTP/WS 开发期验收见 [持久计划验证](docs/changes/2026-10-12-persistent-plans/VERIFICATION.md)，真实微信计划仍待验收。
 
-本地新增已确认计划的结果传递，**尚未部署**。例如“让 Air 的这个会话检查问题，再把它的结果交给另一个会话复核”：预览须明确后继的结果来源，确认后才将同计划所选前驱的精确完成回执作为资料附在原任务后；普通依赖默认不共享输出。每来源最多 1000 Unicode 码点且 JSON 编码含转义最多 3000 字符，裁剪、来源命令/turn、全文记录 SHA256 与实际请求文本一并持久保存。已记录输出为空会明确标示，缺失输出则停止，不冒充空结果；重启不重新采样或重发已领取步骤。Web 计划和微信状态查询显示来源、冻结与裁剪状态，不把冻结当作送达，也不在计划摘要中展示结果正文；认证命令详情仍如实显示已记录的实际请求（含附件），记录不证明已发送。只支持精确完成的原生会话步骤，终端 `input-written` 不参与；仍不动态改写任务、增加目标或重规划。详细边界见 [结果传递合同](docs/changes/2026-10-12-plan-result-handoff/TECH.md) 与 [验收记录](docs/changes/2026-10-12-plan-result-handoff/VERIFICATION.md)。
+已部署已确认计划的结果传递，并完成同一真实 Air 会话的两步模型接力与原生回执交叉核对；不同物理机接力仍待验收。例如“让 Air 的这个会话检查问题，再把它的结果交给另一个会话复核”：预览须明确后继的结果来源，确认后才将同计划所选前驱的精确完成回执作为资料附在原任务后；普通依赖默认不共享输出。每来源最多 1000 Unicode 码点且 JSON 编码含转义最多 3000 字符，裁剪、来源命令/turn、全文记录 SHA256 与实际请求文本一并持久保存。已记录输出为空会明确标示，缺失输出则停止，不冒充空结果；重启不重新采样或重发已领取步骤。Web 计划和微信状态查询显示来源、冻结与裁剪状态，不把冻结当作送达，也不在计划摘要中展示结果正文；认证命令详情仍如实显示已记录的实际请求（含附件），记录不证明已发送。只支持精确完成的原生会话步骤，终端 `input-written` 不参与；仍不动态改写任务、增加目标或重规划。详细边界见 [结果传递合同](docs/changes/2026-10-12-plan-result-handoff/TECH.md) 与 [正式验收记录](docs/changes/2026-10-12-authorized-release/VERIFICATION.md)。
 
 已部署每任务最多 4 个有序技能组合，例如“按顺序使用设计和 UX 技能优化页面”。预览列出全部技能及 SHA256，确认与派发均核对整组；任一失配不部分执行，同请求调换顺序也拒绝。预览过长时不保存可确认计划，避免授权未显示的内容。正式原会话已验证两技能按指定顺序完整读取与实算 SHA256、精确 turn 完成、相同请求不重发及反序 HTTP 409；这是管理接口验收，不代替微信自然语言实测，也不冻结技能依赖目录。见 [开发合同](docs/changes/2026-10-12-ordered-skills/VERIFICATION.md) 与 [正式发布验收](docs/changes/2026-10-12-ordered-skills-release/VERIFICATION.md)。
 
@@ -142,15 +142,15 @@ node verify.mjs --list              # 只列计划，不运行检查
 
 `test-console-auth.mjs` 默认只显示帮助，统一入口明确带 `--run`，验证真实临时 PostgreSQL 中的一次性兑换、1 小时到期、Cookie、并发和重启。收到 SIGINT/SIGTERM 后，入口等待当前检查正常收尾，再停止后续步骤；异常断连不会因重复等待 WebSocket close 而跳过其他资源清理。强制终止、掉电及未响应退出的子进程不在此保证内。
 
-仓库新增 `.github/workflows/verify.yml`：Ubuntu 运行完整验证，macOS 运行不依赖 Docker 的单测与构建，CI 使用 Node 24。当前本机实际为 Node 26；工作流配置检查不等于 GitHub 已运行，未推送前不宣称 CI 通过。实现、命令和交付边界见 [可复现验证](docs/changes/2026-10-12-reproducible-verification/TECH.md)。
+仓库 `.github/workflows/verify.yml`：Ubuntu 运行完整验证，macOS 运行不依赖 Docker 的单测与构建，CI 使用 Node 24。当前本机实际为 Node 26；GitHub run [38262955582](https://github.com/TaoSama/wechat-super-leader-bot/actions/runs/38262955582) 已通过 Ubuntu 16 checks / macOS 13 checks。前两次失败及修复保留在 [发布证据](docs/changes/2026-10-12-authorized-release/VERIFICATION.md)。实现、命令和交付边界见 [可复现验证](docs/changes/2026-10-12-reproducible-verification/TECH.md)。
 
 已有终端 Agent 支持显式只读观测：Daemon 配置 `--terminal-sock <已有绝对路径>` 与可重复 `--terminal-pane <明确wN:pN>` 后，每 15 秒独立刷新状态；Web 标注终端来源，状态超过 45 秒失效，默认不读取聊天历史、不开放发送。微信可明确询问该会话的最新输出，获得有裁剪提示的有限终端快照；不等于完整历史或精确任务回执。`--probe` 可无 token 检查该来源，不写 journal，不启动终端宿主。当前只接受已核对的 protocol 22，默认关闭，macOS/Linux 用户服务可保存相同参数。观测代码已随构建产物部署，但未配置真实终端目标、未启用观测，见 [终端观测设计与边界](docs/changes/2026-10-12-terminal-observation/TECH.md)。
 
-原 CLI 历史读取已在本地实现，**尚未部署或配置真实记录目录**。除已有 socket 和明确 pane 外，须逐个提供方显式增加 `--terminal-history-root codex=/absolute/sessions`、`--terminal-history-root claude=/absolute/projects` 或 `--terminal-history-root grok=/absolute/sessions`；路径指向记录目录本身，每提供方最多一个。不会从 home、环境变量或只授权元数据发现的 `--codex-home` 推导正文权限。仅可信会话 ID 绑定可用，配置目录不等于保证文件存在。
+原 CLI 历史读取代码已随候选部署，**未启用或配置真实记录目录**。除已有 socket 和明确 pane 外，须逐个提供方显式增加 `--terminal-history-root codex=/absolute/sessions`、`--terminal-history-root claude=/absolute/projects` 或 `--terminal-history-root grok=/absolute/sessions`；路径指向记录目录本身，每提供方最多一个。不会从 home、环境变量或只授权元数据发现的 `--codex-home` 推导正文权限。仅可信会话 ID 绑定可用，配置目录不等于保证文件存在。
 
 启用后 Web 显示“CLI 会话记录”，沿用 2 秒快照刷新与向上自动分页；读取原 JSONL 中的用户/助手可见文本，隐藏推理和私有元数据。Grok ACP 文本明确标注“文本片段（非完整轮次）”，不伪造消息结束、turn ID 或完成回执。旧页不因追加漂移，文件改写/替换或原会话换绑使上下文失效，必须显式重新读取；来源撤销或观测过期会暂停并保留已读内容。每文件最多 32 MiB，读取预算和不支持格式见 [历史读取合同](docs/changes/2026-10-12-terminal-history/TECH.md)。真实 Go/HTTP/临时 PG 与独立浏览器合成验收均通过，证据见 [验证记录](docs/changes/2026-10-12-terminal-history/VERIFICATION.md)；不代表真实 CLI、微信或 Linux 服务已验收。
 
-原终端单步输入现已接通源码中的持久命令、Controller、Web 与自然语言确认链路，**尚未部署或启用正式终端发送**。必须在已有 socket 和明确 pane 清单之外显式设置 `--terminal-send-mode=non-atomic`，并使用真实持久 journal；独立零输入预检通过后才发布 45 秒发送资格。不启动 Agent、不恢复会话、不使用默认焦点，也不在通道失效时自动换路。同一 PTY 内原 CLI 退出、替换和人工输入的非原子窗口仍存在，启用前必须接受此边界并验收明确目标。
+原终端单步输入现已接通持久命令、Controller、Web 与自然语言确认链路，代码已部署，**尚未启用正式终端发送**。必须在已有 socket 和明确 pane 清单之外显式设置 `--terminal-send-mode=non-atomic`，并使用真实持久 journal；独立零输入预检通过后才发布 45 秒发送资格。不启动 Agent、不恢复会话、不使用默认焦点，也不在通道失效时自动换路。同一 PTY 内原 CLI 退出、替换和人工输入的非原子窗口仍存在，启用前必须接受此边界并验收明确目标。
 
 Web 可向明确终端会话发送单步输入；微信模型模式先生成带非原子警告的准确目标/内容预览，用户确认后才投递。规则诊断模式仍只读，所有含终端的多步和持久依赖计划均拒绝。回执 `input-written` 只显示“输入已写入，执行未确认”，独立于最近完成；六字段输入证明不包含私有 socket、原会话路径或虚构 turn/output。命令先持久化身份再写入，重复请求与重启不重发；丢回执保持 `uncertain`，仅核查原请求，不能凭 idle/done 解锁后继。
 

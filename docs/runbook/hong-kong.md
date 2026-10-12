@@ -54,7 +54,7 @@ Nginx 配置源为 `deploy/nginx.conf`，安装到独立 `/etc/nginx/conf.d/supe
 
 ## 原生 Daemon 用户服务
 
-Mac Air 已恢复原生用户服务并连接香港，维护窗口、版本与验收结果见 [发布记录](../changes/2026-10-12-release-preflight/VERIFICATION.md)。不要另开前台 Daemon。服务直接运行 Go 二进制，不依赖 Node 包装器，也不另启 Codex app-server。
+Mac Air 与 Mac Mini 均已安装原生用户服务并认证连接香港；Mini 只读且没有启用 desktop-send。维护窗口、版本与验收结果见 [最新发布记录](../changes/2026-10-12-authorized-release/VERIFICATION.md)。不要另开前台 Daemon。服务直接运行 Go 二进制，不依赖 Node 包装器，也不另启 Codex app-server。
 
 | 项目 | macOS | Linux |
 | --- | --- | --- |
@@ -80,9 +80,9 @@ node local.mjs --check --controller https://leader.taoai.site
 
 `deploy/register-node.mjs` 的新节点 token 只接受 8–512 位 ASCII 字母、数字、`_`、`-`，避免 dotenv 注释或 Compose 插值改变凭证；正式生成使用至少 32 个随机字节的 hex/base64url。先 dry-run，确认仅新增精确 node-id 后再串行 `--apply`；同 ID 不同 token 必须停止，不能覆盖旧凭证。token/env 均为 `0600`，父目录为 `0700`。配置修改后须按排空流程重启 Controller 才生效。
 
-新增物理节点先核对实际远端用户目录、既有控制 socket、原服务和 journal；不能仅凭桌面 IPC 存在就安装并宣称可控。Mac Mini 当前用户目录为 `/Users/macmini`，控制 socket 缺失，尚未安装本项目服务；详见 [接入前置核查](../changes/2026-10-11-macmini-onboarding/VERIFICATION.md)。不要照搬 Mac Air 路径或未经授权启动后端/重启桌面应用。
+新增物理节点先核对实际远端用户目录、既有控制 socket、原服务和 journal；不能仅凭桌面 IPC 存在就宣称可控。Mac Mini 当前用户目录为 `/Users/macmini`，控制 socket 缺失；已用独立凭据注册并安装只读 LaunchAgent，真实 WSS 连接成功。对唯一持久目标等待完整发现期限后返回 `no-client-found`，历史/发送未证明。详见 [当前节点证据](../changes/2026-10-12-authorized-release/VERIFICATION.md)。不要照搬 Mac Air 路径或启动后端/重启桌面应用。
 
-控制接口缺失不代表必须改变用户桌面配置。本地 SQLite 实验已撤回；`--codex-home` 使用纯文件元数据发现，不读取数据库、不创建后端。两机开发期临时 probe 发现 Air 17 个、Mini 1 个；Air 现已正式启用，Mini 未找到可用桌面 owner，仍未安装本项目服务。独立发现与原进程控制不能混为一谈，见 [文件发现验证](../changes/2026-10-11-rollout-discovery/VERIFICATION.md) 与 [当前发布状态](../changes/2026-10-12-release-preflight/VERIFICATION.md)。
+控制接口缺失不代表必须改变用户桌面配置。本地 SQLite 实验已撤回；`--codex-home` 使用纯文件元数据发现，不读取数据库、不创建后端。最近正式状态显示 Air 18 个、Mini 1 个会话；两机均启用文件发现。Mini 的精确目标未找到可处理 owner，不能以独立发现替代原进程控制。见 [文件发现验证](../changes/2026-10-11-rollout-discovery/VERIFICATION.md) 与 [当前发布状态](../changes/2026-10-12-authorized-release/VERIFICATION.md)。
 
 下面是**当前 Mac Air 的维护命令**：使用已存在的私有 token、原 state-dir、香港地址和完整技能根目录。不要将它照搬到另一个节点；Linux 应使用该机器原生构建、独立 node-id/token、实际 socket 和技能目录。
 
@@ -152,7 +152,7 @@ Daemon journal 防重放记录绑定节点、Controller URL 和本机 socket。�
 
 回退不是只换一个 URL：香港上线后的新命令、消息、记忆不能丢弃。需先停止新的写入和节点服务，对香港数据库做反向流式迁移并核对，显式迁移 journal 绑定后才启用本地 Controller。保留原本地卷不表示它仍是最新数据。
 
-多技能组合还有读取合同的回退边界：旧 Controller 的技能引用校验为 `max(1)`，读取命令时无条件执行，包括 completed/failed 终态记录。新版一旦保存含 2–4 份技能引用的命令，即使已排空，也不能直接退回旧镜像。不能删除或改写历史记录规避校验；需使用支持同一数据合同的修复版本，保留数据库和原 journal。
+多技能组合还有读取合同的回退边界：旧 Controller 的技能引用校验为 `max(1)`，读取命令时无条件执行，包括 completed/failed 终态记录。新版已保存含 2–4 份技能引用的命令及结果传递的冻结输入合同，即使已排空也不能直接退回旧镜像。不能删除或改写历史记录规避校验；需使用支持同一数据合同的修复版本，保留数据库和原 journal。部署后浏览器正常刷新以加载同版 Web；不要为保留旧标签页而放宽严格校验。
 
 ## 独立微信 Gateway
 
