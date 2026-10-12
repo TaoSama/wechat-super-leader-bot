@@ -3,6 +3,7 @@ import { InboundWeChatMessage } from "./types.js";
 import { StateManager } from "./state.js";
 import { markdownToWeChat, DEFAULT_MESSAGE_MAX_CHARS, unicodeSafeBoundary } from "./markdown.js";
 import { DEFAULT_POLL_TIMEOUT_MS, MAX_POLL_TIMEOUT_MS, MAX_POLL_ATTEMPTS, SEND_REQUEST_TIMEOUT_MS, REPLY_TIMEOUT_MS } from "./budgets.js";
+import { validateSendReceipt } from "./send_receipt.js";
 
 export const DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com";
 export const CHANNEL_VERSION = "0.3.0";
@@ -239,8 +240,7 @@ export class ILinkClient {
     return { nextSyncBuf, messages, rawMessageCount: rawMsgs.length };
   }
 
-  public async sendSingleText(chatId: string, formattedText: string, clientIdOverride?: string, signal?: AbortSignal,
-    options?: { strictReceipt?: boolean }): Promise<void> {
+  public async sendSingleText(chatId: string, formattedText: string, clientIdOverride?: string, signal?: AbortSignal): Promise<void> {
     const account = this.stateManager.account;
     if (!account || !account.token) {
       throw new Error("WeChat is not logged in");
@@ -269,17 +269,7 @@ export class ILinkClient {
       signal
     );
 
-    const ret = response.ret;
-    const errcode = response.errcode;
-    if (options?.strictReceipt && (!(ret === 0 || errcode === 0) ||
-        Object.hasOwn(response, "ret") && ret !== 0 || Object.hasOwn(response, "errcode") && errcode !== 0)) {
-      throw new Error("WeChat sendmessage failed: notification requires explicit successful receipt");
-    }
-    if ((ret !== undefined && ret !== null && ret !== 0) || (errcode !== undefined && errcode !== null && errcode !== 0)) {
-      throw new Error(
-        `WeChat sendmessage failed: ret=${String(ret)} errcode=${String(errcode)}`
-      );
-    }
+    validateSendReceipt(response);
   }
 
   public async sendMarkdownReply(

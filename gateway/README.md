@@ -8,7 +8,9 @@ WeChat Gateway 是 Super Leader 的独立微信接入网关组件。负责与微
 
 Gateway 只交付 Controller 持久保存的文本，不生成文案、不调用模型或新建任务。唯一合同为 `source: { type: "plan" | "goal", id: UUID }`，通知 `id` 必须等于 `source.id`；拒绝旧 `executionId`、未知字段及混型。计划 kind 为 `completed/failed/expired`，目标 kind 为 `completed/blocked/expired`。目标首次从 active 离开至这三态时由 Controller 生成一条通知；取消不通知，blocked 后到期不重复。只提交已有非空聊天 context 的列表（每批128个聊天、超过时排序轮转），每轮最多4条、串行发送；没有 context 不消耗领取机会。现有 context 不保证永久可主动触达。
 
-每条通知领取只尝试一次，领取响应丢失不发送；领取后复核通知内容、身份、context、截止与停止状态。只发送一次纯文本，并要求微信明确返回成功码。`super-leader:notification:<id>` 仅关联证据，不是微信幂等保证。空回执、网络异常或超时记为 `uncertain`，不重领、不重发；回执提交最多3次相同请求，失败时原 claim 可通过 Controller Bearer 管理接口核查。`accepted` 只表示微信接口受理，不证明用户收到或已读。
+每条通知领取只尝试一次，领取响应丢失不发送；领取后复核通知内容、身份、context、截止与停止状态。只发送一次纯文本；普通回复与通知使用同一响应判定：HTTP 成功且 JSON 对象符合发送响应格式时，允许空对象 `{}` 或仅 `message_id`，不强制可省略的零码出现；若出现 `ret` / `errcode`，必须是数字零。非法类型、非零码、未知字段/嵌套 envelope，以及无零码却带非空 `errmsg` 的含糊响应均拒绝。不把空 HTTP 正文、非法 JSON 或响应丢失当作 `{}`。
+
+`super-leader:notification:<id>` 仅关联证据，不是微信幂等保证。异常响应、网络异常或超时记为 `uncertain`，不重领、不重发；更新响应判定也不改写旧回执。回执提交最多3次相同请求，失败时原 claim 可通过 Controller Bearer 管理接口核查。`accepted` 只表示已取得客户端支持的成功响应，不证明用户收到或已读。诊断区分微信 HTTP 状态、错误码类型/非零码和格式异常，只记录通知 ID、attempt ID 和固定分类，不保存原始响应、微信服务端 message_id 或错误文本。
 
 领取后崩溃可能漏发，允许名单撤销与外部发送仍有竞争窗口；不保证 exactly-once 或必达。持续目标完成是模型依据精确完成记录作出的判断，不是独立业务验收；失败、阻塞、授权到期不等于停止原会话已运行任务。更新不重置微信游标、context、去重记录或回复进度。
 

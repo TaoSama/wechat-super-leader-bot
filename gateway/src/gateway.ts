@@ -114,7 +114,7 @@ export class WeChatGateway {
         let status: "accepted" | "uncertain" = "accepted";
         let sendErrorType: string | undefined;
         try {
-          await this.ilink.sendSingleText(item.chatId, item.text, `super-leader:notification:${item.id}`, undefined, { strictReceipt: true });
+          await this.ilink.sendSingleText(item.chatId, item.text, `super-leader:notification:${item.id}`);
         } catch (error) {
           status = "uncertain"; // A send failure is evidence uncertainty, never a resend instruction.
           sendErrorType = sanitizeErrorType(error);

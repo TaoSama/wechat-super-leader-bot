@@ -43,7 +43,7 @@ export async function verifyPlanNotifications({ base, token, request, store, res
       'Provider text differs from the immutable persisted notification');
     sent.push(payload.msg);
     if (providerMode === 'drop') throw new TypeError('Synthetic send response lost after submission');
-    return new Response(JSON.stringify(providerMode === 'empty' ? {} : { ret: 0, errcode: 0 }),
+    return new Response(JSON.stringify(providerMode === 'empty' ? {} : providerMode === 'rejected' ? { ret: -14 } : { ret: 0, errcode: 0 }),
       { headers: { 'content-type': 'application/json' } });
   };
   const makeGateway = (options = {}) => {
@@ -144,17 +144,21 @@ export async function verifyPlanNotifications({ base, token, request, store, res
     await makeGateway({ state: restored }).deliverNotificationsOnce();
     assert.equal(sent.length, countBeforeLoss, 'Restart replayed a claimed notification');
 
-    for (const mode of ['empty', 'drop']) {
+    for (const mode of ['empty', 'rejected', 'drop']) {
       const id = await addFailure();
       providerMode = mode;
       const count = sent.length;
       const summary = await first.deliverNotificationsOnce();
-      assert.equal(summary.uncertain, 1);
+      const expectedStatus = mode === 'empty' ? 'accepted' : 'uncertain';
+      assert.equal(summary[expectedStatus], 1);
       assert.equal(sent.length, count + 1);
-      assert.equal((await get(id)).status, 'uncertain');
+      const receipt = await get(id);
+      assert.equal(receipt.status, expectedStatus);
       providerMode = 'success';
+      await restart(true);
       await first.deliverNotificationsOnce();
-      assert.equal(sent.length, count + 1, 'Unknown send was automatically replayed');
+      assert.deepEqual(await get(id), receipt, 'Restart rewrote a permanent receipt');
+      assert.equal(sent.length, count + 1, 'Attempted send was automatically replayed');
     }
 
     const lostReceipt = await addFailure();
@@ -188,7 +192,7 @@ export async function verifyPlanNotifications({ base, token, request, store, res
     await first.deliverNotificationsOnce();
     assert.equal((await get(revoked)).status, 'accepted');
     assert.equal(new Set(sent.map(item => item.client_id)).size, sent.length);
-    console.log('PASS notification claim-response loss, empty/unknown send result, receipt-response loss, allowlist revoke/restore and Controller/Gateway restart: no external replay');
+    console.log('PASS notification empty-object acceptance, rejected/lost response uncertainty, claim/receipt-response loss, allowlist revoke/restore and Controller/Gateway restart: no receipt rewrite or external replay');
   } finally {
     for (const gateway of gateways) gateway.stop();
     await rm(dir, { recursive: true, force: true });

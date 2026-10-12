@@ -3,6 +3,7 @@ import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { writePrivateJsonSync, resolvePath } from "./state.js";
 import { DEFAULT_POLL_TIMEOUT_MS, MAX_POLL_ATTEMPTS, CHECKPOINT_MARGIN_MS, MAX_PROCESSING_PHASE_MS, MAX_POLL_PHASE_MS } from "./budgets.js";
+import { ILinkSendReceiptError } from "./send_receipt.js";
 
 export type HealthStatus = "starting" | "healthy" | "processing" | "degraded" | "stopped";
 
@@ -40,18 +41,18 @@ export function resolveHealthPath(options: {
 
 export function sanitizeErrorType(err: unknown): string {
   if (!err) return "UnknownError";
+  if (err instanceof ILinkSendReceiptError) return "ILinkSend" + err.reason;
   if (typeof err === "object" && err !== null) {
     const errorObj = err as { name?: string; message?: string };
     const msg = String(errorObj.message || "");
     if (msg.includes("CHAT_NOT_ALLOWED") || errorObj.name === "ChatNotAllowedError") {
       return "ChatNotAllowed";
     }
-    if (msg.includes("HTTP 401")) return "ControllerAuth401";
-    if (msg.includes("HTTP 403")) return "ControllerAuth403";
-    const ctrlMatch = msg.match(/Controller .* HTTP (\d{3})/);
-    if (ctrlMatch) return "ControllerHttp" + ctrlMatch[1];
-    const ilinkMatch = msg.match(/WeChat iLink HTTP (\d{3})/);
+    const ctrlMatch = msg.match(/^Controller\b.*\bHTTP (\d{3})\b/);
+    if (ctrlMatch) return (ctrlMatch[1] === "401" || ctrlMatch[1] === "403" ? "ControllerAuth" : "ControllerHttp") + ctrlMatch[1];
+    const ilinkMatch = msg.match(/^WeChat iLink HTTP (\d{3})\b/);
     if (ilinkMatch) return "ILinkHttp" + ilinkMatch[1];
+    if (msg === "WeChat iLink returned a non-object JSON response") return "ILinkInvalidResponse";
     if (msg.includes("WeChat getupdates failed")) return "ILinkGetUpdatesError";
     if (msg.includes("WeChat sendmessage failed")) return "ILinkSendMessageError";
     if (errorObj.name === "AbortError" || msg.toLowerCase().includes("aborted") || msg.toLowerCase().includes("timeout") || msg.toLowerCase().includes("timed out")) {
