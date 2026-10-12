@@ -137,12 +137,17 @@ func desktopFramePolicySnapshot(recipient string, state map[string]any) ([]byte,
 }
 
 // Native-to-daemon fixtures bypass write(), whose outbound request policy must
-// remain narrower than the inbound native snapshot policy.
-func desktopFramePolicyWriteSnapshot(c *desktopConn, body []byte) error {
+// remain narrower than the inbound native snapshot policy. Keep the fixture's
+// transfer deadline, but let the client's own operation budget govern decoding:
+// race instrumentation must not turn CPU-only projection into a server timeout.
+// Fixture cleanup still closes and joins the connection after the client ends.
+func desktopFixtureWriteSnapshot(c *desktopConn, body []byte) error {
 	var header [4]byte
 	binary.LittleEndian.PutUint32(header[:], uint32(len(body)))
-	_, err := io.Copy(c, io.MultiReader(bytes.NewReader(header[:]), bytes.NewReader(body)))
-	return err
+	if _, err := io.Copy(c, io.MultiReader(bytes.NewReader(header[:]), bytes.NewReader(body))); err != nil {
+		return err
+	}
+	return c.SetReadDeadline(time.Time{})
 }
 
 func desktopFramePolicyState() map[string]any {
@@ -162,7 +167,7 @@ func TestDesktopFrameLargeObserverSnapshot(t *testing.T) {
 		if err := desktopOwnerSubscribe(c); err != nil {
 			return err
 		}
-		if err := desktopFramePolicyWriteSnapshot(c, body); err != nil {
+		if err := desktopFixtureWriteSnapshot(c, body); err != nil {
 			return err
 		}
 		if err := desktopExpectFollow(c, false); err != nil {
@@ -170,10 +175,8 @@ func TestDesktopFrameLargeObserverSnapshot(t *testing.T) {
 		}
 		return desktopExpectClosed(c)
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), desktopTestTimeout)
-	defer cancel()
 	var observations []protocol.DesktopObservation
-	err = NewDesktopObserver(path).Snapshot(ctx, []string{"session"}, func(id string, observation protocol.DesktopObservation) {
+	err = NewDesktopObserver(path).Snapshot(t.Context(), []string{"session"}, func(id string, observation protocol.DesktopObservation) {
 		if id != "session" {
 			t.Errorf("snapshot attached to wrong session: %q", id)
 		}
@@ -216,14 +219,12 @@ func TestDesktopFrameLargeSendReadinessSnapshot(t *testing.T) {
 		if follow.Type != "broadcast" || follow.Method != desktopFollowingChanged {
 			return errors.New("unexpected send readiness snapshot subscription")
 		}
-		if err := desktopFramePolicyWriteSnapshot(c, body); err != nil {
+		if err := desktopFixtureWriteSnapshot(c, body); err != nil {
 			return err
 		}
 		return controlExpectClosed(c)
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), desktopTestTimeout)
-	defer cancel()
-	if err := NewDesktopController(path).CheckSendReadiness(ctx, "session"); err != nil {
+	if err := NewDesktopController(path).CheckSendReadiness(t.Context(), "session"); err != nil {
 		t.Fatalf("large send readiness snapshot unavailable: %v", err)
 	}
 }
