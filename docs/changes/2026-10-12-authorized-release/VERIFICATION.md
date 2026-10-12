@@ -82,7 +82,25 @@ Controller `leaderMode=model`、`leaderModel=gpt-6.1-sol`。用本人 allowlist 
 - 修后同一 fixture 连续 75.00 秒、38 次读取、同 generation PASS；测试结束仅正常 reader-stopped。不是长期压力保证。
 - 768 个合法控制帧后历史仍可读；13类未知/畸形消息穿插合法控制帧仍在第129帧拒绝。内外 discovery requestId 不同，验证精确外层绑定。
 - 实现者 `go test ./...`、race、vet 通过；主控独立 `go test -race ./pkg/codex ./pkg/client` 为32.376s/21.990s，`go vet ./...`、Web400项和diffcheck通过。另一协作者只读评审无阻塞项，定向非live回归0.791s通过。
-- 此处仅为源码修复和开发期 live 证据；正式 Daemon 更新及 HTTP/浏览器复测仍待随后执行。
+- 产品修复提交的 GitHub run [38268716818](https://github.com/TaoSama/wechat-super-leader-bot/actions/runs/38268716818) 已全部通过（Ubuntu all、macOS unit）。正式发布与复测如下。
+
+## 历史修复正式部署
+
+从干净提交 `ef32a2f1eccc8146343a82046ae921f8c30008d8` 构建 Air 原生产物，产品源码与补丁9ef6647一致，额外提交仅文档。`go version -m` 确认 darwin/arm64、go1.26.4、完整revision、modified=false；候选和稳定路径 SHA256 均为 `7c6adeb00d6d043b1ebe888abd77275cd3790c29f25a31e209b307f88a9f30d9`。一次从daemon子目录提交文档的命令路径错误，未暂存/提交，随后产生的dirty候选未安装；回到项目根提交后重新构建上述干净候选。
+
+15:15:37 UTC 全量审计无未决命令/claim/计划；通知API独立确认1条pending无attempt，Gateway环境开关仍false。正常停原Gateway（15:16:20）、原Controller（15:16:49），均exit0/OOMfalse；15:17:06停后审计的五表摘要与15:05基线完全一致。保留该通知，不删除、领取或改写记录。
+
+只更新Air用户服务，完整保留token、journal、socket、node-id、URL、heartbeat和四个技能根；新PID437、稳定二进制hash匹配。香港没有构建/更换镜像或容器；原Controller于15:17:58恢复，原Gateway于15:19:01恢复。15:18:16数据库五表摘要仍全部一致。PG一直运行，Mini Daemon未重启，Codex App未重启/改连接方式。两节点WSS再次认证在线，三个容器healthy/restarts=0，Gateway自检errors0。
+
+正式验证：
+
+1. 管理HTTP对固定fixture每2秒读取limit=1，39次、92734ms，historyContext/来源/条目恒等；结束后使用首轮旧cursor仍可读取不同的更早条目。首次驱动误写来源常量`desktop-recorded`，被实际`codex-desktop`拒绝；核对协议后修正驱动，未改产品合同。
+2. 真实浏览器在同一historyContext下连续242412ms、97次成功、0失败、来源codex-desktop；条目由22增至24。滚动至旧消息后刷新不拉走位置，新回复出现时保留位置并显示“有新消息·跳到最新”。fixture总条目未超过默认30，不能把本轮手动滚动冒称触发了更早页自动请求；更早页cursor由上一项实测，自动加载保留已有组件回归证据。
+3. 通过Web输入框仅向同一复用fixture发送一次“只回复HISTORY_FIX_OK_20261012”，没有另建Task或向其他会话发消息。命令`cmd_eccd7bb9-e3e7-40e8-b286-e331b887ea65`、turn`01a130b4-d763-79c3-ae08-1640b459f61f`均精确completed，输出`HISTORY_FIX_OK_20261012`；原生read_thread独立核对同turn、8752ms、无工具调用。见 [历史与发送实测截图](history-fix-verified.png)。
+
+当前修复不解除发送资格的30秒重检波动，不代表多天长稳、所有owner或不同物理机接力均通过。
+
+15:23:26 UTC最终全量审计：最后一次Web验收新增1条completed命令，因此21条命令（19completed/2failed）、摘要`3d751606f40ad9c773b01d9942d2b701`；其余四表摘要与15:05基线完全一致。没有未决命令、claim或活动计划；通知保持pending且未领取。归档fixture后，正式状态接口不再列出该会话，两节点仍connected。
 
 ## 结果接力后的全量状态
 
@@ -100,6 +118,10 @@ Controller `leaderMode=model`、`leaderModel=gpt-6.1-sol`。用本人 allowlist 
 
 ## 测试资源与剩余门槛
 
-复用原专用会话 `01a12a91-5777-75e0-8df3-4ee968565997`，未新建 Task。准备回合 `01a13079-6d79-7541-ad9e-3aedf61916bd` 精确 completed，输出 `READY_RELEASE_F6B2B5D_20261012`；这只是原宿主准备，不是新版 Controller 验收。浏览器复用空间 47。二者将在本轮验收后清理/归档。
+复用原专用会话 `01a12a91-5777-75e0-8df3-4ee968565997`，未新建Task；两步接力与最后Web测试均终态后已归档，保留历史供下次复用。浏览器复用空间47，最终退出登录后`/auth/session`返回401、URL无hash/query、local/session storage均0；`finish({keep:[]})`确认空间关闭。未遗留测试登录或后台live测试进程。
+
+本轮临时目录`/tmp/super-leader-release.BQsC2s`及未安装的dirty测试二进制`daemon/bin/super-leader-daemon-history-fix-darwin-arm64`已通过系统trash移至废纸篓，原路径不存在，可恢复；目录不含落盘秘密。正式ef32a2f候选、安装服务、数据库、token、journal与证据截图保留。两位协作者已结束，无新增Agent。浏览器提示Ego Lite有更新，本轮未升级。
+
+Task目录另一路核对：主Task已归属正确项目，但cwd仍ordinary。此前5个归档目标的第一个移动接口返回`The task is not available in the sidebar.`，未继续尝试其余目标、未解归档、未改数据库；项目归属1/6与cwd迁移0/6分别记录，不能混为完成。
 
 真实微信入站/内置浏览器、Mini owner 控制、公司机器边界、Linux 用户服务、真实 CLI 精确完成、持续动态自治及长稳仍需独立证据。不会删除状态绕过 uncertain；写入新合同后需同合同修复版本，不能盲目降级旧 Controller/Daemon。

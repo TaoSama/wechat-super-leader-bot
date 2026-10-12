@@ -38,7 +38,7 @@ node local.mjs --sessions --controller https://leader.taoai.site
 
 部署、原生服务及人工微信验收见 [香港运维说明](docs/runbook/hong-kong.md)。已迁移到香港的实例不要再执行本地 `--up` 启动第二个编排权威。
 
-2026-10-12 发布状态：香港 Controller/Web、Air 与新注册的 Mini Daemon 已部署 `f6b2b5d` 产品源码；Mini 只读，不开放发送。Air 原桌面 owner 路由已完成真实模型两步结果接力、精确 turn/输出回查与重复确认不重发。GitHub 已推送，Ubuntu 完整整链与 macOS CI 均通过。部署前已打开的 Web 页面需要刷新以加载同版数据合同。多会话订阅仍使用 16 条独立连接共享两个帧处理槽；30 秒窗口重连会短暂重新检查，超过 32 MiB 的会话仍明确不可用。未改 App transport 或重启 App；历史持续读取发现的广播累计问题正在修复，不将单次成功视为长稳保障。最新证据见 [正式发布与验收记录](docs/changes/2026-10-12-authorized-release/VERIFICATION.md)。微信真实入站与内置浏览器体验仍待用户确认。
+2026-10-12 发布状态：香港 Controller/Web 与新注册的 Mini Daemon 为 `f6b2b5d`；Air 已更新到历史连接修复产物 `ef32a2f`（产品补丁 `9ef6647`）。Mini 只读，不开放发送。Air 原桌面 owner 路由已完成真实模型两步结果接力、精确 turn/输出回查与重复确认不重发；修复后正式浏览器连续242秒/97次读取、旧消息位置保留及直接发送均通过。GitHub已推送，修复提交的Ubuntu整链与macOS CI均通过。部署前已打开的Web页面需要刷新以加载同版数据合同。多会话订阅仍使用16条独立连接共享两个帧处理槽；30秒窗口重连会短暂重新检查，超过32 MiB的会话仍明确不可用。未改App transport或重启App；短时连续读取不等于长期负载保障。最新证据见 [正式发布与验收记录](docs/changes/2026-10-12-authorized-release/VERIFICATION.md)。微信真实入站与内置浏览器体验仍待用户确认。
 
 ## Web 会话工作台
 
