@@ -109,6 +109,8 @@ Web：`http://127.0.0.1:8790`。前端无手输 token 入口；本机若需签�
 
 例如：“看看 demoair 上这个会话的进度”“让这个会话只回复测试字符串”。发送任务先生成准确目标和内容的计划；回复“确认执行”才发送，待确认阶段说“取消计划”不会派发。`accepted` 只表示受理；必须跟踪关联 `turnId` 的终态和输出才算测试成功。
 
+自然语言明确查询具体会话输出时，`read_session` 复用 Web 的原来源历史通道，不再创建持久读取命令，也不会仅返回文件元数据。返回最近最多 8 条已记录内容，每条正文最多 1000 Unicode 码点且 JSON 编码最多 3000 字符，总结果 JSON 最多 11000 字符；超限优先保留较新记录，并注明来源、获取时间、更早内容及裁剪。它不是完整历史、未记录的实时输出或本次任务完成证明；只问正在运行的任务列表时不读正文。终端必须已显式配置并报告 `historySource=terminal-transcript`，否则说明不可读，不改读终端屏幕。设计及验收门槛见 [自然语言历史查询](docs/changes/2026-10-12-leader-session-history/TECH.md)；正式发布状态以该目录验收记录为准。
+
 已支持最多四步的持久依赖计划，例如“先让这个会话检查测试，完成后再让另一个会话检查文档”。预览冻结每步的目标、内容、技能版本和依赖，10 分钟内确认后最多自动推进 24 小时；只有精确完成回执才解锁后继，同一会话还要等待空闲资格。可说“计划到哪了”查询，或“停止后续任务”取消；取消不终止原会话已运行的任务，已领取项可能已发送。结果不明时不重发；重启后查原回执，不另起后端。后续内容不会自动吸收前项输出，需动态决定时应查询结果后另提计划。已随远端镜像部署；原子确认、取消、真实临时 PG 和 HTTP/WS 开发期验收见 [持久计划验证](docs/changes/2026-10-12-persistent-plans/VERIFICATION.md)，真实微信计划仍待验收。
 
 已部署已确认计划的结果传递，并完成同一真实 节点 A 会话的两步模型接力与原生回执交叉核对；不同物理机接力仍待验收。例如“让 节点 A 的这个会话检查问题，再把它的结果交给另一个会话复核”：预览须明确后继的结果来源，确认后才将同计划所选前驱的精确完成回执作为资料附在原任务后；普通依赖默认不共享输出。每来源最多 1000 Unicode 码点且 JSON 编码含转义最多 3000 字符，裁剪、来源命令/turn、全文记录 SHA256 与实际请求文本一并持久保存。已记录输出为空会明确标示，缺失输出则停止，不冒充空结果；重启不重新采样或重发已领取步骤。Web 计划和微信状态查询显示来源、冻结与裁剪状态，不把冻结当作送达，也不在计划摘要中展示结果正文；认证命令详情仍如实显示已记录的实际请求（含附件），记录不证明已发送。只支持精确完成的原生会话步骤，终端 `input-written` 不参与；仍不动态改写任务、增加目标或重规划。详细边界见 [结果传递合同](docs/changes/2026-10-12-plan-result-handoff/TECH.md) 与 [正式验收记录](docs/changes/2026-10-12-authorized-release/VERIFICATION.md)。
@@ -144,7 +146,7 @@ node verify.mjs --list              # 只列计划，不运行检查
 
 仓库 `.github/workflows/verify.yml`：Ubuntu 运行完整验证，macOS 运行不依赖 Docker 的单测与构建，CI 使用 Node 24。当前本机实际为 Node 26；GitHub run [38262955582](https://github.com/TaoSama/wechat-super-leader-bot/actions/runs/38262955582) 已通过 Ubuntu 16 checks / macOS 13 checks。前两次失败及修复保留在 [发布证据](docs/changes/2026-10-12-authorized-release/VERIFICATION.md)。实现、命令和交付边界见 [可复现验证](docs/changes/2026-10-12-reproducible-verification/TECH.md)。
 
-已有终端 Agent 支持显式只读观测：Daemon 配置 `--terminal-sock <已有绝对路径>` 与可重复 `--terminal-pane <明确wN:pN>` 后，每 15 秒独立刷新状态；Web 标注终端来源，状态超过 45 秒失效，默认不读取聊天历史、不开放发送。微信可明确询问该会话的最新输出，获得有裁剪提示的有限终端快照；不等于完整历史或精确任务回执。`--probe` 可无 token 检查该来源，不写 journal，不启动终端宿主。当前只接受已核对的 protocol 22，默认关闭，macOS/Linux 用户服务可保存相同参数。观测代码已随构建产物部署，但未配置真实终端目标、未启用观测，见 [终端观测设计与边界](docs/changes/2026-10-12-terminal-observation/TECH.md)。
+已有终端 Agent 支持显式只读观测：Daemon 配置 `--terminal-sock <已有绝对路径>` 与可重复 `--terminal-pane <明确wN:pN>` 后，每 15 秒独立刷新状态；Web 标注终端来源，状态超过 45 秒失效，默认不读取聊天历史、不开放发送。显式管理诊断命令仍可读取有裁剪提示的有限终端快照；模型的 `read_session` 改用下述显式启用的已记录历史，不暗中改读屏幕，也不作为精确任务回执。`--probe` 可无 token 检查该来源，不写 journal，不启动终端宿主。当前只接受已核对的 protocol 22，默认关闭，macOS/Linux 用户服务可保存相同参数。观测代码已随构建产物部署，但未配置真实终端目标、未启用观测，见 [终端观测设计与边界](docs/changes/2026-10-12-terminal-observation/TECH.md)。
 
 原 CLI 历史读取代码已随候选部署，**未启用或配置真实记录目录**。除已有 socket 和明确 pane 外，须逐个提供方显式增加 `--terminal-history-root codex=/absolute/sessions`、`--terminal-history-root claude=/absolute/projects` 或 `--terminal-history-root grok=/absolute/sessions`；路径指向记录目录本身，每提供方最多一个。不会从 home、环境变量或只授权元数据发现的 `--codex-home` 推导正文权限。仅可信会话 ID 绑定可用，配置目录不等于保证文件存在。
 

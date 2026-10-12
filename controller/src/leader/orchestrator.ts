@@ -11,6 +11,7 @@ import { createExecution, hasTerminalTarget, matchesExecutionCommand, validatePl
 import { assertTerminalSingleStep, submitTerminalPlan, TERMINAL_INPUT_WARNING } from "./terminal-plan.js";
 import { ExecutionScheduler } from "./execution-scheduler.js";
 import { executionSummary } from "./execution-presentation.js";
+import { readSessionHistory } from "./session-history.js";
 import {
   CLAIM_TTL_MS, ConsoleLinkIssued, ConsoleLinkIssuer, LEADER_TOOLS, LeaderData, LeaderDataSchema, LeaderReply, MAX_HISTORY_ITEMS,
   MAX_MODEL_STEPS, MAX_RECEIPTS, MAX_REPLY_CHARS, MAX_RESULT_CODE_POINTS, MAX_RESULT_JSON_CHARS, MAX_TOOL_CALLS, PLAN_TTL_MS, Plan,
@@ -24,7 +25,7 @@ const clip = (text: string, length: number) => {
 };
 const confirmation = /^(?:确认执行|按这个计划执行|就按这个执行|确认这个计划)[。！!]?$/;
 const cancellation = /^(?:请|帮我)?(?:取消计划|不用执行|取消执行|停止后续任务|停止后续执行|先别跑后面的任务)[。！!]?$/;
-type Hub = Pick<NodeHub, "getAllSessions" | "getNodeStatusList" | "getNodeSession" | "isNodeConnected" | "getAllSkills" | "getNodeSkills">;
+type Hub = Pick<NodeHub, "getAllSessions" | "getNodeStatusList" | "getNodeSession" | "isNodeConnected" | "getAllSkills" | "getNodeSkills" | "readHistory">;
 
 export type { ConsoleLinkIssued, ConsoleLinkIssuer };
 
@@ -116,7 +117,7 @@ export class LeaderOrchestrator {
       const reference = hash([chatId, messageId]).slice(0, 12);
       const trace: QueryTrace = { modelSteps: 0, toolCalls: 0, totalModelMs: 0 };
       try {
-        reply = await this.reason(chatId, messageId, text, data, linkContext, trace, previousPlan);
+        reply = await this.reason(chatId, text, data, linkContext, trace, previousPlan);
       } catch (error) {
         if (error instanceof ConflictError) throw error;
         console.warn('Leader processing failed; no plan dispatched', {
@@ -190,7 +191,7 @@ export class LeaderOrchestrator {
     return { text: executionSummary(view), commandId: commandIds.at(-1) };
   }
 
-  private async reason(chatId: string, messageId: string, text: string, data: LeaderData, linkContext: LinkContext, trace: QueryTrace, previousPlan?: Plan): Promise<LeaderReply> {
+  private async reason(chatId: string, text: string, data: LeaderData, linkContext: LinkContext, trace: QueryTrace, previousPlan?: Plan): Promise<LeaderReply> {
     const signal = AbortSignal.timeout(TURN_TIMEOUT_MS);
     const sanitizedUserPrompt = sanitizeConsoleLinkSecrets(text);
     const messages: ModelMessage[] = [
@@ -224,7 +225,7 @@ export class LeaderOrchestrator {
         toolCount++;
         trace.toolCalls = toolCount;
         trace.lastTool = Object.hasOwn(ToolArguments, call.function.name) ? call.function.name : "unsupported";
-        const output = await this.callTool(call, chatId, data, hash([chatId, messageId, step, toolCount]), memoryChanges, linkContext);
+        const output = await this.callTool(call, chatId, data, memoryChanges, linkContext, signal);
         signal.throwIfAborted();
         if (data.pending) return { text: this.attachConsoleLink(this.preview(data.pending), linkContext) };
         const content = JSON.stringify(output);
@@ -241,7 +242,7 @@ export class LeaderOrchestrator {
     return `${content.trim()}${notice}`;
   }
 
-  private async callTool(call: ModelToolCall, chatId: string, data: LeaderData, operationId: string, memoryChanges: string[], linkContext: LinkContext): Promise<unknown> {
+  private async callTool(call: ModelToolCall, chatId: string, data: LeaderData, memoryChanges: string[], linkContext: LinkContext, signal: AbortSignal): Promise<unknown> {
     const name = call.function.name;
     if (!Object.hasOwn(ToolArguments, name)) return { error: "Unsupported tool" };
     let raw: unknown;
@@ -319,14 +320,7 @@ export class LeaderOrchestrator {
       }
       case "read_session": {
         const args = ToolArguments.read_session.parse(raw);
-        try {
-          const result = await this.commands.submit({ ...args, action: "read", requestId: `read_${operationId}` }, 2000);
-          data.commandIds.push(result.commandId);
-          return result;
-        } catch (error) {
-          if (error instanceof CommandError) return { error: error.message };
-          throw error;
-        }
+        return readSessionHistory(this.hub, args, signal);
       }
       case "get_command": {
         const { commandId, planId } = ToolArguments.get_command.parse(raw);

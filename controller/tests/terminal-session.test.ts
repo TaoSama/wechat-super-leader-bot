@@ -40,9 +40,12 @@ describe("terminal observation boundary", () => {
     expect(ToolArguments.read_session.safeParse({ nodeId: "fixture", sessionId: session.id }).success).toBe(true);
     expect(PostCommandRequestSchema.safeParse({ nodeId: "fixture", sessionId: session.id, action: "read", requestId: "fixture" }).success).toBe(true);
   });
-  it("gives the model accurate source and snapshot limits", () => {
+  it("gives the model accurate source and recorded-history limits", () => {
     for (const name of ["list_sessions", "read_session"]) {
-      expect(LEADER_TOOLS.find(tool => tool.function.name === name)?.function.description).toContain("不是完整对话历史");
+      const description = LEADER_TOOLS.find(tool => tool.function.name === name)?.function.description;
+      expect(description).toContain("historySource=terminal-transcript");
+      expect(description).toContain("不是终端屏幕快照或完整对话");
+      expect(description).toContain("不回退其他通道");
     }
     expect(SYSTEM_PROMPT).toContain("idle/done不是精确任务完成证据");
   });

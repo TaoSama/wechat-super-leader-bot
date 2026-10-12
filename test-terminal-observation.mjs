@@ -12,7 +12,7 @@ import { stopTestProcess, withTestCleanup } from './scripts/test-cleanup.mjs';
 export const TERMINAL_NODE = 'terminal-fixture-node';
 const PANE_ID = 'w1:p1';
 const OUTPUT = 'SYNTHETIC_TERMINAL_SNAPSHOT';
-const READ_PREFIX = '读取测试终端快照 ';
+const READ_PREFIX = '读取测试终端记录 ';
 const FRAME_LIMIT = 1024 * 1024;
 
 export function terminalModelCall(text) {
@@ -134,12 +134,20 @@ export async function verifyTerminalObservation({ base, request, nodeToken, wait
     assert(listed.body.text.includes('"statusSource":"terminal"'));
     assert(listed.body.text.includes('"executionStatus":"active"'));
     assert(!methods.includes('pane.read'), 'List tool must not read terminal content');
+    const commandsBeforeRead = (await request('/v1/status')).body.commands.length;
     const read = await message(READ_PREFIX + session.id);
     assert.equal(read.status, 200, JSON.stringify(read.body));
-    assert(read.body.text.includes(OUTPUT), JSON.stringify(read.body));
-    assert(read.body.text.includes('终端快照'));
-    assert(read.body.text.includes('裁剪'));
-    assert(!read.body.text.includes('turnId'), 'Snapshot must not invent a native turn');
+    assert(read.body.text.includes('history_unavailable'), JSON.stringify(read.body));
+    assert(!read.body.text.includes(OUTPUT));
+    assert(!methods.includes('pane.read'), 'History tool must not fall back to terminal screen');
+    assert.equal((await request('/v1/status')).body.commands.length, commandsBeforeRead);
+    // Explicit diagnostic commands still expose labeled pane snapshots, not history.
+    const snapshot = await request('/v1/commands', { nodeId: TERMINAL_NODE, sessionId: session.id,
+      action: 'read', requestId: randomUUID() });
+    assert.equal(snapshot.status, 200, JSON.stringify(snapshot.body));
+    assert(snapshot.body.output.includes(OUTPUT));
+    assert(snapshot.body.output.includes('终端快照') && snapshot.body.output.includes('裁剪'));
+    assert.equal(snapshot.body.turnId, undefined, 'Snapshot must not invent a native turn');
     const target = `/v1/sessions/${TERMINAL_NODE}/${encodeURIComponent(session.id)}`;
     const history = await request(target + '/history');
     assert.equal(history.status, 502, JSON.stringify(history.body));
@@ -163,7 +171,7 @@ export async function verifyTerminalObservation({ base, request, nodeToken, wait
     assert.equal((await status()).id, session.id, 'Lifecycle transition changed identity');
     assert(methods.every(method => ['ping', 'agent.get', 'pane.read'].includes(method)));
     healthy();
-    console.log('PASS real Go terminal observer → PostgreSQL Controller → Leader list/read tools; explicit snapshot, source failure/recovery, no history/send/native turn; default disabled probe');
+    console.log('PASS real Go terminal observer → PostgreSQL Controller → Leader list/history-unavailable with zero commands or pane reads; explicit diagnostic snapshot, source failure/recovery, no history/send/native turn; default disabled probe');
   }, [
     { label: 'terminal fixture daemon', cleanup: () => stopTestProcess(daemon) },
     { label: 'terminal fixture socket', cleanup: async () => {
