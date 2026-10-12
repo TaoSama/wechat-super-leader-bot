@@ -230,11 +230,15 @@ func TestDesktopSnapshotUnsubscribesAndDeduplicates(t *testing.T) {
 	const framedHistorySize = 10 * 1024 * 1024
 	state["turnHistory"] = strings.Repeat("x", framedHistorySize)
 	envelope := desktopStateEnvelope(t, change)
+	body, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
 	path := desktopFixture(t, func(c *desktopConn) error {
 		if err := desktopOwnerSubscribe(c); err != nil {
 			return err
 		}
-		if err := c.write(envelope); err != nil {
+		if err := desktopFixtureWriteSnapshot(c, body); err != nil {
 			return err
 		}
 		if err := desktopExpectFollow(c, false); err != nil {
@@ -243,7 +247,7 @@ func TestDesktopSnapshotUnsubscribesAndDeduplicates(t *testing.T) {
 		return desktopExpectClosed(c)
 	})
 	var observations []protocol.DesktopObservation
-	if err := NewDesktopObserver(path).Snapshot(context.Background(), []string{"session", "session"}, func(_ string, o protocol.DesktopObservation) { observations = append(observations, o) }); err != nil {
+	if err := NewDesktopObserver(path).Snapshot(t.Context(), []string{"session", "session"}, func(_ string, o protocol.DesktopObservation) { observations = append(observations, o) }); err != nil {
 		t.Fatal(err)
 	}
 	if len(observations) != 1 || observations[0].Status != "idle" || observations[0].Model != "desktop-model" ||

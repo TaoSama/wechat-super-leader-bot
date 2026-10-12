@@ -466,8 +466,10 @@ test("CLI parseGatewayCli mode mutual exclusivity and env handling", () => {
   assert.equal(optsRunFromEnv.run, true);
 });
 
-test("Health tracker and checkGatewayHealth lifecycle and error sanitization", () => {
+test("Health tracker and checkGatewayHealth lifecycle and error sanitization", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-01-01T00:00:00Z") });
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-health-test-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
   const healthPath = path.join(tmpDir, "health.json");
 
   // Health check fails when file doesn't exist
@@ -502,18 +504,21 @@ test("Health tracker and checkGatewayHealth lifecycle and error sanitization", (
   assert.equal(resHealthy.status, "healthy");
   assert.equal(resHealthy.consecutiveErrors, 0);
 
-  // Stale poll detection
+  // The exact age boundary is healthy; stale detection starts after it.
+  const resAtBoundary = checkGatewayHealth(healthPath, 0);
+  assert.equal(resAtBoundary.ok, true);
+  assert.equal(resAtBoundary.ageMs, 0);
+  t.mock.timers.tick(1);
   const resStale = checkGatewayHealth(healthPath, 0);
   assert.equal(resStale.ok, false);
   assert.equal(resStale.reason, "PollStale");
+  assert.equal(resStale.ageMs, 1);
 
   // Stopped process
   tracker.recordStop();
   const resStopped = checkGatewayHealth(healthPath, 120000);
   assert.equal(resStopped.ok, false);
   assert.equal(resStopped.reason, "GatewayStopped");
-
-  fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 test("CLI --healthcheck runs independently without requiring credentials", async () => {
