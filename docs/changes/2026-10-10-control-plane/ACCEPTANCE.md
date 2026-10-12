@@ -1,5 +1,7 @@
 # 完整目标验收清单
 
+2026-10-13最新现场：通知升级后复用专用 节点 A 原会话，以服务端模拟入站完成一个新目标：1次派发、2次决策，精确输出 `WECHAT_GOAL_NOTICE_OK`，HTTP/PG/App 三路一致。正式 Gateway 自然领取新通知并尝试发送，回执 `uncertain`，日志分类 `ILinkSendMessageError`；未重发、未手工 claim，旧业务摘要及旧 uncertain attempt 不变。当前共24命令（22 completed/2 failed）、42消息、2 completed目标，无未决授权；fixture已归档。详见 [通知现场验收](../2026-10-13-goal-notifications/LIVE.md)。这证明生成与单次投递链路，**不证明微信接口受理或手机收取**；以下数字保留为此前阶段证据。
+
 2026-10-13后续通知增量：远端 Controller/Web 和 Gateway 均为 `0230727`，节点 A/节点 B 不变。持续目标通知已实现、合成整链通过并启用；源合同迁移保留旧 uncertain attempt、旧目标不补发。双平台 CI 全通过。发布脚本在 Gateway healthy 后因配置比较保护退出，独立只读配置/健康/业务摘要核验通过，确切旧配置差异原因仍未证实；没有回退或重发。详见 [通知发布与边界](../2026-10-13-goal-notifications/VERIFICATION.md)。真实手机目标通知收取仍未验证，完整目标未完成。
 
 2026-10-13最新增量：远端 Controller/Web 与 节点 A Daemon 为 `08e260a`，Gateway `3a750e7`、节点 B `ef32a2f`。紧凑筛选、显式分页历史、两个 节点 A 长会话及真实微信登录链接兑换见 [历史发布](../2026-10-13-history-source/VERIFICATION.md)。持续目标在同一 节点 A 原会话完成一次确认、两次真实动作和三次模型判断，动态 SUN→DAY、精确 turn/输入/结果摘要三路一致，见 [真实目标验收](../2026-10-13-live-goal/VERIFICATION.md)；入站是服务端模拟，不是手机控制。最新审计 23 命令（21 completed/2 failed）、无未决、1 completed 固定计划、1 completed 目标、原唯一 uncertain 通知同 attempt 未重发。节点 B 原 owner 状态/历史/资格已通过，真实发送未验收。下面10-12的版本、数量与运行身份保留为历史基线，不覆盖这些增量。
@@ -26,7 +28,7 @@ TypeScript Controller 是唯一控制权威，使用 PostgreSQL；TypeScript 微
 
 | 用户要求 | 当前证据 | 未达到的门槛 |
 | --- | --- | --- |
-| GitHub 公开仓库（用户后续改为公开） | 当前仍 private / main；源码已推送，产品 `08e260a` 双平台 CI 通过 | 旧验收截图含其他会话标题及预览，等待用户选择清理历史后公开或明确允许保留。未擅自公开或改写 Git 历史 |
+| GitHub 公开仓库（用户后续改为公开） | 当前仍 private / main；源码已推送，产品 `0230727` 双平台 CI 通过 | 已定位4张旧验收截图，含其他会话标题、预览及路径，仍在HEAD与可达历史中；等待用户选择清理历史后公开或明确允许保留。仅删除当前版本不足以清除历史；未擅自公开或改写 Git 历史，见 [风险路径](../2026-10-13-goal-notifications/LIVE.md) |
 | 本地项目与 Task 目录 | 源码已迁至 `~/Workspaces/wechat-super-leader-bot`，原生服务和复用验收会话 cwd 正确；主任务已归属该项目 | 项目归属 1/6、原有 cwd 迁移 0/6。首个已归档测试 Task 的移动接口返回 `The task is not available in the sidebar.`，未继续更改其余目标、未解归档或写 DB；归属不等于 cwd |
 | 微信扫码与接入 | 本人允许名单与远端独立 Gateway 已启用；用户真实索取控制台链接的入站、准确回复及兑换已核实，见 [本轮记录](../2026-10-13-history-source/VERIFICATION.md) | 链接成功不能替代真实手机会话派发、目标确认、记忆及通知验收；健康检查不等于全部能力可用 |
 | 微信自然语言指挥 | leaderMode=model、gpt-6.1-sol；真实微信索取登录链接及兑换已核实；服务端模拟预览/确认驱动 节点 A 两轮真实动态目标通过 | 两轮目标的入站是直接调用 Controller，不冒称手机消息；早期主动发送未确认且未重发；微信内置浏览器及真实手机目标控制待验收 |
