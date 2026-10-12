@@ -17,6 +17,7 @@ type desktopHistoryStream struct {
 	owner, requestID, method string
 	deadline                 time.Time
 	noise                    int
+	noiseKinds               desktopHistoryNoise
 	operationTimeout         time.Duration
 	subscribed               bool
 }
@@ -26,6 +27,7 @@ func (r *DesktopHistoryReader) run(entry *desktopHistoryEntry) {
 	defer func() {
 		entry.mu.Lock()
 		if entry.err == nil {
+			entry.logFailureLocked(historyFailureStopped)
 			entry.err = historyError(protocol.HistoryContextExpired)
 		}
 		entry.raw = nil
@@ -38,12 +40,12 @@ func (r *DesktopHistoryReader) run(entry *desktopHistoryEntry) {
 	}()
 	connection, cleanup, err := connectDesktopClient(entry.ctx, r.socketPath, desktopHistoryClient)
 	if err != nil {
-		entry.fail(protocol.HistoryUnavailable)
+		entry.failReason(protocol.HistoryUnavailable, historyFailureInitialize)
 		return
 	}
 	if err := connection.SetReadDeadline(time.Time{}); err != nil {
 		cleanup()
-		entry.fail(protocol.HistoryFailed)
+		entry.failReason(protocol.HistoryFailed, historyFailureTransport)
 		return
 	}
 	events, readerDone := make(chan desktopReadResult, 1), make(chan struct{})
@@ -54,7 +56,7 @@ func (r *DesktopHistoryReader) run(entry *desktopHistoryEntry) {
 		if stream.owner != "" {
 			if err := connection.SetWriteDeadline(time.Now().Add(desktopUnsubscribeTimeout)); err != nil {
 				if entry.ctx.Err() == nil {
-					log.Printf("desktop history unsubscribe deadline failed: %v", err)
+					log.Printf("desktop history unsubscribe deadline failed")
 				}
 			} else if err := connection.follow(stream.owner, entry.sessionID, false); err != nil && entry.ctx.Err() == nil {
 				log.Printf("desktop history unsubscribe failed")
@@ -65,7 +67,7 @@ func (r *DesktopHistoryReader) run(entry *desktopHistoryEntry) {
 		<-readerDone
 	}()
 	if err := stream.request(desktopDiscoverOwner, 1, ""); err != nil {
-		entry.fail(protocol.HistoryUnavailable)
+		entry.failReason(protocol.HistoryUnavailable, historyFailureRequestWrite)
 		return
 	}
 	tickDuration := min(desktopDiscoveryTick, r.idleTTL)
@@ -83,32 +85,33 @@ func (r *DesktopHistoryReader) run(entry *desktopHistoryEntry) {
 			idle := entry.active == 0 && time.Since(entry.lastUsed) >= r.idleTTL
 			entry.mu.Unlock()
 			if idle {
+				entry.failReason(protocol.HistoryContextExpired, historyFailureIdle)
 				return
 			}
 			if !stream.deadline.IsZero() && !time.Now().Before(stream.deadline) {
-				entry.fail(protocol.HistoryTimeout)
+				entry.failReason(protocol.HistoryTimeout, historyFailureDeadline)
 				return
 			}
 		case <-entry.wake:
 			if err := stream.maybeLoad(); err != nil {
-				entry.fail(err.Error())
+				entry.failReason(err.Error(), historyFailureRequestWrite)
 				return
 			}
 		case event := <-events:
 			if event.err != nil {
 				if errors.Is(event.err, errDesktopFrameTooLarge) {
-					entry.fail(protocol.HistoryTooLarge)
+					entry.failReason(protocol.HistoryTooLarge, historyFailureFrameLimit)
 				} else {
-					entry.fail(protocol.HistoryUnavailable)
+					entry.failReason(protocol.HistoryUnavailable, historyFailureTransport)
 				}
 				return
 			}
 			if err := stream.handle(event.message); err != nil {
-				entry.fail(err.Error())
+				entry.failReason(err.Error(), historyFailureReasonOf(err))
 				return
 			}
 			if err := stream.maybeLoad(); err != nil {
-				entry.fail(err.Error())
+				entry.failReason(err.Error(), historyFailureRequestWrite)
 				return
 			}
 		}
@@ -128,16 +131,6 @@ func readDesktopHistoryEvents(ctx context.Context, c *desktopConn, events chan<-
 			return
 		}
 	}
-}
-
-func (entry *desktopHistoryEntry) fail(message string) {
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	if entry.delivered {
-		message = protocol.HistoryContextExpired
-	}
-	entry.err = historyError(message)
-	entry.notifyLocked()
 }
 
 func (stream *desktopHistoryStream) request(method string, version int, target string) error {
@@ -180,25 +173,28 @@ func (stream *desktopHistoryStream) maybeLoad() error {
 }
 
 func (stream *desktopHistoryStream) handle(message desktopEnvelope) error {
+	if handled, err := stream.routerControl(message); handled {
+		return err
+	}
 	if message.Type == "response" && message.RequestID == stream.requestID && stream.requestID != "" {
 		// Responses carry no method version. The exact version is established by
 		// the request; response binding is request ID, method and owner identity.
 		if message.Method != stream.method || !time.Now().Before(stream.deadline) {
-			return historyError(protocol.HistoryFailed)
+			return historyFailure(protocol.HistoryFailed, historyFailureResponse)
 		}
 		if message.ResultType != "success" {
-			return historyError(protocol.HistoryUnavailable)
+			return historyFailure(protocol.HistoryUnavailable, historyFailureResponse)
 		}
 		if stream.owner != "" && message.HandledByClientID != stream.owner {
-			return historyError(protocol.HistoryContextExpired)
+			return historyFailure(protocol.HistoryContextExpired, historyFailureOwner)
 		}
-		stream.noise = 0
+		stream.resetNoise()
 		method := stream.method
 		stream.requestID, stream.method = "", ""
 		switch method {
 		case desktopDiscoverOwner:
 			if !protocol.ValidHistoryIdentity(message.HandledByClientID) || !protocol.ValidTurnID(message.HandledByClientID) || message.HandledByClientID == stream.connection.clientID {
-				return historyError(protocol.HistoryUnavailable)
+				return historyFailure(protocol.HistoryUnavailable, historyFailureOwner)
 			}
 			stream.owner = message.HandledByClientID
 			return stream.request(desktopReadSettings, 1, stream.owner)
@@ -249,26 +245,26 @@ func (stream *desktopHistoryStream) handle(message desktopEnvelope) error {
 			targeted = targeted || target == stream.connection.clientID
 		}
 		if !targeted {
-			return stream.skip()
+			return stream.skip(message)
 		}
 		// Before following, broadcasts cannot establish or invalidate this
 		// subscription. Count them as noise without extending the handshake.
 		if !stream.subscribed {
-			return stream.skip()
+			return stream.skip(message)
 		}
 		if message.SourceClientID != stream.owner || stream.owner == "" {
-			return historyError(protocol.HistoryContextExpired)
+			return historyFailure(protocol.HistoryContextExpired, historyFailureOwner)
 		}
 		if message.Method == desktopFollowingChanged {
 			return stream.following(message)
 		}
 		if message.Version != 11 {
-			return historyError(protocol.HistoryFailed)
+			return historyFailure(protocol.HistoryFailed, historyFailureVersion)
 		}
 		if err := stream.entry.change(message.Params); err != nil {
 			return err
 		}
-		stream.noise = 0
+		stream.resetNoise()
 		stream.entry.mu.Lock()
 		ready := !stream.entry.loadRequested || (stream.entry.loadResponded && stream.entry.revision >= stream.entry.loadRevision)
 		stream.entry.mu.Unlock()
@@ -277,7 +273,7 @@ func (stream *desktopHistoryStream) handle(message desktopEnvelope) error {
 		}
 		return nil
 	}
-	return stream.skip()
+	return stream.skip(message)
 }
 
 func (stream *desktopHistoryStream) following(message desktopEnvelope) error {
@@ -290,16 +286,23 @@ func (stream *desktopHistoryStream) following(message desktopEnvelope) error {
 		return historyError(protocol.HistoryFailed)
 	}
 	if !following {
-		return historyError(protocol.HistoryContextExpired)
+		return historyFailure(protocol.HistoryContextExpired, historyFailureFollowing)
 	}
-	stream.noise = 0
+	stream.resetNoise()
 	return nil
 }
 
-func (stream *desktopHistoryStream) skip() error {
+func (stream *desktopHistoryStream) resetNoise() {
+	stream.noise = 0
+	stream.noiseKinds = desktopHistoryNoise{}
+}
+
+func (stream *desktopHistoryStream) skip(message desktopEnvelope) error {
 	stream.noise++
+	stream.noiseKinds.observe(message)
 	if stream.noise > desktopSkipLimit {
-		return historyError(protocol.HistoryFailed)
+		log.Print(stream.noiseKinds.logLine(stream.requestID != "", stream.subscribed))
+		return historyFailure(protocol.HistoryFailed, historyFailureNoise)
 	}
 	return nil
 }
