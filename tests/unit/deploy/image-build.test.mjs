@@ -1,0 +1,104 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+
+const BASE_IMAGE = 'node:24-bookworm-slim';
+const NATIVE_TOOLCHAIN = `FROM --platform=$BUILDPLATFORM ${BASE_IMAGE} AS toolchain`;
+const controllerDockerfile = readFileSync(new URL('../../../deploy/Dockerfile.controller', import.meta.url), 'utf8');
+const gatewayDockerfile = readFileSync(new URL('../../../deploy/Dockerfile.gateway', import.meta.url), 'utf8');
+
+function stages(source) {
+  const result = [];
+  for (const line of source.replace(/\\\r?\n\s*/g, ' ').split(/\r?\n/)) {
+    const instruction = line.trim();
+    if (!instruction || instruction.startsWith('#')) continue;
+    if (/^FROM\s/i.test(instruction)) result.push([instruction]);
+    else {
+      assert.ok(result.length, 'instruction must follow FROM');
+      result.at(-1).push(instruction);
+    }
+  }
+  return result;
+}
+
+function assertImageContract(source, component) {
+  const parsed = stages(source);
+  const buildNames = component === 'controller' ? ['controller-build', 'web-build'] : ['build'];
+  assert.equal(parsed.length, buildNames.length + 2);
+  assert.equal(parsed[0][0], NATIVE_TOOLCHAIN, 'toolchain must execute on the build architecture');
+  assert.ok(parsed[0].includes('RUN npm install --global pnpm@11.8.0'));
+  for (const [index, name] of buildNames.entries()) {
+    const build = parsed[index + 1];
+    assert.equal(build[0], `FROM toolchain AS ${name}`, 'build stages must inherit the native toolchain');
+    assert.ok(build.includes('RUN pnpm install --frozen-lockfile'));
+    if (name === 'web-build') assert.ok(build.includes('RUN pnpm run build'));
+    else {
+      assert.ok(build.includes('RUN pnpm run build && pnpm prune --prod'));
+      assert.ok(build.includes(`WORKDIR /work/${component}`));
+      assert.ok(build.includes('COPY scripts/clean-build.mjs /work/scripts/clean-build.mjs'));
+    }
+  }
+  const runtime = parsed.at(-1);
+  // An unqualified final FROM uses the requested target platform, not BUILDPLATFORM.
+  assert.equal(runtime[0], `FROM ${BASE_IMAGE}`);
+  assert.ok(!runtime.some(line => /^RUN\s/i.test(line)), 'runtime must not execute emulated target binaries');
+  assert.ok(runtime.includes('USER node'));
+  assert.ok(runtime.includes('WORKDIR /app'));
+  const sourceStage = buildNames[0];
+  const allowedCopies = ['package.json', 'node_modules', 'dist'].map(artifact =>
+    `COPY --from=${sourceStage} --chown=node:node /work/${component}/${artifact} ./${artifact}`);
+  if (component === 'controller') {
+    allowedCopies.push('COPY --from=web-build --chown=node:node /web/dist ./web');
+    assert.ok(runtime.includes('CMD ["node", "dist/index.js"]'));
+  } else {
+    assert.ok(parsed[1].includes('RUN mkdir -p /runtime/etc/super-leader /runtime/var/lib/super-leader-gateway'));
+    for (const directory of ['/etc/super-leader', '/var/lib/super-leader-gateway']) {
+      allowedCopies.push(`COPY --from=build --chown=node:node /runtime${directory} ${directory}`);
+    }
+    assert.ok(runtime.includes('ENTRYPOINT ["node", "dist/index.js"]'));
+    assert.ok(runtime.includes('CMD ["--run"]'));
+  }
+  assert.deepEqual(runtime.filter(line => /^(?:COPY|ADD)\s/i.test(line)), allowedCopies,
+    'only reviewed runtime artifacts may cross architectures');
+}
+
+test('Controller and Gateway compile natively without executing target-platform RUN instructions', () => {
+  assertImageContract(controllerDockerfile, 'controller');
+  assertImageContract(gatewayDockerfile, 'gateway');
+});
+
+test('image contracts reject emulated toolchains, unpruned dependencies and leaked web tooling', () => {
+  for (const [source, component] of [[controllerDockerfile, 'controller'], [gatewayDockerfile, 'gateway']]) {
+    assert.throws(() => assertImageContract(source.replace('--platform=$BUILDPLATFORM ', ''), component));
+    assert.throws(() => assertImageContract(source.replace(`FROM ${BASE_IMAGE}\n`, `FROM ${BASE_IMAGE}\nRUN node --version\n`), component));
+    assert.throws(() => assertImageContract(source.replace(' && pnpm prune --prod', ''), component));
+    assert.throws(() => assertImageContract(source.replace(`FROM ${BASE_IMAGE}\n`, `FROM --platform=$BUILDPLATFORM ${BASE_IMAGE}\n`), component));
+    assert.throws(() => assertImageContract(`${source}\nCOPY --from=toolchain /usr/local/bin/pnpm /usr/local/bin/pnpm\n`, component));
+  }
+  assert.throws(() => assertImageContract(controllerDockerfile.replace('/web/dist ./web', '/web/node_modules ./web'), 'controller'));
+  assert.throws(() => assertImageContract(controllerDockerfile.replace('FROM toolchain AS web-build', `FROM ${BASE_IMAGE} AS web-build`), 'controller'));
+  assert.throws(() => assertImageContract(gatewayDockerfile.replace('--chown=node:node /runtime/etc/super-leader', '/runtime/etc/super-leader'), 'gateway'));
+});
+
+test('cross-architecture runtime dependency roots remain limited to reviewed pure-JavaScript packages', () => {
+  const controller = JSON.parse(readFileSync(new URL('../../../controller/package.json', import.meta.url), 'utf8'));
+  const gateway = JSON.parse(readFileSync(new URL('../../../gateway/package.json', import.meta.url), 'utf8'));
+  assert.deepEqual(controller.dependencies, {
+    dotenv: '^18.0.6', express: '^5.2.1', pg: '^8.23.1', ws: '^8.22.0', zod: '^4.6.5',
+  }, 'new runtime dependencies require a platform-independence review');
+  for (const manifest of [controller, gateway]) {
+    assert.deepEqual(manifest.optionalDependencies ?? {}, {});
+    assert.deepEqual(manifest.peerDependencies ?? {}, {});
+  }
+  assert.deepEqual(gateway.dependencies ?? {}, {});
+  const lock = readFileSync(new URL('../../../controller/pnpm-lock.yaml', import.meta.url), 'utf8');
+  assert.doesNotMatch(lock, /^  (?:pg-native|bufferutil|utf-8-validate)@/m,
+    'optional native peers must not become installed runtime packages');
+});
+
+test('Gateway cannot switch away from the fixed Docker and CI package manager', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../../../gateway/package.json', import.meta.url), 'utf8'));
+  const lock = readFileSync(new URL('../../../gateway/pnpm-lock.yaml', import.meta.url), 'utf8');
+  assert.equal(manifest.devEngines.packageManager.version, '11.8.0');
+  assert.match(lock, /packageManagerDependencies:\s+'@pnpm\/exe':\s+specifier: 11\.8\.0\s+version: 11\.8\.0\s+pnpm:\s+specifier: 11\.8\.0\s+version: 11\.8\.0/);
+});

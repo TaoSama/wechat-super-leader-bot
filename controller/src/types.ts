@@ -1,9 +1,8 @@
 import { z } from "zod";
-import { SkillCatalogSchema, SkillRef, SkillRefsSchema } from "./skills.js";
-import { sanitizeModelMetadata } from "./model-metadata.js";
-import { InputReceiptSchema, TerminalSessionIdSchema, type InputReceipt } from "./input-receipt.js";
-import { isTerminalHistoryTarget, isTerminalSession } from "./terminal-session.js";
-export { InputReceiptSchema, type InputReceipt } from "./input-receipt.js";
+import { SkillCatalogSchema, SkillRef, SkillRefsSchema } from "./skills/catalog.js";
+import { sanitizeModelMetadata } from "./sessions/model-metadata.js";
+import { InputReceiptSchema, TerminalSessionIdSchema, type InputReceipt } from "./sessions/input-receipt.js";
+import { isTerminalHistoryTarget, isTerminalSession } from "./sessions/terminal.js";
 
 export const ActionTypeSchema = z.enum(["read", "send"]);
 export type ActionType = z.infer<typeof ActionTypeSchema>;

@@ -45,4 +45,4 @@ jobs:
           pnpm --dir gateway install --frozen-lockfile
           pnpm --dir web install --frozen-lockfile
       - name: Verify with synthetic fixtures
-        run: node verify.mjs --suite ${{ matrix.suite }}
+        run: node scripts/verify.mjs --suite ${{ matrix.suite }}

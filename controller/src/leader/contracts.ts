@@ -1,8 +1,8 @@
 import { z } from "zod";
-import type { ModelTool } from "./model.js";
-import { MAX_SELECTED_SKILLS, SkillRefsSchema } from "../skills.js";
+import type { ModelTool } from "./model/contracts.js";
+import { MAX_SELECTED_SKILLS, SkillRefsSchema } from "../skills/catalog.js";
 import { SendRouteSchema } from "../types.js";
-import { GoalProposalSchema, GoalTargetSchema } from "./goal.js";
+import { GoalProposalSchema, GoalTargetSchema } from "./goals/goal.js";
 
 export const MAX_MODEL_STEPS = 6;
 export const MAX_TOOL_CALLS = 12;

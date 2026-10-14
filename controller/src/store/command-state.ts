@@ -1,5 +1,5 @@
 import { CommandRecord, isValidTurnId, validateCommandSendRoute } from "../types.js";
-import { InputReceiptSchema, sameInputReceipt, type InputReceipt } from "../input-receipt.js";
+import { InputReceiptSchema, sameInputReceipt, type InputReceipt } from "../sessions/input-receipt.js";
 import { ConflictError } from "./interface.js";
 
 /** Shared by receipt validation and the store's atomic mutation boundary. */

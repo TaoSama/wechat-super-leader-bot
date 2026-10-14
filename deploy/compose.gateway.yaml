@@ -3,7 +3,7 @@ services:
     profiles: [wechat]
     build:
       context: .
-      dockerfile: Dockerfile.gateway
+      dockerfile: deploy/Dockerfile.gateway
     image: super-leader-gateway:latest
     container_name: super-leader-gateway
     user: "1000:1000"

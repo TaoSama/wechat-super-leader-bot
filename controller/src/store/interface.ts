@@ -1,9 +1,10 @@
-import { CommandRecord, InputReceipt, MessageRecord, ScopedSession, Session } from "../types.js";
+import { CommandRecord, MessageRecord, ScopedSession, Session } from "../types.js";
+import { InputReceipt } from "../sessions/input-receipt.js";
 import { LeaderState } from "../leader/state.js";
-import type { CreateExecutionResult, ExecutionRecord } from "../leader/execution.js";
-import type { ExecutionConfirmationAuthority } from "../leader/execution-confirmation.js";
-import type { Notification, NotificationReceiptStatus } from "../notifications.js";
-import type { GoalRecord, GoalConfirmationAuthority, CreateGoalResult } from "../leader/goal.js";
+import type { CreateExecutionResult, ExecutionRecord } from "../leader/plans/execution.js";
+import type { ExecutionConfirmationAuthority } from "../leader/plans/confirmation.js";
+import type { Notification, NotificationReceiptStatus } from "../notifications/contracts.js";
+import type { GoalRecord, GoalConfirmationAuthority, CreateGoalResult } from "../leader/goals/goal.js";
 import {
   ConsoleLinkRecord,
   ConsoleSessionRecord,
@@ -11,8 +12,8 @@ import {
 } from "../console/types.js";
 
 export type { LeaderState } from "../leader/state.js";
-export type { CreateExecutionResult, ExecutionRecord } from "../leader/execution.js";
-export type { ExecutionConfirmationAuthority } from "../leader/execution-confirmation.js";
+export type { CreateExecutionResult, ExecutionRecord } from "../leader/plans/execution.js";
+export type { ExecutionConfirmationAuthority } from "../leader/plans/confirmation.js";
 export type {
   ConsoleLinkRecord,
   ConsoleSessionRecord,

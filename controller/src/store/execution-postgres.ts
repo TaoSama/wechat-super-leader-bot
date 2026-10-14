@@ -1,14 +1,14 @@
 import type pg from "pg";
 import { normalizeExecution, validateExecutionUpdate, executionPageLimit, EXECUTION_PAGE_SIZE,
-  type CreateExecutionResult, type ExecutionRecord } from "../leader/execution.js";
+  type CreateExecutionResult, type ExecutionRecord } from "../leader/plans/execution.js";
 import { validateChatId, validateExpectedRevision } from "../leader/state.js";
 import { ConflictError } from "./interface.js";
 import { executionListQuery } from "./execution-list.js";
-import { createTerminalNotification, validateNotificationTime } from "../notifications.js";
+import { createTerminalNotification, validateNotificationTime } from "../notifications/contracts.js";
 import { insertTerminalNotification } from "./notification-postgres.js";
 import { lockChatAuthorization } from "./goal-postgres.js";
 import { assertExecutionConfirmation, normalizeExecutionConfirmation,
-  type ExecutionConfirmationAuthority } from "../leader/execution-confirmation.js";
+  type ExecutionConfirmationAuthority } from "../leader/plans/confirmation.js";
 
 type ExecutionQueryClient = Pick<pg.Pool, "query">;
 
