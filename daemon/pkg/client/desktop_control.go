@@ -5,13 +5,14 @@ import (
 	"errors"
 
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex"
+	codexdesktop "github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex/desktop"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/journal"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 )
 
 type desktopController interface {
 	CheckSendReadiness(context.Context, string) error
-	PrepareSend(context.Context, codex.DesktopSendRequest) (codex.PreparedDesktopSend, error)
+	PrepareSend(context.Context, codexdesktop.DesktopSendRequest) (codexdesktop.PreparedDesktopSend, error)
 	InspectTurn(context.Context, string, string) (codex.TurnObservation, error)
 }
 
@@ -37,7 +38,7 @@ func (d *Daemon) sendPrompt(ctx context.Context, cmd protocol.ControllerCommandM
 	if err != nil || !found || entry.Finished || entry.Dispatch == nil {
 		return "", &codex.UncertainError{Err: errors.New("desktop dispatch claim unavailable; no input sent")}
 	}
-	prepared, err := d.desktopController.PrepareSend(ctx, codex.DesktopSendRequest{
+	prepared, err := d.desktopController.PrepareSend(ctx, codexdesktop.DesktopSendRequest{
 		SessionID: cmd.SessionID, ClientUserMessageID: entry.Dispatch.ClientUserMessageID, RequestID: entry.Dispatch.RequestID,
 	})
 	if err != nil {

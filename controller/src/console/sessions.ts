@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
-import { CommandService } from "../commands.js";
-import { NodeHub } from "../hub.js";
-import { HistoryError } from "../session-history.js";
-import { TERMINAL_SESSION_ID_PATTERN } from "../terminal-session.js";
+import { CommandService } from "../commands/service.js";
+import { NodeHub } from "../nodes/hub.js";
+import { HistoryError } from "../sessions/history.js";
+import { TERMINAL_SESSION_ID_PATTERN } from "../sessions/terminal.js";
 
 const TargetSchema = z.object({
   nodeId: z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/),

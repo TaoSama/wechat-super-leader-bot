@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
 import { LockKeyhole, LogOut, RefreshCw, Layers, LayoutDashboard, MessagesSquare } from "lucide-react";
-import { LeaderOverview } from "./components/LeaderOverview";
-import { SessionWorkspace } from "./components/SessionWorkspace";
-import { useStatusPolling } from "./hooks/useStatusPolling";
-import { getOrInitAuthSession, setUnauthenticatedSession, subscribeAuthState } from "./auth";
-import { logoutAuthSession } from "./api";
+import { LeaderOverview } from "./features/leader/components/LeaderOverview";
+import { SessionWorkspace } from "./features/sessions/components/SessionWorkspace";
+import { useStatusPolling } from "./features/status/useStatusPolling";
+import { getOrInitAuthSession, setUnauthenticatedSession, subscribeAuthState } from "./auth/bootstrap";
+import { logoutAuthSession } from "./api/auth";
 import { POLL_INTERVAL_MS, AuthState, ScopedSession } from "./types";
-import { sessionKey } from "./hooks/useSessionHistory";
+import { sessionKey } from "./features/sessions/useSessionHistory";
 import { formatTimeShort } from "./format";
 
 export interface AppProps { pollIntervalMs?: number }

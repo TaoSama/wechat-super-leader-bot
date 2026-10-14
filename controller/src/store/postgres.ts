@@ -1,16 +1,17 @@
 import pg from "pg";
-import { CommandRecord, InputReceipt, InputReceiptSchema, MessageRecord, ScopedSession, Session, SendRouteSchema, validateCommandSendRoute } from "../types.js";
+import { CommandRecord, MessageRecord, ScopedSession, Session, SendRouteSchema, validateCommandSendRoute } from "../types.js";
+import { InputReceipt, InputReceiptSchema } from "../sessions/input-receipt.js";
 import { IStore, CreateCommandResult, ConflictError } from "./interface.js";
-import { sameSkillRefs, SkillRefsSchema } from "../skills.js";
+import { sameSkillRefs, SkillRefsSchema } from "../skills/catalog.js";
 import { nextCommandState, inspectionLimit, validateStoredCommandInput } from "./command-state.js";
 import { validateNodeSessionInventory, withNodeSessionsLock } from "./node-sessions.js";
-import type { CreateExecutionResult, ExecutionRecord } from "../leader/execution.js";
-import type { ExecutionConfirmationAuthority } from "../leader/execution-confirmation.js";
-import type { Notification, NotificationReceiptStatus } from "../notifications.js";
-import type { GoalRecord, GoalConfirmationAuthority, CreateGoalResult } from "../leader/goal.js";
-import { initGoalTables, pgConfirmGoal, pgGetGoal, pgGetLatestGoal, pgCompareAndSetGoal, pgListRunnableGoals, pgListRecentGoals } from "./goal-postgres.js";
-import { initNotificationTables, pgListPendingNotifications, pgGetNotification, pgClaimNotification, pgRecordNotificationReceipt } from "./notification-postgres.js";
-import { initExecutionTables, pgCreateExecutionIfAbsent, pgGetExecution, pgGetLatestExecution,
+import type { CreateExecutionResult, ExecutionRecord } from "../leader/plans/execution.js";
+import type { ExecutionConfirmationAuthority } from "../leader/plans/confirmation.js";
+import type { Notification, NotificationReceiptStatus } from "../notifications/contracts.js";
+import type { GoalRecord, GoalConfirmationAuthority, CreateGoalResult } from "../leader/goals/goal.js";
+import { pgConfirmGoal, pgGetGoal, pgGetLatestGoal, pgCompareAndSetGoal, pgListRunnableGoals, pgListRecentGoals } from "./goal-postgres.js";
+import { pgListPendingNotifications, pgGetNotification, pgClaimNotification, pgRecordNotificationReceipt } from "./notification-postgres.js";
+import { pgCreateExecutionIfAbsent, pgGetExecution, pgGetLatestExecution,
   pgCompareAndSetExecution, pgListActiveExecutions, pgConfirmExecution, pgListRecentExecutions, pgCreateLockedExecution } from "./execution-postgres.js";
 import {
   LeaderState,
@@ -24,12 +25,13 @@ import {
   ConsoleSessionRecord,
 } from "../console/types.js";
 import {
-  initConsoleAuthTables,
   pgCreateConsoleLinkIfAbsent,
   pgConsumeConsoleLink,
   pgGetConsoleSession,
   pgDeleteConsoleSession,
 } from "./console-postgres.js";
+
+import { initializeDatabase } from "./migrations.js";
 
 const { Pool } = pg;
 
@@ -41,88 +43,7 @@ export class PostgresStore implements IStore {
   }
 
   async init(): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS commands (
-          command_id VARCHAR(64) PRIMARY KEY,
-          request_id VARCHAR(128) UNIQUE,
-          node_id VARCHAR(64) NOT NULL,
-          session_id VARCHAR(64) NOT NULL,
-          action VARCHAR(32) NOT NULL,
-          prompt TEXT,
-          status VARCHAR(32) NOT NULL,
-          output TEXT,
-          error TEXT,
-          expires_at TIMESTAMPTZ NOT NULL,
-          created_at TIMESTAMPTZ NOT NULL,
-          updated_at TIMESTAMPTZ NOT NULL
-        );
-      `);
-
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS messages (
-          chat_id VARCHAR(64) NOT NULL,
-          message_id VARCHAR(128) NOT NULL,
-          text TEXT NOT NULL,
-          reply_text TEXT NOT NULL,
-          command_id VARCHAR(64),
-          created_at TIMESTAMPTZ NOT NULL,
-          PRIMARY KEY (chat_id, message_id)
-        );
-      `);
-      await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS skills JSONB NOT NULL DEFAULT '[]'::jsonb");
-      await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS turn_id VARCHAR(128)");
-      await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS send_route VARCHAR(32)");
-      await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS input_receipt JSONB");
-      await client.query("CREATE INDEX IF NOT EXISTS commands_inspection_idx ON commands (node_id, command_id) WHERE turn_id IS NOT NULL AND action = 'send' AND status IN ('accepted', 'uncertain')");
-
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS node_sessions (
-          node_id VARCHAR(64) NOT NULL,
-          session_id VARCHAR(64) NOT NULL,
-          data JSONB NOT NULL,
-          updated_at TIMESTAMPTZ NOT NULL,
-          PRIMARY KEY (node_id, session_id)
-        );
-      `);
-
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS leader_states (
-          chat_id VARCHAR(64) PRIMARY KEY,
-          revision INTEGER NOT NULL CHECK (revision >= 1),
-          data JSONB NOT NULL,
-          updated_at TIMESTAMPTZ NOT NULL
-        );
-      `);
-
-      // Additive console auth tables
-      await initConsoleAuthTables(client);
-      await initExecutionTables(client);
-      await initGoalTables(client);
-      await initNotificationTables(client);
-
-      // At controller startup: clear stale node_sessions from previous instance
-      await client.query(`DELETE FROM node_sessions;`);
-
-      // At controller startup: mark lingering pending/accepted commands from before restart as uncertain
-      await client.query(`
-        UPDATE commands
-        SET status = 'uncertain',
-            error = 'Controller restarted while command was pending or accepted',
-            updated_at = NOW()
-        WHERE status IN ('pending', 'accepted');
-      `);
-
-      await client.query("COMMIT");
-    } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    } finally {
-      client.release();
-    }
+    await initializeDatabase(this.pool);
   }
 
   async close(): Promise<void> {
