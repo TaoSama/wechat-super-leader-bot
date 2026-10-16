@@ -1,4 +1,4 @@
-import { ControlPlaneStatusResponse, NodeStatus, ScopedSession, CommandRecord, CommandStatus, ActionType } from "../types";
+import { ControlPlaneStatusResponse, NodeStatus, ScopedSession, CommandRecord, CommandStatus, ActionType, SessionCapability } from "../types";
 import { normalizeDesktopObservation } from "../features/sessions/session-observation";
 import { normalizeSendAvailability } from "../features/sessions/send-availability";
 import { isTerminalHistoryTarget } from "../features/sessions/terminal-session";
@@ -15,13 +15,13 @@ const VALID_COMMAND_STATUSES: ReadonlySet<CommandStatus> = new Set([
   "uncertain",
 ]);
 
-function normalizeActionCapabilities(raw: unknown): ActionType[] {
+function normalizeActionCapabilities(raw: unknown): SessionCapability[] {
   if (!Array.isArray(raw)) {
     return [];
   }
-  const result: ActionType[] = [];
+  const result: SessionCapability[] = [];
   for (const item of raw) {
-    if ((item === "read" || item === "send") && !result.includes(item)) {
+    if ((item === "read" || item === "send" || item === "resume-send") && !result.includes(item)) {
       result.push(item);
     }
   }
@@ -52,7 +52,8 @@ export function normalizeSession(raw: unknown): ScopedSession | null {
   const provider = typeof obj.provider === "string" && obj.provider ? obj.provider : "codex-app";
 
   // Malformed desktop evidence must not become "absent" and bypass its veto.
-  const desktopObservation = normalizeDesktopObservation(obj.desktopObservation) ??
+  const normalizedDesktop = normalizeDesktopObservation(obj.desktopObservation);
+  const desktopObservation = normalizedDesktop ??
     (obj.desktopObservation !== undefined && obj.sendAvailability !== undefined
       ? { source: "codex-desktop" as const, status: "unknown" as const, availability: "unavailable" as const }
       : undefined);
@@ -75,7 +76,8 @@ export function normalizeSession(raw: unknown): ScopedSession | null {
     preview: typeof obj.preview === "string" ? obj.preview : undefined,
     loaded: typeof obj.loaded === "boolean" ? obj.loaded : undefined,
     desktopObservation,
-    sendAvailability: normalizeSendAvailability(obj.sendAvailability),
+    sendAvailability: normalizeSendAvailability(obj.desktopObservation !== undefined && !normalizedDesktop &&
+      Array.isArray(obj.capabilities) && obj.capabilities.includes("resume-send") ? null : obj.sendAvailability),
     ...(obj.historySource === "terminal-transcript" && isTerminalHistoryTarget({ id: obj.id, provider })
       ? { historySource: "terminal-transcript" as const } : {}),
   };
@@ -116,7 +118,7 @@ export function normalizeCommand(raw: unknown): CommandRecord | null {
     output: typeof obj.output === "string" ? obj.output : undefined,
     error: typeof obj.error === "string" ? obj.error : undefined,
     turnId: typeof obj.turnId === "string" ? obj.turnId : undefined,
-    sendRoute: obj.sendRoute === "desktop-owner" || obj.sendRoute === "control-socket" || obj.sendRoute === "terminal-pane" ? obj.sendRoute : undefined,
+    sendRoute: obj.sendRoute === "desktop-owner" || obj.sendRoute === "control-socket" || obj.sendRoute === "app-server-resume" || obj.sendRoute === "terminal-pane" ? obj.sendRoute : undefined,
     inputReceipt,
     expiresAt: typeof obj.expiresAt === "string" ? obj.expiresAt : "",
     createdAt: typeof obj.createdAt === "string" ? obj.createdAt : "",

@@ -222,6 +222,7 @@ describe("会话工作台交互与安全", () => {
     await screen.findByText("最新消息");
     expect(scroll.scrollTop).toBe(150);
     expect(screen.getByRole("button", { name: "有新消息 · 跳到最新" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "有新消息 · 跳到最新" }).closest(".latest-message-slot")?.parentElement).toHaveClass("session-bottom-slot");
     fireEvent.click(screen.getByRole("button", { name: "加载更早的消息" }));
     await screen.findByText("更早消息");
     expect(scroll.scrollTop).toBe(250);

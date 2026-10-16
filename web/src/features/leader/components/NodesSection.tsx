@@ -1,12 +1,23 @@
-import { Server, Wifi, WifiOff } from "lucide-react";
+import { ChevronDown, Server, Wifi, WifiOff } from "lucide-react";
 import { DerivedNodeStatus } from "../../status/useStatusPolling";
 import { formatTimestamp, formatRelativeAge } from "../../../format";
 
 interface Props { nodes: DerivedNodeStatus[]; selectedNodeId: string | null; onSelectNodeId: (nodeId: string | null) => void }
 
 export function NodesSection({ nodes, selectedNodeId, onSelectNodeId }: Props) {
-  return <section className="nodes-section" aria-labelledby="nodes-heading">
-    <div className="section-heading"><div><p className="eyebrow">CONNECTED MACHINES</p><h2 id="nodes-heading">机器 <span>{nodes.length}</span></h2></div>{selectedNodeId && <button type="button" className="text-button" onClick={() => onSelectNodeId(null)}>清除筛选</button>}</div>
+  const onlineCount = nodes.filter(node => node.connected).length;
+  return <section className="nodes-section leader-machine-scope" aria-label="看板机器范围">
+    <div className="machine-scope-controls">
+      <label className="machine-filter"><Server size={16} aria-hidden="true" /><span>机器</span>
+        <select className="filter-select" aria-label="筛选看板机器" value={selectedNodeId || ""} onChange={event => onSelectNodeId(event.target.value || null)}>
+          <option value="">全部机器 · {nodes.length}</option>
+          {selectedNodeId && !nodes.some(node => node.nodeId === selectedNodeId) && <option value={selectedNodeId}>{selectedNodeId} · 未报告</option>}
+          {nodes.map(node => <option key={node.nodeId} value={node.nodeId}>{node.nodeId}{node.connected ? "" : " · 离线"}</option>)}
+        </select>
+      </label>
+      {selectedNodeId && <button type="button" className="text-button" onClick={() => onSelectNodeId(null)}>清除机器筛选</button>}
+    </div>
+    <details className="machine-details"><summary><span>机器状态</span><span>{onlineCount} / {nodes.length} 在线</span><ChevronDown size={15} aria-hidden="true" /></summary>
     {!nodes.length ? <div role="status" className="empty-panel"><Server size={24} aria-hidden="true" /><h3>暂无已连接的宿主节点</h3><p>机器连接后，会话与在线状态会出现在这里。</p></div> : <div className="node-list">{nodes.map((node) => {
       const selected = selectedNodeId === node.nodeId;
       const Icon = node.connected ? Wifi : WifiOff;
@@ -16,5 +27,6 @@ export function NodesSection({ nodes, selectedNodeId, onSelectNodeId }: Props) {
         <p title={formatTimestamp(node.lastHeartbeat)}>{node.inferredOffline ? "历史会话 · 连接未报告" : `心跳 ${formatRelativeAge(node.lastHeartbeat)}`}</p>
       </button>;
     })}</div>}
+    </details>
   </section>;
 }

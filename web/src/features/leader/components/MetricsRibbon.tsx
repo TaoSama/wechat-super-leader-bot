@@ -29,10 +29,10 @@ export const MetricsRibbon: React.FC<MetricsRibbonProps> = ({
   const offlineNodes = nodes.length - onlineNodes;
 
   const sendCapableSessions = sessions.filter((s) =>
-    s.capabilities.includes("send")
+    s.capabilities.includes("send") || s.capabilities.includes("resume-send")
   ).length;
   const readOnlySessions = sessions.filter(
-    (s) => s.capabilities.includes("read") && !s.capabilities.includes("send")
+    (s) => s.capabilities.includes("read") && !s.capabilities.includes("send") && !s.capabilities.includes("resume-send")
   ).length;
 
   const counts = {
