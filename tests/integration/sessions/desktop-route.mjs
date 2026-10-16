@@ -224,6 +224,14 @@ export async function verifyDesktopRoute({ base, request, nodeToken, waitFor, on
     assert.equal(receipt.turnId, TURN_ID);
     assert.equal(receipt.output, OUTPUT);
     assert.equal(receipt.sendRoute, 'desktop-owner');
+    // Exact-turn inspection closes its one-shot snapshot connection before
+    // reporting completion. Let the server observe that close before sending
+    // unrelated updates, which would otherwise race into its unread buffer.
+    await waitFor(async () => {
+      assertHealthy();
+      return ![...connections].some(connection => !connection.clientType ||
+        connection.clientType === 'super-leader-desktop-controller');
+    }, 'One-shot desktop readers disconnected before owner update');
     state.threadRuntimeStatus.type = 'active';
     state.latestCollaborationMode.settings.model = 'fixture-updated-model';
     state.latestReasoningEffort = 'medium';
