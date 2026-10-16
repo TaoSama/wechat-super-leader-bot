@@ -14,7 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex/internal/threadstate"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 	"github.com/gorilla/websocket"
@@ -211,6 +210,9 @@ func (rc *rpcConn) notify(method string, params map[string]any) error {
 }
 
 func (rc *rpcConn) call(ctx context.Context, method string, params map[string]any, timeout time.Duration) (map[string]any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	id := atomic.AddUint64(&rc.reqID, 1)
 	ch := make(chan rpcResponse, 1)
 
@@ -232,7 +234,14 @@ func (rc *rpcConn) call(ctx context.Context, method string, params map[string]an
 	}
 
 	rc.writeMu.Lock()
-	writeErr := rc.conn.SetWriteDeadline(time.Now().Add(DefaultWriteTimeout))
+	writeErr := ctx.Err()
+	deadline := time.Now().Add(DefaultWriteTimeout)
+	if end, ok := ctx.Deadline(); ok && end.Before(deadline) {
+		deadline = end
+	}
+	if writeErr == nil {
+		writeErr = rc.conn.SetWriteDeadline(deadline)
+	}
 	if writeErr == nil {
 		writeErr = rc.conn.WriteJSON(req)
 	}
@@ -316,8 +325,9 @@ func (rc *rpcConn) getLoadedSet(ctx context.Context, timeout time.Duration) (map
 }
 
 // DiscoverSessions queries both thread/loaded/list and thread/list (useStateDbOnly: true).
-// Only threads proven loaded in the live Codex App instance receive ["read", "send"] capability;
-// unloaded historical threads are downgraded to ["read"] only.
+// Only loaded idle threads receive "send". Idle and known unloaded targets
+// advertise "resume-send" for explicit sends and frozen-route continuations;
+// discovery never restores a thread.
 func (a *AppServerAdapter) DiscoverSessions(ctx context.Context) ([]protocol.Session, error) {
 	rc, err := a.connect(ctx)
 	if err != nil {
@@ -393,7 +403,7 @@ func (a *AppServerAdapter) SendPrompt(ctx context.Context, sessionID string, pro
 		return "", err
 	}
 	if !loadedSet[sessionID] {
-		return "", fmt.Errorf("session %s is not loaded in the live Codex App instance (downgraded to read-only; implicit thread/resume is disabled)", sessionID)
+		return "", fmt.Errorf("session %s is not loaded in the live Codex App instance (implicit thread/resume is disabled; explicit resume-send is required)", sessionID)
 	}
 
 	// 2. Pre-flight check current session state via thread/read
@@ -418,24 +428,9 @@ func (a *AppServerAdapter) SendPrompt(ctx context.Context, sessionID string, pro
 	}
 
 	// 3. Dispatch turn/start
-	res, err := rc.call(ctx, "turn/start", map[string]any{
-		"threadId": sessionID,
-		"input": []map[string]any{
-			{
-				"type": "text",
-				"text": prompt,
-			},
-		},
-	}, a.rpcTimeout)
+	turnID, err := a.startTurn(ctx, rc, sessionID, prompt)
 	if err != nil {
-		// Because the RPC write may have reached the server, any network error/timeout here is uncertain
-		return "", &codex.UncertainError{Err: fmt.Errorf("turn/start error (result uncertain): %w", err)}
-	}
-
-	turnObj, _ := res["turn"].(map[string]any)
-	turnID, _ := turnObj["id"].(string)
-	if !protocol.ValidTurnID(turnID) {
-		return "", &codex.UncertainError{Err: errors.New(protocol.InvalidTurnAcknowledgement)}
+		return "", err
 	}
 
 	return fmt.Sprintf("turnId=%s", turnID), nil

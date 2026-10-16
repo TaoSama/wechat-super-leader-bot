@@ -37,6 +37,16 @@ if (typeof window !== "undefined") {
   });
 }
 
+// jsdom supplies the element but does not implement the native dialog lifecycle.
+Object.defineProperties(HTMLDialogElement.prototype, {
+  showModal: { configurable: true, writable: true, value: function (this: HTMLDialogElement) { this.setAttribute("open", ""); } },
+  close: { configurable: true, writable: true, value: function (this: HTMLDialogElement) {
+    if (!this.open) return;
+    this.removeAttribute("open");
+    queueMicrotask(() => this.dispatchEvent(new Event("close")));
+  } },
+});
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();

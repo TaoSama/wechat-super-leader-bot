@@ -8,6 +8,7 @@ import { logoutAuthSession } from "./api/auth";
 import { POLL_INTERVAL_MS, AuthState, ScopedSession } from "./types";
 import { sessionKey } from "./features/sessions/useSessionHistory";
 import { formatTimeShort } from "./format";
+import { useViewportHeight } from "./useViewportHeight";
 
 export interface AppProps { pollIntervalMs?: number }
 
@@ -19,12 +20,15 @@ export function App({ pollIntervalMs = POLL_INTERVAL_MS }: AppProps) {
   const [requestedSessionKey, setRequestedSessionKey] = useState<string | null>(null);
   const [requestedSessionRevision, setRequestedSessionRevision] = useState(0);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [detailVisible, setDetailVisible] = useState(false);
+  const viewportHeight = useViewportHeight();
   const handleAuthFailure = useCallback(() => {
     setUnauthenticatedSession("expired");
     setAuthState({ status: "unauthenticated", reason: "expired" });
     setSelectedNodeId(null);
     setView("sessions");
     setRequestedSessionKey(null);
+    setDetailVisible(false);
   }, []);
   const authenticated = authState.status === "authenticated";
   const telemetry = useStatusPolling(authenticated, pollIntervalMs, handleAuthFailure);
@@ -47,6 +51,7 @@ export function App({ pollIntervalMs = POLL_INTERVAL_MS }: AppProps) {
       setSelectedNodeId(null);
       setView("sessions");
       setRequestedSessionKey(null);
+      setDetailVisible(false);
     } catch (error) {
       setLogoutError(error instanceof Error ? error.message : "退出登录失败");
     } finally { setLoggingOut(false); }
@@ -59,11 +64,11 @@ export function App({ pollIntervalMs = POLL_INTERVAL_MS }: AppProps) {
   }
   const connectionLabels = { connecting: "正在连接", live: "实时连接", reconnecting: "正在重连", polling: "定时更新", offline: "连接中断" };
 
-  return <div className="app-shell">
+  return <div className={`app-shell ${authenticated ? "is-authenticated" : ""} ${view === "sessions" && detailVisible ? "mobile-detail-open" : ""}`} style={viewportHeight ? { height: viewportHeight } : undefined}>
     <a href="#main-workspace" className="skip-link">跳转至会话工作区</a>
     <header className="app-header">
-      <div className="brand"><span className="brand-mark"><Layers size={22} aria-hidden="true" /></span><div><h1>Super Leader</h1><span>会话与指令工作台</span></div></div>
-      {authenticated && <nav className="primary-nav" aria-label="主导航"><button type="button" className={view === "leader" ? "active" : ""} aria-current={view === "leader" ? "page" : undefined} onClick={() => setView("leader")}><LayoutDashboard size={17} aria-hidden="true" />Super Leader</button><button type="button" className={view === "sessions" ? "active" : ""} aria-current={view === "sessions" ? "page" : undefined} onClick={() => setView("sessions")}><MessagesSquare size={17} aria-hidden="true" />会话</button></nav>}
+      <div className="brand"><span className="brand-mark"><Layers size={22} aria-hidden="true" /></span><div><h1>Super Leader</h1><span>让每一项工作都有进展</span></div></div>
+      {authenticated && <nav className="primary-nav" aria-label="主导航"><button type="button" className={view === "sessions" ? "active" : ""} aria-current={view === "sessions" ? "page" : undefined} onClick={() => setView("sessions")}><MessagesSquare size={17} aria-hidden="true" />会话</button><button type="button" className={view === "leader" ? "active" : ""} aria-current={view === "leader" ? "page" : undefined} onClick={() => setView("leader")}><LayoutDashboard size={17} aria-hidden="true" />Super Leader</button></nav>}
       <div className="header-actions">
         {authenticated ? <>
           <span className={`header-connection ${telemetry.error ? "degraded" : ""}`} role="status"><span className="connection-dot" aria-hidden="true" /><span>{telemetry.error ? "状态待恢复" : connectionLabels[telemetry.connectionState]}<small>{telemetry.lastUpdatedAt ? `更新于 ${formatTimeShort(telemetry.lastUpdatedAt)}` : "正在同步状态"}</small></span></span>
@@ -84,7 +89,7 @@ export function App({ pollIntervalMs = POLL_INTERVAL_MS }: AppProps) {
       {authenticated && telemetry.error && <div role="alert" data-testid="telemetry-error-banner" className="notice">获取会话状态失败：{telemetry.error}。当前显示上次成功快照。<button type="button" onClick={telemetry.manualRefresh}>立即重试</button></div>}
       {authenticated && telemetry.isLoading && !telemetry.data && <div role="status" data-testid="telemetry-loading-state" className="workspace-empty">正在同步机器与会话…</div>}
       {authenticated && telemetry.data && <>
-        <div hidden={view !== "sessions"} className="workspace-panel"><SessionWorkspace data={telemetry.data} nodes={telemetry.derivedNodes} active={view === "sessions"} requestedSessionKey={requestedSessionKey} requestedSessionRevision={requestedSessionRevision} stale={!!telemetry.error || telemetry.controllerHealthy === false} onAuthFailure={handleAuthFailure} /></div>
+        <div hidden={view !== "sessions"} className="workspace-panel"><SessionWorkspace data={telemetry.data} nodes={telemetry.derivedNodes} active={view === "sessions"} requestedSessionKey={requestedSessionKey} requestedSessionRevision={requestedSessionRevision} stale={!!telemetry.error || telemetry.controllerHealthy === false} onAuthFailure={handleAuthFailure} onDetailVisibilityChange={setDetailVisible} /></div>
         <section className="leader-panel" hidden={view !== "leader"} aria-label="运行状态与发送记录"><LeaderOverview data={telemetry.data} nodes={telemetry.derivedNodes} selectedNodeId={selectedNodeId} onSelectNodeId={setSelectedNodeId} onOpenSession={openSession} onBrowseSessions={() => setView("sessions")} /></section>
       </>}
     </main>

@@ -10,13 +10,15 @@ import (
 type SendRoute string
 
 const (
-	RouteControlSocket SendRoute = "control-socket"
-	RouteDesktopOwner  SendRoute = "desktop-owner"
-	RouteTerminalPane  SendRoute = "terminal-pane"
+	RouteControlSocket   SendRoute = "control-socket"
+	RouteDesktopOwner    SendRoute = "desktop-owner"
+	RouteTerminalPane    SendRoute = "terminal-pane"
+	RouteAppServerResume SendRoute = "app-server-resume"
 )
 
-// DispatchIdentity binds a durable command to exactly one desktop connection
-// and owner. Request identifiers are correlation, not native deduplication.
+// DispatchIdentity binds a durable command to its runtime endpoint. Desktop
+// dispatches also bind the owner and connection. Request identifiers are local
+// correlation, not native deduplication.
 type DispatchIdentity struct {
 	Route               SendRoute `json:"route"`
 	SessionID           string    `json:"sessionId"`

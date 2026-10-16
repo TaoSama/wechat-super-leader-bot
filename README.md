@@ -22,7 +22,8 @@ Gateway 独立维护微信登录与同步状态，负责轮询、转发和回复
 Daemon 原生运行在 Mac/Linux 宿主机，连接已有会话；用户仍可在原客户端操作这些会话。
 
 远端 Docker 运行 Controller、Web、PostgreSQL 和独立 Gateway；宿主机主动连接 WSS，
-不需要给 Mac 开公网入站端口。桌面控制使用已有 owner，不另起 app-server，不通过 resume 抢占会话。
+不需要给 Mac 开公网入站端口。桌面控制优先使用已有 owner；未加载会话可通过配置的
+app-server 按原 ID 恢复后发送，不创建替代会话。已有 writer 冲突时明确失败，不抢占、不自动换路。
 
 ## 入口与代码布局
 
@@ -68,6 +69,8 @@ compose.yaml    本机控制平面基础编排
 每个聊天同时只允许一个未结束的持续目标或固定计划。
 
 Web 提供机器与会话搜索、原来源历史、直接发送、计划和目标进度。
+手机底栏切换会话与看板，聊天顶栏保留模型、状态和详情入口；返回列表保留草稿与阅读位置。
+向上滚动自动加载更早历史，新消息不会打断阅读；看板优先展示待处理和执行中记录，完成记录可展开。
 状态通过认证 SSE 更新，断流后轮询兜底；历史采用快照与分页，不是 token 流式输出。
 读取旧消息时保留滚动位置；来源失效后暂停，用户可显式重新读取最新页。
 
@@ -140,7 +143,7 @@ node scripts/local.mjs --sessions --controller https://leader.example.com
 
 | 参数 | 作用与边界 |
 | --- | --- |
-| `--sock` | 已有 Codex 控制 socket，不创建后端 |
+| `--sock` | 已有 Codex 控制 socket；可按原 ID 恢复未加载会话，不创建后端 |
 | `--desktop-sock` | 已有桌面 IPC 的状态、模型与历史观测 |
 | `--desktop-send` | 显式开启原桌面 owner 发送，要求 desktop socket |
 | `--codex-home` | 只读文件元数据发现，不等于历史或发送授权 |

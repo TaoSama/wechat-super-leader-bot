@@ -36,7 +36,7 @@ export class GoalConversation {
         return { error: "持续目标仅支持已知、在线且有精确完成能力的原生会话；不支持终端输入" };
       }
       if (!hasSkillRefs(this.hub.getNodeSkills(target.nodeId), target.skills)) return { error: "目标技能版本变化或不可用；请重新查询并预览" };
-      const eligibility = selectSendRoute(session, this.now());
+      const eligibility = selectSendRoute(session, this.now(), target.sendRoute);
       if (!eligibility.ready || eligibility.route !== target.sendRoute) return { error: "目标发送资格或固定路线已变化；请重新查询并预览" };
     }
   }

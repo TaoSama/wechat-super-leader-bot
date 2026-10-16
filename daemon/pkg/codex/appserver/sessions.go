@@ -33,6 +33,9 @@ func sessionFromThread(thread map[string]any, loaded bool, observedAt string) pr
 	if loaded && status == "idle" {
 		caps = append(caps, protocol.ActionSend)
 	}
+	if status == "notLoaded" || status == "idle" {
+		caps = append(caps, protocol.CapabilityResumeSend)
+	}
 	return protocol.Session{
 		ID: threadstate.ExtractString(thread, "id"), Provider: codex.ProviderCodexApp,
 		Title:  threadstate.ClipHistoryText(threadstate.ExtractString(thread, "title", "name", "preview"), threadstate.MaxSessionMetadataLength),
