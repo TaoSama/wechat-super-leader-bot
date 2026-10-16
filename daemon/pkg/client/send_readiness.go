@@ -16,6 +16,7 @@ import (
 const (
 	readinessConcurrency = 2
 	readinessRecheck     = 30 * time.Second
+	readinessRecovery    = time.Second
 	readinessTick        = 250 * time.Millisecond
 	readinessTimeout     = 8 * time.Second
 	// No probe has completed yet; a zero-length historical validity interval
@@ -24,9 +25,10 @@ const (
 )
 
 type desktopReadinessRecord struct {
-	Availability protocol.SendAvailability
-	Generation   uint64
-	NextCheck    time.Time
+	Availability   protocol.SendAvailability
+	Generation     uint64
+	NextCheck      time.Time
+	RetryNotBefore time.Time
 }
 
 type readinessJob struct {
@@ -89,6 +91,17 @@ func (d *Daemon) invalidateSendReadinessLocked(id string, observation protocol.D
 			ObservedAt: uncheckedReadinessTimestamp, ValidUntil: uncheckedReadinessTimestamp}
 	}
 	record.Availability = revokedReadiness(record.Availability, observation, now)
+	if freshDesktopIdle(observation, now) {
+		// A new proof needs a new check, while a failed probe keeps its cooldown.
+		// Keep an already queued check in place so revision bursts cannot starve it.
+		retryAt := now
+		if record.RetryNotBefore.After(retryAt) {
+			retryAt = record.RetryNotBefore
+		}
+		if record.NextCheck.After(retryAt) {
+			record.NextCheck = retryAt
+		}
+	}
 	d.sendReadiness[id] = record
 	return !exists || previous != record.Availability
 }
@@ -179,9 +192,14 @@ func (d *Daemon) completeReadiness(result readinessResult, now time.Time, update
 	}
 	previous := record.Availability
 	record.NextCheck = now.Add(readinessRecheck)
+	record.RetryNotBefore = now.Add(readinessRecovery)
+	if result.Err != nil {
+		record.RetryNotBefore = record.NextCheck
+	}
 	observation := d.desktopSnapshot[result.ID]
 	if result.Generation != d.desktopGeneration[result.ID] || !freshDesktopIdle(observation, now) {
 		record.Availability = revokedReadiness(record.Availability, observation, now)
+		record.NextCheck = record.RetryNotBefore
 	} else {
 		record.Generation = result.Generation
 		record.Availability = protocol.SendAvailability{Route: protocol.RouteDesktopOwner, State: protocol.SendReady,
