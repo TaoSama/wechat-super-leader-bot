@@ -83,11 +83,14 @@ describe("workspace desktop observations", () => {
       active={false} onAuthFailure={vi.fn()} />);
     const row = screen.getByTestId("session-row-node-session");
     expect(row.querySelector(".session-state")).toHaveTextContent(status === "active" ? "执行中" : "空闲");
-    expect(row).toHaveTextContent("桌面观测");
+    expect(row.querySelector(".session-observation")).toBeNull();
+    expect(row.children).toHaveLength(3);
     fireEvent.click(row);
     expect(document.querySelector(".detail-title .status-label")).toHaveTextContent(status === "active" ? "执行中" : "空闲");
+    fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
     expect(screen.getByText("控制接口：未加载")).toBeInTheDocument();
     expect(screen.getByText("桌面观测", { exact: false, selector: ".detail-subline > span" })).toHaveTextContent("2026-10-11");
+    fireEvent.click(screen.getByRole("button", { name: "关闭会话详情" }));
     fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "不会发送" } });
     expect(screen.getByRole("button", { name: "发送消息" })).toBeDisabled();
     expect(raw).toMatchObject({ status: "notLoaded", loaded: false, capabilities: ["read"], observedAt: iso(-1000) });
@@ -100,6 +103,24 @@ describe("workspace desktop observations", () => {
     const row = screen.getByTestId("session-row-node-session");
     expect(within(row).getByText("未加载")).toBeInTheDocument();
     expect(row).toHaveTextContent("桌面已失联");
+  });
+
+  it.each([
+    [desktop({ availability: "unavailable" }), "桌面已失联"],
+    [desktop({ observedAt: iso(-45001) }), "桌面观测已过期"],
+    [desktop({ observedAt: iso(1) }), "桌面观测时间异常"],
+    [desktop({ observedAt: undefined }), "桌面观测时间缺失"],
+    [desktop({ status: "unknown" }), "桌面状态未知"],
+  ] as const)("异常观测在列表中只显示简短原因，完整时间与说明在详情中 %#", (observation, label) => {
+    vi.spyOn(Date, "now").mockReturnValue(NOW);
+    const raw = session("notLoaded", observation);
+    render(<SessionWorkspace data={{ nodes, sessions: [raw], commands: [], goals: emptyGoals(), executions: emptyExecutions() }}
+      nodes={nodes} stale={false} active={false} onAuthFailure={vi.fn()} />);
+    const row = screen.getByTestId("session-row-node-session");
+    expect(row.querySelector(".session-observation")?.textContent).toBe(label);
+    fireEvent.click(row);
+    fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
+    expect(within(screen.getByRole("dialog")).getByText(describeDesktopObservation(observation, NOW)!)).toBeVisible();
   });
 
   it("expires desktop status after 45 seconds even without a new status event", async () => {

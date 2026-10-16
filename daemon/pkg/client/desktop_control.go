@@ -22,11 +22,17 @@ func (d *Daemon) sendPrompt(ctx context.Context, cmd protocol.ControllerCommandM
 	if isTerminalSession(cmd.SessionID) {
 		return "", errors.New("terminal sessions are read-only; no input was sent")
 	}
-	if cmd.SendRoute == protocol.RouteTerminalPane {
+	switch cmd.SendRoute {
+	case protocol.RouteTerminalPane:
 		return "", errors.New("terminal-pane cannot target a native session; no fallback was attempted")
-	}
-	if cmd.SendRoute != protocol.RouteDesktopOwner {
+	case protocol.RouteAppServerResume:
+		return d.sendWithResume(ctx, cmd, prompt)
+	case "", protocol.RouteControlSocket:
 		return d.adapter.SendPrompt(ctx, cmd.SessionID, prompt)
+	case protocol.RouteDesktopOwner:
+		// Continue with the selected desktop owner only.
+	default:
+		return "", errors.New("unsupported send route")
 	}
 	if !d.cfg.DesktopSend || d.cfg.DesktopSocketPath == "" {
 		return "", errors.New("desktop sending is disabled; no input sent")
@@ -72,6 +78,14 @@ func (d *Daemon) turnInspector(msg protocol.InspectTurnMessage) (codex.TurnInspe
 	if d.journal != nil {
 		identity, err := d.journal.ReadDispatch(msg.CommandID, msg.SessionID, msg.TurnID)
 		if err == nil {
+			if identity.Route == protocol.RouteAppServerResume {
+				sender, ok := d.adapter.(codex.ResumeSender)
+				inspector, inspectOK := d.adapter.(codex.TurnInspector)
+				if !ok || !inspectOK || identity.Endpoint != d.cfg.SocketPath || sender.Endpoint() != identity.Endpoint {
+					return nil, errors.New("original managed app-server endpoint unavailable")
+				}
+				return inspector, nil
+			}
 			if identity.Route != protocol.RouteDesktopOwner || identity.Endpoint != d.cfg.DesktopSocketPath || d.desktopController == nil {
 				return nil, errors.New("original desktop route unavailable")
 			}

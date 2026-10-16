@@ -1,15 +1,19 @@
-import { useMemo, useState } from "react";
-import { ArrowUpRight, CheckCircle2, Clock, AlertTriangle, Radio, XCircle } from "lucide-react";
-import { CommandRecord, CommandStatus, COMMAND_STATUS_SEMANTICS, ScopedSession } from "../../../types";
+import { useMemo } from "react";
+import { ArrowUpRight, CheckCircle2, ChevronDown, Clock, AlertTriangle, Radio, XCircle } from "lucide-react";
+import { CommandRecord, COMMAND_STATUS_SEMANTICS, ScopedSession } from "../../../types";
 import { formatTimestamp, formatRelativeAge } from "../../../format";
+import { CommandFilter, matchesCommandFilter } from "../command-filters";
 
 interface Props {
   commands: CommandRecord[];
   selectedNodeId: string | null;
   sessions?: ScopedSession[];
   onOpenSession?: (session: ScopedSession) => void;
+  statusFilter: CommandFilter;
+  onStatusFilterChange: (filter: CommandFilter) => void;
+  onClearNodeFilter?: () => void;
 }
-const RECENT_COMMAND_LIMIT = 50;
+export const RECENT_COMMAND_LIMIT = 50;
 const GROUPS = [
   { key: "attention", title: "需要处理", description: "优先核查异常与未确认的结果", statuses: ["uncertain", "failed"] },
   { key: "running", title: "执行中", description: "等待响应或已经受理，最终结果尚未确认", statuses: ["pending", "accepted"] },
@@ -18,23 +22,25 @@ const GROUPS = [
 ] as const;
 const STATUS_ICONS = { pending: Clock, accepted: Radio, "input-written": AlertTriangle, completed: CheckCircle2, failed: XCircle, uncertain: AlertTriangle };
 
-export function CommandsSection({ commands, selectedNodeId, sessions = [], onOpenSession }: Props) {
-  const [statusFilter, setStatusFilter] = useState<CommandStatus | "ALL">("ALL");
+export function CommandsSection({ commands, selectedNodeId, sessions = [], onOpenSession, statusFilter, onStatusFilterChange, onClearNodeFilter }: Props) {
   const recent = useMemo(() => [...commands].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, RECENT_COMMAND_LIMIT), [commands]);
-  const filtered = recent.filter((command) => (!selectedNodeId || command.nodeId === selectedNodeId) && (statusFilter === "ALL" || command.status === statusFilter));
+  const filtered = recent.filter(command => (!selectedNodeId || command.nodeId === selectedNodeId) && matchesCommandFilter(command.status, statusFilter));
+  const hasFilter = statusFilter !== "ALL" || !!selectedNodeId;
+  function clearFilters() { onStatusFilterChange("ALL"); if (selectedNodeId) onClearNodeFilter?.(); }
 
   return <section className="command-section" aria-labelledby="commands-heading">
-    <div className="section-heading"><div><p className="eyebrow">COMMAND ACTIVITY</p><h2 id="commands-heading">指令动态 <span>{filtered.length}</span></h2></div>
-      <label className="status-filter">状态筛选<select className="filter-select" aria-label="按指令状态过滤" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as CommandStatus | "ALL")}><option value="ALL">全部状态</option>{Object.entries(COMMAND_STATUS_SEMANTICS).map(([key, value]) => <option key={key} value={key}>{value.label}</option>)}</select></label>
+    <div className="section-heading"><h2 id="commands-heading">指令动态 <span>{filtered.length}</span></h2>
+      <label className="status-filter">状态筛选<select className="filter-select" aria-label="按指令状态过滤" value={statusFilter} onChange={(event) => onStatusFilterChange(event.target.value as CommandFilter)}><option value="ALL">全部状态</option><option value="attention">需要处理</option><option value="running">执行中</option>{Object.entries(COMMAND_STATUS_SEMANTICS).map(([key, value]) => <option key={key} value={key}>{value.label}</option>)}</select></label>
     </div>
-    <p className="section-description">最近 {RECENT_COMMAND_LIMIT} 条记录 · 点会话标题继续阅读，展开详情查看完整回执。</p>
+    <div className="command-filter-summary"><p className="section-description">最近 {RECENT_COMMAND_LIMIT} 条 · 异常与执行中优先，已完成收起。</p>
+      {hasFilter && <button type="button" className="text-button" onClick={clearFilters}>{selectedNodeId && !onClearNodeFilter ? "清除状态筛选" : "清空指令筛选"}</button>}
+    </div>
     {!filtered.length && <div role="status" className="empty-panel"><Clock size={24} aria-hidden="true" /><h3>暂无匹配的指令审计记录</h3><p>{commands.length ? "更换状态或机器筛选，查看其他记录。" : "从微信或已有会话发送消息后，指令状态会显示在这里。"}</p></div>}
     {GROUPS.map((group) => {
       const items = filtered.filter((command) => (group.statuses as readonly string[]).includes(command.status));
       if (!items.length) return null;
-      return <section className={`command-group group-${group.key}`} key={group.key} aria-label={group.title}>
-        <div className="group-heading"><h3>{group.title}<span>{items.length}</span></h3><p>{group.description}</p></div>
-        <div className="command-list">{items.map((command) => {
+      const heading = <div className="group-heading"><h3>{group.title}<span>{items.length}</span></h3><p>{group.description}</p></div>;
+      const list = <div className="command-list">{items.map((command) => {
           const semantics = COMMAND_STATUS_SEMANTICS[command.status];
           const Icon = STATUS_ICONS[command.status];
           const session = sessions.find((item) => item.nodeId === command.nodeId && item.id === command.sessionId);
@@ -47,7 +53,13 @@ export function CommandsSection({ commands, selectedNodeId, sessions = [], onOpe
             </div>
             <details className="command-details"><summary>指令详情与回执</summary><div className="command-detail-content"><p>{semantics.description}</p><dl><div><dt>会话标识</dt><dd>{command.nodeId} / {command.sessionId}</dd></div><div><dt>指令 ID</dt><dd>{command.commandId}</dd></div><div><dt>请求 ID</dt><dd>{command.requestId}</dd></div></dl>{command.inputReceipt && <dl><div><dt>输入证明</dt><dd>{command.inputReceipt.kind}</dd></div><div><dt>证明会话</dt><dd>{command.inputReceipt.sessionId}</dd></div><div><dt>宿主请求 ID</dt><dd>{command.inputReceipt.requestId}</dd></div><div><dt>实际输入 SHA256</dt><dd>{command.inputReceipt.promptSHA256}</dd></div><div><dt>响应 / 观测版本</dt><dd>{command.inputReceipt.responseRevision} / {command.inputReceipt.observedRevision}</dd></div></dl>}{command.turnId && <p>关联 Turn: {command.turnId}（按该轮次核验，不以会话空闲状态判断完成）</p>}<p>创建: {formatTimestamp(command.createdAt)}</p><p>更新: {formatTimestamp(command.updatedAt)}</p><p>派发截止（非执行时限）: {formatTimestamp(command.expiresAt)}</p>{command.prompt && <div><h5>完整请求</h5><pre>{command.prompt}</pre></div>}{command.output && <div><h5>最终回执 / 返回快照</h5><pre>{command.output}</pre></div>}</div></details>
           </article>;
-        })}</div>
+        })}</div>;
+      return <section className={`command-group group-${group.key}`} key={group.key} aria-label={group.title}>
+        {group.key === "completed"
+          ? <details className="command-history" key={statusFilter} open={statusFilter === "completed"}>
+              <summary>{heading}<span className="command-history-action">查看已完成<ChevronDown size={16} aria-hidden="true" /></span></summary>{list}
+            </details>
+          : <>{heading}{list}</>}
       </section>;
     })}
   </section>;

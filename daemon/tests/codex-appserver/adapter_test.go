@@ -182,14 +182,14 @@ func TestAppServerAdapter_DiscoveryAndRead(t *testing.T) {
 		t.Fatalf("missing expected sessions: live=%v, hist=%v", liveSess, histSess)
 	}
 
-	// Live loaded session has both read and send
-	if len(liveSess.Capabilities) != 2 || liveSess.Capabilities[0] != protocol.ActionRead || liveSess.Capabilities[1] != protocol.ActionSend {
-		t.Fatalf("expected loaded session to have [read, send], got %v", liveSess.Capabilities)
+	// Loaded idle sessions also support continuation of a frozen resume route.
+	if len(liveSess.Capabilities) != 3 || liveSess.Capabilities[0] != protocol.ActionRead || liveSess.Capabilities[1] != protocol.ActionSend || liveSess.Capabilities[2] != protocol.CapabilityResumeSend {
+		t.Fatalf("expected loaded idle session to support both explicit routes, got %v", liveSess.Capabilities)
 	}
 
-	// Historical unloaded session is downgraded to read-only
-	if len(histSess.Capabilities) != 1 || histSess.Capabilities[0] != protocol.ActionRead {
-		t.Fatalf("expected unloaded session to be read-only, got %v", histSess.Capabilities)
+	// Unloaded sessions advertise only an explicit restoration path, not send.
+	if len(histSess.Capabilities) != 2 || histSess.Capabilities[0] != protocol.ActionRead || histSess.Capabilities[1] != protocol.CapabilityResumeSend {
+		t.Fatalf("expected unloaded session to require explicit resume-send, got %v", histSess.Capabilities)
 	}
 
 	// 2. Read session

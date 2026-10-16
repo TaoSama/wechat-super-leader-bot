@@ -5,6 +5,7 @@
 
 import type { ConsoleGoals } from "./features/leader/goal-contract";
 export type ActionType = "read" | "send";
+export type SessionCapability = ActionType | "resume-send";
 
 export type CommandStatus =
   | "pending"
@@ -31,7 +32,7 @@ export interface DesktopObservation {
   reasoningEffort?: string;
 }
 
-export type SendRoute = "control-socket" | "desktop-owner" | "terminal-pane";
+export type SendRoute = "control-socket" | "desktop-owner" | "app-server-resume" | "terminal-pane";
 interface SendAvailabilityFields {
   state: "ready" | "blocked" | "unavailable";
   observedAt: string;
@@ -56,7 +57,7 @@ export interface ScopedSession {
   title: string;
   cwd: string;
   status: string;
-  capabilities: ActionType[];
+  capabilities: SessionCapability[];
   observedAt: string;
   model?: string;
   modelProvider?: string;

@@ -75,6 +75,20 @@ it("shows complete authorization and preserves its preview across ordinary queri
   expect((await f.store.listRecentGoals(["chat"], 10))).toHaveLength(1);
 });
 
+it("confirms a frozen resume goal after its native session becomes loaded idle", async () => {
+  const f = fixture();
+  Object.assign(f.sessions[0], { loaded: false, status: "notLoaded", capabilities: ["read", "resume-send"] });
+  const { pending } = await f.propose();
+  expect(pending.targets[0].sendRoute).toBe("app-server-resume");
+  Object.assign(f.sessions[0], { loaded: true, status: "idle", capabilities: ["read", "send", "resume-send"] });
+  const reply = await f.leader.handle("chat", "confirm-resume", `确认目标 ${pending.id}`);
+  expect(reply.text).toContain("后台将按授权预算持续推进");
+  expect(await f.store.getGoal(pending.id)).toMatchObject({ status: "active", proposal: {
+    targets: [{ nodeId: "air", sessionId: "original", sendRoute: "app-server-resume" }],
+  } });
+  expect(f.commands.submit).not.toHaveBeenCalled();
+});
+
 it("does not persist an unseen goal if preview rendering fails after a successful proposal", async () => {
   const f = fixture(), original = await f.propose(), value = request();
   value.objective = "替换预览但不应授权";

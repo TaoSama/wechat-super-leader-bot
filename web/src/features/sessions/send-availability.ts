@@ -31,7 +31,28 @@ export function isSendAvailabilityFresh(availability: SendAvailability, now = Da
     observedAt <= now && now < validUntil && validUntil > observedAt && validUntil - observedAt <= MAX_SEND_AVAILABILITY_AGE_MS;
 }
 
+export function canResumeSession(session: ScopedSession, now = Date.now()): boolean {
+  if (isTerminalSession(session) || session.provider !== "codex-app" || !session.capabilities.includes("resume-send") ||
+      session.loaded !== false || !["notLoaded", "idle"].includes(session.status)) return false;
+  const observedAt = isIsoTimestamp(session.observedAt) ? Date.parse(session.observedAt) : NaN;
+  if (!Number.isFinite(now) || !Number.isFinite(observedAt) || observedAt > now || now - observedAt > MAX_SEND_AVAILABILITY_AGE_MS) return false;
+  if (session.desktopObservation !== undefined) {
+    const desktop = normalizeDesktopObservation(session.desktopObservation);
+    if (!desktop || isDesktopObservationFresh(desktop, now)) return false;
+  }
+  if (session.sendAvailability !== undefined) {
+    const authority = normalizeSendAvailability(session.sendAvailability)!;
+    if (authority.route !== "desktop-owner" || !isIsoTimestamp(authority.observedAt) || !isIsoTimestamp(authority.validUntil)) return false;
+    if (authority.state === "ready") {
+      const observed = Date.parse(authority.observedAt), until = Date.parse(authority.validUntil);
+      if (observed > now || until <= observed || until - observed > MAX_SEND_AVAILABILITY_AGE_MS || now < until) return false;
+    }
+  }
+  return true;
+}
+
 export function sessionSendBlockReason(session: ScopedSession, now = Date.now()): string | null {
+  if (canResumeSession(session, now)) return null;
   const terminal = isTerminalSession(session);
   const availability = normalizeSendAvailability(session.sendAvailability);
   if (terminal && !availability) return TERMINAL_READ_ONLY_REASON;
@@ -63,5 +84,6 @@ export function sessionSendBlockReason(session: ScopedSession, now = Date.now())
 }
 
 export function sendRouteLabel(route: SendRoute): string {
-  return route === "terminal-pane" ? "原终端输入（非原子）" : route === "desktop-owner" ? "原桌面会话" : "宿主控制接口";
+  return route === "terminal-pane" ? "原终端输入（非原子）" : route === "desktop-owner" ? "原桌面会话" :
+    route === "app-server-resume" ? "按需恢复原会话（执行时检查占用）" : "宿主控制接口";
 }

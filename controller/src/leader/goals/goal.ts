@@ -13,7 +13,7 @@ export const GOAL_INPUT_LIMIT = 16_000;
 export const GOAL_PAGE_SIZE = 8;
 const stamp = z.number().int().nonnegative().refine(Number.isSafeInteger);
 export const GoalTargetSchema = z.object({ nodeId: z.string().trim().min(1).max(64), sessionId: z.string().trim().min(1).max(64),
-  sendRoute: z.enum(["control-socket", "desktop-owner"]), skills: SkillRefsSchema.optional() }).strict();
+  sendRoute: z.enum(["control-socket", "desktop-owner", "app-server-resume"]), skills: SkillRefsSchema.optional() }).strict();
 export const GoalProposalSchema = z.object({ id: z.string().uuid(), expiresAt: stamp,
   objective: z.string().trim().min(1).max(2000), criteria: z.array(z.string().trim().min(1).max(500)).min(1).max(8),
   targets: z.array(GoalTargetSchema).min(1).max(4), constraints: z.string().max(2000),
