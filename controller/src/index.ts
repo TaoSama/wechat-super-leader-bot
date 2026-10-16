@@ -1,7 +1,7 @@
-import { loadConfig } from "./config.js";
+import { loadConfig } from "./runtime/config.js";
 import { MemoryStore } from "./store/memory.js";
 import { PostgresStore } from "./store/postgres.js";
-import { ControllerServer } from "./server.js";
+import { ControllerServer } from "./http/server.js";
 
 async function main() {
   try {

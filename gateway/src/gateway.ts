@@ -1,13 +1,13 @@
-import { StateManager } from "./state.js";
-import { ILinkClient } from "./ilink.js";
-import { ControllerClient, ChatNotAllowedError } from "./controller_client.js";
-import { DEFAULT_MESSAGE_MAX_CHARS } from "./markdown.js";
-import { HealthTracker, sanitizeErrorType } from "./health.js";
-import { CHECKPOINT_MARGIN_MS, REPLY_TIMEOUT_MS, SEND_REQUEST_TIMEOUT_MS } from "./budgets.js";
+import { StateManager } from "./runtime/state.js";
+import { ILinkClient } from "./wechat/client.js";
+import { ControllerClient, ChatNotAllowedError } from "./controller/client.js";
+import { DEFAULT_MESSAGE_MAX_CHARS } from "./wechat/markdown.js";
+import { HealthTracker, sanitizeErrorType } from "./runtime/health.js";
+import { CHECKPOINT_MARGIN_MS, REPLY_TIMEOUT_MS, SEND_REQUEST_TIMEOUT_MS } from "./runtime/budgets.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { NOTIFICATION_CHAT_LIMIT, NOTIFICATION_TIMEOUT_MS, NOTIFICATION_RECEIPT_RETRIES, NOTIFICATION_LIMIT,
-  parseNotification, sameNotification, type NotificationDeliverySummary } from "./notifications.js";
+  parseNotification, sameNotification, type NotificationDeliverySummary } from "./controller/notification-contract.js";
 
 const NOTIFICATION_CYCLE_BUDGET_MS = NOTIFICATION_TIMEOUT_MS + NOTIFICATION_LIMIT *
   (NOTIFICATION_TIMEOUT_MS + SEND_REQUEST_TIMEOUT_MS + NOTIFICATION_TIMEOUT_MS * (NOTIFICATION_RECEIPT_RETRIES + 1)) + CHECKPOINT_MARGIN_MS;

@@ -3,7 +3,7 @@
  * Strictly Read-Only Telemetry Types
  */
 
-import type { ConsoleGoals } from "./goal-contract";
+import type { ConsoleGoals } from "./features/leader/goal-contract";
 export type ActionType = "read" | "send";
 
 export type CommandStatus =

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex"
+	codexdesktop "github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex/desktop"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 )
 
@@ -230,7 +230,7 @@ func TestReadinessFailureClassificationAndWireIsolation(t *testing.T) {
 		state  protocol.SendAvailabilityState
 		reason protocol.SendAvailabilityReason
 	}{
-		{codex.ErrDesktopSendBusy, protocol.SendBlocked, protocol.SendReasonBusy},
+		{codexdesktop.ErrDesktopSendBusy, protocol.SendBlocked, protocol.SendReasonBusy},
 		{errors.New("unknown settings"), protocol.SendBlocked, protocol.SendReasonPreflightRejected},
 		{context.DeadlineExceeded, protocol.SendUnavailable, protocol.SendReasonUnavailable},
 	} {

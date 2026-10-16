@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex"
+	codexdesktop "github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex/desktop"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 )
 
@@ -17,7 +18,7 @@ type fixtureDesktopController struct {
 	prepares, sends, closes, inspections atomic.Int32
 	prepareErr, dispatchErr, inspectErr  error
 	turnID                               string
-	beforePrepare                        func(codex.DesktopSendRequest)
+	beforePrepare                        func(codexdesktop.DesktopSendRequest)
 	beforeDispatch                       func(protocol.DispatchIdentity)
 }
 
@@ -30,7 +31,7 @@ func (f *fixtureDesktopController) CheckSendReadiness(context.Context, string) e
 	return errors.New("fixture readiness check not configured")
 }
 
-func (f *fixtureDesktopController) PrepareSend(_ context.Context, req codex.DesktopSendRequest) (codex.PreparedDesktopSend, error) {
+func (f *fixtureDesktopController) PrepareSend(_ context.Context, req codexdesktop.DesktopSendRequest) (codexdesktop.PreparedDesktopSend, error) {
 	f.prepares.Add(1)
 	if f.beforePrepare != nil {
 		f.beforePrepare(req)
@@ -81,7 +82,7 @@ func TestDesktopRoutePersistsBeforeSendAndReplaysWithoutSending(t *testing.T) {
 	cmd := desktopCommand()
 	desktop := &fixtureDesktopController{turnID: "desktop-turn"}
 	d.desktopController = desktop
-	desktop.beforePrepare = func(req codex.DesktopSendRequest) {
+	desktop.beforePrepare = func(req codexdesktop.DesktopSendRequest) {
 		entry, found, err := d.journal.Lookup(cmd)
 		if err != nil || !found || entry.Dispatch == nil || entry.Dispatch.RequestID != req.RequestID || entry.Dispatch.ClientUserMessageID != req.ClientUserMessageID {
 			t.Fatalf("prepare without persisted request IDs: %+v %v", entry, err)

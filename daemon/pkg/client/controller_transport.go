@@ -5,8 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
+)
+
+const (
+	controllerInboundFrameLimit = 8 * 1024 * 1024
+	controllerWriteTimeout      = 5 * time.Second
 )
 
 var errControllerPayloadLimit = errors.New("controller message exceeds payload limit; nothing was sent")

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex"
+	codexdesktop "github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex/desktop"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/config"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 )
@@ -34,7 +34,7 @@ func TestLiveDesktopHistoryColdRoute(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	stateAvailable := false
-	err := codex.NewDesktopObserver(path).Watch(ctx, []string{sessionID}, func(id string, observation protocol.DesktopObservation) {
+	err := codexdesktop.NewDesktopObserver(path).Watch(ctx, []string{sessionID}, func(id string, observation protocol.DesktopObservation) {
 		d.publishDesktop(id, observation, updates)
 		if observation.Availability == "available" {
 			stateAvailable = true

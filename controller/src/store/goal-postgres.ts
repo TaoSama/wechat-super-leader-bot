@@ -1,13 +1,13 @@
 import type pg from "pg";
 import { normalizeGoal, assertGoalConfirmation, goalIsOpen, validateGoalUpdate,
-  type GoalRecord, type GoalConfirmationAuthority, type CreateGoalResult } from "../leader/goal.js";
+  type GoalRecord, type GoalConfirmationAuthority, type CreateGoalResult } from "../leader/goals/goal.js";
 import { executionListQuery } from "./execution-list.js";
 import { ConflictError } from "./interface.js";
 import type { LeaderState } from "../leader/state.js";
 import type { IStore } from "./interface.js";
-import { validateGoalProofs } from "../leader/goal-view.js";
+import { validateGoalProofs } from "../leader/goals/view.js";
 import { validateChatId, validateExpectedRevision } from "../leader/state.js";
-import { createGoalNotification } from "../notifications.js";
+import { createGoalNotification } from "../notifications/contracts.js";
 import { insertTerminalNotification } from "./notification-postgres.js";
 
 export async function lockChatAuthorization(client: Pick<pg.PoolClient, "query">, chatId: string): Promise<void> {
