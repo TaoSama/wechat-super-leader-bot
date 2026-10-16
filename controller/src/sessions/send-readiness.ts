@@ -46,7 +46,7 @@ export function waitForSendReadiness(hub: ReadinessHub, targets: readonly Readin
       if (!session) return denied(target, "目标会话已不可用");
       const key = JSON.stringify([target.nodeId, target.sessionId]);
       const expectedRoute = target.sendRoute ?? waitingRoutes.get(key);
-      const eligibility = selectSendRoute(session, now());
+      const eligibility = selectSendRoute(session, now(), expectedRoute);
       if (eligibility.ready) {
         if (expectedRoute && expectedRoute !== eligibility.route) return denied(target, "发送路线已变化，请重新生成计划");
         waitingRoutes.set(key, eligibility.route);

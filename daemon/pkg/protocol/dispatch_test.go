@@ -34,3 +34,22 @@ func TestDispatchIDsAndRouteIdentity(t *testing.T) {
 		t.Fatal("unknown send route accepted")
 	}
 }
+
+func TestExplicitResumeRouteIsSendOnlyAndFingerprintBound(t *testing.T) {
+	cmd := ControllerCommandMessage{Type: "command", CommandID: "resume-command", NodeID: "node", SessionID: "session", Action: ActionSend, Prompt: "test", ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano)}
+	before := cmd.PayloadFingerprint()
+	cmd.SendRoute = RouteAppServerResume
+	if err := cmd.Validate("node", time.Now()); err != nil || cmd.PayloadFingerprint() == before {
+		t.Fatalf("explicit resume route invalid or not bound: %v", err)
+	}
+	for _, action := range []ActionType{ActionRead, CapabilityResumeSend} {
+		cmd.Action = action
+		if cmd.Validate("node", time.Now()) == nil {
+			t.Fatal("capability treated as an action or read permitted a restore")
+		}
+	}
+	cmd.Action, cmd.SessionID = ActionSend, "terminal:pane"
+	if cmd.Validate("node", time.Now()) == nil {
+		t.Fatal("terminal accepted app-server restore")
+	}
+}

@@ -183,7 +183,7 @@ func TestDiscoverAllSourcesAndPages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sessions) != 3 || sessions[0].Model != "thread-model" || sessions[0].Preview != "preview" || sessions[1].Loaded == nil || *sessions[1].Loaded || len(sessions[1].Capabilities) != 1 || sessions[2].Model != "" {
+	if len(sessions) != 3 || sessions[0].Model != "thread-model" || sessions[0].Preview != "preview" || sessions[1].Loaded == nil || *sessions[1].Loaded || len(sessions[1].Capabilities) != 2 || sessions[1].Capabilities[1] != protocol.CapabilityResumeSend || sessions[2].Model != "" {
 		t.Fatalf("incorrect session metadata: %+v", sessions)
 	}
 }

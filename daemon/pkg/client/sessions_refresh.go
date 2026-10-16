@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"reflect"
+	"slices"
 	"sort"
 	"time"
 
@@ -59,6 +60,11 @@ func (d *Daemon) cachedSessions() []protocol.Session {
 	defer d.snapshotMu.RUnlock()
 	sessions := mergeSessionSources(d.sessionSnapshot, d.catalogSnapshot)
 	for i := range sessions {
+		if !d.canResumeSendLocked(sessions[i].ID, time.Now()) {
+			sessions[i].Capabilities = slices.DeleteFunc(sessions[i].Capabilities, func(capability protocol.ActionType) bool {
+				return capability == protocol.CapabilityResumeSend
+			})
+		}
 		sessions[i].SendAvailability = nil
 		if observation, ok := d.desktopSnapshot[sessions[i].ID]; ok {
 			sessions[i].DesktopObservation = &observation

@@ -66,6 +66,8 @@ describe.each(["memory", "postgres"])("%s send route persistence", kind => {
     expect(duplicate.command.sendRoute).toBe("desktop-owner");
     await store.createCommandIfAbsent(command({ commandId: "native", requestId: "native", sendRoute: "control-socket" }));
     expect((await store.findCommandByRequestId("native"))?.sendRoute).toBe("control-socket");
+    await store.createCommandIfAbsent(command({ commandId: "resume", requestId: "resume", sendRoute: "app-server-resume" }));
+    expect((await store.findCommandByRequestId("resume"))?.sendRoute).toBe("app-server-resume");
   });
 
   it("keeps historical unbound sends readable and rejects read or invalid route binding", async () => {
