@@ -6,6 +6,7 @@ import { emptyExecutions, emptyGoals } from "../fixtures/status-fixtures";
 import type { ScopedSession } from "../../src/types";
 import { StrictMode } from "react";
 import { SessionDetails } from "../../src/features/sessions/components/SessionDetails";
+import { sessionKey } from "../../src/features/sessions/useSessionHistory";
 
 const NOW = Date.parse("2026-10-11T12:00:00Z");
 const iso = new Date(NOW).toISOString();
@@ -41,6 +42,65 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("mobile workspace navigation and composing", () => {
+  it("挂载保留当前焦点，手机打开详情与返回列表才转移焦点", async () => {
+    render(<><button autoFocus>工作区入口</button><SessionWorkspace data={data} nodes={nodes} stale={false} onAuthFailure={vi.fn()} /></>);
+    expect(screen.getByRole("button", { name: "工作区入口" })).toHaveFocus();
+    await openSession();
+    expect(screen.getByRole("heading", { name: session.title })).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "返回会话列表" }));
+    expect(screen.getByTestId("session-row-air-original")).toHaveFocus();
+    await waitFor(() => expect(window.history.state.superLeaderSessionWorkspace).toBeUndefined());
+  });
+
+  it("切换历史来源保留输入焦点，并为新来源重置阅读位置", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: "history_too_large" }), { status: 413 }));
+    workspace();
+    fireEvent.click(screen.getByTestId("session-row-air-original"));
+    const pagedHistory = await screen.findByRole("button", { name: "使用分页历史接口" });
+    const historyScroll = screen.getByLabelText("会话历史");
+    Object.defineProperties(historyScroll, { scrollHeight: { value: 1200, configurable: true }, clientHeight: { value: 300, configurable: true } });
+    historyScroll.scrollTop = 360;
+    fireEvent.scroll(historyScroll);
+    const draft = screen.getByLabelText("发送给当前会话");
+    draft.focus();
+    fireEvent.click(pagedHistory);
+    expect(draft).toHaveFocus();
+    expect(historyScroll.scrollTop).toBe(1200);
+    await screen.findByText("原会话历史");
+    expect(draft).toHaveFocus();
+  });
+
+  it("桌面同屏切换会话时把焦点移到新会话标题", async () => {
+    mobile = false;
+    const other = { ...session, id: "other", title: "另一个会话" };
+    render(<SessionWorkspace data={{ ...data, sessions: [session, other] }} nodes={nodes} stale={false} onAuthFailure={vi.fn()} />);
+    await openSession();
+    const draft = screen.getByLabelText("发送给当前会话");
+    draft.focus();
+    fireEvent.click(screen.getByTestId("session-row-air-original"));
+    expect(draft).toHaveFocus();
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ session: other,
+      historyContext: "cf7e282f-d6d2-4a98-a517-9fb753f2549b", source: "control-socket", fetchedAt: iso,
+      items: [{ id: "other-message", turnId: "turn", type: "agentMessage", kind: "assistant", text: "其它会话历史" }], nextCursor: null, truncated: false,
+    }), { status: 200 }));
+    fireEvent.click(screen.getByTestId("session-row-air-other"));
+    expect(screen.getByRole("heading", { name: other.title })).toHaveFocus();
+    await screen.findByText("其它会话历史");
+  });
+
+  it("后台导航及重新激活工作区都保留外部焦点", async () => {
+    const view = (active: boolean, requestedSessionKey?: string) => <><button autoFocus>其它工作区操作</button><SessionWorkspace data={data} nodes={nodes} stale={false} active={active} requestedSessionKey={requestedSessionKey} onAuthFailure={vi.fn()} /></>;
+    const { rerender } = render(view(false));
+    const external = screen.getByRole("button", { name: "其它工作区操作" });
+    expect(external).toHaveFocus();
+    rerender(view(false, sessionKey(session)));
+    expect(screen.getByRole("heading", { name: session.title })).toBeInTheDocument();
+    expect(external).toHaveFocus();
+    rerender(view(true, sessionKey(session)));
+    await screen.findByText("原会话历史");
+    expect(external).toHaveFocus();
+  });
+
   it("手机返回保留选中项、草稿、列表滚动和URL，浏览器前进可以重新打开详情", async () => {
     const visibility = vi.fn();
     const { container } = workspace(visibility);
