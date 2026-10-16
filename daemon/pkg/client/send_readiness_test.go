@@ -172,7 +172,7 @@ func TestDesktopReadinessIsIndependentAndInvalidationPreservesCheckTime(t *testi
 	}
 }
 
-func TestReadinessGenerationExpiryAndThirtySecondRecheck(t *testing.T) {
+func TestReadinessGenerationExpiryRecoversBeforePeriodicRecheck(t *testing.T) {
 	d := newReadinessFixture(t)
 	updates := make(chan struct{}, 1)
 	now := time.Now()
@@ -189,15 +189,22 @@ func TestReadinessGenerationExpiryAndThirtySecondRecheck(t *testing.T) {
 		t.Fatalf("old generation granted ready or renewed time: %+v", got)
 	}
 	checkTime := now.Add(time.Second)
-	if jobs := d.readinessSweep(checkTime.Add(readinessRecheck-time.Nanosecond), map[string]bool{}, 2, updates); len(jobs) != 0 {
-		t.Fatal("probe repeated before thirty seconds")
+	if jobs := d.readinessSweep(checkTime.Add(readinessRecovery-time.Nanosecond), map[string]bool{}, 2, updates); len(jobs) != 0 {
+		t.Fatal("stale result retried before recovery cooldown")
 	}
-	jobs = d.readinessSweep(checkTime.Add(readinessRecheck), map[string]bool{}, 2, updates)
+	checkTime = checkTime.Add(readinessRecovery)
+	jobs = d.readinessSweep(checkTime, map[string]bool{}, 2, updates)
 	if len(jobs) != 1 {
-		t.Fatal("probe did not resume after thirty seconds")
+		t.Fatal("stale result did not schedule a fast fresh-generation check")
 	}
 	d.completeReadiness(readinessResult{readinessJob: jobs[0]}, checkTime, updates)
 	ready := d.sendReadiness[id]
+	if ready.Availability.State != protocol.SendReady {
+		t.Fatal("fresh-generation check did not restore ready")
+	}
+	if jobs := d.readinessSweep(checkTime.Add(readinessRecheck-time.Nanosecond), map[string]bool{}, 2, updates); len(jobs) != 0 {
+		t.Fatal("successful unchanged proof bypassed periodic recheck cooldown")
+	}
 	at, err := time.Parse(time.RFC3339Nano, ready.Availability.ObservedAt)
 	if err != nil {
 		t.Fatal(err)

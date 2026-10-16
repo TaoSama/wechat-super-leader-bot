@@ -118,7 +118,9 @@ func TestReadinessLateProbeCannotSurviveDisconnectAndReconnectedIdle(t *testing.
 	release := make(chan struct{})
 	var count atomic.Int32
 	d.desktopController = &readinessFixtureController{check: func(ctx context.Context, _ string) error {
-		count.Add(1)
+		if count.Add(1) != 1 {
+			return nil
+		}
 		close(started)
 		select {
 		case <-release:
@@ -156,7 +158,16 @@ func TestReadinessLateProbeCannotSurviveDisconnectAndReconnectedIdle(t *testing.
 		time.Sleep(time.Millisecond)
 	}
 	if got := d.readinessSweep(time.Now(), map[string]bool{}, 2, updates); len(got) != 0 {
-		t.Fatal("disconnect immediately restarted completed probe")
+		t.Fatal("disconnect bypassed bounded recovery cooldown")
+	}
+	for d.cachedSessions()[0].SendAvailability.State != protocol.SendReady {
+		if time.Now().After(deadline) {
+			t.Fatal("reconnected idle did not recover through a fresh probe")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if count.Load() != 2 {
+		t.Fatalf("recovery did not remain single-flight: checks=%d", count.Load())
 	}
 }
 

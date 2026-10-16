@@ -6,6 +6,7 @@ import type { LeaderModel, ModelMessage, ModelToolCall } from "./model/contracts
 import { hasSkillRefs } from "../skills/catalog.js";
 import { selectExecutionObservation, selectModelObservation } from "../sessions/observation.js";
 import { selectSendRoute } from "../sessions/send-eligibility.js";
+import { readinessFailure, waitForSendReadiness, type ReadinessHub } from "../sessions/send-readiness.js";
 import { failureReply, modelDiagnostic } from "./model/errors.js";
 import { createExecution, hasTerminalTarget, matchesExecutionCommand, validatePlanDependencies } from "./plans/execution.js";
 import { assertTerminalSingleStep, submitTerminalPlan, TERMINAL_INPUT_WARNING } from "./plans/terminal.js";
@@ -29,7 +30,7 @@ const clip = (text: string, length: number) => {
 };
 const confirmation = /^(?:确认执行|按这个计划执行|就按这个执行|确认这个计划)[。！!]?$/;
 const cancellation = /^(?:请|帮我)?(?:取消计划|不用执行|取消执行|停止后续任务|停止后续执行|先别跑后面的任务)[。！!]?$/;
-type Hub = Pick<NodeHub, "getAllSessions" | "getNodeStatusList" | "getNodeSession" | "isNodeConnected" | "getAllSkills" | "getNodeSkills" | "readHistory">;
+type Hub = Pick<NodeHub, "getAllSessions" | "getNodeStatusList" | "getNodeSession" | "isNodeConnected" | "getAllSkills" | "getNodeSkills" | "readHistory"> & ReadinessHub;
 
 
 const sanitizeConsoleLinkSecrets = (text: string, issuedUrl?: string): string => {
@@ -180,6 +181,12 @@ export class LeaderOrchestrator {
     catch { return { text: "计划依赖或结果来源无效，没有派发。请重新规划。" }; }
     try { assertTerminalSingleStep(plan); }
     catch { return { text: "终端输入只支持独立单步，不能加入多步或依赖计划，没有派发。" }; }
+    if (plan.actions.some(action => !action.sendRoute)) return { text: "计划中的会话状态已变化（发送路线缺失），没有派发。请重新生成计划。" };
+    const readiness = await waitForSendReadiness(this.hub, plan.actions, {
+      now: this.now, timeoutMs: Math.min(plan.expiresAt, data.inflight!.expiresAt) - this.now(),
+    });
+    if (!readiness.ready) return { text: `计划中的节点或会话状态已变化：${readinessFailure(readiness)}。没有派发。` };
+    if (plan.expiresAt <= this.now()) return { text: "等待期间计划已过期，没有派发。请重新生成计划。" };
     // Validate every target before beginning; revalidate again inside CommandService immediately before dispatch.
     for (const action of plan.actions) {
       const session = this.hub.getNodeSession(action.nodeId, action.sessionId);
@@ -393,8 +400,13 @@ export class LeaderOrchestrator {
         catch { return { error: "Invalid plan dependencies or result sources; resultFrom must select distinct direct earlier dependencies, and same-session tasks must form a chain" }; }
         if ((await this.store.getLatestExecution(chatId))?.status === "active") return { error: "An active plan already exists; query its progress or ask the user to cancel it" };
         if (await this.goals.hasUnfinished(chatId)) return { error: "An active or blocked goal already exists; query its progress or cancel it" };
+        const readiness = await waitForSendReadiness(this.hub, actions, {
+          signal, now: this.now, timeoutMs: data.inflight!.expiresAt - this.now(),
+        });
+        if (!readiness.ready) return { error: readinessFailure(readiness) };
+        if (data.inflight!.expiresAt <= this.now()) return { error: "等待期间处理授权已过期，未生成计划或派发" };
         const boundActions: Plan["actions"] = [];
-        for (const action of actions) {
+        for (const [index, action] of actions.entries()) {
           const session = this.hub.getNodeSession(action.nodeId, action.sessionId);
           if (action.skills?.length && !hasSkillRefs(this.hub.getNodeSkills(action.nodeId), action.skills)) {
             return { error: "Selected skill unavailable or changed; query this node's skills first" };
@@ -403,7 +415,10 @@ export class LeaderOrchestrator {
           if (!this.hub.isNodeConnected(action.nodeId) || !eligibility?.ready) {
             return { error: "Plan contains unavailable, busy or read-only targets; clarify with the user" };
           }
-          boundActions.push({ ...action, sendRoute: eligibility.route });
+          if (eligibility.route !== readiness.routes[index]) {
+            return { error: `[${action.nodeId}] ${action.sessionId}：发送路线已变化，请重新生成计划` };
+          }
+          boundActions.push({ ...action, sendRoute: readiness.routes[index] });
         }
         try { assertTerminalSingleStep({ actions: boundActions }); }
         catch { data.pending = undefined; return { error: "终端输入无法证明任务完成，只支持独立单步，不能加入多步或依赖计划" }; }
