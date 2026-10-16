@@ -1,8 +1,8 @@
 import { z } from "zod";
 import type { IStore } from "../store/interface.js";
-import { normalizeGoal, validateGoalDecision, type GoalDecisionInput } from "../leader/goal.js";
-import { readGoalView } from "../leader/goal-view.js";
-import { goalReason } from "../leader/goal-reason.js";
+import { normalizeGoal, validateGoalDecision, type GoalDecisionInput } from "../leader/goals/goal.js";
+import { readGoalView } from "../leader/goals/view.js";
+import { goalReason } from "../leader/goals/reason.js";
 import { TurnIdSchema } from "../types.js";
 
 export const CONSOLE_GOAL_LIMIT = 12;

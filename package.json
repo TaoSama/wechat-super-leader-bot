@@ -1,0 +1,14 @@
+{
+  "name": "super-leader",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "packageManager": "pnpm@11.8.0",
+  "scripts": {
+    "build": "pnpm --dir controller build && pnpm --dir gateway build && pnpm --dir web build && cd daemon && go build -o bin/super-leader-daemon ./cmd/super-leader-daemon",
+    "test": "node scripts/verify.mjs --suite unit",
+    "test:integration": "node scripts/verify.mjs --suite integration",
+    "verify": "node scripts/verify.mjs",
+    "local": "node scripts/local.mjs"
+  }
+}

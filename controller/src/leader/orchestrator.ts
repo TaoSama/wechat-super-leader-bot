@@ -1,21 +1,21 @@
 import { createHash, randomUUID } from "node:crypto";
-import { CommandError, CommandService } from "../commands.js";
-import { NodeHub } from "../hub.js";
+import { CommandError, CommandService } from "../commands/service.js";
+import { NodeHub } from "../nodes/hub.js";
 import { ConflictError, IStore } from "../store/interface.js";
-import type { LeaderModel, ModelMessage, ModelToolCall } from "./model.js";
-import { hasSkillRefs } from "../skills.js";
-import { selectExecutionObservation, selectModelObservation } from "../session-observation.js";
-import { selectSendRoute } from "../send-eligibility.js";
-import { failureReply, modelDiagnostic } from "./errors.js";
-import { createExecution, hasTerminalTarget, matchesExecutionCommand, validatePlanDependencies } from "./execution.js";
-import { assertTerminalSingleStep, submitTerminalPlan, TERMINAL_INPUT_WARNING } from "./terminal-plan.js";
-import { ExecutionScheduler } from "./execution-scheduler.js";
-import { executionSummary } from "./execution-presentation.js";
-import { readSessionHistory } from "./session-history.js";
-import { GoalConversation, goalConfirmation, goalCancellation } from "./goal-conversation.js";
-import { GoalScheduler } from "./goal-scheduler.js";
-import { createGoalDecider } from "./goal-model.js";
-import { goalPreview } from "./goal-presentation.js";
+import type { LeaderModel, ModelMessage, ModelToolCall } from "./model/contracts.js";
+import { hasSkillRefs } from "../skills/catalog.js";
+import { selectExecutionObservation, selectModelObservation } from "../sessions/observation.js";
+import { selectSendRoute } from "../sessions/send-eligibility.js";
+import { failureReply, modelDiagnostic } from "./model/errors.js";
+import { createExecution, hasTerminalTarget, matchesExecutionCommand, validatePlanDependencies } from "./plans/execution.js";
+import { assertTerminalSingleStep, submitTerminalPlan, TERMINAL_INPUT_WARNING } from "./plans/terminal.js";
+import { ExecutionScheduler } from "./plans/scheduler.js";
+import { executionSummary } from "./plans/presentation.js";
+import { readSessionHistory } from "./queries/session-history.js";
+import { GoalConversation, goalConfirmation, goalCancellation } from "./goals/conversation.js";
+import { GoalScheduler } from "./goals/scheduler.js";
+import { createGoalDecider } from "./goals/model.js";
+import { goalPreview } from "./goals/presentation.js";
 import {
   CLAIM_TTL_MS, ConsoleLinkIssued, ConsoleLinkIssuer, LEADER_TOOLS, LeaderData, LeaderDataSchema, LeaderReply, MAX_HISTORY_ITEMS,
   MAX_MODEL_STEPS, MAX_RECEIPTS, MAX_REPLY_CHARS, MAX_RESULT_CODE_POINTS, MAX_RESULT_JSON_CHARS, MAX_TOOL_CALLS, PLAN_TTL_MS, Plan,
@@ -31,7 +31,6 @@ const confirmation = /^(?:确认执行|按这个计划执行|就按这个执行|
 const cancellation = /^(?:请|帮我)?(?:取消计划|不用执行|取消执行|停止后续任务|停止后续执行|先别跑后面的任务)[。！!]?$/;
 type Hub = Pick<NodeHub, "getAllSessions" | "getNodeStatusList" | "getNodeSession" | "isNodeConnected" | "getAllSkills" | "getNodeSkills" | "readHistory">;
 
-export type { ConsoleLinkIssued, ConsoleLinkIssuer };
 
 const sanitizeConsoleLinkSecrets = (text: string, issuedUrl?: string): string => {
   let result = text;

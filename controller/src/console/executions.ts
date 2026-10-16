@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { IStore } from "../store/interface.js";
-import { normalizeExecution, ExecutionSchema } from "../leader/execution.js";
-import { readExecutionView } from "../leader/execution-view.js";
+import { normalizeExecution, ExecutionSchema } from "../leader/plans/execution.js";
+import { readExecutionView } from "../leader/plans/view.js";
 import { MAX_PLAN_ACTIONS, MAX_RESULT_CODE_POINTS } from "../leader/contracts.js";
 import { TurnIdSchema } from "../types.js";
 

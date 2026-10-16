@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex"
+	codexdesktop "github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex/desktop"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 )
 
@@ -189,7 +189,7 @@ func (d *Daemon) completeReadiness(result readinessResult, now time.Time, update
 		if result.Err != nil {
 			record.Availability.State, record.Availability.Reason = protocol.SendBlocked, protocol.SendReasonPreflightRejected
 			var networkError net.Error
-			if errors.Is(result.Err, codex.ErrDesktopSendBusy) {
+			if errors.Is(result.Err, codexdesktop.ErrDesktopSendBusy) {
 				record.Availability.Reason = protocol.SendReasonBusy
 			} else if errors.As(result.Err, &networkError) || errors.Is(result.Err, context.DeadlineExceeded) || errors.Is(result.Err, context.Canceled) ||
 				errors.Is(result.Err, io.EOF) || errors.Is(result.Err, io.ErrUnexpectedEOF) || errors.Is(result.Err, net.ErrClosed) {

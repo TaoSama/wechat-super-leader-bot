@@ -4,7 +4,7 @@ import {
   IConsoleAuthStore,
   hashConsoleToken,
 } from "./types.js";
-import { validateConsolePublicUrl } from "../config.js";
+import { validateConsolePublicUrl } from "../runtime/config.js";
 
 export const CONSOLE_LINK_TTL_MS = 3600 * 1000; // 1 hour
 export const CONSOLE_SESSION_TTL_MS = 3600 * 1000; // 1 hour

@@ -1,19 +1,20 @@
-import { CommandRecord, InputReceipt, MessageRecord, ScopedSession, Session, validateCommandSendRoute } from "../types.js";
+import { CommandRecord, MessageRecord, ScopedSession, Session, validateCommandSendRoute } from "../types.js";
+import { InputReceipt } from "../sessions/input-receipt.js";
 import { IStore, CreateCommandResult, ConflictError } from "./interface.js";
-import { sameSkillRefs } from "../skills.js";
+import { sameSkillRefs } from "../skills/catalog.js";
 import { nextCommandState, inspectionLimit, validateStoredCommandInput } from "./command-state.js";
 import { validateNodeSessionInventory } from "./node-sessions.js";
 import { executionListQuery } from "./execution-list.js";
 import { normalizeGoal, assertGoalConfirmation, validateGoalUpdate, goalIsOpen, type GoalRecord,
-  type GoalConfirmationAuthority, type CreateGoalResult } from "../leader/goal.js";
-import { validateGoalProofs } from "../leader/goal-view.js";
+  type GoalConfirmationAuthority, type CreateGoalResult } from "../leader/goals/goal.js";
+import { validateGoalProofs } from "../leader/goals/view.js";
 import { createTerminalNotification, createGoalNotification, readNotification, claimNotificationRecord, receiptNotificationRecord,
   NotificationIdSchema, NotificationReceiptStatusSchema, validateNotificationTime, NOTIFICATION_BATCH_LIMIT,
-  type Notification, type StoredNotification, type NotificationReceiptStatus } from "../notifications.js";
+  type Notification, type StoredNotification, type NotificationReceiptStatus } from "../notifications/contracts.js";
 import { normalizeExecution, validateExecutionUpdate, executionPageLimit, EXECUTION_PAGE_SIZE,
-  type CreateExecutionResult, type ExecutionRecord } from "../leader/execution.js";
+  type CreateExecutionResult, type ExecutionRecord } from "../leader/plans/execution.js";
 import { assertExecutionConfirmation, normalizeExecutionConfirmation,
-  type ExecutionConfirmationAuthority } from "../leader/execution-confirmation.js";
+  type ExecutionConfirmationAuthority } from "../leader/plans/confirmation.js";
 import {
   LeaderState,
   cloneLeaderState,

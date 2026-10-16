@@ -17,7 +17,7 @@ services:
   controller:
     build:
       context: .
-      dockerfile: Dockerfile.controller
+      dockerfile: deploy/Dockerfile.controller
     environment:
       HOST: 0.0.0.0
       PORT: 8790

@@ -1,7 +1,7 @@
 import type pg from "pg";
 import { normalizeNotification, readNotification, claimNotificationRecord, receiptNotificationRecord,
   NotificationIdSchema, NotificationReceiptStatusSchema, validateNotificationTime, NOTIFICATION_BATCH_LIMIT,
-  type Notification, type StoredNotification, type NotificationReceiptStatus } from "../notifications.js";
+  type Notification, type StoredNotification, type NotificationReceiptStatus } from "../notifications/contracts.js";
 import { executionListQuery } from "./execution-list.js";
 
 interface NotificationRow {
