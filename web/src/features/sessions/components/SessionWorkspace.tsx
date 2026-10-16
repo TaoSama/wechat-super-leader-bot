@@ -55,6 +55,7 @@ export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = t
   const listRef = useRef<HTMLDivElement>(null);
   const listScrollRef = useRef(0);
   const historyPositionsRef = useRef(new Map<string, number>());
+  const navigationRef = useRef({ selectedKey, detailVisible });
   const visibleSessions = useMemo(() => {
     const search = query.trim().toLocaleLowerCase();
     return data.sessions.filter((session) => {
@@ -66,15 +67,22 @@ export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = t
   }, [data.sessions, query, nodeFilter, observationNow]);
 
   useLayoutEffect(() => {
+    const previous = navigationRef.current;
+    navigationRef.current = { selectedKey, detailVisible };
+    if (!active || previous.selectedKey === selectedKey && previous.detailVisible === detailVisible) return;
+    if (detailVisible) headingRef.current?.focus();
+    else if (previous.detailVisible) {
+      const selectedButton = listRef.current?.querySelector<HTMLButtonElement>(".session-choice.selected");
+      selectedButton?.focus({ preventScroll: true });
+    }
+  }, [active, selectedKey, detailVisible]);
+  useLayoutEffect(() => {
     if (detailVisible) {
-      headingRef.current?.focus();
       const container = scroll.scrollRef.current;
       if (container) container.scrollTop = historyPositionsRef.current.get(historyOwner) ?? container.scrollHeight;
     }
     else {
       if (listRef.current) listRef.current.scrollTop = listScrollRef.current;
-      const selectedButton = listRef.current?.querySelector<HTMLButtonElement>(".session-choice.selected");
-      selectedButton?.focus({ preventScroll: true });
     }
   }, [selectedKey, detailVisible, historyOwner]);
   useEffect(() => {
