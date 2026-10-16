@@ -27,6 +27,20 @@ function fixture() {
 afterEach(() => vi.useRealTimers());
 
 describe("bounded send readiness observation", () => {
+  it("revalidates loaded idle resume only for an explicitly frozen route", async () => {
+    const f = fixture();
+    delete f.session.desktopObservation;
+    delete f.session.sendAvailability;
+    Object.assign(f.session, { status: "idle", loaded: true, capabilities: ["read", "send", "resume-send"] });
+    expect(await waitForSendReadiness(f.hub, [target])).toEqual({ ready: true, routes: ["control-socket"] });
+    expect(await waitForSendReadiness(f.hub, [{ ...target, sendRoute: "app-server-resume" }]))
+      .toEqual({ ready: true, routes: ["app-server-resume"] });
+    f.session.capabilities = ["read", "send"];
+    expect(await waitForSendReadiness(f.hub, [{ ...target, sendRoute: "app-server-resume" }]))
+      .toMatchObject({ ready: false, reason: expect.stringContaining("路线已变化") });
+    expect(f.hub.subscribeSessionChanges).not.toHaveBeenCalled();
+  });
+
   it("observes checking recovery and releases the listener", async () => {
     const f = fixture();
     const result = waitForSendReadiness(f.hub, [target]);

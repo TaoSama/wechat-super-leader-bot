@@ -13,7 +13,7 @@ import (
 
 var (
 	ErrDispatchIdentity = errors.New("command journal dispatch identity invalid or unavailable")
-	ErrNoDispatch       = errors.New("command journal has no desktop dispatch identity")
+	ErrNoDispatch       = errors.New("command journal has no bound runtime dispatch identity")
 )
 
 func validDispatchUUID(value string) bool {
@@ -49,14 +49,20 @@ func validDispatchEndpoint(endpoint string) bool {
 	})
 }
 
-// A claim carries only preallocated UUIDs. A bound identity additionally carries
-// the exact connection and owner selected before the one mutation write.
+// A claim carries only preallocated UUIDs. Every bound identity has the exact
+// endpoint selected before mutation; only desktop identities have an owner.
 func validateDispatch(identity protocol.DispatchIdentity, requireBound bool) error {
-	if identity.Route != protocol.RouteDesktopOwner || !validDispatchText(identity.SessionID) ||
+	if (identity.Route != protocol.RouteDesktopOwner && identity.Route != protocol.RouteAppServerResume) || !validDispatchText(identity.SessionID) ||
 		!validDispatchUUID(identity.ClientUserMessageID) || !validDispatchUUID(identity.RequestID) {
 		return ErrDispatchIdentity
 	}
 	if !requireBound && identity.OwnerID == "" && identity.ConnectionID == "" && identity.Endpoint == "" {
+		return nil
+	}
+	if identity.Route == protocol.RouteAppServerResume {
+		if identity.OwnerID != "" || identity.ConnectionID != "" || !validDispatchEndpoint(identity.Endpoint) {
+			return ErrDispatchIdentity
+		}
 		return nil
 	}
 	if !validDispatchText(identity.OwnerID) || !validDispatchText(identity.ConnectionID) || !validDispatchEndpoint(identity.Endpoint) {
@@ -68,7 +74,7 @@ func validateDispatch(identity protocol.DispatchIdentity, requireBound bool) err
 // BindDispatch commits the immutable route before the native mutation write.
 // A completed or restart-recovered claim can never be rebound for execution.
 func (j *Journal) BindDispatch(cmd protocol.ControllerCommandMessage, identity protocol.DispatchIdentity) error {
-	if cmd.Action != protocol.ActionSend || cmd.SendRoute != protocol.RouteDesktopOwner ||
+	if cmd.Action != protocol.ActionSend || (cmd.SendRoute != protocol.RouteDesktopOwner && cmd.SendRoute != protocol.RouteAppServerResume) ||
 		identity.Route != cmd.SendRoute || identity.SessionID != cmd.SessionID {
 		return ErrDispatchIdentity
 	}

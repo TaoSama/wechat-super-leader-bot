@@ -30,7 +30,7 @@ export class CommandService {
     if (!session) throw new CommandError(404, "Target session is unavailable");
     let sendRoute: SendRoute | undefined;
     if (request.action === "send") {
-      const eligibility = selectSendRoute(session);
+      const eligibility = selectSendRoute(session, Date.now(), expectedRoute);
       if (!eligibility.ready) throw new CommandError(eligibility.httpStatus, eligibility.reason);
       sendRoute = eligibility.route;
       if (expectedRoute !== undefined && sendRoute !== expectedRoute) throw new CommandError(409, "Target send route changed; regenerate the plan");

@@ -20,6 +20,8 @@ const MaxControllerMessageBytes = 1024 * 1024
 const (
 	ActionRead ActionType = "read"
 	ActionSend ActionType = "send"
+	// CapabilityResumeSend is an admission hint, never an executable action.
+	CapabilityResumeSend ActionType = "resume-send"
 )
 
 // DaemonResultStatus values: completed, failed, accepted, uncertain
@@ -182,11 +184,14 @@ func (c *ControllerCommandMessage) Validate(expectedNodeID string, now time.Time
 	if c.Action == ActionSend && strings.TrimSpace(c.Prompt) == "" {
 		return errors.New("prompt is required for send action")
 	}
-	if c.SendRoute != "" && (c.Action != ActionSend || (c.SendRoute != RouteControlSocket && c.SendRoute != RouteDesktopOwner && c.SendRoute != RouteTerminalPane)) {
+	if c.SendRoute != "" && (c.Action != ActionSend || (c.SendRoute != RouteControlSocket && c.SendRoute != RouteDesktopOwner && c.SendRoute != RouteTerminalPane && c.SendRoute != RouteAppServerResume)) {
 		return errors.New("invalid send route")
 	}
 	if c.SendRoute == RouteTerminalPane && !strings.HasPrefix(c.SessionID, "terminal:") {
 		return errors.New("terminal-pane requires a terminal session")
+	}
+	if c.SendRoute == RouteAppServerResume && (!ValidHistoryIdentity(c.SessionID) || strings.HasPrefix(c.SessionID, "terminal:")) {
+		return errors.New("app-server-resume requires a native session")
 	}
 	if len(c.Skills) > 0 && c.Action != ActionSend {
 		return errors.New("only send accepts skill references")

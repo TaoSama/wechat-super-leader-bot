@@ -193,7 +193,7 @@ export class LeaderOrchestrator {
       if (action.skills?.length && !hasSkillRefs(this.hub.getNodeSkills(action.nodeId), action.skills)) {
         return { text: "计划中的技能已变化或不可用，没有派发。请重新查询技能并生成计划。" };
       }
-      const eligibility = session ? selectSendRoute(session, this.now()) : undefined;
+      const eligibility = session ? selectSendRoute(session, this.now(), action.sendRoute) : undefined;
       if (!this.hub.isNodeConnected(action.nodeId) || !action.sendRoute || !eligibility?.ready || eligibility.route !== action.sendRoute) {
         return { text: "计划中的节点或会话状态已变化，没有派发。请重新查询并生成计划。" };
       }
@@ -411,7 +411,7 @@ export class LeaderOrchestrator {
           if (action.skills?.length && !hasSkillRefs(this.hub.getNodeSkills(action.nodeId), action.skills)) {
             return { error: "Selected skill unavailable or changed; query this node's skills first" };
           }
-          const eligibility = session ? selectSendRoute(session, this.now()) : undefined;
+          const eligibility = session ? selectSendRoute(session, this.now(), readiness.routes[index]) : undefined;
           if (!this.hub.isNodeConnected(action.nodeId) || !eligibility?.ready) {
             return { error: "Plan contains unavailable, busy or read-only targets; clarify with the user" };
           }

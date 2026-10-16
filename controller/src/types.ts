@@ -6,8 +6,9 @@ import { isTerminalHistoryTarget, isTerminalSession } from "./sessions/terminal.
 
 export const ActionTypeSchema = z.enum(["read", "send"]);
 export type ActionType = z.infer<typeof ActionTypeSchema>;
+export const SessionCapabilitySchema = z.enum(["read", "send", "resume-send"]);
 
-export const SendRouteSchema = z.enum(["desktop-owner", "control-socket", "terminal-pane"]);
+export const SendRouteSchema = z.enum(["desktop-owner", "control-socket", "app-server-resume", "terminal-pane"]);
 export type SendRoute = z.infer<typeof SendRouteSchema>;
 const SendAvailabilityFields = {
   state: z.enum(["ready", "blocked", "unavailable"]),
@@ -73,7 +74,7 @@ export const SessionSchema = z.object({
   title: z.string().default(""),
   cwd: z.string().default(""),
   status: z.string().default("unknown"),
-  capabilities: z.array(ActionTypeSchema).default([]),
+  capabilities: z.array(SessionCapabilitySchema).default([]),
   observedAt: z.string(),
   model: z.string().optional(),
   modelProvider: z.string().optional(),

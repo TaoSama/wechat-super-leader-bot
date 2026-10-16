@@ -16,6 +16,14 @@ type SessionAdapter interface {
 	SendPrompt(context.Context, string, string) (string, error)
 }
 
+// ResumeSender sends once on its configured server, explicitly restoring the
+// thread if needed. ResumeSend returns the exact native turn ID, never output.
+// Discovery, readiness and inspection must not invoke it.
+type ResumeSender interface {
+	Endpoint() string
+	ResumeSend(context.Context, string, string) (string, error)
+}
+
 type HistoryReader interface {
 	ReadHistory(context.Context, string, string, int) (protocol.SessionHistory, error)
 }

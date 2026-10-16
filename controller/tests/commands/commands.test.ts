@@ -78,6 +78,66 @@ it("persists desktop authority and dispatches it without native send capability"
   expect(f.hub.sendCommand).toHaveBeenCalledTimes(1);
 });
 
+it("persists explicit resume route, preserves native unloaded facts and deduplicates replay", async () => {
+  const f = setup();
+  Object.assign(f.session, { status: "notLoaded", loaded: false, capabilities: ["read", "resume-send"] });
+  const result = await f.commands.submit(input, 0, undefined, "app-server-resume");
+  expect(result.sendRoute).toBe("app-server-resume");
+  expect(f.hub.sendCommand.mock.calls[0][0].sendRoute).toBe("app-server-resume");
+  expect(f.session).toMatchObject({ status: "notLoaded", loaded: false, capabilities: ["read", "resume-send"] });
+  f.session.capabilities = ["read"];
+  expect((await f.commands.submit(input, 0)).commandId).toBe(result.commandId);
+  expect(f.hub.sendCommand).toHaveBeenCalledTimes(1);
+});
+
+it("dispatches a frozen resume route after loading and never rewrites its persisted route", async () => {
+  const f = setup();
+  f.session.capabilities = ["read", "send", "resume-send"];
+  expect(f.commands.canDispatchSend(input, "app-server-resume")).toBe(true);
+  const result = await f.commands.submit(input, 0, undefined, "app-server-resume");
+  expect(result.sendRoute).toBe("app-server-resume");
+  expect(f.hub.sendCommand.mock.calls[0][0].sendRoute).toBe("app-server-resume");
+  f.session.capabilities = ["read", "send"];
+  expect(f.commands.canDispatchSend(input, "app-server-resume")).toBe(false);
+  expect((await f.commands.submit(input, 0)).sendRoute).toBe("app-server-resume");
+  expect(f.hub.sendCommand).toHaveBeenCalledTimes(1);
+});
+
+it.each(["capability", "active", "stale", "desktop"])("does not consume an attempt for revoked loaded resume: %s", async change => {
+  const f = setup();
+  f.session.capabilities = ["read", "send", "resume-send"];
+  if (change === "capability") f.session.capabilities = ["read", "send"];
+  if (change === "active") f.session.status = "active";
+  if (change === "stale") f.session.observedAt = new Date(Date.now() - 60_000).toISOString();
+  if (change === "desktop") f.session.desktopObservation = {
+    source: "codex-desktop", availability: "available", status: "idle", observedAt: new Date().toISOString(),
+  };
+  expect(f.commands.canDispatchSend(input, "app-server-resume")).toBe(false);
+  await expect(f.commands.submit(input, 0, undefined, "app-server-resume")).rejects.toThrow();
+  expect(await f.store.listRecentCommands()).toEqual([]);
+  expect(f.hub.sendCommand).not.toHaveBeenCalled();
+});
+
+it("does not substitute managed resume for a frozen desktop route", async () => {
+  const f = setup();
+  Object.assign(f.session, { status: "notLoaded", loaded: false, capabilities: ["read", "resume-send"],
+    sendAvailability: { ...desktopReady(), state: "unavailable", reason: "unavailable" } });
+  await expect(f.commands.submit(input, 0, undefined, "desktop-owner")).rejects.toThrow("route changed");
+  expect(await f.store.listRecentCommands()).toEqual([]);
+  expect(f.hub.sendCommand).not.toHaveBeenCalled();
+});
+
+it.each(["owner", "capability-revoked"])("refuses resume when %s changes before transmission", async change => {
+  const f = setup();
+  Object.assign(f.session, { status: "notLoaded", loaded: false, capabilities: ["read", "resume-send"] });
+  await expect(f.commands.submit(input, 0, async () => {
+    if (change === "owner") f.session.desktopObservation = { source: "codex-desktop", availability: "available", status: "active", observedAt: new Date().toISOString() };
+    else f.session.capabilities = ["read"];
+  }, "app-server-resume")).rejects.toThrow("changed before transmission");
+  expect(f.hub.sendCommand).not.toHaveBeenCalled();
+  expect(await f.store.findCommandByRequestId(input.requestId)).toMatchObject({ status: "failed", sendRoute: "app-server-resume" });
+});
+
 it.each(["native-to-desktop", "desktop-to-native", "blocked", "expired", "active-observation", "offline"])(
   "fails the persisted command with zero dispatch when authority changes: %s", async change => {
     const f = setup();
