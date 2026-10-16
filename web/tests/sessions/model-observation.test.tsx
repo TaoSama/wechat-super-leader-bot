@@ -91,6 +91,7 @@ describe("workspace model views", () => {
     fireEvent.click(row);
     expect(document.querySelector(".detail-model")).toHaveTextContent("desktop-model");
     expect(document.querySelector(".composer-label span")).toHaveTextContent("desktop-model");
+    fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
     const details = document.querySelector(".session-metadata") as HTMLElement;
     expect(within(details).getByText("desktop-provider")).toBeInTheDocument();
     expect(within(details).getByText("high")).toBeInTheDocument();

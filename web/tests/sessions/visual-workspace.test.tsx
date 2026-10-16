@@ -38,10 +38,11 @@ it("会话三行突出标题、最近消息和模型，技术字段在详情中"
   expect(row).not.toHaveTextContent("openai");
   fireEvent.click(row);
   await screen.findByText("可读的历史消息");
-  const metadata = screen.getByText("会话详情").closest("details")!;
-  expect(metadata).not.toHaveAttribute("open");
-  expect(within(metadata).getByText(session.cwd)).not.toBeVisible();
-  fireEvent.click(within(metadata).getByText("会话详情"));
+  expect(screen.queryByRole("dialog", { name: "会话详情" })).toBeNull();
+  expect(screen.queryByText(session.cwd)).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
+  const metadata = screen.getByRole("dialog", { name: "会话详情" });
+  expect(metadata).toHaveAttribute("open");
   expect(within(metadata).getByText(session.cwd)).toBeVisible();
 });
 
@@ -59,7 +60,10 @@ it("历史超限提供显式分页入口，选择后标注来源且不发送消�
   fireEvent.click(await screen.findByTestId("session-row-local-session-one"));
   fireEvent.click(await screen.findByRole("button", { name: "使用分页历史接口" }));
   await screen.findByText("可读的历史消息");
-  expect(screen.getByText(/原生分页历史 · 读取同一会话/)).toBeInTheDocument();
+  expect(screen.getByText("已切换为原生分页历史")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "查看来源" }));
+  const metadata = screen.getByRole("dialog", { name: "会话详情" });
+  expect(within(metadata).getByText(/原生分页历史 · 读取同一会话/)).toBeVisible();
   expect(screen.queryByText("历史超出读取大小限制。")).toBeNull();
   expect(calls.some(url => url.includes("source=control-socket"))).toBe(true);
   expect(calls.some(url => url.includes("/messages"))).toBe(false);
@@ -144,7 +148,12 @@ it("Leader按注意事项、进行中、完成分组且筛选不混淆执行状�
   expect(screen.getByRole("button", { name: "Super Leader" })).toHaveAttribute("aria-current", "page");
   expect(screen.getByRole("region", { name: "需要处理" })).toHaveTextContent("不确定，需核验，勿自动重发");
   expect(within(screen.getByRole("region", { name: "执行中" })).getByTestId("command-status-command-3")).toHaveTextContent("已受理");
-  expect(within(screen.getByRole("region", { name: "最近完成" })).getByTestId("command-status-command-5")).toHaveTextContent("执行完成");
+  const completed = screen.getByRole("region", { name: "最近完成" });
+  const completedStatus = within(completed).getByTestId("command-status-command-5");
+  expect(completedStatus).not.toBeVisible();
+  fireEvent.click(within(completed).getByText("查看已完成"));
+  expect(completedStatus).toBeVisible();
+  expect(completedStatus).toHaveTextContent("执行完成");
   expect(screen.getByRole("region", { name: "Leader 运行模式" })).toHaveTextContent("leader-config-model");
   fireEvent.change(screen.getByLabelText("按指令状态过滤"), { target: { value: "uncertain" } });
   expect(screen.getByTestId("command-item-command-1")).toBeInTheDocument();
@@ -158,11 +167,13 @@ it("Leader完整回执默认折叠，节点筛选和回到原会话保留草稿"
   await screen.findByText("可读的历史消息");
   fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "继续这段草稿" } });
   fireEvent.click(screen.getByRole("button", { name: "Super Leader" }));
+  fireEvent.click(screen.getByText("查看已完成"));
   const completed = screen.getByTestId("command-item-command-5");
   const output = within(completed).getByText("完整输出只在详情中展开");
   expect(output).not.toBeVisible();
   fireEvent.click(within(completed).getByText("指令详情与回执"));
   expect(output).toBeVisible();
+  fireEvent.click(screen.getByText("机器状态"));
   fireEvent.click(screen.getByRole("button", { name: "按节点 remote 筛选会话与指令" }));
   expect(screen.queryByTestId("command-item-command-1")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "取消筛选节点 remote" }));
@@ -173,7 +184,7 @@ it("Leader完整回执默认折叠，节点筛选和回到原会话保留草稿"
 
 it("流水仅展示最近50条，较早记录不会混入当前分类", () => {
   const commands = Array.from({ length: 55 }, (_, index) => ({ ...command("completed", index), createdAt: new Date(Date.UTC(2026, 9, 11, 10, index)).toISOString() }));
-  const { container } = render(<CommandsSection commands={commands} selectedNodeId={null} sessions={[session]} />);
+  const { container } = render(<CommandsSection commands={commands} selectedNodeId={null} sessions={[session]} statusFilter="ALL" onStatusFilterChange={vi.fn()} />);
   expect(container.querySelectorAll(".command-row")).toHaveLength(50);
   expect(screen.queryByTestId("command-item-command-4")).toBeNull();
   expect(screen.getByTestId("command-item-command-54")).toBeInTheDocument();

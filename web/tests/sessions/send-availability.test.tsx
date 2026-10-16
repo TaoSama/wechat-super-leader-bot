@@ -112,7 +112,9 @@ describe("workspace send route feedback", () => {
 
   it("enables ready desktop and displays the persisted route in its receipt", async () => {
     const { fetchMock } = setup();
+    fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
     expect(screen.getByText("控制接口：未加载")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭会话详情" }));
     expect(screen.getByText("通过原桌面会话发送 · 保留原会话设置")).toBeInTheDocument();
     const send = screen.getByRole("button", { name: "发送消息" });
     expect(send).toBeEnabled();

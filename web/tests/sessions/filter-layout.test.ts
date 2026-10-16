@@ -3,9 +3,13 @@ import { resolve } from "node:path";
 import postcss, { type Rule } from "postcss";
 import { expect, it } from "vitest";
 
-const stylesheet = postcss.parse(readFileSync(resolve(process.cwd(), "src/index.css"), "utf8"));
+const sourceDirectory = resolve(process.cwd(), "src");
+const entrySource = readFileSync(resolve(sourceDirectory, "main.tsx"), "utf8");
+const cssImports = [...entrySource.matchAll(/^import ["'](.+\.css)["'];$/gm)].map(match => match[1]);
+if (!cssImports.length) throw new Error("Missing application stylesheet imports");
+const stylesheet = postcss.parse(cssImports.map(path => readFileSync(resolve(sourceDirectory, path), "utf8")).join("\n"));
 const rule = (selector: string) => {
-  const found = stylesheet.nodes.find(node => node.type === "rule" && node.selector === selector);
+  const found = stylesheet.nodes.find(node => node.type === "rule" && node.selectors.includes(selector));
   if (!found || found.type !== "rule") throw new Error(`Missing filter rule: ${selector}`);
   return found;
 };
@@ -35,4 +39,27 @@ it("键盘select保留清晰焦点，节点筛选选中样式不增加尺寸", (
   for (const property of ["padding", "width", "height", "min-height", "transform"]) {
     expect(declarations(rule(".node-card.selected"))).not.toHaveProperty(property);
   }
+});
+
+it.each([
+  ".composer-route-details > summary",
+  ".receipt-details > summary",
+  ".send-receipt summary",
+  ".machine-details > summary",
+  ".command-history > summary",
+  ".command-details summary",
+  ".leader-mode-help summary",
+  ".leader-footnote summary",
+])("折叠入口%s保持至少44px触摸高度，响应式规则不能缩小", (selector) => {
+  const minimumTouchHeight = 44;
+  const assertTouchHeight = (height: string) => {
+    expect(height).toMatch(/^\d+(?:\.\d+)?px$/);
+    expect(Number.parseFloat(height)).toBeGreaterThanOrEqual(minimumTouchHeight);
+  };
+  assertTouchHeight(declarations(rule(selector))["min-height"]);
+  stylesheet.walkRules(candidate => {
+    if (!candidate.selectors.includes(selector)) return;
+    const height = declarations(candidate)["min-height"];
+    if (height !== undefined) assertTouchHeight(height);
+  });
 });

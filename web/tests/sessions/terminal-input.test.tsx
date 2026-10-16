@@ -114,7 +114,7 @@ describe("terminal composer and receipt behavior", () => {
   });
 
   it("shows proof as an input receipt in a separate group, never in recent-completed or final-output groups", () => {
-    render(<CommandsSection commands={[command]} selectedNodeId={null} sessions={[session]} />);
+    render(<CommandsSection commands={[command]} selectedNodeId={null} sessions={[session]} statusFilter="ALL" onStatusFilterChange={vi.fn()} />);
     const group = screen.getByRole("region", { name: "终端输入已写入" });
     expect(within(group).getByText("输入已写入 (Input Written)")).toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "最近完成" })).not.toBeInTheDocument();

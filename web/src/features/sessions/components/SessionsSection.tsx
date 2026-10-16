@@ -153,6 +153,7 @@ export const SessionsSection: React.FC<SessionsSectionProps> = ({
             const statusBadge = getSessionStatusBadge(session.status);
             const hasRead = session.capabilities.includes("read");
             const hasSend = session.capabilities.includes("send");
+            const hasResume = session.capabilities.includes("resume-send");
 
             return (
               <div
@@ -223,7 +224,8 @@ export const SessionsSection: React.FC<SessionsSectionProps> = ({
                         <span>CAP:send</span>
                       </span>
                     )}
-                    {!hasRead && !hasSend && (
+                    {hasResume && <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded border border-cyan-500/30 text-cyan-300" title="可按需恢复原会话，执行时检查占用">可按需恢复</span>}
+                    {!hasRead && !hasSend && !hasResume && (
                       <span
                         className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-mono rounded border border-amber-500/40 bg-amber-950/40 text-amber-300"
                         title="该会话未声明任何可用能力"
