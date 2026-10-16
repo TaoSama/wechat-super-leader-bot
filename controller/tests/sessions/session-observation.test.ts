@@ -97,7 +97,7 @@ describe("read-only desktop observation", () => {
       return { content: "目标只读，没有派发。", toolCalls: [] };
     } };
     await new LeaderOrchestrator(store, hub, commands, model, () => NOW).handle("chat", "plan", "给会话生成执行计划");
-    expect(planResult).toMatchObject({ error: expect.stringContaining("read-only") });
+    expect(planResult).toMatchObject({ error: "[node] session：Target session is not idle or not loaded" });
     expect((await store.getLeaderState("chat"))?.data.pending).toBeUndefined();
     expect(commands.submit).not.toHaveBeenCalled();
   });

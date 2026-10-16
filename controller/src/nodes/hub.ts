@@ -46,6 +46,7 @@ export class NodeHub {
   // Monotonic generation counter per nodeId to prevent async disconnect/reconnect races
   private nodeGenerations = new Map<string, number>();
   private nodeSessionWrites = new Map<string, Promise<void>>();
+  private sessionSubscribers = new Map<string, Set<() => void>>();
 
   // Maximum heartbeat timeout: if no heartbeat received for 45s, close connection
   private static readonly HEARTBEAT_TIMEOUT_MS = 45000;
@@ -69,6 +70,20 @@ export class NodeHub {
     const node = this.nodes.get(nodeId);
     if (!node || !node.isHelloCompleted) return null;
     return node.sessions.find((s) => s.id === sessionId) || null;
+  }
+
+  subscribeSessionChanges(nodeId: string, listener: () => void): () => void {
+    const listeners = this.sessionSubscribers.get(nodeId) ?? new Set<() => void>();
+    listeners.add(listener);
+    this.sessionSubscribers.set(nodeId, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (!listeners.size && this.sessionSubscribers.get(nodeId) === listeners) this.sessionSubscribers.delete(nodeId);
+    };
+  }
+
+  private sessionsChanged(nodeId: string): void {
+    for (const listener of [...(this.sessionSubscribers.get(nodeId) ?? [])]) listener();
   }
 
   async readHistory(nodeId: string, sessionId: string, options: HistoryReadOptions = {},
@@ -135,6 +150,7 @@ export class NodeHub {
           if (json?.type === "heartbeat" || json?.type === "hello") {
             // An invalid inventory must revoke cached send authority immediately.
             nodeRecord.sessions = [];
+            this.sessionsChanged(nodeId);
             ws.close(4000, "Invalid session inventory");
           }
           return;
@@ -148,6 +164,7 @@ export class NodeHub {
             if (!(error instanceof InvalidSessionInventoryError)) throw error;
             console.warn(`[${nodeId}] Rejected duplicate session identities in inventory`);
             nodeRecord.sessions = [];
+            this.sessionsChanged(nodeId);
             ws.close(4000, "Invalid session inventory");
             return;
           }
@@ -165,6 +182,7 @@ export class NodeHub {
       this.historyRequests.disconnect(ws);
       if (this.nodes.get(nodeId)?.ws === ws) {
         this.nodes.delete(nodeId);
+        this.sessionsChanged(nodeId);
 
         await this.queueNodeSessionWrite(nodeId, async () => {
           try {
@@ -212,6 +230,7 @@ export class NodeHub {
       node.skills = msg.skills;
       node.lastHeartbeat = new Date();
       node.isHelloCompleted = true;
+      this.sessionsChanged(nodeId);
       try {
         await this.persistNodeSessions(node, msg.sessions);
       } catch (err) {
@@ -232,6 +251,7 @@ export class NodeHub {
       node.sessions = msg.sessions;
       node.skills = msg.skills;
       node.lastHeartbeat = new Date();
+      this.sessionsChanged(nodeId);
       try {
         await this.persistNodeSessions(node, msg.sessions);
       } catch (err) {
@@ -450,6 +470,7 @@ export class NodeHub {
     this.historyRequests.closeAll();
     const closingNodes = [...this.nodes.entries()];
     this.nodes.clear();
+    for (const [nodeId] of closingNodes) this.sessionsChanged(nodeId);
     for (const [nodeId, node] of closingNodes) {
       if (node.heartbeatTimer) clearTimeout(node.heartbeatTimer);
       try {

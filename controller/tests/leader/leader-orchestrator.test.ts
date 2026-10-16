@@ -223,7 +223,7 @@ describe("Leader orchestration", () => {
     expect(f.commands.submit).not.toHaveBeenCalled();
     const unknown = new ScriptedModel([tool("propose_plan", { actions: [{ ...actions[0], nodeId: "wrong" }] }), final("请澄清机器")]);
     await f.create(unknown).handle("chat", "m3", "去别的机器执行");
-    expect(unknown.calls[1].some(m => m.role === "tool" && m.content?.includes("unavailable"))).toBe(true);
+    expect(unknown.calls[1].some(m => m.role === "tool" && m.content?.includes("[wrong] s1：节点已断开连接"))).toBe(true);
     expect(f.commands.submit).not.toHaveBeenCalled();
   });
 
