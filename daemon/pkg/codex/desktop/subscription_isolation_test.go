@@ -352,15 +352,26 @@ func TestDesktopSubscriptionIsolationFairActualStartsAcrossWindows(t *testing.T)
 		return isolationUnfollowOrClose(c, id)
 	})
 	observer := NewDesktopObserver(path)
-	observer.watchWindow, observer.subscriptionWindow = 80*time.Millisecond, 50*time.Millisecond
+	observer.watchWindow, observer.subscriptionWindow = isolationWait, 50*time.Millisecond
 	observer.subscriptionLimit = 2
 	ids := []string{"a", "b", "c", "d", "e", "f", "g"}
 	for round := range 4 {
 		ctx, cancel := context.WithTimeout(context.Background(), isolationWait)
-		err := observer.Watch(ctx, ids, func(string, protocol.DesktopObservation) {})
+		available := map[string]bool{}
+		// End each window after two full batches actually publish snapshots.
+		// Rotation starts at the first snapshot, so elapsed wall time alone
+		// cannot guarantee that a second batch has completed its handshake.
+		err := observer.Watch(ctx, ids, func(id string, observation protocol.DesktopObservation) {
+			if observation.Availability == "available" {
+				available[id] = true
+				if len(available) == 2*observer.subscriptionLimit {
+					cancel()
+				}
+			}
+		})
 		cancel()
-		if err != nil {
-			t.Fatalf("window %d failed: %v", round, err)
+		if !errors.Is(err, context.Canceled) || len(available) != 2*observer.subscriptionLimit {
+			t.Fatalf("window %d failed: err=%v available=%v", round, err, available)
 		}
 		waitIdle()
 	}
