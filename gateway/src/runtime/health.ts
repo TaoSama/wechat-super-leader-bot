@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { writePrivateJsonSync, resolvePath } from "./state.js";
-import { DEFAULT_POLL_TIMEOUT_MS, MAX_POLL_ATTEMPTS, CHECKPOINT_MARGIN_MS, MAX_PROCESSING_PHASE_MS, MAX_POLL_PHASE_MS } from "./budgets.js";
+import { DEFAULT_POLL_TIMEOUT_MS, POLL_NETWORK_MARGIN_MS, MAX_POLL_ATTEMPTS, CHECKPOINT_MARGIN_MS, MAX_PROCESSING_PHASE_MS, MAX_POLL_PHASE_MS } from "./budgets.js";
 import { ILinkSendReceiptError } from "../wechat/send-receipt.js";
 
 export type HealthStatus = "starting" | "healthy" | "processing" | "degraded" | "stopped";
@@ -106,7 +106,7 @@ export class HealthTracker {
     return this.currentData;
   }
 
-  public recordPollStart(budgetMs = DEFAULT_POLL_TIMEOUT_MS * MAX_POLL_ATTEMPTS + CHECKPOINT_MARGIN_MS): void {
+  public recordPollStart(budgetMs = (DEFAULT_POLL_TIMEOUT_MS + POLL_NETWORK_MARGIN_MS) * MAX_POLL_ATTEMPTS + CHECKPOINT_MARGIN_MS): void {
     if (!this.currentData) return;
     const now = new Date().toISOString();
     this.currentData.last_poll_started_at = now;

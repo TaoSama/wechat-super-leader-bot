@@ -15,6 +15,7 @@ import { verificationEnvironment } from '../../../scripts/verify.mjs';
 import { closeTestWebSocket, stopTestProcess, withTestCleanup } from '../../support/cleanup.mjs';
 import { createControllerFixture, createPostgresFixture, waitFor } from '../../support/control-plane-fixture.mjs';
 import { PROGRESS_TASK, RAW_REPLY_TASK, RESUMABLE_REPLY, verifyReliableDelivery } from './reliable-delivery.mjs';
+import { BUDGET_REPLY, BUDGET_REPLY_TASK, verifyWechatBudget } from './wechat-budget.mjs';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const CHAT = 'synthetic-wechat-interaction-chat';
@@ -36,12 +37,16 @@ const HEARTBEAT_MS = 500;
 const TICK_OBSERVATION_MS = 2_200;
 const MESSAGE_TYPE_TEXT = 1;
 const CONFIRMATION_INPUT = /^(?:请)?(?:确认|执行|开始|开始执行|确认执行|确认开始|按这个计划执行|就按这个执行|确认这个计划)[。！!]?$/u;
-const { values } = parseArgs({ options: { help: { type: 'boolean', short: 'h' }, run: { type: 'boolean' } } });
+const { values } = parseArgs({ options: { help: { type: 'boolean', short: 'h' }, run: { type: 'boolean' },
+  'budget-only': { type: 'boolean' } } });
 
 if (values.help || !values.run) {
-  console.log('Usage: node tests/integration/leader/wechat-interaction.mjs --run\nRequires built Controller/Gateway, Node >=24, OpenSSL and local Docker with postgres:16-alpine. Starts real processes against disposable PostgreSQL, local model HTTP, local WeChat HTTPS and a synthetic Daemon WebSocket. Never reads live credentials or sessions.');
+  console.log('Usage: node tests/integration/leader/wechat-interaction.mjs --run [--budget-only]\nRequires built Controller/Gateway, Node >=24, OpenSSL and local Docker with postgres:16-alpine. Starts real processes against disposable PostgreSQL, local model HTTP, local WeChat HTTPS and a synthetic Daemon WebSocket. Never reads live credentials or sessions.');
 } else {
-  await main().catch(error => { console.error(error.stack); process.exitCode = 1; });
+  await (async () => {
+    await main();
+    if (!values['budget-only']) await main({ budgetOnly: true });
+  })().catch(error => { console.error(error.stack); process.exitCode = 1; });
 }
 
 async function listen(server) {
@@ -65,7 +70,7 @@ function respond(response, body, status = 200) {
   response.end(JSON.stringify(body));
 }
 
-async function main() {
+async function main({ budgetOnly = values['budget-only'] } = {}) {
   const env = verificationEnvironment();
   const require = createRequire(new URL('../../../controller/package.json', import.meta.url));
   const { WebSocket } = require('ws');
@@ -82,8 +87,8 @@ async function main() {
   const fingerprint = createHash('sha256').update(JSON.stringify(['synthetic-account', 'synthetic-wechat-token'])).digest('hex');
   const clientId = (key, index) => 'super-leader:' + createHash('sha256')
     .update(JSON.stringify([fingerprint, CHAT, key, index])).digest('hex').slice(0, 24);
-  const authorizationCalls = [];
-  let controller, model, wechat, socket, heartbeat, gatewayChild, cursor = 0;
+  const authorizationCalls = [], controllerRequests = [], validContexts = new Set([CONTEXT]);
+  let controller, model, wechat, proxy, gatewayControllerUrl, socket, heartbeat, gatewayChild, cursor = 0;
   const healthy = () => { if (errors.length) throw errors[0]; };
   const evidence = (step, data) => console.log(JSON.stringify({ step, ...data }, (_key, value) =>
     typeof value === 'string' ? value.replace(/#login=[A-Za-z0-9_.~%-]+/gu, '#login=[synthetic-redacted]') : value));
@@ -127,9 +132,9 @@ async function main() {
               (_, index) => ({ nodeId: NODE, sessionId: SESSION,
                 prompt: last.content === PROGRESS_TASK ? `合成进度任务 ${index + 1}` : DIRECT_PROMPT,
                 dependsOn: index ? [index] : [] })) }) }];
-        } else if (last.content === RAW_REPLY_TASK) {
+        } else if ([RAW_REPLY_TASK, BUDGET_REPLY_TASK].includes(last.content)) {
           output = [{ type: 'message', role: 'assistant', status: 'completed',
-            content: [{ type: 'output_text', text: RESUMABLE_REPLY }] }];
+            content: [{ type: 'output_text', text: last.content === BUDGET_REPLY_TASK ? BUDGET_REPLY : RESUMABLE_REPLY }] }];
         } else {
           assert([QUERY, NEGATIVE].includes(last.content), 'Unexpected model input: ' + JSON.stringify(last));
           output = [{ type: 'message', role: 'assistant', status: 'completed',
@@ -153,6 +158,20 @@ async function main() {
       delete controller.env[key];
     }
     await controller.start();
+    proxy = createServer(async (request, response) => {
+      try {
+        const body = request.method === 'POST' ? await jsonBody(request) : undefined;
+        const observation = { method: request.method, path: request.url, body };
+        controllerRequests.push(observation);
+        const result = await fetch(controller.base + request.url, { method: request.method,
+          headers: { authorization: request.headers.authorization, 'content-type': 'application/json' },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(PROCESS_MS) });
+        observation.status = result.status;
+        response.writeHead(result.status, { 'content-type': 'application/json' });
+        response.end(await result.text());
+      } catch (error) { errors.push(error); respond(response, { error: 'Synthetic Controller proxy failure' }, 500); }
+    });
+    gatewayControllerUrl = `http://127.0.0.1:${await listen(proxy)}`;
 
     let sessionStatus = 'idle';
     const sendFrame = message => socket.send(JSON.stringify(message), error => { if (error) errors.push(error); });
@@ -206,7 +225,7 @@ async function main() {
           respond(response, { ret: 0, errcode: 0, get_updates_buf: 'synthetic-cursor-' + cursor, msgs: incoming.splice(0) });
         } else if (request.url === '/ilink/bot/getconfig') {
           assert.equal(body.ilink_user_id, CHAT);
-          assert.equal(body.context_token, CONTEXT);
+          assert(validContexts.has(body.context_token), 'Typing used an unknown synthetic context');
           respond(response, { ret: 0, typing_ticket: 'synthetic-typing-ticket' });
         } else if (request.url === '/ilink/bot/sendtyping') {
           assert.equal(body.ilink_user_id, CHAT);
@@ -217,7 +236,7 @@ async function main() {
         } else {
           assert.equal(request.url, '/ilink/bot/sendmessage');
           assert.equal(body.msg.to_user_id, CHAT);
-          assert.equal(body.msg.context_token, CONTEXT);
+          assert(validContexts.has(body.msg.context_token), 'Send used an unknown synthetic context');
           assert.equal(body.msg.item_list.length, 1);
           assert.equal(body.msg.item_list[0].type, MESSAGE_TYPE_TEXT);
           sent.push(body.msg);
@@ -236,12 +255,13 @@ async function main() {
     await writeFile(accountPath, JSON.stringify({ token: 'synthetic-wechat-token', accountId: 'synthetic-account',
       baseUrl: `https://127.0.0.1:${wechatPort}` }), { mode: 0o600 });
 
-    const runGateway = async (mode, { expectedExit = 0 } = {}) => {
+    const runGateway = async (mode, { expectedExit = 0, gatewayEnv = {} } = {}) => {
       healthy();
       let output = '', stderr = '';
-      gatewayChild = spawn(process.execPath, ['gateway/dist/index.js', mode, '--notifications', '--controller-url', controller.base,
+      gatewayChild = spawn(process.execPath, ['gateway/dist/index.js', mode, '--notifications', '--controller-url', gatewayControllerUrl,
         '--credentials-path', accountPath, '--state-path', statePath, '--health-path', join(dir, 'health.json')],
-      { cwd: ROOT, env: { ...env, CONTROLLER_TOKEN: token, NODE_EXTRA_CA_CERTS: certPath }, stdio: ['ignore', 'pipe', 'pipe'] });
+      { cwd: ROOT, env: { ...env, CONTROLLER_TOKEN: token, NODE_EXTRA_CA_CERTS: certPath,
+        ...(budgetOnly ? {} : { GATEWAY_SEND_BUDGET: '1000' }), ...gatewayEnv }, stdio: ['ignore', 'pipe', 'pipe'] });
       gatewayChild.stdout.on('data', chunk => { output += chunk; });
       gatewayChild.stderr.on('data', chunk => { stderr += chunk; });
       const timer = setTimeout(() => { errors.push(new Error('Gateway CLI timed out')); gatewayChild.kill('SIGTERM'); }, PROCESS_MS);
@@ -253,13 +273,14 @@ async function main() {
       gatewayChild = undefined;
       return expectedExit === 0 ? JSON.parse(output.trim()) : { exit, stderr };
     };
-    const input = async (text, messageId = randomUUID()) => {
+    const input = async (text, messageId = randomUUID(), contextToken = CONTEXT, gatewayOptions) => {
       const before = sent.length;
       const eventsBefore = wireEvents.length;
       inputs.push({ text, messageId });
+      validContexts.add(contextToken);
       incoming.push({ message_type: MESSAGE_TYPE_TEXT, from_user_id: CHAT, client_id: messageId,
-        context_token: CONTEXT, item_list: [{ type: MESSAGE_TYPE_TEXT, text_item: { text } }] });
-      const summary = await runGateway('--poll-once');
+        create_time_ms: Date.now(), context_token: contextToken, item_list: [{ type: MESSAGE_TYPE_TEXT, text_item: { text } }] });
+      const summary = await runGateway('--poll-once', gatewayOptions);
       const replies = sent.slice(before).filter(message => !notificationClientIds.has(message.client_id));
       if (summary.processedCount > 0) {
         const events = wireEvents.slice(eventsBefore);
@@ -284,6 +305,13 @@ async function main() {
     };
     await runGateway('--establish-baseline');
     assert.equal(sent.length, 0);
+    if (budgetOnly) {
+      await verifyWechatBudget({ controller, input, runGateway, pending, sent, incoming, deliveries, sendFrame,
+        statePath, wireEvents, evidence, healthy, chatId: CHAT, contextToken: CONTEXT, directTask: DIRECT_TASK,
+        query: QUERY, clientId, controllerRequests, validContexts, restartController, setSessionStatus, databaseUrl });
+      healthy();
+      return;
+    }
     await input(PROPOSAL);
     await input(QUERY);
     await input(NEGATIVE);
@@ -477,6 +505,7 @@ async function main() {
     { label: 'heartbeat', cleanup: () => { clearInterval(heartbeat); } },
     { label: 'synthetic Daemon', cleanup: () => closeTestWebSocket(socket) },
     { label: 'Controller', cleanup: () => controller?.stop() },
+    { label: 'Controller proxy', cleanup: () => closeServer(proxy) },
     { label: 'WeChat HTTPS shim', cleanup: () => closeServer(wechat) },
     { label: 'model HTTP shim', cleanup: () => closeServer(model) },
     { label: 'disposable PostgreSQL', cleanup: () => postgres.stop() },

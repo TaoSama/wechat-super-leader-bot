@@ -53,7 +53,7 @@ export async function verifyReliableDelivery(harness) {
 
   const rawMessageId = randomUUID(), rawKey = JSON.stringify(['synthetic-account', chatId, rawMessageId]);
   const enqueueRaw = () => incoming.push({ message_type: TEXT_TYPE, from_user_id: chatId, client_id: rawMessageId,
-    context_token: contextToken, item_list: [{ type: TEXT_TYPE, text_item: { text: RAW_REPLY_TASK } }] });
+    create_time_ms: Date.now(), context_token: contextToken, item_list: [{ type: TEXT_TYPE, text_item: { text: RAW_REPLY_TASK } }] });
   fault.remaining = 2; fault.mode = 'reject';
   enqueueRaw();
   const rawStart = sent.length;
@@ -136,18 +136,19 @@ async function verifyUnknownOrdinaryReply(harness) {
   const { incoming, chatId, contextToken, query, runGateway, sent, statePath, fault, wireEvents, evidence } = harness;
   const messageId = randomUUID(), key = JSON.stringify(['synthetic-account', chatId, messageId]);
   const message = (text, clientId) => ({ message_type: TEXT_TYPE, from_user_id: chatId, client_id: clientId,
-    context_token: contextToken, item_list: [{ type: TEXT_TYPE, text_item: { text } }] });
+    create_time_ms: Date.now(), context_token: contextToken, item_list: [{ type: TEXT_TYPE, text_item: { text } }] });
   const previous = JSON.parse(await readFile(statePath, 'utf8'));
   const start = sent.length;
   fault.remaining = 2; fault.mode = 'disconnect';
   incoming.push(message(RAW_REPLY_TASK, messageId), message(query, randomUUID()));
   const result = await runGateway('--poll-once');
-  assert.equal(result.skippedCount, 1, 'Ambiguous ordinary reply was not isolated');
-  assert.equal(result.processedCount, 1, 'Unknown delivery blocked the next message in the batch');
+  assert.equal(result.skippedCount, 0, 'Durably admitted replies should not be reported as skipped inputs');
+  assert.equal(result.processedCount, 2, 'Unknown delivery blocked the next message in the batch');
   assert.equal(sent.length - start, 3, 'Unknown delivery retried or blocked the later reply');
   const state = JSON.parse(await readFile(statePath, 'utf8'));
   assert.equal(state.reply_deliveries[key].acknowledgedChunks, 1);
   assert.equal(state.reply_deliveries[key].inFlight, true);
+  assert.equal(state.delivery_outbox[key].status, 'uncertain', 'Ambiguous reply was not durably isolated');
   assert(state.processed_message_keys.includes(key));
   assert.notEqual(state.sync_buf, previous.sync_buf, 'Isolated unknown delivery blocked cursor advancement');
   const modelCalls = wireEvents.filter(event => event.kind === 'model').length, sentAfter = sent.length;

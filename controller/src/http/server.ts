@@ -30,6 +30,7 @@ import { readConsoleGoals } from "../console/goals.js";
 import { createNotificationRouter } from "../notifications/routes.js";
 import { hashConsoleToken } from "../console/types.js";
 import { createMediaRouter } from "../sessions/media-routes.js";
+import { createMessageReplyRouter } from "../sessions/message-reply-routes.js";
 
 function makeMessageRequestId(chatId: string, messageId: string): string {
   // Use sha256 of JSON tuple to guarantee zero collision even if chatId or messageId contains delimiter characters
@@ -188,6 +189,7 @@ export class ControllerServer {
     const apiRouter = express.Router();
     apiRouter.use(this.authMiddleware.bind(this));
     apiRouter.use(createMediaRouter(this.store, () => this.config.allowedChatIds, this.now));
+    apiRouter.use(createMessageReplyRouter(this.store, () => this.config.allowedChatIds));
     apiRouter.use("/notifications", createNotificationRouter(this.store, () => this.config.allowedChatIds, this.now));
     apiRouter.use("/sessions", createSessionRouter(this.hub, this.commands));
     apiRouter.post("/chats/authorize", (req: Request,res: Response) => {

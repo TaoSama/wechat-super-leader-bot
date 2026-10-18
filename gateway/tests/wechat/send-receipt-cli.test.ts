@@ -130,6 +130,8 @@ async function fixture(t: TestContext, options: Options = {}) {
   writePrivateJsonSync(accountPath, { token: WECHAT_TOKEN, accountId: "synthetic-account" });
   const state = new StateManager(accountPath, statePath);
   state.markBaselineEstablished(); state.setContextToken(CHAT, CONTEXT);
+  const inboundCreatedAtMs = Date.now() - 1000;
+  state.recordInboundContext("synthetic-prior-inbound-key", CHAT, inboundCreatedAtMs);
   state.commitCursor("synthetic-old-cursor"); state.saveState();
 
   function handle(handler: (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>) {
@@ -145,6 +147,7 @@ async function fixture(t: TestContext, options: Options = {}) {
       polls++;
       json(res, { ret: 0, get_updates_buf: "synthetic-next-cursor", msgs: options.inbound ? [{
         message_type: 1, from_user_id: CHAT, client_id: MESSAGE_ID, context_token: CONTEXT,
+        create_time_ms: inboundCreatedAtMs,
         item_list: [{ type: 1, text_item: { text: INBOUND_TEXT } }],
       }] : [] });
       return;
@@ -250,7 +253,7 @@ async function fixture(t: TestContext, options: Options = {}) {
     counts: () => ({ polls, claims, receipts, pendingRequests }) };
 }
 
-for (const sendBody of [{}, { message_id: "synthetic-send-receipt" }]) {
+for (const sendBody of [{}, { errmsg: "" }, { ret: 0 }, { message_id: "18446744073709551615" }]) {
   test(`real CLI accepts ${JSON.stringify(sendBody)} and persists inbound/notification dedup across restart`, { timeout: TEST_MS }, async t => {
     const f = await fixture(t, { sendBody, inbound: true });
     const first = f.start();
@@ -269,6 +272,7 @@ for (const sendBody of [{}, { message_id: "synthetic-send-receipt" }]) {
 }
 
 const failures = [
+  { sendBody: { message_id: 1.5 }, errorType: "ILinkSendInvalidMessageId" },
   { sendBody: { ret: 7, errmsg: UPSTREAM_ERROR }, errorType: "ILinkSendRejectedRet" },
   { sendBody: { errcode: -1, errmsg: UPSTREAM_ERROR }, errorType: "ILinkSendRejectedErrcode" },
   { sendBody: { ret: "0" }, errorType: "ILinkSendInvalidRet" },

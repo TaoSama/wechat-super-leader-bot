@@ -1,8 +1,8 @@
 import type pg from "pg";
-import { normalizeNotification, readNotification, claimNotificationRecord, receiptNotificationRecord,
+import { normalizeNotification, readNotification, claimNotificationRecord, receiptNotificationRecord, deferNotificationRecord, NotificationDeferReasonSchema,
   NotificationIdSchema, NotificationReceiptStatusSchema, validateNotificationTime, NOTIFICATION_BATCH_LIMIT,
   terminalNotificationPartEligible, NOTIFICATION_PART_LIMIT,
-  type Notification, type StoredNotification, type NotificationReceiptStatus } from "../notifications/contracts.js";
+  type Notification, type StoredNotification, type NotificationReceiptStatus, type NotificationDeferReason } from "../notifications/contracts.js";
 import { executionListQuery } from "./execution-list.js";
 import { ConflictError } from "./interface.js";
 import { lockNotificationSource } from "./notification-source-postgres.js";
@@ -177,4 +177,13 @@ export async function pgRecordNotificationReceipt(pool: pg.Pool, id: string, att
   NotificationReceiptStatusSchema.parse(status);
   validateNotificationTime(now);
   return updateNotification(pool, id, now, current => receiptNotificationRecord(current, attemptId, status, now));
+}
+
+export async function pgDeferNotification(pool: pg.Pool, id: string, attemptId: string, reason: NotificationDeferReason,
+  now: number): Promise<Notification | null> {
+  NotificationIdSchema.parse(id);
+  NotificationIdSchema.parse(attemptId);
+  NotificationDeferReasonSchema.parse(reason);
+  validateNotificationTime(now);
+  return updateNotification(pool, id, now, current => deferNotificationRecord(current, attemptId, reason, now));
 }

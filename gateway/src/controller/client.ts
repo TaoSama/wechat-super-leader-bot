@@ -2,9 +2,10 @@ import { ControllerMessageRequest, ControllerMessageResponse } from "../types.js
 import { FetchLike } from "../wechat/client.js";
 import { CHAT_AUTHORIZATION_TIMEOUT_MS, DEFAULT_CONTROLLER_TIMEOUT_MS, DEFAULT_CONTROLLER_MAX_RETRIES } from "../runtime/budgets.js";
 import { NotificationClient } from "./notification-client.js";
-import { NOTIFICATION_TIMEOUT_MS } from "./notification-contract.js";
+import { NOTIFICATION_TIMEOUT_MS, type NotificationDeferReason } from "./notification-contract.js";
 import { downloadControllerImage } from "./image-client.js";
-import { validateImageAttachments, type ImageAttachment } from "../wechat/media-delivery.js";
+import type { ImageAttachment } from "../wechat/media-delivery.js";
+import { getControllerMessageReply, parseControllerReply } from "./reply-client.js";
 export { DEFAULT_CONTROLLER_TIMEOUT_MS } from "../runtime/budgets.js";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
@@ -131,8 +132,14 @@ export class ControllerClient {
     }
   }
   public listNotifications(chatIds: string[]) { return this.notifications.listNotifications(chatIds); }
+  public getMessageReply(chatId: string, messageId: string): Promise<ControllerMessageResponse> {
+    return getControllerMessageReply({ baseUrl: this.baseUrl, token: this.token, fetchImpl: this.fetchImpl, timeoutMs: this.timeoutMs }, chatId, messageId);
+  }
   public getNotification(id: string) { return this.notifications.getNotification(id); }
   public claimNotification(id: string, attemptId: string) { return this.notifications.claimNotification(id, attemptId); }
+  public deferNotification(id: string, attemptId: string, reason: NotificationDeferReason) {
+    return this.notifications.deferNotification(id, attemptId, reason);
+  }
   public recordNotificationReceipt(id: string, attemptId: string, status: "accepted" | "uncertain") {
     return this.notifications.recordNotificationReceipt(id, attemptId, status);
   }
@@ -193,20 +200,7 @@ export class ControllerClient {
         }
 
         const data: unknown = await response.json();
-        if (typeof data !== "object" || data === null || typeof (data as Record<string, unknown>).text !== "string") {
-          throw new Error("Controller /v1/messages returned invalid response schema (missing string text field)");
-        }
-        const record = data as Record<string, unknown>;
-        let images: ImageAttachment[] | undefined;
-        if (Object.hasOwn(record, "images")) {
-          try { images = validateImageAttachments(record.images); }
-          catch { throw new Error("Controller /v1/messages returned invalid response schema (image attachments)"); }
-        }
-        return {
-          text: record.text as string,
-          commandId: typeof record.commandId === "string" ? record.commandId : undefined,
-          ...(images === undefined ? {} : { images }),
-        };
+        return parseControllerReply(data, "/v1/messages");
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         // Do not retry poison chats, auth, or schema validation errors

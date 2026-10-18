@@ -7,6 +7,7 @@ import { ILinkClient } from "../../src/wechat/client.js";
 import { ControllerClient } from "../../src/controller/client.js";
 import { WeChatGateway } from "../../src/gateway.js";
 import { NOTIFICATION_LIMIT, type Notification } from "../../src/controller/notification-contract.js";
+import type { ContextPolicy } from "../../src/runtime/context-policy.js";
 
 export const ID = "00000000-0000-4000-8000-000000000001";
 export const ATTEMPT = "00000000-0000-4000-8000-000000000002";
@@ -30,14 +31,17 @@ export function claimed(item = notification(), attemptId = ATTEMPT): Notificatio
   const now = Date.now();
   return { ...item, status: "claimed", attemptId, attemptedAt: now, attemptExpiresAt: Math.min(now + 60000, item.expiresAt) };
 }
-export function harness(t: TestContext, options: { enabled?: boolean; items?: Notification[]; baseline?: boolean } = {}) {
+export function harness(t: TestContext, options: {
+  enabled?: boolean; items?: Notification[]; baseline?: boolean; policy?: Partial<ContextPolicy>;
+} = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-notifications-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const accountPath = path.join(directory, "account.json"), statePath = path.join(directory, "state.json");
   fs.writeFileSync(accountPath, JSON.stringify({ token: "synthetic", accountId: "fixture" }));
-  const state = new StateManager(accountPath, statePath);
+  const state = new StateManager(accountPath, statePath, options.policy);
   if (options.baseline !== false) state.markBaselineEstablished();
   state.setContextToken("chat", "synthetic-context");
+  state.recordInboundContext("fixture:inbound:chat", "chat", Date.now() - 1000);
   const records = new Map((options.items ?? [notification()]).map(item => [item.id, item]));
   const requests: { url: string; body: Record<string, unknown> }[] = [];
   const sends: Record<string, unknown>[] = [];
@@ -46,8 +50,9 @@ export function harness(t: TestContext, options: { enabled?: boolean; items?: No
     pending?: (chatIds: string[]) => void | Promise<void>;
     claim?: (item: Notification) => Notification | Promise<Notification>;
     receipt?: (item: Notification) => void;
+    defer?: (item: Notification) => void;
     send?: () => unknown | Promise<unknown>;
-    poll?: () => void;
+    poll?: () => void | Promise<void>;
   } = {};
   const controller = new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic", fetchImpl: async (url, init) => {
     const pathname = new URL(String(url)).pathname;
@@ -73,10 +78,19 @@ export function harness(t: TestContext, options: { enabled?: boolean; items?: No
       records.set(id, next);
       return json({ notification: next });
     }
+    if (pathname.endsWith("/defer")) {
+      if (item.status !== "claimed" || item.attemptId !== body.attemptId) return json({}, 409);
+      const { attemptId, attemptedAt: _attemptedAt, attemptExpiresAt: _attemptExpiresAt, ...pending } = item;
+      const next: Notification = { ...pending, status: "pending", lastDeferredAttemptId: attemptId,
+        lastDeferReason: body.reason as Notification["lastDeferReason"] };
+      hooks.defer?.(next);
+      records.set(id, next);
+      return json({ notification: next });
+    }
     return json({ notification: item });
   } });
-  const ilink = new ILinkClient({ stateManager: state, fetchImpl: async (url, init) => {
-    if (String(url).endsWith("getupdates")) { hooks.poll?.(); return json({ ret: 0, msgs: [], get_updates_buf: "new-cursor" }); }
+  const createILink = (stateManager = state) => new ILinkClient({ stateManager, fetchImpl: async (url, init) => {
+    if (String(url).endsWith("getupdates")) { await hooks.poll?.(); return json({ ret: 0, msgs: [], get_updates_buf: "new-cursor" }); }
     if (String(url).endsWith("getconfig")) return json({ ret: 0, typing_ticket: "synthetic-ticket" });
     if (String(url).endsWith("sendtyping")) {
       typings.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
@@ -85,6 +99,7 @@ export function harness(t: TestContext, options: { enabled?: boolean; items?: No
     sends.push(JSON.parse(String(init?.body)).msg);
     return json(hooks.send ? await hooks.send() : { ret: 0, errcode: 0 });
   } });
+  const ilink = createILink();
   const gateway = new WeChatGateway({ stateManager: state, controller, ilink, notifications: options.enabled ?? true });
-  return { gateway, controller, ilink, state, records, requests, sends, typings, hooks, accountPath, statePath };
+  return { gateway, controller, ilink, createILink, state, records, requests, sends, typings, hooks, accountPath, statePath };
 }
