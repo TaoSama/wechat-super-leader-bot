@@ -41,6 +41,7 @@ export async function initExecutionTables(client: pg.PoolClient): Promise<void> 
     data JSONB NOT NULL,
     created_at BIGINT NOT NULL
   )`);
+  await client.query("ALTER TABLE leader_executions ADD COLUMN IF NOT EXISTS console_hidden_at TIMESTAMPTZ");
   await client.query("CREATE UNIQUE INDEX IF NOT EXISTS leader_executions_active_chat_idx ON leader_executions (chat_id) WHERE status='active'");
   await client.query("CREATE INDEX IF NOT EXISTS leader_executions_active_id_idx ON leader_executions (id) WHERE status='active'");
   await client.query("CREATE INDEX IF NOT EXISTS leader_executions_chat_recent_idx ON leader_executions (chat_id, (status='active') DESC, created_at DESC, id DESC)");
@@ -163,6 +164,7 @@ export async function pgListRecentExecutions(pool: pg.Pool, chatIds: readonly st
   const query = executionListQuery(chatIds, limit);
   if (!query.chatIds.length) return [];
   const result = await pool.query<ExecutionRow>(`SELECT * FROM leader_executions WHERE chat_id=ANY($1::text[])
+    AND (console_hidden_at IS NULL OR status NOT IN ('completed','failed','cancelled','expired'))
     ORDER BY (status='active') DESC, created_at DESC, id DESC LIMIT $2`, [query.chatIds, query.count]);
   return result.rows.map(executionFromRow);
 }
