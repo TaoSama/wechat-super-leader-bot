@@ -14,6 +14,7 @@ const MAX_TIMEOUT_MS = 315000;
 const UNCERTAIN_REPLY = "上次处理这条消息的结果尚不明确，为避免重复执行，我没有自动重跑。请查询任务状态后再决定下一步。";
 const FAILED_REPLY = "这次处理没有正常完成，执行结果待核实。我保留了会话和记忆，请先查询任务状态，避免重复执行。";
 const EXPIRED_LINK_REPLY = "上次已生成一次性控制台链接；如需新链接，请重新请求。";
+const CONFLICT_REPLY = "这条消息的编号与已处理消息相同，但内容不同。为避免误执行，我没有处理新内容；请重新发送一条消息。";
 const ENV_ALLOWLIST = ["PATH", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"] as const;
 
 interface ThreadRunner {
@@ -114,7 +115,7 @@ export class CodexReplyEngine {
     const inputHash = hash(request.text);
     const previous = journal[key];
     if (previous) {
-      if (previous.inputHash !== inputHash) throw new Error("Message identity has conflicting content");
+      if (previous.inputHash !== inputHash) return { text: CONFLICT_REPLY };
       return previous.stage === "completed" && previous.reply ? previous.reply : { text: UNCERTAIN_REPLY };
     }
     journal[key] = { inputHash, stage: "started" };

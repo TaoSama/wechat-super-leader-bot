@@ -7,6 +7,10 @@ import type { CodexOptions, ThreadEvent, ThreadOptions } from "@openai/codex-sdk
 import { CodexReplyEngine, type CodexReplyEngineOptions } from "../../src/leader/codex.js";
 import { WorkspaceStore } from "../../src/leader/workspace.js";
 import { CONTROL_TOKEN_ENV } from "../../src/leader/control-mcp.js";
+import { StateManager } from "../../src/runtime/state.js";
+import { ILinkClient } from "../../src/wechat/client.js";
+import { ControllerClient } from "../../src/controller/client.js";
+import { WeChatGateway } from "../../src/gateway.js";
 
 const request = { chatId: "chat", messageId: "message", text: "记住：以后先说结论" };
 const usage = { input_tokens: 0, cached_input_tokens: 0, cache_write_input_tokens: 0,
@@ -94,7 +98,61 @@ test("completed message survives restart without rerunning; conflicting duplicat
   await new CodexReplyEngine(options).reply("account", request, noController);
   assert.deepEqual(await new CodexReplyEngine(options).reply("account", request, noController), { text: "cached" });
   assert.equal(calls, 1);
-  await assert.rejects(new CodexReplyEngine(options).reply("account", { ...request, text: "other" }, noController), /conflicting/);
+  const workspace = await new WorkspaceStore(root).forChat("account", "chat");
+  const originalJournal = workspace.getReplyJournal();
+  const conflict = await new CodexReplyEngine(options).reply("account", { ...request, text: "other" }, noController);
+  assert.match(conflict.text, /编号.*相同.*内容不同/);
+  assert.equal(calls, 1);
+  assert.deepEqual(workspace.getReplyJournal(), originalJournal);
+});
+
+test("conflicting message is replied without tools and later messages in the poll batch advance the cursor", async t => {
+  const root = fixture(t);
+  let modelCalls = 0;
+  const engine = new CodexReplyEngine({ root: path.join(root, "workspaces"), model: "test-model",
+    sdkFactory: fakeFactory(async function* () { modelCalls++; yield* complete("正常后续回复"); }) });
+  await engine.reply("account", request, noController);
+  const workspace = await new WorkspaceStore(path.join(root, "workspaces")).forChat("account", "chat");
+  const originalJournal = workspace.getReplyJournal();
+  const originalKey = Object.keys(originalJournal)[0];
+  const credentials = path.join(root, "account.json");
+  fs.writeFileSync(credentials, JSON.stringify({ token: "synthetic", accountId: "account" }));
+  const state = new StateManager(credentials, path.join(root, "state.json"));
+  state.markBaselineEstablished();
+  const sent: string[] = [];
+  const controller = new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic",
+    fetchImpl: async url => {
+      assert.ok(String(url).endsWith("/v1/chats/authorize"), "conflict must not forward to Controller tools");
+      return new Response(JSON.stringify({ allowed: true }));
+    } });
+  const ilink = new ILinkClient({ stateManager: state, configuredBaseUrl: "https://ilink.example",
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("getupdates")) return new Response(JSON.stringify({ ret: 0,
+        get_updates_buf: "past-conflict-and-followup", msgs: [
+          { message_type: 1, from_user_id: "chat", client_id: request.messageId, context_token: "ctx",
+            item_list: [{ type: 1, text_item: { text: "different message content" } }] },
+          { message_type: 1, from_user_id: "chat", client_id: "next-message", context_token: "ctx",
+            item_list: [{ type: 1, text_item: { text: "正常新消息" } }] },
+        ] }));
+      if (String(url).endsWith("getconfig")) return new Response(JSON.stringify({ ret: 0, typing_ticket: "ticket" }));
+      if (String(url).endsWith("sendtyping")) return new Response(JSON.stringify({ ret: 0 }));
+      if (String(url).endsWith("sendmessage")) {
+        sent.push(JSON.parse(String(init?.body)).msg.item_list[0].text_item.text);
+        return new Response(JSON.stringify({ ret: 0 }));
+      }
+      throw new Error("Unexpected synthetic WeChat route");
+    } });
+  const gateway = new WeChatGateway({ stateManager: state, ilink, controller, replyEngine: engine });
+  const result = await gateway.pollOnce();
+  assert.equal(result.processedCount, 2);
+  assert.equal(state.syncBuf, "past-conflict-and-followup");
+  assert.equal(sent.length, 2);
+  assert.match(sent[0], /没有处理新内容/);
+  assert.equal(sent[1], "正常后续回复");
+  assert.equal(modelCalls, 2, "only the original and subsequent new message invoke Codex");
+  assert.deepEqual(workspace.getReplyJournal()[originalKey], originalJournal[originalKey]);
+  assert.equal((await gateway.pollOnce()).polledCount, 0);
+  assert.equal(sent.length, 2);
 });
 
 test("failed turns retain early thread ID and started journal, sanitize stderr and refuse automatic replay", async t => {

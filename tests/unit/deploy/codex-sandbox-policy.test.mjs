@@ -6,7 +6,10 @@ const policy = JSON.parse(readFileSync(new URL('../../../deploy/security/codex-s
 const apparmor = readFileSync(new URL('../../../deploy/security/codex-apparmor', import.meta.url), 'utf8');
 const NEWUSER = 0x10000000;
 const NEWNET = 0x40000000;
+const NEWPID = 0x20000000;
+const NEWUTS = 0x04000000;
 const BWRAP_CLONE = 0x38020011;
+const FS_HELPER_CLONE = BWRAP_CLONE | NEWNET;
 
 // Evaluate the production target: amd64 with every capability dropped. This
 // checks effective permissions, including upstream capability-conditional rules.
@@ -28,9 +31,12 @@ test('Codex can create only the required namespace shape and detach its own old 
   assert.equal(policy.defaultAction, 'SCMP_ACT_ERRNO');
   for (const name of ['read', 'write', 'execve', 'mount', 'pivot_root']) assert.equal(allows(name), true, name);
   assert.equal(allows('clone', [BWRAP_CLONE]), true);
+  // Native filesystem helpers deny networking even when shell networking is enabled.
+  assert.equal(allows('clone', [FS_HELPER_CLONE]), true);
   assert.equal(allows('unshare', [NEWUSER]), true);
   assert.equal(allows('umount2', [0, 2]), true);
-  for (const flags of [BWRAP_CLONE | NEWNET, BWRAP_CLONE & ~NEWUSER, NEWNET, NEWUSER]) {
+  for (const flags of [BWRAP_CLONE & ~NEWUSER, FS_HELPER_CLONE & ~NEWUSER,
+    FS_HELPER_CLONE & ~NEWPID, FS_HELPER_CLONE | NEWUTS, NEWNET, NEWUSER]) {
     assert.equal(allows('clone', [flags]), false, `clone flags ${flags}`);
   }
   for (const flags of [NEWNET, NEWUSER | NEWNET, 0]) assert.equal(allows('unshare', [flags]), false);

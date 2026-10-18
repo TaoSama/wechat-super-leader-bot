@@ -1238,6 +1238,20 @@
     },
     {
       "names": [
+        "clone"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        {
+          "index": 0,
+          "value": 2013397009,
+          "op": "SCMP_CMP_EQ"
+        }
+      ],
+      "comment": "Codex 0.163.0 filesystem helper always uses Restricted networking (exec-server/src/fs_sandbox.rs:137); bubblewrap adds NEWNET to the exact shell namespace shape."
+    },
+    {
+      "names": [
         "unshare"
       ],
       "action": "SCMP_ACT_ALLOW",

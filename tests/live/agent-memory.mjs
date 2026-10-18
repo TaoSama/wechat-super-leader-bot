@@ -29,6 +29,7 @@ const FIXTURE_TOKEN = 'synthetic-memory-verification-token';
 const CHAT = 'synthetic-agent-memory';
 const ACCOUNT = 'synthetic-agent-memory-account';
 const children = new Set();
+const childDiagnostics = [];
 
 if (values.help || !values.run) console.log(HELP);
 else await main().catch(error => {
@@ -51,6 +52,7 @@ async function execute(command, args, env, label) {
     const [code] = await once(child, 'close');
     assert(!timedOut, `${label} timed out; no retry was attempted`);
     const classification = stderr.match(/\[gateway\] fatal: ([A-Za-z]+)(?:\r?\n|$)/)?.[1] || 'diagnostic-withheld';
+    childDiagnostics.push({ label, exitCode: code, classification, hints: diagnosticKinds(stderr) });
     assert.equal(code, 0, `${label} failed (exit ${code}; ${classification}); provider output withheld`);
     return stdout;
   } finally {
@@ -73,6 +75,8 @@ async function main() {
   // macOS /var is a symlink; the production workspace deliberately rejects symlink ancestors.
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'super-leader-agent-memory-')));
   const leaderRoot = join(directory, 'leader');
+  const keyDigest = createHash('sha256').update(JSON.stringify([ACCOUNT, CHAT])).digest('hex');
+  const workspace = join(leaderRoot, keyDigest);
   const credentials = join(directory, 'synthetic-account.json');
   const state = join(directory, 'gateway-state.json');
   const marker = randomUUID().replaceAll('-', '');
@@ -140,7 +144,7 @@ async function main() {
     const env = { PATH: process.env.PATH, HOME: directory, LANG: 'en_US.UTF-8',
       NODE_EXTRA_CA_CERTS: cert, CONTROLLER_TOKEN: FIXTURE_TOKEN,
       GATEWAY_LEADER_API_KEY: process.env.GATEWAY_LEADER_API_KEY };
-    for (const name of ['GATEWAY_LEADER_BASE_URL', 'GATEWAY_LEADER_MODEL', 'GATEWAY_CODEX_PATH']) {
+    for (const name of ['GATEWAY_LEADER_BASE_URL', 'GATEWAY_LEADER_MODEL', 'GATEWAY_CODEX_PATH', 'SSL_CERT_FILE', 'SSL_CERT_DIR']) {
       if (process.env[name]) env[name] = process.env[name];
     }
     const cliArgs = [GATEWAY_CLI, '--controller-url', url,
@@ -167,9 +171,8 @@ async function main() {
       return { inbound, summary, text: replies.slice(before).join('\n') };
     }
     const first = await message(`请实际维护本目录三个记忆文件：preference.md 记录我的明确偏好“每次回答先给结论，偏好识别码 ${markers.preference}”；task.md 记录当前未完成任务“合成验收任务 ${markers.task}，下一步等待用户继续”；memory.md 记录长期事实“合成项目识别码 ${markers.memory}，来源是本轮用户明确提供”。这是本地记忆测试，无需查询控制外部项目。请先读现有文件再写入，完成后简短确认。`);
+    evidence.firstObservation = { replySummary: boundedReply(first.text), processedCount: first.summary.processedCount };
     assert.equal(first.summary.processedCount, 1, 'First message was not processed');
-    const keyDigest = createHash('sha256').update(JSON.stringify([ACCOUNT, CHAT])).digest('hex');
-    const workspace = join(leaderRoot, keyDigest);
     for (const [name, expected] of [['preference.md', markers.preference], ['task.md', markers.task], ['memory.md', markers.memory]]) {
       assert((await readFile(join(workspace, name), 'utf8')).includes(expected), `Missing durable marker in ${name}`);
     }
@@ -227,6 +230,8 @@ async function main() {
       server.closeAllConnections();
       await new Promise((accept, reject) => server.close(error => error ? reject(error) : accept()));
     }
+    evidence.childDiagnostics = childDiagnostics;
+    evidence.nativeDiagnostics = await diagnoseWorkspace(workspace, markers);
     await rm(directory, { recursive: true, force: true });
     if (values.evidence) await writeFile(resolve(values.evidence), `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
   }
@@ -237,7 +242,59 @@ function boundedReply(text) {
   for (const secret of [process.env.GATEWAY_LEADER_API_KEY, process.env.GATEWAY_LEADER_BASE_URL]) {
     if (secret) text = text.replaceAll(secret, '[REDACTED]');
   }
-  return text.slice(0, 1200);
+  return text.replace(/\b(?:sk-|sess-)[A-Za-z0-9_-]{12,}\b/g, '[REDACTED]')
+    .replace(/\bBearer\s+\S+/gi, 'Bearer [REDACTED]').slice(0, 1200);
+}
+
+function diagnosticKinds(text) {
+  const lowered = text.toLowerCase();
+  return ['certificate verify failed', 'certificate verification failed', 'unknown issuer', 'permission denied',
+    'operation not permitted', 'no such file', 'cannot find module', 'module_not_found', 'eacces', 'enoent',
+    'requires approval', 'approval required', 'approval denied', 'connection refused', 'network is unreachable',
+    'error sending request', 'unauthorized', 'timed out', 'failed to initialize', 'sandbox']
+    .filter(kind => lowered.includes(kind));
+}
+
+async function diagnoseWorkspace(workspace, markers) {
+  const result = { threadRecorded: false, journalStages: [], memoryFiles: {}, eventTypes: {}, nativeTools: [], diagnosticKinds: [] };
+  try {
+    try { result.threadRecorded = Boolean(JSON.parse(await readFile(join(workspace, '.thread.json'), 'utf8')).threadId); }
+    catch (error) { if (error.code !== 'ENOENT') result.threadReadError = safeCode(error); }
+    try { result.journalStages = Object.values(JSON.parse(await readFile(join(workspace, '.replies.json'), 'utf8'))).map(item =>
+      ['started', 'completed'].includes(item.stage) ? item.stage : 'unknown'); }
+    catch (error) { if (error.code !== 'ENOENT') result.journalReadError = safeCode(error); }
+    for (const [name, marker] of [['preference.md', markers.preference], ['task.md', markers.task], ['memory.md', markers.memory]]) {
+      try { result.memoryFiles[name] = { exists: true, containsMarker: (await readFile(join(workspace, name), 'utf8')).includes(marker) }; }
+      catch (error) { result.memoryFiles[name] = { exists: false, readError: safeCode(error) }; }
+    }
+    let files = [];
+    try { files = await recursivelyList(join(workspace, '.codex', 'sessions')); }
+    catch (error) { if (error.code !== 'ENOENT') result.sessionReadError = safeCode(error); }
+    const tools = new Set();
+    const kinds = new Set();
+    for (const file of files.filter(path => path.endsWith('.jsonl'))) {
+      for (const line of (await readFile(file, 'utf8')).split('\n').filter(Boolean)) {
+        let event;
+        try { event = JSON.parse(line); } catch { result.invalidEventLines = (result.invalidEventLines || 0) + 1; continue; }
+        const type = `${event.type || 'unknown'}:${event.payload?.type || 'none'}`;
+        const safeType = /^[A-Za-z0-9_:.-]{1,120}$/.test(type) ? type : 'withheld';
+        result.eventTypes[safeType] = (result.eventTypes[safeType] || 0) + 1;
+        if (['function_call', 'custom_tool_call'].includes(event.payload?.type)) {
+          const name = event.payload.name || '';
+          if (/^[A-Za-z0-9_:.-]{1,160}$/.test(name)) tools.add(name);
+          for (const match of (event.payload.input || '').matchAll(/tools\.([A-Za-z0-9_]{1,160})/g)) tools.add(match[1]);
+        }
+        for (const kind of diagnosticKinds(line)) kinds.add(kind);
+      }
+    }
+    result.nativeTools = [...tools].slice(0, 64);
+    result.diagnosticKinds = [...kinds];
+  } catch (error) { result.collectionError = safeCode(error); }
+  return result;
+}
+
+function safeCode(error) {
+  return ['ENOENT', 'EACCES', 'EPERM', 'ENOTDIR'].includes(error.code) ? error.code : error instanceof SyntaxError ? 'InvalidJson' : 'DiagnosticUnavailable';
 }
 
 async function recursivelyList(directory) {

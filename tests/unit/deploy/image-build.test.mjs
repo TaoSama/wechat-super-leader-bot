@@ -23,13 +23,17 @@ function stages(source) {
 
 function assertImageContract(source, component) {
   const parsed = stages(source);
-  const buildNames = component === 'controller' ? ['controller-build', 'web-build'] : ['build', 'runtime-dependencies'];
+  const buildNames = component === 'controller' ? ['controller-build', 'web-build'] : ['build', 'runtime-dependencies', 'runtime-certificates'];
   assert.equal(parsed.length, buildNames.length + 2);
   assert.equal(parsed[0][0], NATIVE_TOOLCHAIN, 'toolchain must execute on the build architecture');
   assert.ok(parsed[0].includes('RUN npm install --global pnpm@11.8.0'));
   for (const [index, name] of buildNames.entries()) {
     const build = parsed[index + 1];
     assert.equal(build[0], `FROM toolchain AS ${name}`, 'build stages must inherit the native toolchain');
+    if (name === 'runtime-certificates') {
+      assert.ok(build.some(line => /apt-get install -y --no-install-recommends ca-certificates/.test(line)));
+      continue;
+    }
     if (name === 'runtime-dependencies') {
       assert.ok(build.includes('ARG TARGETARCH'));
       const install = build.find(line => line.startsWith('RUN case '));
@@ -68,6 +72,7 @@ function assertImageContract(source, component) {
     for (const directory of ['/etc/super-leader', '/var/lib/super-leader-gateway']) {
       allowedCopies.push(`COPY --from=build --chown=node:node /runtime${directory} ${directory}`);
     }
+    allowedCopies.push('COPY --from=runtime-certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt');
     assert.ok(runtime.includes('ENTRYPOINT ["node", "dist/index.js"]'));
     assert.ok(runtime.includes('CMD ["--run"]'));
   }
