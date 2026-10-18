@@ -1,0 +1,228 @@
+import { test, type TestContext } from "node:test";
+import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { CodexOptions, ThreadEvent, ThreadOptions } from "@openai/codex-sdk";
+import { CodexReplyEngine, type CodexReplyEngineOptions } from "../../src/leader/codex.js";
+import { WorkspaceStore } from "../../src/leader/workspace.js";
+import { CONTROL_TOKEN_ENV } from "../../src/leader/control-mcp.js";
+
+const request = { chatId: "chat", messageId: "message", text: "记住：以后先说结论" };
+const usage = { input_tokens: 0, cached_input_tokens: 0, cache_write_input_tokens: 0,
+  output_tokens: 0, reasoning_output_tokens: 0 };
+const noController = { forwardMessage: async () => { throw new Error("Unexpected controller call"); } };
+
+function fixture(t: TestContext) {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "codex-reply-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  return root;
+}
+
+function fakeFactory(run: (input: string, settings: ThreadOptions, sdk: CodexOptions,
+  resume: string | undefined, signal: AbortSignal) => AsyncIterable<ThreadEvent>): NonNullable<CodexReplyEngineOptions["sdkFactory"]> {
+  return sdk => ({
+    startThread: settings => ({ runStreamed: async (input, turn) => ({ events: run(input, settings, sdk, undefined, turn.signal) }) }),
+    resumeThread: (id, settings) => ({ runStreamed: async (input, turn) => ({ events: run(input, settings, sdk, id, turn.signal) }) }),
+  });
+}
+
+async function* complete(text: string): AsyncIterable<ThreadEvent> {
+  yield { type: "item.completed", item: { type: "agent_message", id: "a", text } };
+  yield { type: "turn.completed", usage };
+}
+
+test("native memory edits, early thread ID and restart resume persist in isolated chat home", async t => {
+  const root = fixture(t);
+  let first = true;
+  const sdkFactory = fakeFactory(async function* (input, settings, sdk, resume) {
+    assert.equal(settings.sandboxMode, undefined);
+    assert.equal(settings.networkAccessEnabled, undefined);
+    assert.equal(sdk.config?.default_permissions, "wechat_memory");
+    const mcpServers = sdk.config?.mcp_servers as Record<string, Record<string, unknown>>;
+    assert.deepEqual(mcpServers.wechat_control.enabled_tools, ["control_current_request"]);
+    assert.deepEqual(mcpServers.wechat_control.tools, { control_current_request: { approval_mode: "approve" } });
+    const permissionProfile = sdk.configOverrides?.find(override => override.startsWith("permissions.wechat_memory="));
+    assert.ok(permissionProfile);
+    assert.ok(permissionProfile.includes(`${JSON.stringify(settings.workingDirectory)}="write"`));
+    assert.ok(permissionProfile.includes(`${JSON.stringify(path.join(settings.workingDirectory!, ".codex"))}="deny"`));
+    for (const metadata of [".replies.json", ".thread.json"]) {
+      assert.ok(permissionProfile.includes(`${JSON.stringify(path.join(settings.workingDirectory!, metadata))}="deny"`));
+    }
+    assert.ok(permissionProfile.includes(`${JSON.stringify(path.join(settings.workingDirectory!, "AGENTS.md"))}="read"`));
+    assert.match(permissionProfile, /":minimal"="read"/);
+    assert.match(permissionProfile, /network=\{enabled=true\}/);
+    assert.match(permissionProfile, /@openai\+codex@[^=]+="read"/);
+    assert.doesNotMatch(permissionProfile, /extends|:root|sandbox_mode|sandbox_workspace_write|:workspace_roots/);
+    assert.equal(settings.approvalPolicy, "never");
+    assert.equal(settings.model, "test-model");
+    assert.equal(sdk.env?.CODEX_HOME, path.join(settings.workingDirectory!, ".codex"));
+    assert.match(input, /preference.md/);
+    assert.equal(sdk.env?.CONTROLLER_TOKEN, undefined);
+    assert.equal(sdk.env?.WECHAT_TOKEN, undefined);
+    assert.equal(sdk.apiKey, "api-auth-only");
+    assert.equal(sdk.config?.model_provider, "leader_openai");
+    if (first) {
+      assert.equal(resume, undefined);
+      yield { type: "thread.started", thread_id: "thread-persisted" };
+      // The next event cannot arrive before thread.started has reached durable storage.
+      const workspace = await new WorkspaceStore(root).forChat("account", "chat");
+      assert.equal(workspace.getThreadId(), "thread-persisted");
+      fs.writeFileSync(path.join(settings.workingDirectory!, "preference.md"), "先说结论，简洁回复。\n");
+      fs.writeFileSync(path.join(settings.workingDirectory!, "task.md"), "当前在修复重发问题，禁止部署。\n");
+      first = false;
+    } else {
+      assert.equal(resume, "thread-persisted");
+      assert.match(input, /先说结论，简洁回复/);
+      assert.match(input, /禁止部署/);
+    }
+    yield* complete("记住了");
+  });
+  const options = { root, model: "test-model", sdkFactory, apiKey: "api-auth-only", baseUrl: "https://api.example.test/v1" };
+  assert.deepEqual(await new CodexReplyEngine(options).reply("account", request, noController), { text: "记住了" });
+  assert.deepEqual(await new CodexReplyEngine(options).reply("account", { ...request, messageId: "next", text: "继续" }, noController), { text: "记住了" });
+  const other = await new WorkspaceStore(root).forChat("other-account", "chat");
+  assert.equal(other.getThreadId(), undefined);
+  assert.doesNotMatch(other.readMemory()["task.md"].content, /重发问题/);
+});
+
+test("completed message survives restart without rerunning; conflicting duplicate is refused", async t => {
+  const root = fixture(t);
+  let calls = 0;
+  const sdkFactory = fakeFactory(async function* () { calls++; yield* complete("cached"); });
+  const options = { root, model: "test-model", sdkFactory };
+  await new CodexReplyEngine(options).reply("account", request, noController);
+  assert.deepEqual(await new CodexReplyEngine(options).reply("account", request, noController), { text: "cached" });
+  assert.equal(calls, 1);
+  await assert.rejects(new CodexReplyEngine(options).reply("account", { ...request, text: "other" }, noController), /conflicting/);
+});
+
+test("failed turns retain early thread ID and started journal, sanitize stderr and refuse automatic replay", async t => {
+  const root = fixture(t);
+  let calls = 0;
+  const sdkFactory = fakeFactory(async function* () {
+    calls++;
+    yield { type: "thread.started", thread_id: "recoverable-thread" };
+    throw new Error("provider-secret-token raw stderr");
+  });
+  const options = { root, model: "test-model", sdkFactory };
+  const failed = await new CodexReplyEngine(options).reply("account", request, noController);
+  assert.doesNotMatch(failed.text, /provider-secret-token|stderr/);
+  const retry = await new CodexReplyEngine(options).reply("account", request, noController);
+  assert.match(retry.text, /没有自动重跑/);
+  assert.equal(calls, 1);
+  const workspace = await new WorkspaceStore(root).forChat("account", "chat");
+  assert.equal(workspace.getThreadId(), "recoverable-thread");
+  assert.equal(Object.values(workspace.getReplyJournal())[0].stage, "started");
+});
+
+test("Controller tool preserves attachments, command ID and original credential links outside generated prose", async t => {
+  const root = fixture(t);
+  const image = { id: "image-1", mime: "image/png" as const, size: 5, sha256: "a".repeat(64) };
+  let calls = 0;
+  const originalText = "控制台：https://console.example/#login=delivery-only-token";
+  const sdkFactory = fakeFactory(async function* (input, _settings, sdk) {
+    assert.doesNotMatch(input, /delivery-only-token/);
+    const servers = sdk.config!.mcp_servers as Record<string, Record<string, string>>;
+    const url = servers.wechat_control.url;
+    const response = await fetch(url, { method: "POST", headers: {
+      Authorization: `Bearer ${sdk.env![CONTROL_TOKEN_ENV]}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream" }, body: JSON.stringify({
+      jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "control_current_request", arguments: {} },
+    }) });
+    assert.equal(response.status, 200);
+    const modelContent = await response.text();
+    assert.doesNotMatch(modelContent, /delivery-only-token/);
+    assert.match(modelContent, /REDACTED/);
+    yield* complete("已查询，结果见图");
+  });
+  const engine = new CodexReplyEngine({ root, model: "test-model", sdkFactory });
+  const reply = await engine.reply("account", request, { forwardMessage: async input => {
+    calls++;
+    assert.deepEqual(input, request);
+    return { text: originalText, commandId: "cmd-1", images: [image] };
+  } });
+  assert.deepEqual(reply, { text: originalText, commandId: "cmd-1", images: [image] });
+  assert.equal(calls, 1);
+  const workspace = await new WorkspaceStore(root).forChat("account", "chat");
+  assert.doesNotMatch(JSON.stringify(workspace.getReplyJournal()), /delivery-only-token/);
+  const replay = await engine.reply("account", request, noController);
+  assert.match(replay.text, /如需新链接，请重新请求/);
+  assert.doesNotMatch(replay.text, /#login/);
+});
+
+test("disconnected Controller call keeps lock and started journal until submission settles", async t => {
+  const root = fixture(t);
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  let submitted!: () => void;
+  const entered = new Promise<void>(resolve => { submitted = resolve; });
+  let terminal!: () => void;
+  const nativeTerminated = new Promise<void>(resolve => { terminal = resolve; });
+  const sdkFactory = fakeFactory(async function* (_input, _settings, sdk) {
+    const servers = sdk.config!.mcp_servers as Record<string, Record<string, string>>;
+    const pending = fetch(servers.wechat_control.url, { method: "POST", headers: {
+      Authorization: `Bearer ${sdk.env![CONTROL_TOKEN_ENV]}`, "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1,
+      method: "tools/call", params: { name: "control_current_request" } }),
+    }).then(() => "response", () => "disconnected");
+    await entered;
+    yield* complete("模型过早声称完成");
+    terminal();
+    void pending;
+  });
+  const engine = new CodexReplyEngine({ root, model: "test-model", sdkFactory });
+  let resolved = false;
+  const reply = engine.reply("account", request, { forwardMessage: async () => {
+    submitted(); await blocked; throw new Error("uncertain-controller-secret");
+  } }).then(value => { resolved = true; return value; });
+  await nativeTerminated;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(resolved, false);
+  const workspace = await new WorkspaceStore(root).forChat("account", "chat");
+  assert.equal(Object.values(workspace.getReplyJournal())[0].stage, "started");
+  release();
+  const result = await reply;
+  assert.doesNotMatch(result.text, /过早声称完成|uncertain-controller-secret/);
+  assert.match(result.text, /待核实/);
+  assert.equal(Object.values(workspace.getReplyJournal())[0].stage, "started");
+});
+
+test("same chat waits for turn termination while another chat proceeds independently", async t => {
+  const root = fixture(t);
+  let unblock!: () => void;
+  const blocked = new Promise<void>(resolve => { unblock = resolve; });
+  let firstStarted!: () => void;
+  const started = new Promise<void>(resolve => { firstStarted = resolve; });
+  const seen: string[] = [];
+  const sdkFactory = fakeFactory(async function* (input) {
+    if (input.includes('"text":"first"')) {
+      seen.push("first"); firstStarted(); await blocked;
+    } else if (input.includes('"text":"second"')) seen.push("second");
+    else seen.push("independent");
+    yield* complete("ok");
+  });
+  const engine = new CodexReplyEngine({ root, model: "test-model", sdkFactory });
+  const first = engine.reply("account", { ...request, text: "first" }, noController);
+  await started;
+  const second = engine.reply("account", { ...request, messageId: "m2", text: "second" }, noController);
+  await engine.reply("account", { ...request, chatId: "other", text: "independent" }, noController);
+  assert.deepEqual(seen, ["first", "independent"]);
+  unblock();
+  await Promise.all([first, second]);
+  assert.deepEqual(seen, ["first", "independent", "second"]);
+});
+
+test("timeout aborts the native turn and keeps uncertain journal; budget is bounded", async t => {
+  const root = fixture(t);
+  let terminated = false;
+  const sdkFactory = fakeFactory(async function* (_input, _settings, _sdk, _resume, signal) {
+    await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+    terminated = true;
+  });
+  const engine = new CodexReplyEngine({ root, model: "test-model", sdkFactory, timeoutMs: 10 });
+  assert.equal(engine.requestBudgetMs, 315010);
+  const reply = await engine.reply("account", request, noController);
+  assert.equal(terminated, true);
+  assert.match(reply.text, /未正常完成|没有正常完成/);
+  assert.throws(() => new CodexReplyEngine({ root, model: "x", timeoutMs: 315001 }), /budget/);
+});

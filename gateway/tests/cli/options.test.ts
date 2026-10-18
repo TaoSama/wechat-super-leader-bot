@@ -81,3 +81,15 @@ for (const { option, environment, field, default: defaultValue, maximum, configu
     }
   });
 }
+test("Codex mode validates its selection and keeps credentials out of parsed options", () => {
+  const options = parseGatewayCli(["--run", "--leader-mode", "codex", "--leader-root", "/tmp/agent-memory", "--leader-model", "gpt-6.1-sol"], {
+    GATEWAY_LEADER_API_KEY: "must-not-be-in-options",
+  });
+  assert.equal(options.leaderMode, "codex");
+  assert.equal(options.leaderRoot, "/tmp/agent-memory");
+  assert.equal(options.leaderModel, "gpt-6.1-sol");
+  assert.ok(!JSON.stringify(options).includes("must-not-be-in-options"));
+  assert.throws(() => parseGatewayCli(["--leader-mode", "typo"], {}), /Invalid leader-mode/);
+  assert.throws(() => parseGatewayCli(["--leader-model", " "], {}), /Invalid leader-model/);
+  assert.equal(parseGatewayCli([], { GATEWAY_LEADER_MODE: "codex" }).leaderMode, "codex");
+});

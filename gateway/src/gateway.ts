@@ -1,3 +1,4 @@
+import type { ControllerMessageRequest, ControllerMessageResponse } from "./types.js";
 import { StateManager } from "./runtime/state.js";
 import { ILinkClient } from "./wechat/client.js";
 import { ControllerClient, ChatNotAllowedError } from "./controller/client.js";
@@ -43,6 +44,11 @@ export interface BaselineSummary {
   establishedAt: string;
 }
 
+export interface GatewayReplyEngine {
+  readonly requestBudgetMs: number;
+  reply(accountId: string, request: ControllerMessageRequest, controller: Pick<ControllerClient, "forwardMessage">): Promise<ControllerMessageResponse>;
+}
+
 export class WeChatGateway {
   public readonly stateManager: StateManager;
   public readonly ilink: ILinkClient;
@@ -51,6 +57,7 @@ export class WeChatGateway {
   public readonly splitMultiPart: boolean;
   public readonly healthTracker?: HealthTracker;
   public readonly notifications: boolean;
+  private readonly replyEngine?: GatewayReplyEngine;
   private stopped: boolean = false;
   private readonly notificationOutbox: NotificationOutbox;
   private flushingReplies = false;
@@ -66,7 +73,9 @@ export class WeChatGateway {
     splitMultiPart?: boolean;
     healthTracker?: HealthTracker;
     notifications?: boolean;
+    replyEngine?: GatewayReplyEngine;
   }) {
+    this.replyEngine = options.replyEngine;
     this.stateManager = options.stateManager;
     this.ilink = options.ilink;
     this.controller = options.controller;
@@ -165,7 +174,7 @@ export class WeChatGateway {
       for (const msg of batch.messages) {
         if (this.stopped) { interrupted = true; break; }
         this.healthTracker?.recordMessageStart(this.controller.authorizationBudgetMs + ENTRY_TYPING_BUDGET_MS +
-          this.controller.requestBudgetMs + REPLY_TIMEOUT_MS + CHECKPOINT_MARGIN_MS);
+          (this.replyEngine?.requestBudgetMs ?? this.controller.requestBudgetMs) + REPLY_TIMEOUT_MS + CHECKPOINT_MARGIN_MS);
         try {
           if (this.hasQuarantinedInboundReply(msg.deliveryKey)) {
             this.quarantineInboundReply(msg.deliveryKey);
@@ -187,11 +196,10 @@ export class WeChatGateway {
             this.stateManager.assertOutboxCapacity(msg.deliveryKey);
           }
           await this.ilink.sendTyping(msg.chatId);
-          const controllerReply = await this.controller.forwardMessage({
-            chatId: msg.chatId,
-            messageId: msg.messageId,
-            text: msg.text,
-          });
+          const request = { chatId: msg.chatId, messageId: msg.messageId, text: msg.text };
+          const controllerReply = this.replyEngine
+            ? await this.replyEngine.reply(this.stateManager.account!.accountId, request, this.controller)
+            : await this.controller.forwardMessage(request);
 
           this.stateManager.putOutbox({ kind: "reply", chatId: msg.chatId, messageId: msg.messageId,
             deliveryKey: msg.deliveryKey, splitMaxChars: this.splitMaxChars, splitMultiPart: this.splitMultiPart, status: "pending" });

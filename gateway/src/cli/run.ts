@@ -39,7 +39,8 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
 
   if (opts.mode === "check") {
     const summary = {
-      ok: Boolean(stateManager.account?.token && opts.controllerToken.trim()),
+      ok: Boolean(stateManager.account?.token && opts.controllerToken.trim() &&
+        (opts.leaderMode !== "codex" || env.GATEWAY_LEADER_API_KEY?.trim())),
       mode: "check",
       controllerUrl: validatedControllerUrl,
       hasControllerToken: Boolean(opts.controllerToken.trim()),
@@ -53,6 +54,9 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
       baselineInProgress: stateManager.baselineInProgress,
       baselineEstablishedAt: stateManager.baselineEstablishedAt || null,
       notifications: opts.notifications,
+      leaderMode: opts.leaderMode,
+      leaderModel: opts.leaderModel,
+      hasLeaderApiKey: Boolean(env.GATEWAY_LEADER_API_KEY?.trim()),
     };
     process.stdout.write(JSON.stringify(summary, null, 2) + "\n");
     return summary.ok ? 0 : 1;
@@ -64,6 +68,14 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
     allowInsecureController: opts.allowInsecureController,
   });
 
+  let replyEngine;
+  if (opts.leaderMode === "codex" && opts.mode !== "establish-baseline") {
+    if (!env.GATEWAY_LEADER_API_KEY?.trim()) throw new Error("Missing GATEWAY_LEADER_API_KEY for Codex reply engine");
+    const { CodexReplyEngine } = await import("../leader/codex.js");
+    replyEngine = new CodexReplyEngine({ root: opts.leaderRoot, model: opts.leaderModel,
+      baseUrl: env.GATEWAY_LEADER_BASE_URL || undefined, apiKey: env.GATEWAY_LEADER_API_KEY,
+      codexPath: env.GATEWAY_CODEX_PATH || undefined });
+  }
   const healthTracker = new HealthTracker(resolvedHealthPath);
   const gateway = new WeChatGateway({
     stateManager,
@@ -72,6 +84,7 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
     splitMaxChars: opts.maxChars,
     healthTracker,
     notifications: opts.notifications,
+    replyEngine,
   });
 
   if (opts.mode === "establish-baseline") {

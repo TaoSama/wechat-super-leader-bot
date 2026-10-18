@@ -23,17 +23,30 @@ function stages(source) {
 
 function assertImageContract(source, component) {
   const parsed = stages(source);
-  const buildNames = component === 'controller' ? ['controller-build', 'web-build'] : ['build'];
+  const buildNames = component === 'controller' ? ['controller-build', 'web-build'] : ['build', 'runtime-dependencies'];
   assert.equal(parsed.length, buildNames.length + 2);
   assert.equal(parsed[0][0], NATIVE_TOOLCHAIN, 'toolchain must execute on the build architecture');
   assert.ok(parsed[0].includes('RUN npm install --global pnpm@11.8.0'));
   for (const [index, name] of buildNames.entries()) {
     const build = parsed[index + 1];
     assert.equal(build[0], `FROM toolchain AS ${name}`, 'build stages must inherit the native toolchain');
-    assert.ok(build.includes('RUN pnpm install --frozen-lockfile'));
+    if (name === 'runtime-dependencies') {
+      assert.ok(build.includes('ARG TARGETARCH'));
+      const install = build.find(line => line.startsWith('RUN case '));
+      assert.match(install, /amd64\) CODEX_CPU=x64/);
+      assert.match(install, /arm64\) CODEX_CPU=arm64/);
+      assert.match(install, /supportedArchitectures:/);
+      assert.match(install, /os: \[linux\]/);
+      assert.match(install, /cpu: \[%s\]/);
+      assert.match(install, /libc: \[glibc\]/);
+      assert.match(install, /pnpm install --prod --frozen-lockfile/);
+      assert.ok(build.includes('COPY gateway/patches ./patches'));
+      continue;
+    }
+    assert.ok(build.some(line => /^RUN pnpm install --frozen-lockfile(?: |$)/.test(line)));
     if (name === 'web-build') assert.ok(build.includes('RUN pnpm run build'));
     else {
-      assert.ok(build.includes('RUN pnpm run build && pnpm prune --prod'));
+      assert.ok(build.includes(component === 'gateway' ? 'RUN pnpm run build' : 'RUN pnpm run build && pnpm prune --prod'));
       assert.ok(build.includes(`WORKDIR /work/${component}`));
       assert.ok(build.includes('COPY scripts/clean-build.mjs /work/scripts/clean-build.mjs'));
     }
@@ -46,7 +59,7 @@ function assertImageContract(source, component) {
   assert.ok(runtime.includes('WORKDIR /app'));
   const sourceStage = buildNames[0];
   const allowedCopies = ['package.json', 'node_modules', 'dist'].map(artifact =>
-    `COPY --from=${sourceStage} --chown=node:node /work/${component}/${artifact} ./${artifact}`);
+    `COPY --from=${component === 'gateway' && artifact === 'node_modules' ? 'runtime-dependencies' : sourceStage} --chown=node:node /work/${component}/${artifact} ./${artifact}`);
   if (component === 'controller') {
     allowedCopies.push('COPY --from=web-build --chown=node:node /web/dist ./web');
     assert.ok(runtime.includes('CMD ["node", "dist/index.js"]'));
@@ -71,16 +84,19 @@ test('image contracts reject emulated toolchains, unpruned dependencies and leak
   for (const [source, component] of [[controllerDockerfile, 'controller'], [gatewayDockerfile, 'gateway']]) {
     assert.throws(() => assertImageContract(source.replace('--platform=$BUILDPLATFORM ', ''), component));
     assert.throws(() => assertImageContract(source.replace(`FROM ${BASE_IMAGE}\n`, `FROM ${BASE_IMAGE}\nRUN node --version\n`), component));
-    assert.throws(() => assertImageContract(source.replace(' && pnpm prune --prod', ''), component));
+    const unpruned = component === 'controller' ? source.replace(' && pnpm prune --prod', '') : source.replace('pnpm install --prod ', 'pnpm install ');
+    assert.throws(() => assertImageContract(unpruned, component));
     assert.throws(() => assertImageContract(source.replace(`FROM ${BASE_IMAGE}\n`, `FROM --platform=$BUILDPLATFORM ${BASE_IMAGE}\n`), component));
     assert.throws(() => assertImageContract(`${source}\nCOPY --from=toolchain /usr/local/bin/pnpm /usr/local/bin/pnpm\n`, component));
   }
   assert.throws(() => assertImageContract(controllerDockerfile.replace('/web/dist ./web', '/web/node_modules ./web'), 'controller'));
   assert.throws(() => assertImageContract(controllerDockerfile.replace('FROM toolchain AS web-build', `FROM ${BASE_IMAGE} AS web-build`), 'controller'));
   assert.throws(() => assertImageContract(gatewayDockerfile.replace('--chown=node:node /runtime/etc/super-leader', '/runtime/etc/super-leader'), 'gateway'));
+  assert.throws(() => assertImageContract(gatewayDockerfile.replace('amd64) CODEX_CPU=x64', 'amd64) CODEX_CPU=arm64'), 'gateway'));
+  assert.throws(() => assertImageContract(gatewayDockerfile.replace('FROM toolchain AS runtime-dependencies', `FROM ${BASE_IMAGE} AS runtime-dependencies`), 'gateway'));
 });
 
-test('cross-architecture runtime dependency roots remain limited to reviewed pure-JavaScript packages', () => {
+test('runtime dependency roots allow reviewed JavaScript packages and target-selected Codex executables', () => {
   const controller = JSON.parse(readFileSync(new URL('../../../controller/package.json', import.meta.url), 'utf8'));
   const gateway = JSON.parse(readFileSync(new URL('../../../gateway/package.json', import.meta.url), 'utf8'));
   assert.deepEqual(controller.dependencies, {
@@ -90,10 +106,16 @@ test('cross-architecture runtime dependency roots remain limited to reviewed pur
     assert.deepEqual(manifest.optionalDependencies ?? {}, {});
     assert.deepEqual(manifest.peerDependencies ?? {}, {});
   }
-  assert.deepEqual(gateway.dependencies ?? {}, {});
+  assert.deepEqual(gateway.dependencies, {
+    '@modelcontextprotocol/sdk': '1.32.1', '@openai/codex-sdk': '0.163.0',
+  }, 'new runtime dependencies require a platform and install-script review');
   const lock = readFileSync(new URL('../../../controller/pnpm-lock.yaml', import.meta.url), 'utf8');
   assert.doesNotMatch(lock, /^  (?:pg-native|bufferutil|utf-8-validate)@/m,
     'optional native peers must not become installed runtime packages');
+  const gatewayLock = readFileSync(new URL('../../../gateway/pnpm-lock.yaml', import.meta.url), 'utf8');
+  for (const cpu of ['x64', 'arm64']) {
+    assert.match(gatewayLock, new RegExp(`'@openai/codex@0\\.163\\.0-linux-${cpu}':\\n[\\s\\S]*?cpu: \\[${cpu}\\]\\n    os: \\[linux\\]`));
+  }
 });
 
 test('Gateway cannot switch away from the fixed Docker and CI package manager', () => {
