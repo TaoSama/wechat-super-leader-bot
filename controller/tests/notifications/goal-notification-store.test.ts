@@ -122,7 +122,7 @@ describe.each(["memory", "postgres"] as const)("%s goal notifications", kind => 
     expect(event).toMatchObject({ id: f.goal.id, source: { type: "goal", id: f.goal.id }, kind: status, chatId: "allowed", status: "pending" });
     expect(event.text).toContain(`**任务**：${SECRET}`);
     expect(event.text).not.toContain(f.goal.id);
-    if (status === "completed") expect(event.text).toContain(`> ${SECRET}`);
+    if (status === "completed") expect(event.text).toContain(SECRET);
     expect(event).not.toHaveProperty("executionId"); expect(event.expiresAt - event.createdAt).toBe(NOTIFICATION_TTL_MS);
     expect(await f.cas(saved!, saved!.revision - 1, event.createdAt)).toBeNull(); expect(await f.get(event.createdAt)).toEqual(event);
   });

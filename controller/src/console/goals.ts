@@ -4,6 +4,7 @@ import { normalizeGoal, validateGoalDecision, type GoalDecisionInput } from "../
 import { readGoalView } from "../leader/goals/view.js";
 import { goalReason } from "../leader/goals/reason.js";
 import { TurnIdSchema } from "../types.js";
+import { consoleCommandReader } from "./command-reader.js";
 
 export const CONSOLE_GOAL_LIMIT = 12;
 const TEXT_LIMIT = 512;
@@ -28,7 +29,7 @@ export const ConsoleGoalsSchema = z.object({ observedAt: timestamp, limit: z.lit
 export type ConsoleGoals = z.infer<typeof ConsoleGoalsSchema>;
 
 /** Explicit public projection, never spread durable leases, chat identity, input or result bodies. */
-export async function readConsoleGoals(store: IStore, chatIds: readonly string[], observedAt: number): Promise<ConsoleGoals> {
+export async function readConsoleGoals(store: IStore, chatIds: readonly string[], observedAt: number, metadataOnly = false): Promise<ConsoleGoals> {
   timestamp.parse(observedAt);
   const records = await store.listRecentGoals(chatIds, CONSOLE_GOAL_LIMIT + 1);
   const allowed = new Set(chatIds);
@@ -40,7 +41,7 @@ export async function readConsoleGoals(store: IStore, chatIds: readonly string[]
   });
   if (new Set(normalized.map(goal => goal.id)).size !== normalized.length) throw new Error("Duplicate goal list identity");
   const items = await Promise.all(normalized.slice(0, CONSOLE_GOAL_LIMIT).map(async goal => {
-    const view = await readGoalView(store, goal, observedAt);
+    const view = await readGoalView(metadataOnly ? consoleCommandReader(store) : store, goal, observedAt, metadataOnly);
     const final = view.decisions.at(-1)?.decision;
     let supported = false;
     if (goal.status === "completed" && final?.type === "complete") {

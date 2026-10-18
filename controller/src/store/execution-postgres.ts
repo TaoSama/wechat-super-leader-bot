@@ -4,7 +4,7 @@ import { normalizeExecution, validateExecutionUpdate, executionPageLimit, EXECUT
 import { validateChatId, validateExpectedRevision } from "../leader/state.js";
 import { ConflictError } from "./interface.js";
 import { executionListQuery } from "./execution-list.js";
-import { createTerminalNotification, validateNotificationTime } from "../notifications/contracts.js";
+import { createTerminalNotifications, validateNotificationTime } from "../notifications/contracts.js";
 import { insertTerminalNotification } from "./notification-postgres.js";
 import { notificationCommands, planNotificationRequestIds, type NotificationCommandReader } from "../notifications/presentation.js";
 import { lockChatAuthorization } from "./goal-postgres.js";
@@ -143,8 +143,8 @@ export async function pgCompareAndSetExecution(pool: pg.Pool, next: ExecutionRec
     const execution = updated.rows.length ? executionFromRow(updated.rows[0]) : null;
     const commands = execution && commandReader && ["completed", "failed", "expired"].includes(execution.status) ?
       await notificationCommands(commandReader(client), planNotificationRequestIds(execution)) : [];
-    const notification = execution && createTerminalNotification(execution, now, commands);
-    if (notification) await insertTerminalNotification(client, notification);
+    const notifications = execution ? createTerminalNotifications(execution, now, commands) : [];
+    for (const notification of notifications) await insertTerminalNotification(client, notification);
     await client.query("COMMIT");
     return execution;
   } catch (error) {

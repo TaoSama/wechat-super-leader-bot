@@ -1,6 +1,9 @@
-import { CommandRecord, MessageRecord, ScopedSession, Session, validateCommandSendRoute } from "../types.js";
+import { CommandRecord, CommandAuthority, MessageRecord, ScopedSession, Session, SendRoute, validateCommandSendRoute } from "../types.js";
+import { ACTIVE_COMMAND_STATUSES, beforeInQueue, sameAuthority, sameCommandPayload } from "../commands/queue.js";
 import { InputReceipt } from "../sessions/input-receipt.js";
+import { commandSummary, type CommandSummary } from "../commands/public.js";
 import { IStore, CreateCommandResult, ConflictError } from "./interface.js";
+import { MemoryMessageImages, type StoredMessageImage } from "../sessions/message-images.js";
 import { sameSkillRefs } from "../skills/catalog.js";
 import { nextCommandState, inspectionLimit, validateStoredCommandInput } from "./command-state.js";
 import { validateNodeSessionInventory } from "./node-sessions.js";
@@ -9,7 +12,9 @@ import { normalizeGoal, assertGoalConfirmation, validateGoalUpdate, goalIsOpen, 
   type GoalConfirmationAuthority, type CreateGoalResult } from "../leader/goals/goal.js";
 import { validateGoalProofs } from "../leader/goals/view.js";
 import { notificationCommands, planNotificationRequestIds, goalNotificationRequestIds } from "../notifications/presentation.js";
-import { createTerminalNotification, createGoalNotification, readNotification, claimNotificationRecord, receiptNotificationRecord,
+import { notificationSource, sameNotificationSource, createProgressNotification, progressNotificationEligible, progressNotificationBudgetAvailable } from "../notifications/progress.js";
+import {NotificationSourceSchema, type NotificationSource } from "../notifications/contracts.js";
+import { createTerminalNotifications, createGoalNotifications, terminalNotificationPartEligible, readNotification, claimNotificationRecord, receiptNotificationRecord,
   NotificationIdSchema, NotificationReceiptStatusSchema, validateNotificationTime, NOTIFICATION_BATCH_LIMIT,
   type Notification, type StoredNotification, type NotificationReceiptStatus } from "../notifications/contracts.js";
 import { normalizeExecution, validateExecutionUpdate, executionPageLimit, EXECUTION_PAGE_SIZE,
@@ -34,11 +39,23 @@ import {
   validateIsoTimestamp,
 } from "../console/types.js";
 
+const KNOWN_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const KNOWN_SESSION_LIMIT = 4096;
+
 export class MemoryStore implements IStore {
+  private messageImages = new MemoryMessageImages();
+  recordMessageImages(chatId: string, messageId: string, images: StoredMessageImage[], expiresAt: number) {
+    return this.messageImages.recordMessageImages(chatId, messageId, images, expiresAt);
+  }
+  getMessageImage(chatId: string, messageId: string, imageId: string, now: number) {
+    return this.messageImages.getMessageImage(chatId, messageId, imageId, now);
+  }
   private commands = new Map<string, CommandRecord>();
   private commandsByRequestId = new Map<string, string>(); // requestId -> commandId
   private messages = new Map<string, MessageRecord>(); // JSON.stringify([chatId, messageId]) -> record
   private nodeSessions = new Map<string, Session[]>(); // nodeId -> Session[]
+  private knownSessions = new Map<string, {session:Session; observedAt:number}>();
+  private queueOrder = 0;
   private leaderStates = new Map<string, LeaderState>(); // chatId -> LeaderState
   private executions = new Map<string, ExecutionRecord>();
   private goals = new Map<string, GoalRecord>();
@@ -57,12 +74,7 @@ export class MemoryStore implements IStore {
       const existing = this.commands.get(existingId)!;
 
       // Check payload consistency
-      if (
-        existing.nodeId !== cmd.nodeId ||
-        existing.sessionId !== cmd.sessionId ||
-        existing.action !== cmd.action ||
-        (existing.prompt || "") !== (cmd.prompt || "") || !sameSkillRefs(existing.skills, cmd.skills)
-      ) {
+      if (!sameCommandPayload(existing, cmd) || !sameAuthority(existing.authority, cmd.authority)) {
         throw new ConflictError(
           `requestId '${cmd.requestId}' was already used with different payload`
         );
@@ -76,6 +88,7 @@ export class MemoryStore implements IStore {
       return { created: false, command: structuredClone(existing) };
     }
 
+    cmd = { ...cmd, queueOrder: ++this.queueOrder };
     this.commands.set(cmd.commandId, structuredClone(cmd));
     if (cmd.requestId) {
       this.commandsByRequestId.set(cmd.requestId, cmd.commandId);
@@ -94,6 +107,14 @@ export class MemoryStore implements IStore {
     const commandId = this.commandsByRequestId.get(requestId);
     if (!commandId) return null;
     return this.getCommand(commandId);
+  }
+
+  async findCommandMetadataByRequestId(requestId: string): Promise<CommandSummary | null> {
+    const id = this.commandsByRequestId.get(requestId);
+    const command = id ? this.commands.get(id) : undefined;
+    if (!command) return null;
+    validateStoredCommandInput(command);
+    return structuredClone(commandSummary(command));
   }
 
   async updateCommandStatus(
@@ -125,6 +146,9 @@ export class MemoryStore implements IStore {
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
     for (const cmd of this.commands.values()) {
+      if (cmd.status === "queued" && Date.parse(cmd.expiresAt) <= nowMs) {
+        cmd.status = "expired"; cmd.updatedAt = nowIso;
+      }
       if (cmd.status === "pending" || (cmd.status === "accepted" && !cmd.turnId)) {
         const expMs = new Date(cmd.expiresAt).getTime();
         if (expMs <= nowMs) {
@@ -136,17 +160,51 @@ export class MemoryStore implements IStore {
     }
   }
 
+  async listQueuedCommands(limit = 64, afterCommandId = ""): Promise<CommandRecord[]> {
+    inspectionLimit(limit);
+    const all = [...this.commands.values()];
+    return structuredClone(all.filter(cmd => cmd.status === "queued" && cmd.commandId > afterCommandId &&
+      (cmd.deliveryMode === "steer" || !all.some(other => other.commandId !== cmd.commandId && other.action === "send" && other.nodeId === cmd.nodeId && other.sessionId === cmd.sessionId &&
+        (ACTIVE_COMMAND_STATUSES.includes(other.status) || other.status === "queued" && beforeInQueue(other, cmd))))
+      )
+      .sort((a,b) => a.commandId.localeCompare(b.commandId)).slice(0,limit));
+  }
+  async claimQueuedCommand(commandId: string, route: SendRoute): Promise<CommandRecord | null> {
+    const cmd = this.commands.get(commandId);
+    if (!cmd || cmd.status !== "queued" || Date.parse(cmd.expiresAt) <= Date.now()) return null;
+    if (cmd.deliveryMode !== "steer" && [...this.commands.values()].some(other => other.commandId !== cmd.commandId && other.action === "send" &&
+      other.nodeId === cmd.nodeId && other.sessionId === cmd.sessionId &&
+      (ACTIVE_COMMAND_STATUSES.includes(other.status) || other.status === "queued" && beforeInQueue(other,cmd)))) return null;
+    const next = { ...cmd, status: "pending" as const, sendRoute: route, updatedAt: new Date().toISOString() };
+    this.commands.set(commandId,next); return structuredClone(next);
+  }
+  async cancelQueuedCommand(commandId: string, authority?: CommandAuthority): Promise<CommandRecord | null> {
+    const cmd = this.commands.get(commandId);
+    if (!cmd || authority && authority.type !== "admin" && !sameAuthority(cmd.authority,authority) || !["queued","cancelled"].includes(cmd.status)) return null;
+    const next = { ...cmd, status: "cancelled" as const, updatedAt: new Date().toISOString() };
+    this.commands.set(commandId,next); return structuredClone(next);
+  }
+
   async listRecentCommands(limit = 50): Promise<CommandRecord[]> {
     const list = Array.from(this.commands.values());
     list.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
     return list.slice(0, limit).map(cmd => { validateStoredCommandInput(cmd); return structuredClone(cmd); });
   }
 
+  async listRecentCommandSummaries(limit = 50): Promise<CommandSummary[]> {
+    inspectionLimit(limit);
+    return [...this.commands.values()].sort((a, b) => a.createdAt < b.createdAt ? 1 : -1)
+      .slice(0, limit).map(command => {
+        validateStoredCommandInput(command);
+        return structuredClone(commandSummary(command));
+      });
+  }
+
   async listInspectableCommands(nodeId: string, limit = 50, afterCommandId = ""): Promise<CommandRecord[]> {
     const count = inspectionLimit(limit);
     return structuredClone([...this.commands.values()].filter(cmd => cmd.nodeId === nodeId && cmd.action === "send" &&
       cmd.sendRoute !== "terminal-pane" && !cmd.sessionId.startsWith("terminal:") && !cmd.inputReceipt &&
-      cmd.turnId && ["accepted", "uncertain"].includes(cmd.status) && cmd.commandId > afterCommandId)
+      ["accepted", "uncertain", "pending"].includes(cmd.status) && cmd.commandId > afterCommandId)
       .sort((a, b) => a.commandId < b.commandId ? -1 : a.commandId > b.commandId ? 1 : 0).slice(0, count));
   }
 
@@ -166,6 +224,26 @@ export class MemoryStore implements IStore {
   async upsertNodeSessions(nodeId: string, sessions: Session[]): Promise<void> {
     validateNodeSessionInventory(sessions);
     this.nodeSessions.set(nodeId, sessions.map((s) => ({ ...s })));
+    for (const session of sessions) {
+      const key = JSON.stringify([nodeId,session.id]);
+      this.knownSessions.delete(key);
+      this.knownSessions.set(key,{session:structuredClone(session),observedAt:Date.now()});
+    }
+    this.pruneKnownSessions();
+  }
+  async getKnownSession(nodeId: string, sessionId: string): Promise<Session | null> {
+    this.pruneKnownSessions();
+    return structuredClone(this.knownSessions.get(JSON.stringify([nodeId,sessionId]))?.session ?? null);
+  }
+
+  private pruneKnownSessions(): void {
+    const pinned = new Set<string>();
+    const pin = (nodeId:string,sessionId:string) => pinned.add(JSON.stringify([nodeId,sessionId]));
+    for (const command of this.commands.values()) if (["queued",...ACTIVE_COMMAND_STATUSES].includes(command.status)) pin(command.nodeId,command.sessionId);
+    for (const execution of this.executions.values()) if (execution.status === "active") for (const action of execution.plan.actions) pin(action.nodeId,action.sessionId);
+    for (const goal of this.goals.values()) if (goalIsOpen(goal)) for (const target of goal.proposal.targets) pin(target.nodeId,target.sessionId);
+    const threshold = Date.now()-KNOWN_SESSION_TTL_MS;
+    for (const [key,entry] of this.knownSessions) if (!pinned.has(key) && (entry.observedAt<threshold || this.knownSessions.size>KNOWN_SESSION_LIMIT)) this.knownSessions.delete(key);
   }
 
   async getNodeSessions(nodeId: string): Promise<ScopedSession[]> {
@@ -288,10 +366,12 @@ export class MemoryStore implements IStore {
     const requestIds = ["completed", "failed", "expired"].includes(normalized.status) ? planNotificationRequestIds(normalized) : [];
     const commands = requestIds.length ? await notificationCommands(this, requestIds) : [];
     if (this.executions.get(normalized.id)?.revision !== expectedRevision) return null;
-    const notification = createTerminalNotification(normalized, now, commands);
-    if (notification && this.notifications.has(notification.id)) throw new ConflictError("Execution notification already exists");
+    const notifications = createTerminalNotifications(normalized, now, commands);
+    for (const notification of notifications) {
+      if (this.notifications.has(notification.id)) throw new ConflictError("Notification ID collision");
+    }
     this.executions.set(normalized.id, normalized);
-    if (notification) this.notifications.set(notification.id, notification);
+    for (const notification of notifications) this.notifications.set(notification.id,notification);
     return structuredClone(normalized);
   }
 
@@ -343,11 +423,13 @@ export class MemoryStore implements IStore {
     if (this.goals.get(goal.id)?.revision !== revision) return null;
     const commitTime = now();
     validateGoalUpdate(current, goal, commitTime);
-    const notification = createGoalNotification(current, goal, commitTime, commands);
-    if (notification && this.notifications.has(notification.id)) throw new ConflictError("Goal notification already exists");
-    // All validation precedes synchronous publication of both records.
+    const notifications = createGoalNotifications(current, goal, commitTime, commands);
+    for (const notification of notifications) {
+      if (this.notifications.has(notification.id)) throw new ConflictError("Notification ID collision");
+    }
+    // All validation precedes synchronous publication of all records.
     this.goals.set(goal.id, goal);
-    if (notification) this.notifications.set(notification.id, notification);
+    for (const notification of notifications) this.notifications.set(notification.id,notification);
     return structuredClone(goal);
   }
   async listRunnableGoals(limit = 8, afterId = ""): Promise<GoalRecord[]> {
@@ -365,9 +447,27 @@ export class MemoryStore implements IStore {
   async listPendingNotifications(chatIds: readonly string[], now: number): Promise<Notification[]> {
     validateNotificationTime(now);
     const query = executionListQuery(chatIds, NOTIFICATION_BATCH_LIMIT);
-    return [...this.notifications.values()].filter(item => query.chatIds.includes(item.chatId) && item.status === "pending" && item.expiresAt > now)
-      .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    const notifications = [...this.notifications.values()];
+    return notifications.filter(item => query.chatIds.includes(item.chatId) && item.status === "pending" && item.expiresAt > now &&
+      (item.kind !== "progress" || this.progressEligible(item, now)) && terminalNotificationPartEligible(item,notifications))
+      .sort((a, b) => Number(a.kind === "progress") - Number(b.kind === "progress") || a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       .slice(0, NOTIFICATION_BATCH_LIMIT).map(item => readNotification(item, now));
+  }
+  private progressEligible(item: StoredNotification, now: number): boolean {
+    const record = item.source.type === "plan" ? this.executions.get(item.source.id) : this.goals.get(item.source.id);
+    return !!record && progressNotificationEligible(item, record, now);
+  }
+  async enqueueProgressNotification(source: NotificationSource, now = Date.now()): Promise<Notification | null> {
+    NotificationSourceSchema.parse(source); validateNotificationTime(now);
+    const record = source.type === "plan" ? this.executions.get(source.id) : this.goals.get(source.id);
+    if (!record || !sameNotificationSource(notificationSource(record),source)) return null;
+    if (!progressNotificationBudgetAvailable(record,[...this.notifications.values()],now)) return null;
+    const commands = await notificationCommands(this,"plan" in record ? planNotificationRequestIds(record) : goalNotificationRequestIds(record));
+    const latest = source.type === "plan" ? this.executions.get(source.id) : this.goals.get(source.id);
+    if (!latest || latest.revision !== record.revision || latest.status !== record.status) return null;
+    const notification = createProgressNotification(latest,commands,[...this.notifications.values()],now);
+    if (!notification) return null;
+    this.notifications.set(notification.id,notification); return readNotification(notification,now);
   }
 
   async getNotification(id: string, now: number): Promise<Notification | null> {
@@ -384,6 +484,8 @@ export class MemoryStore implements IStore {
     const query = executionListQuery(chatIds, NOTIFICATION_BATCH_LIMIT);
     const current = this.notifications.get(id);
     if (!current) return null;
+    if (current.kind === "progress" && !this.progressEligible(current,now)) throw new ConflictError("Progress notification source is no longer active");
+    if (!terminalNotificationPartEligible(current,[...this.notifications.values()])) throw new ConflictError("Previous notification part is not accepted");
     const next = claimNotificationRecord(current, attemptId, query.chatIds, now);
     this.notifications.set(id, next);
     return readNotification(next, now);

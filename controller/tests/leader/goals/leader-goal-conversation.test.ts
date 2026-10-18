@@ -281,7 +281,8 @@ it.each(["expiry", "skill", "route"])("revalidates %s before confirmation withou
   const { pending } = await f.propose(value);
   if (mode === "expiry") f.tick(PLAN_TTL_MS + 1);
   if (mode === "skill") f.skills[0].digest = "c".repeat(64);
-  if (mode === "route") f.sessions[0].status = "active";
+  if (mode === "route") f.sessions[0].sendAvailability = {route:"desktop-owner",state:"blocked",reason:"checking",
+    observedAt:new Date().toISOString(),validUntil:new Date(Date.now()+45000).toISOString()};
   expect((await f.leader.handle("chat", "confirm", `确认目标 ${pending.id}`)).text).toContain("未派发");
   expect(await f.store.getLatestGoal("chat")).toBeNull();
 });

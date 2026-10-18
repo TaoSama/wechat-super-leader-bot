@@ -1,4 +1,4 @@
-import { CommandRecord, isValidTurnId, validateCommandSendRoute } from "../types.js";
+import { CommandRecord, isValidTurnId, validateCommandSendRoute, DeliveryModeSchema, CommandAuthoritySchema } from "../types.js";
 import { InputReceiptSchema, sameInputReceipt, type InputReceipt } from "../sessions/input-receipt.js";
 import { ConflictError } from "./interface.js";
 
@@ -6,6 +6,7 @@ import { ConflictError } from "./interface.js";
 export function validateCommandTurnBinding(cmd: CommandRecord, status: CommandRecord["status"], turnId?: string,
   inputReceipt?: InputReceipt, output?: string, error?: string): void {
   validateCommandSendRoute(cmd);
+  if (cmd.deliveryMode === "steer" && turnId !== undefined && turnId !== cmd.expectedTurnId) throw new ConflictError("Steer result does not match expected turn");
   if (cmd.action === "send" && cmd.sendRoute === "terminal-pane") {
     if (!["pending", "input-written", "failed", "uncertain"].includes(status) || turnId !== undefined || cmd.turnId !== undefined || output) {
       throw new ConflictError("Terminal input cannot bind a native turn or task result");
@@ -50,7 +51,8 @@ export function nextCommandState(cmd: CommandRecord, status: CommandRecord["stat
   turnId?: string, inputReceipt?: InputReceipt): CommandRecord {
   validateStoredCommandInput(cmd);
   validateCommandTurnBinding(cmd, status, turnId, inputReceipt, output, error);
-  if (cmd.status === "completed" || cmd.status === "failed" || cmd.status === "input-written") return cmd;
+  if (["completed", "failed", "input-written", "cancelled", "expired"].includes(cmd.status)) return cmd;
+  if (cmd.status === "queued" && !["failed", "expired", "cancelled"].includes(status)) throw new ConflictError("Queued command has not been dispatched");
   return { ...cmd, status, turnId: turnId ?? cmd.turnId,
     ...(inputReceipt ? { inputReceipt: structuredClone(inputReceipt) } : {}),
     // An acceptance snapshot is not the completed turn's recorded result.
@@ -61,6 +63,10 @@ export function nextCommandState(cmd: CommandRecord, status: CommandRecord["stat
 
 /** Reject malformed persisted proof before it can be displayed, ACKed or inspected. */
 export function validateStoredCommandInput(cmd: CommandRecord): void {
+  if (cmd.deliveryMode !== undefined) DeliveryModeSchema.parse(cmd.deliveryMode);
+  if (cmd.deliveryMode === "steer" ? !isValidTurnId(cmd.expectedTurnId) : cmd.expectedTurnId !== undefined) throw new ConflictError("Invalid command delivery identity");
+  if (cmd.authority !== undefined) CommandAuthoritySchema.parse(cmd.authority);
+  if (cmd.status === "queued" && (cmd.action !== "send" || !cmd.authority)) throw new ConflictError("Queued command requires durable authorization");
   if (cmd.sendRoute === "terminal-pane" || cmd.status === "input-written" || cmd.inputReceipt !== undefined) {
     validateCommandTurnBinding(cmd, cmd.status, cmd.turnId, cmd.inputReceipt, cmd.output, cmd.error);
   }

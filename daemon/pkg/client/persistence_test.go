@@ -66,6 +66,14 @@ func TestJournalCrashHelper(t *testing.T) {
 		if result := d.ExecuteCommand(context.Background(), cmd); result.Status != protocol.StatusAccepted {
 			t.Fatalf("dispatch: %+v", result)
 		}
+	case "full-output":
+		if _, created, err := d.journal.Begin(cmd); err != nil || !created {
+			t.Fatalf("claim: %v", err)
+		}
+		if err := d.journal.Finish(protocol.DaemonResultMessage{Type: "result", CommandID: cmd.CommandID,
+			Status: protocol.StatusCompleted, TurnID: "durable-turn", Output: fullOutputFixture()}); err != nil {
+			t.Fatal(err)
+		}
 	default:
 		t.Fatal("invalid helper mode")
 	}
@@ -73,7 +81,7 @@ func TestJournalCrashHelper(t *testing.T) {
 }
 
 func TestDurableReceiptAfterProcessExit(t *testing.T) {
-	for _, mode := range []string{"claim", "accepted"} {
+	for _, mode := range []string{"claim", "accepted", "full-output"} {
 		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()
 			expiry := time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano)
@@ -92,6 +100,8 @@ func TestDurableReceiptAfterProcessExit(t *testing.T) {
 			want := protocol.StatusAccepted
 			if mode == "claim" {
 				want = protocol.StatusUncertain
+			} else if mode == "full-output" {
+				want = protocol.StatusCompleted
 			}
 			result := d.ExecuteCommand(context.Background(), persistenceCommand(expiry))
 			if result.Status != want || adapter.sends.Load() != 0 {
@@ -106,6 +116,9 @@ func TestDurableReceiptAfterProcessExit(t *testing.T) {
 			}
 			if mode == "accepted" && replay[0].TurnID != "durable-turn" {
 				t.Fatal("turn ID lost")
+			}
+			if mode == "full-output" && (result.Output != fullOutputFixture() || replay[0].Output != fullOutputFixture()) {
+				t.Fatal("full original Markdown was lost after process exit")
 			}
 			if err := d.ackResult(protocol.ResultAckMessage{Type: "result_ack", CommandID: result.CommandID, Status: result.Status, TurnID: result.TurnID}); err != nil {
 				t.Fatal(err)
@@ -124,6 +137,10 @@ func TestDurableReceiptAfterProcessExit(t *testing.T) {
 			}
 		})
 	}
+}
+
+func fullOutputFixture() string {
+	return "\n# 完整结果\n\n```go\n" + strings.Repeat("\t// 原始 Markdown <>& 🎉  \n", 10000) + "```\n\n"
 }
 
 type faultyJournal struct {
@@ -180,8 +197,8 @@ func TestJournalWriteFailuresNeverRepeatDispatch(t *testing.T) {
 }
 
 func TestReceiptBoundsAndPrivateFile(t *testing.T) {
-	text := boundedReceiptText(strings.Repeat("界", 20000), maxPersistedOutputBytes)
-	if len(text) > maxPersistedOutputBytes || !utf8.ValidString(text) || !strings.HasSuffix(text, "...(truncated)") {
+	text := boundedReceiptText(strings.Repeat("界", 20000), maxPersistedErrorBytes)
+	if len(text) > maxPersistedErrorBytes || !utf8.ValidString(text) || !strings.HasSuffix(text, "...(truncated)") {
 		t.Fatal("invalid UTF8 bound")
 	}
 	dir := t.TempDir()
@@ -196,5 +213,66 @@ func TestReceiptBoundsAndPrivateFile(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0600 {
 		t.Fatalf("unsafe journal mode: %v", info.Mode())
+	}
+}
+
+func TestCompleteResultReceiptRetainsOutputAndRejectsOverflow(t *testing.T) {
+	for _, length := range []int{256 * 1024, protocol.MaxTurnOutputBytes, protocol.MaxTurnOutputBytes + 1} {
+		original := strings.Repeat("<", length)
+		result := completeResultReceipt(protocol.DaemonResultMessage{
+			Type: "result", CommandID: "full-receipt", Status: protocol.StatusCompleted,
+			Output: original, OutputPresent: true,
+		})
+		if length > protocol.MaxTurnOutputBytes {
+			if result.Status != protocol.StatusFailed || result.Output != "" || result.OutputPresent || result.Error != protocol.ErrTurnOutputLimit.Error() {
+				t.Fatalf("over-limit receipt must fail explicitly: status=%s output=%d error=%s", result.Status, len(result.Output), result.Error)
+			}
+		} else if result.Status != protocol.StatusCompleted || result.Output != original || !result.OutputPresent {
+			t.Fatalf("receipt modified: input=%d output=%d status=%s", length, len(result.Output), result.Status)
+		}
+	}
+}
+
+type fullResultAdapter struct {
+	receiptAdapter
+	output string
+}
+
+func (a *fullResultAdapter) ReadSession(context.Context, string) (string, error) {
+	return a.output, nil
+}
+
+func TestExecuteCommandDurablyStoresFullOutputOrExplicitFailure(t *testing.T) {
+	for _, tooLarge := range []bool{false, true} {
+		name, output := "complete-markdown", fullOutputFixture()
+		if tooLarge {
+			name, output = "explicit-overflow", strings.Repeat("x", protocol.MaxTurnOutputBytes+1)
+		}
+		t.Run(name, func(t *testing.T) {
+			d, err := OpenDaemon(persistenceConfig(t.TempDir()), &fullResultAdapter{output: output})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer closeDaemon(t, d)
+			cmd := persistenceCommand(time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano))
+			cmd.Action, cmd.Prompt = protocol.ActionRead, ""
+			result := d.ExecuteCommand(context.Background(), cmd)
+			if tooLarge {
+				if result.Status != protocol.StatusFailed || result.HasOutput() || result.Error != protocol.ErrTurnOutputLimit.Error() {
+					t.Fatalf("overflow must explicitly fail: status=%s output=%d error=%s", result.Status, len(result.Output), result.Error)
+				}
+			} else if result.Status != protocol.StatusCompleted || result.Output != output {
+				t.Fatalf("full result changed: status=%s len=%d want=%d", result.Status, len(result.Output), len(output))
+			}
+			if err := d.flushResults(func(msg any) error {
+				replay := msg.(protocol.DaemonResultMessage)
+				if !protocol.SameResult(result, replay) {
+					t.Error("durable replay changed original result")
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

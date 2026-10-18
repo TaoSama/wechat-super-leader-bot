@@ -107,7 +107,7 @@ export class ExecutionScheduler {
       return null;
     }
     const view = await readExecutionView(this.store, execution, this.now());
-    if (view.steps.some(step => step.status === "failed")) {
+    if (view.steps.some(step => ["failed", "cancelled", "expired"].includes(step.status))) {
       await this.transition(execution, "failed");
       return null;
     }
@@ -116,6 +116,7 @@ export class ExecutionScheduler {
       await this.transition(execution, "completed");
       return null;
     }
+    await this.store.enqueueProgressNotification({type:"plan",id:execution.id},this.now());
     return { execution, view };
   }
 
@@ -154,7 +155,7 @@ export class ExecutionScheduler {
       if (this.stopped) return;
       try {
         await this.commands.submit({ nodeId: action.nodeId, sessionId: action.sessionId, prompt: input?.prompt ?? action.prompt,
-          ...(action.skills ? { skills: action.skills } : {}), action: "send", requestId: executionRequestId(execution, index) },
+          ...(action.skills ? { skills: action.skills } : {}), deliveryMode:action.deliveryMode,expectedTurnId:action.expectedTurnId,action: "send", requestId: executionRequestId(execution, index) },
         0, async () => {
           const snapshot = await this.store.getExecution(id);
           const view = snapshot && await readExecutionView(this.store, snapshot, this.now());
@@ -168,11 +169,11 @@ export class ExecutionScheduler {
               current.attempts[index]!.expiresAt <= this.now() || !view ||
               !validInput || !snapshot || JSON.stringify(snapshot.attempts[index]) !== JSON.stringify(attempt) ||
               !sameExecutionAuthorization(claimed, snapshot) || !sameExecutionAuthorization(claimed, current) ||
-              view.steps.some(step => step.status === "failed" || step.status === "uncertain") ||
+              view.steps.some(step => ["failed", "cancelled", "expired", "uncertain"].includes(step.status)) ||
               !action.dependsOn.every(step => view.steps[step - 1].status === "completed")) {
             throw new CommandError(409, "Execution dispatch authority is unavailable");
           }
-        }, action.sendRoute);
+        }, action.sendRoute,{type:"plan",id:execution.id,chatId:execution.chatId});
       } catch (error) {
         this.report(error);
         if (this.stopped) return;

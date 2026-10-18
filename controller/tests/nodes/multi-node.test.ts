@@ -112,7 +112,7 @@ it("revokes cached authority on malformed inventory instead of keeping old ready
     expect(f.air.closeCode).toBe(4000);
     expect(f.hub.isNodeConnected("macair")).toBe(false);
     expect(f.hub.getNodeSession("macair", "shared-session")).toBeNull();
-    await expect(f.service.submit({ nodeId: "macair", sessionId: "shared-session", action: "send", prompt: "fixture", requestId: "invalid-inventory" }, 0)).rejects.toThrow("offline");
+    expect((await f.service.submit({ nodeId: "macair", sessionId: "shared-session", action: "send", prompt: "fixture", requestId: "invalid-inventory" }, 0)).status).toBe("queued");
     expect(f.air.sent.filter(frame => frame.type === "command")).toHaveLength(0);
   } finally { await f.hub.closeAll(); }
 });

@@ -56,13 +56,18 @@ describe("read-only desktop display selection", () => {
   });
 
   it.each([
-    { connected: false, stale: false, loaded: true, reason: "机器离线" },
     { connected: true, stale: true, loaded: true, reason: "状态待更新" },
     { connected: true, stale: false, loaded: false, reason: "暂时只读" },
   ])("keeps transport and control send restrictions despite desktop idle %#", ({ connected, stale, loaded, reason }) => {
     const raw: ScopedSession = { ...session("idle", desktop({ status: "idle" })), loaded, capabilities: ["read", "send"] };
     expect(selectExecutionObservation(raw, NOW)).toEqual({ executionStatus: "idle", statusSource: "control-socket" });
     expect(sendBlockReason(raw, connected, stale)).toContain(reason);
+  });
+
+  it("allows a known send-capable offline target to queue without deriving authority from desktop idle", () => {
+    const raw: ScopedSession = { ...session("idle", desktop({ status: "idle" })), loaded: true, capabilities: ["read", "send"] };
+    expect(sendBlockReason(raw, false, false, NOW)).toBeNull();
+    expect(sendBlockReason({ ...raw, capabilities: ["read"] }, false, false, NOW)).not.toBeNull();
   });
 
   it.each([

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { hasSkillRefs } from "../../skills/catalog.js";
 import { selectSendRoute } from "../../sessions/send-eligibility.js";
+import { queueSendRoute } from "../../commands/queue.js";
 import type { NodeHub } from "../../nodes/hub.js";
 import { ConflictError, type IStore } from "../../store/interface.js";
 import { PLAN_TTL_MS, type GoalRequest, type LeaderData, type LeaderReply } from "../contracts.js";
@@ -24,20 +25,19 @@ export class GoalConversation {
     return goal?.status === "active" || goal?.status === "blocked";
   }
 
-  private validateTargets(proposal: Pick<GoalProposal, "targets">): ErrorResult | undefined {
+  private async validateTargets(proposal: Pick<GoalProposal, "targets">): Promise<ErrorResult | undefined> {
     const identities = new Set<string>();
     for (const target of proposal.targets) {
       const key = JSON.stringify([target.nodeId, target.sessionId]);
       if (identities.has(key)) return { error: "持续目标不能重复授权同一会话" };
       identities.add(key);
-      const session = this.hub.getNodeSession(target.nodeId, target.sessionId);
-      if (!session || !this.hub.isNodeConnected(target.nodeId) || target.sessionId.startsWith("terminal:") ||
+      const session = this.hub.getNodeSession(target.nodeId, target.sessionId) ?? await this.store.getKnownSession(target.nodeId,target.sessionId);
+      if (!session || target.sessionId.startsWith("terminal:") ||
           session.provider.startsWith("terminal")) {
         return { error: "持续目标仅支持已知、在线且有精确完成能力的原生会话；不支持终端输入" };
       }
-      if (!hasSkillRefs(this.hub.getNodeSkills(target.nodeId), target.skills)) return { error: "目标技能版本变化或不可用；请重新查询并预览" };
-      const eligibility = selectSendRoute(session, this.now(), target.sendRoute);
-      if (!eligibility.ready || eligibility.route !== target.sendRoute) return { error: "目标发送资格或固定路线已变化；请重新查询并预览" };
+      if (this.hub.isNodeConnected(target.nodeId) && !hasSkillRefs(this.hub.getNodeSkills(target.nodeId), target.skills)) return { error: "目标技能版本变化或不可用；请重新查询并预览" };
+      if (queueSendRoute(session,target.sendRoute) !== target.sendRoute) return { error: "目标发送资格或固定路线已变化；请重新查询并预览" };
     }
   }
 
@@ -47,19 +47,19 @@ export class GoalConversation {
     }
     const targets: GoalProposal["targets"] = [];
     for (const target of request.targets) {
-      const session = this.hub.getNodeSession(target.nodeId, target.sessionId);
-      const eligibility = session ? selectSendRoute(session, this.now()) : undefined;
-      if (!eligibility?.ready || eligibility.route === "terminal-pane") return { error: "目标会话不可用、忙碌、只读或仅支持终端输入；请先澄清范围" };
-      targets.push({ ...target, sendRoute: eligibility.route });
+      const session = this.hub.getNodeSession(target.nodeId, target.sessionId) ?? await this.store.getKnownSession(target.nodeId,target.sessionId);
+      const route = session ? queueSendRoute(session) : undefined;
+      if (!route || route === "terminal-pane") return { error: "目标会话未知、只读或仅支持终端输入；请先澄清范围" };
+      targets.push({ ...target, sendRoute: route });
     }
     const proposal: GoalProposal = { ...request, targets, id: randomUUID(), expiresAt: this.now() + PLAN_TTL_MS };
-    const error = this.validateTargets(proposal);
+    const error = await this.validateTargets(proposal);
     return error ?? proposal;
   }
 
   async confirm(chatId: string, revision: number, proposal: GoalProposal, data: LeaderData): Promise<LeaderReply> {
     if (proposal.expiresAt <= this.now()) return { text: "目标预览已过期，未派发；请重新描述范围与预算。" };
-    const error = this.validateTargets(proposal);
+    const error = await this.validateTargets(proposal);
     if (error) return { text: `${error.error}；未派发。` };
     try {
       await this.store.confirmGoal(createGoal(chatId, proposal, this.now()), {

@@ -2,9 +2,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import * as crypto from "node:crypto";
-import { WeChatAccount, GatewaySyncState } from "../types.js";
+import { WeChatAccount, GatewaySyncState, ReplyDeliveryState } from "../types.js";
 
 export const MAX_PROCESSED_MESSAGE_KEYS = 1000;
+export const MAX_REPLY_DELIVERIES = 1000;
 
 export function resolvePath(inputPath: string): string {
   if (inputPath.startsWith("~/") || inputPath === "~") {
@@ -52,6 +53,7 @@ export class StateManager {
   public contextTokens: Record<string, string> = {};
   public processedMessageKeys: string[] = [];
   public sentReplyProgress: Record<string, number> = {};
+  public replyDeliveries: Record<string, ReplyDeliveryState> = {};
   public baselineEstablished: boolean = false;
   public baselineInProgress: boolean = false;
   public baselineEstablishedAt: string | undefined = undefined;
@@ -115,6 +117,7 @@ export class StateManager {
         this.processedMessageKeys = [];
         this.processedMessageKeySet = new Set();
         this.sentReplyProgress = {};
+        this.replyDeliveries = {};
         this.baselineEstablished = false;
         this.baselineInProgress = false;
         this.baselineEstablishedAt = undefined;
@@ -144,6 +147,28 @@ export class StateManager {
         }
       }
       this.baselineEstablished = state.baseline_established === true;
+      this.replyDeliveries = {};
+      if (state.reply_deliveries !== undefined) {
+        if (!state.reply_deliveries || typeof state.reply_deliveries !== "object" || Array.isArray(state.reply_deliveries)) {
+          throw new Error("Invalid reply delivery state");
+        }
+        for (const [key, item] of Object.entries(state.reply_deliveries)) {
+          if (!item || typeof item !== "object" || !/^[a-f0-9]{64}$/.test(item.digest) ||
+              !Number.isSafeInteger(item.totalChunks) || item.totalChunks <= 0 ||
+              !Number.isSafeInteger(item.acknowledgedChunks) || item.acknowledgedChunks < 0 ||
+              item.acknowledgedChunks > item.totalChunks || typeof item.inFlight !== "boolean" ||
+              item.inFlight && item.acknowledgedChunks === item.totalChunks ||
+              item.failureReason !== undefined &&
+                (!["AttachmentExpired", "AttachmentUnavailable"].includes(item.failureReason) ||
+                 item.inFlight || item.acknowledgedChunks === item.totalChunks)) {
+            throw new Error("Invalid reply delivery state");
+          }
+          this.replyDeliveries[key] = { ...item };
+        }
+        if (Object.keys(this.replyDeliveries).length > MAX_REPLY_DELIVERIES) {
+          throw new Error("Reply delivery state exceeds capacity");
+        }
+      }
       this.baselineInProgress = state.baseline_in_progress === true && !this.baselineEstablished;
       this.baselineEstablishedAt =
         typeof state.baseline_established_at === "string" && state.baseline_established_at
@@ -163,6 +188,7 @@ export class StateManager {
       context_tokens: this.contextTokens,
       processed_message_keys: this.processedMessageKeys.slice(-MAX_PROCESSED_MESSAGE_KEYS),
       sent_reply_progress: this.sentReplyProgress,
+      reply_deliveries: this.replyDeliveries,
       baseline_established: this.baselineEstablished,
     };
     if (this.baselineInProgress) {
@@ -185,7 +211,7 @@ export class StateManager {
     if (this.baselineEstablished) {
       throw new Error("Baseline is already established; refusing duplicate baseline initialization");
     }
-    if (Object.keys(this.sentReplyProgress).length > 0) {
+    if (Object.keys(this.sentReplyProgress).length > 0 || Object.keys(this.replyDeliveries).length > 0) {
       throw new Error("Cannot establish baseline: active in-progress reply chunks exist in state");
     }
     if (!this.baselineInProgress && (this.syncBuf !== "" || this.processedMessageKeys.length > 0)) {
@@ -235,10 +261,11 @@ export class StateManager {
     return this.processedMessageKeySet.has(deliveryKey);
   }
 
-  public recordProcessedMessageKey(deliveryKey: string): void {
+  public recordProcessedMessageKey(deliveryKey: string, options?: { preserveReplyEvidence?: boolean }): void {
     if (!deliveryKey) return;
     const previous = [...this.processedMessageKeys];
     const previousReplyProgress = this.sentReplyProgress[deliveryKey];
+    const previousDelivery = this.replyDeliveries[deliveryKey];
     if (!this.processedMessageKeySet.has(deliveryKey)) {
       this.processedMessageKeys.push(deliveryKey);
       if (this.processedMessageKeys.length > MAX_PROCESSED_MESSAGE_KEYS) {
@@ -246,7 +273,10 @@ export class StateManager {
       }
       this.processedMessageKeySet = new Set(this.processedMessageKeys);
     }
-    delete this.sentReplyProgress[deliveryKey];
+    if (!options?.preserveReplyEvidence) {
+      delete this.sentReplyProgress[deliveryKey];
+      delete this.replyDeliveries[deliveryKey];
+    }
     try {
       this.saveState();
     } catch (err) {
@@ -255,6 +285,7 @@ export class StateManager {
       if (previousReplyProgress !== undefined) {
         this.sentReplyProgress[deliveryKey] = previousReplyProgress;
       }
+      if (previousDelivery) this.replyDeliveries[deliveryKey] = previousDelivery;
       throw err;
     }
   }
@@ -262,6 +293,93 @@ export class StateManager {
   public getReplySentChunks(deliveryKey: string): number {
     if (!deliveryKey) return 0;
     return this.sentReplyProgress[deliveryKey] || 0;
+  }
+
+  public hasUncertainReply(deliveryKey: string): boolean {
+    return this.replyDeliveries[deliveryKey]?.inFlight === true;
+  }
+
+  public hasPermanentReplyFailure(deliveryKey: string): boolean {
+    return this.replyDeliveries[deliveryKey]?.failureReason !== undefined;
+  }
+
+  public recordReplyFailure(deliveryKey: string, reason: NonNullable<ReplyDeliveryState["failureReason"]>): void {
+    const previous = this.replyDeliveries[deliveryKey];
+    if (!previous || previous.inFlight || previous.acknowledgedChunks === previous.totalChunks ||
+        previous.failureReason !== undefined && previous.failureReason !== reason) {
+      throw new Error("Invalid WeChat permanent reply failure transition");
+    }
+    if (previous.failureReason === reason) return;
+    this.replyDeliveries[deliveryKey] = { ...previous, failureReason: reason };
+    try { this.saveState(); }
+    catch (error) { this.replyDeliveries[deliveryKey] = previous; throw error; }
+  }
+
+  public prepareReplyDelivery(deliveryKey: string, digest: string, totalChunks: number): ReplyDeliveryState {
+    const previous = this.replyDeliveries[deliveryKey];
+    if (previous) {
+      if (previous.digest !== digest || previous.totalChunks !== totalChunks) {
+        throw new Error("WeChat reply content or chunk plan changed; refusing replay");
+      }
+      if (previous.inFlight) throw new Error("WeChat reply delivery uncertain; refusing replay");
+      if (previous.failureReason) throw new Error("WeChat reply permanently failed; refusing replay");
+      return { ...previous };
+    }
+    if (this.getReplySentChunks(deliveryKey) > 0) {
+      throw new Error("WeChat legacy reply progress requires review before replay");
+    }
+    const next = { ...this.replyDeliveries };
+    let removedKey: string | undefined;
+    if (Object.keys(next).length >= MAX_REPLY_DELIVERIES) {
+      const completed = Object.keys(next).find(key => next[key].acknowledgedChunks === next[key].totalChunks && !next[key].inFlight);
+      if (!completed) throw new Error("WeChat reply delivery state capacity exhausted");
+      delete next[completed];
+      removedKey = completed;
+    }
+    const item = { digest, totalChunks, acknowledgedChunks: 0, inFlight: false };
+    next[deliveryKey] = item;
+    const before = this.replyDeliveries;
+    const removedProgress = removedKey === undefined ? undefined : this.sentReplyProgress[removedKey];
+    if (removedKey !== undefined) delete this.sentReplyProgress[removedKey];
+    this.replyDeliveries = next;
+    try { this.saveState(); }
+    catch (error) {
+      this.replyDeliveries = before;
+      if (removedKey !== undefined && removedProgress !== undefined) this.sentReplyProgress[removedKey] = removedProgress;
+      throw error;
+    }
+    return { ...item };
+  }
+
+  public beginReplyChunk(deliveryKey: string, chunkIndex: number): void {
+    this.updateReplyDelivery(deliveryKey, chunkIndex, true, false);
+  }
+
+  public confirmReplyChunk(deliveryKey: string, chunkIndex: number): void {
+    this.updateReplyDelivery(deliveryKey, chunkIndex, false, true);
+  }
+
+  public rejectReplyChunk(deliveryKey: string, chunkIndex: number): void {
+    this.updateReplyDelivery(deliveryKey, chunkIndex, false, false);
+  }
+
+  private updateReplyDelivery(deliveryKey: string, chunkIndex: number, inFlight: boolean, acknowledged: boolean): void {
+    const previous = this.replyDeliveries[deliveryKey];
+    if (!previous || previous.failureReason || previous.acknowledgedChunks !== chunkIndex || chunkIndex >= previous.totalChunks ||
+        previous.inFlight === inFlight) {
+      throw new Error("Invalid WeChat reply chunk transition");
+    }
+    const previousProgress = this.sentReplyProgress[deliveryKey];
+    const count = chunkIndex + (acknowledged ? 1 : 0);
+    this.replyDeliveries[deliveryKey] = { ...previous, acknowledgedChunks: count, inFlight };
+    if (count > 0) this.sentReplyProgress[deliveryKey] = count;
+    try { this.saveState(); }
+    catch (error) {
+      this.replyDeliveries[deliveryKey] = previous;
+      if (previousProgress === undefined) delete this.sentReplyProgress[deliveryKey];
+      else this.sentReplyProgress[deliveryKey] = previousProgress;
+      throw error;
+    }
   }
 
   public recordReplyChunkProgress(deliveryKey: string, chunksSent: number): void {

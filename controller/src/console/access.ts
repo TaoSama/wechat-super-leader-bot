@@ -2,13 +2,14 @@ import { Request } from "express";
 
 const HISTORY_PATH = /^\/sessions\/[^/]+\/[^/]+\/history\/?$/i;
 const MESSAGE_PATH = /^\/sessions\/[^/]+\/[^/]+\/messages\/?$/i;
+const MESSAGE_RECOVERY_PATH = /^\/sessions\/[^/]+\/[^/]+\/messages\/[^/]+\/?$/i;
 export const CONSOLE_MESSAGE_INTENT = "session-message";
 
 /** Browser credentials authorize only named workspace operations, never the admin API. */
 export function isConsoleRead(req: Request): boolean {
   return req.method === "GET" && (
     /^\/(?:status|skills)\/?$/i.test(req.path) || req.path === "/events" ||
-    /^\/commands\/[^/]+\/?$/i.test(req.path) || HISTORY_PATH.test(req.path)
+    /^\/commands\/[^/]+\/?$/i.test(req.path) || HISTORY_PATH.test(req.path) || MESSAGE_RECOVERY_PATH.test(req.path)
   );
 }
 

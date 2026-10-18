@@ -24,6 +24,12 @@ type ResumeSender interface {
 	ResumeSend(context.Context, string, string) (string, error)
 }
 
+// SteerSender appends input to an exact active turn and never starts a new one.
+// SteerPrompt returns the accepted native turn ID.
+type SteerSender interface {
+	SteerPrompt(context.Context, string, string, string) (string, error)
+}
+
 type HistoryReader interface {
 	ReadHistory(context.Context, string, string, int) (protocol.SessionHistory, error)
 }

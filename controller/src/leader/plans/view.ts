@@ -2,7 +2,7 @@ import type { IStore } from "../../store/interface.js";
 import { TurnIdSchema } from "../../types.js";
 import { assertNativeExecutionPlan, executionRequestId, matchesExecutionCommand, type ExecutionRecord } from "./execution.js";
 import { summarizeExecutionInput, type ExecutionResultSourceView } from "./input.js";
-import { verifyExecutionInput } from "./input-source.js";
+import { verifyExecutionInput, verifyExecutionInputMetadata } from "./input-source.js";
 
 export type { ExecutionResultSourceView } from "./input.js";
 
@@ -19,7 +19,8 @@ export interface ExecutionView {
   }>;
 }
 
-export async function readExecutionView(store: IStore, execution: ExecutionRecord, now: number): Promise<ExecutionView> {
+export async function readExecutionView(store: Pick<IStore, "findCommandByRequestId">, execution: ExecutionRecord, now: number,
+  metadataOnly = false): Promise<ExecutionView> {
   assertNativeExecutionPlan(execution.plan);
   const steps: ExecutionView["steps"] = [];
   for (const [index, action] of execution.plan.actions.entries()) {
@@ -28,7 +29,7 @@ export async function readExecutionView(store: IStore, execution: ExecutionRecor
       ...(execution.attempts[index]?.input ? { resultSources: summarizeExecutionInput(execution.attempts[index]!.input!) } : {}) };
     const attempt = execution.attempts[index];
     const command = await store.findCommandByRequestId(executionRequestId(execution, index));
-    if (attempt && !await verifyExecutionInput(store, execution, index)) {
+    if (attempt && !await (metadataOnly ? verifyExecutionInputMetadata : verifyExecutionInput)(store, execution, index)) {
       steps.push({ ...step, status: "uncertain", error: "Execution input snapshot is inconsistent" });
     } else if (command && (!attempt || !matchesExecutionCommand(execution, index, command))) {
       steps.push({ ...step, status: "uncertain", error: "Execution command identity is inconsistent" });

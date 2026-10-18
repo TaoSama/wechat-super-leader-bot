@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -14,6 +14,7 @@ import { parseArgs } from 'node:util';
 import { verificationEnvironment } from '../../../scripts/verify.mjs';
 import { closeTestWebSocket, stopTestProcess, withTestCleanup } from '../../support/cleanup.mjs';
 import { createControllerFixture, createPostgresFixture, waitFor } from '../../support/control-plane-fixture.mjs';
+import { PROGRESS_TASK, RAW_REPLY_TASK, RESUMABLE_REPLY, verifyReliableDelivery } from './reliable-delivery.mjs';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const CHAT = 'synthetic-wechat-interaction-chat';
@@ -24,19 +25,16 @@ const PROPOSAL = '请先给合成会话制定一个统计记录的单步计划�
 const DIRECT_TASK = '请直接统计合成会话中的待办记录，并把最终结果告诉我';
 const DIRECT_PROMPT = '统计合成待办记录并报告最终数量';
 const DIRECT_FINAL = '**直接执行最终结果**：共 23 条待办，其中 5 条已完成。';
-const DIRECT_FINAL_PLAIN = '直接执行最终结果：共 23 条待办，其中 5 条已完成。';
 const QUERY = '开始执行了吗？';
 const MISROUTED_QUERY = '合成会话里的待办记录统计完了吗？';
 const NEGATIVE = '暂时不要执行';
 const PROGRESS = 'SYNTHETIC_PROGRESS_ONLY：正在统计，尚未完成';
 const FINAL = '**验收最终结果**：共 17 条记录，其中 3 条需要复核。';
-const FINAL_PLAIN = '验收最终结果：共 17 条记录，其中 3 条需要复核。';
 const HTTP_MS = 5_000;
 const PROCESS_MS = 30_000;
 const HEARTBEAT_MS = 500;
 const TICK_OBSERVATION_MS = 2_200;
 const MESSAGE_TYPE_TEXT = 1;
-const NOTIFICATION_PREFIX = 'super-leader:notification:';
 const CONFIRMATION_INPUT = /^(?:请)?(?:确认|执行|开始|开始执行|确认执行|确认开始|按这个计划执行|就按这个执行|确认这个计划)[。！!]?$/u;
 const { values } = parseArgs({ options: { help: { type: 'boolean', short: 'h' }, run: { type: 'boolean' } } });
 
@@ -80,12 +78,16 @@ async function main() {
   const certPath = join(dir, 'localhost-cert.pem');
   const keyPath = join(dir, 'localhost-key.pem');
   const sent = [], incoming = [], inputs = [], deliveries = [], acknowledgements = [], modelCalls = [], errors = [], logs = [];
+  const wireEvents = [], notificationClientIds = new Set(), fault = { remaining: 0, mode: null };
+  const fingerprint = createHash('sha256').update(JSON.stringify(['synthetic-account', 'synthetic-wechat-token'])).digest('hex');
+  const clientId = (key, index) => 'super-leader:' + createHash('sha256')
+    .update(JSON.stringify([fingerprint, CHAT, key, index])).digest('hex').slice(0, 24);
   const authorizationCalls = [];
   let controller, model, wechat, socket, heartbeat, gatewayChild, cursor = 0;
   const healthy = () => { if (errors.length) throw errors[0]; };
   const evidence = (step, data) => console.log(JSON.stringify({ step, ...data }, (_key, value) =>
     typeof value === 'string' ? value.replace(/#login=[A-Za-z0-9_.~%-]+/gu, '#login=[synthetic-redacted]') : value));
-  const notificationMessages = () => sent.filter(message => message.client_id.startsWith(NOTIFICATION_PREFIX));
+  const notificationMessages = () => sent.filter(message => notificationClientIds.has(message.client_id));
 
   await withTestCleanup(async () => {
     execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-sha256',
@@ -101,27 +103,33 @@ async function main() {
         if (body.tools?.length === 1 && body.tools[0].name === 'classify_user_authorization') {
           assert.equal(body.input.length, 2, 'Authorization included planner history or tool results');
           assert.deepEqual(body.input.map(item => item.role), ['system', 'user']);
-          assert([DIRECT_TASK, MISROUTED_QUERY].includes(last.content), 'Unexpected authorization input: ' + JSON.stringify(last));
+          assert([DIRECT_TASK, PROGRESS_TASK, MISROUTED_QUERY].includes(last.content), 'Unexpected authorization input: ' + JSON.stringify(last));
           for (const history of [PROPOSAL, DIRECT_PROMPT, PROGRESS, FINAL]) {
             assert(!JSON.stringify(body.input[0]).includes(history), 'Authorization system input included planner history');
           }
           authorizationCalls.push(last);
           respond(response, { status: 'completed', output: [{ type: 'function_call',
             call_id: 'synthetic-authorization-' + authorizationCalls.length, name: 'classify_user_authorization',
-            arguments: JSON.stringify({ intent: last.content === DIRECT_TASK ? 'task' : 'query' }) }] });
+            arguments: JSON.stringify({ intent: last.content !== MISROUTED_QUERY ? 'task' : 'query' }) }] });
           return;
         }
         modelCalls.push(last);
+        wireEvents.push({ kind: 'model', text: last.content });
         let output;
         if (last.content === PROPOSAL) {
           output = [{ type: 'function_call', call_id: 'synthetic-proposal-' + modelCalls.length, name: 'propose_plan',
             arguments: JSON.stringify({ actions: [{ nodeId: NODE, sessionId: SESSION,
               prompt: '统计合成记录并报告最终数量', dependsOn: [] }] }) }];
-        } else if ([DIRECT_TASK, MISROUTED_QUERY].includes(last.content)) {
+        } else if ([DIRECT_TASK, PROGRESS_TASK, MISROUTED_QUERY].includes(last.content)) {
           assert(body.tools.some(tool => tool.name === 'execute_plan'), 'Model was not offered the direct execution tool');
           output = [{ type: 'function_call', call_id: 'synthetic-execution-' + modelCalls.length, name: 'execute_plan',
-            arguments: JSON.stringify({ actions: [{ nodeId: NODE, sessionId: SESSION,
-              prompt: DIRECT_PROMPT, dependsOn: [] }] }) }];
+            arguments: JSON.stringify({ actions: Array.from({ length: last.content === PROGRESS_TASK ? 4 : 1 },
+              (_, index) => ({ nodeId: NODE, sessionId: SESSION,
+                prompt: last.content === PROGRESS_TASK ? `合成进度任务 ${index + 1}` : DIRECT_PROMPT,
+                dependsOn: index ? [index] : [] })) }) }];
+        } else if (last.content === RAW_REPLY_TASK) {
+          output = [{ type: 'message', role: 'assistant', status: 'completed',
+            content: [{ type: 'output_text', text: RESUMABLE_REPLY }] }];
         } else {
           assert([QUERY, NEGATIVE].includes(last.content), 'Unexpected model input: ' + JSON.stringify(last));
           output = [{ type: 'message', role: 'assistant', status: 'completed',
@@ -146,11 +154,17 @@ async function main() {
     }
     await controller.start();
 
-    socket = new WebSocket(controller.base.replace('http:', 'ws:') + '/v1/daemon',
+    let sessionStatus = 'idle';
+    const sendFrame = message => socket.send(JSON.stringify(message), error => { if (error) errors.push(error); });
+    const frame = type => ({ type, ...(type === 'hello' ? { version: 1, nodeId: NODE } : {}), sessions: [{
+      id: SESSION, title: '合成统计会话', provider: 'codex-app', cwd: '/synthetic', status: sessionStatus, loaded: true,
+      capabilities: ['read', 'send'], observedAt: new Date().toISOString(),
+    }], skills: [] });
+    const connectDaemon = async () => {
+      socket = new WebSocket(controller.base.replace('http:', 'ws:') + '/v1/daemon',
       { headers: { authorization: 'Bearer ' + nodeToken } });
     socket.on('error', error => errors.push(error));
     await once(socket, 'open');
-    const sendFrame = message => socket.send(JSON.stringify(message), error => { if (error) errors.push(error); });
     socket.on('message', raw => {
       try {
         const message = JSON.parse(raw.toString());
@@ -164,16 +178,23 @@ async function main() {
         } else if (message.type === 'result_ack') acknowledgements.push(message);
       } catch (error) { errors.push(error); }
     });
-    const frame = type => ({ type, ...(type === 'hello' ? { version: 1, nodeId: NODE } : {}), sessions: [{
-      id: SESSION, title: '合成统计会话', provider: 'codex-app', cwd: '/synthetic', status: 'idle', loaded: true,
-      capabilities: ['read', 'send'], observedAt: new Date().toISOString(),
-    }], skills: [] });
     sendFrame(frame('hello'));
     heartbeat = setInterval(() => sendFrame(frame('heartbeat')), HEARTBEAT_MS);
     await waitFor(async () => {
       healthy();
       return (await controller.request('/v1/status')).body.sessions.some(session => session.nodeId === NODE && session.id === SESSION);
     }, 'Synthetic Daemon session visible through Controller HTTP');
+    };
+    const disconnectDaemon = async () => { clearInterval(heartbeat); await closeTestWebSocket(socket); socket = undefined; };
+    const restartController = async () => { await disconnectDaemon(); await controller.stop(); await controller.start(); };
+    const setSessionStatus = async status => {
+      sessionStatus = status;
+      if (!socket) { await connectDaemon(); return; }
+      sendFrame(frame('heartbeat'));
+      await waitFor(async () => (await controller.request('/v1/status')).body.sessions.some(session =>
+        session.id === SESSION && session.status === status), 'Synthetic session status ' + status);
+    };
+    await connectDaemon();
 
     wechat = createHttpsServer({ key: await readFile(keyPath), cert: await readFile(certPath) }, async (request, response) => {
       try {
@@ -183,6 +204,16 @@ async function main() {
         if (request.url === '/ilink/bot/getupdates') {
           cursor++;
           respond(response, { ret: 0, errcode: 0, get_updates_buf: 'synthetic-cursor-' + cursor, msgs: incoming.splice(0) });
+        } else if (request.url === '/ilink/bot/getconfig') {
+          assert.equal(body.ilink_user_id, CHAT);
+          assert.equal(body.context_token, CONTEXT);
+          respond(response, { ret: 0, typing_ticket: 'synthetic-typing-ticket' });
+        } else if (request.url === '/ilink/bot/sendtyping') {
+          assert.equal(body.ilink_user_id, CHAT);
+          assert.equal(body.typing_ticket, 'synthetic-typing-ticket');
+          assert.equal(body.status, 1);
+          wireEvents.push({ kind: 'typing' });
+          respond(response, { ret: 0, errcode: 0 });
         } else {
           assert.equal(request.url, '/ilink/bot/sendmessage');
           assert.equal(body.msg.to_user_id, CHAT);
@@ -190,6 +221,13 @@ async function main() {
           assert.equal(body.msg.item_list.length, 1);
           assert.equal(body.msg.item_list[0].type, MESSAGE_TYPE_TEXT);
           sent.push(body.msg);
+          wireEvents.push({ kind: 'send', message: body.msg });
+          if (fault.remaining > 0 && --fault.remaining === 0) {
+            if (fault.mode === 'disconnect') { response.destroy(); return; }
+            assert.equal(fault.mode, 'reject');
+            respond(response, { ret: -1, errcode: -1 });
+            return;
+          }
           respond(response, { ret: 0, errcode: 0 });
         }
       } catch (error) { errors.push(error); respond(response, { error: 'Synthetic WeChat protocol failure' }, 500); }
@@ -198,7 +236,7 @@ async function main() {
     await writeFile(accountPath, JSON.stringify({ token: 'synthetic-wechat-token', accountId: 'synthetic-account',
       baseUrl: `https://127.0.0.1:${wechatPort}` }), { mode: 0o600 });
 
-    const runGateway = async mode => {
+    const runGateway = async (mode, { expectedExit = 0 } = {}) => {
       healthy();
       let output = '', stderr = '';
       gatewayChild = spawn(process.execPath, ['gateway/dist/index.js', mode, '--notifications', '--controller-url', controller.base,
@@ -211,23 +249,37 @@ async function main() {
       try { [exit] = await once(gatewayChild, 'exit'); }
       finally { clearTimeout(timer); }
       healthy();
-      assert.equal(exit, 0, 'Gateway CLI failed: ' + stderr + output);
+      assert.equal(exit, expectedExit, 'Unexpected Gateway CLI exit: ' + stderr + output);
       gatewayChild = undefined;
-      return JSON.parse(output.trim());
+      return expectedExit === 0 ? JSON.parse(output.trim()) : { exit, stderr };
     };
     const input = async (text, messageId = randomUUID()) => {
       const before = sent.length;
+      const eventsBefore = wireEvents.length;
       inputs.push({ text, messageId });
       incoming.push({ message_type: MESSAGE_TYPE_TEXT, from_user_id: CHAT, client_id: messageId,
         context_token: CONTEXT, item_list: [{ type: MESSAGE_TYPE_TEXT, text_item: { text } }] });
       const summary = await runGateway('--poll-once');
-      const replies = sent.slice(before).filter(message => !message.client_id.startsWith(NOTIFICATION_PREFIX));
+      const replies = sent.slice(before).filter(message => !notificationClientIds.has(message.client_id));
+      if (summary.processedCount > 0) {
+        const events = wireEvents.slice(eventsBefore);
+        const typing = events.findIndex(event => event.kind === 'typing');
+        const model = events.findIndex(event => event.kind === 'model');
+        assert(typing >= 0, 'New input did not send a typing indicator');
+        if (model >= 0) assert(typing < model, 'Input reached model before its typing indicator');
+      }
       evidence('wechat-input', { input: text, reply: replies.map(message => message.item_list[0].text_item.text).join('\n'), summary });
       return { messageId, summary, replies };
     };
     const pending = async () => {
       const response = await controller.request('/v1/notifications/pending', { chatIds: [CHAT] });
       assert.equal(response.status, 200);
+      for (const item of response.body.items) {
+        // IDs correlate exact delivery parts; no assumption about an outbound prefix identifies notifications.
+        for (let index = 0; index <= Math.ceil(item.text.length / 2_000); index++) {
+          notificationClientIds.add(clientId('notification:' + item.id, index));
+        }
+      }
       return response.body.items;
     };
     await runGateway('--establish-baseline');
@@ -284,8 +336,9 @@ async function main() {
     assert.equal(notificationMessages().length, 1, 'Completion did not result in exactly one outbound notification');
     const outbound = notificationMessages()[0];
     const actual = outbound.item_list[0].text_item.text;
-    assert(actual.includes(FINAL_PLAIN), 'Actual WeChat send omitted or corrupted the completed result: ' + actual);
-    assert(!actual.includes('**') && !actual.includes('###'), 'Actual WeChat send contains raw Markdown formatting');
+    assert.equal(actual, notification.text, 'Actual WeChat send changed persisted Markdown');
+    assert(actual.includes(FINAL), 'Actual WeChat send omitted or corrupted the completed result: ' + actual);
+    assert.equal(wireEvents[wireEvents.findIndex(event => event.message === outbound) - 1]?.kind, 'typing');
     assert(!actual.includes(PROGRESS), 'Actual WeChat notification contains progress instead of the result');
     evidence('exact-completion', { commandStatus: complete.body.status, daemonOutput: complete.body.output,
       notificationKind: notification.kind, actualWeChatText: actual, outboundCount: notificationMessages().length });
@@ -379,8 +432,8 @@ async function main() {
     assert.equal(directSummary.notifications.accepted, 1);
     assert.equal(notificationMessages().length, 2, 'Direct task did not send exactly one completion notification');
     const directActual = notificationMessages()[1].item_list[0].text_item.text;
-    assert(directActual.includes(DIRECT_FINAL_PLAIN), 'Direct WeChat send omitted its result: ' + directActual);
-    assert(!directActual.includes('**') && !directActual.includes('###'), 'Direct notification contains raw Markdown');
+    assert.equal(directActual, directNotification.text, 'Direct notification changed persisted Markdown');
+    assert(directActual.includes(DIRECT_FINAL), 'Direct WeChat send omitted its result: ' + directActual);
     assert(!directActual.includes(PROGRESS), 'Direct notification sent accepted progress instead of the result');
     assert.equal(directConfirmationMessages(), 0, 'Direct task received a user confirmation before completion');
     evidence('direct-execution-completion', { commandStatus: directComplete.body.status,
@@ -400,12 +453,18 @@ async function main() {
     assert.equal(directPersisted.body.notification.status, 'accepted');
     assert.equal(authorizationCalls.filter(call => call.content === DIRECT_TASK).length, 1,
       'Direct completion replay requested authorization again');
+    const directAuthorizationCount = authorizationCalls.filter(call => call.content === DIRECT_TASK).length;
+    const reliableDelivery = await verifyReliableDelivery({ controller, input, runGateway, pending, sent, incoming, deliveries,
+      sendFrame, statePath, fault, wireEvents, evidence, healthy, chatId: CHAT, contextToken: CONTEXT,
+      directTask: DIRECT_TASK, nodeId: NODE, sessionId: SESSION, clientId,
+      restartController, setSessionStatus, databaseUrl, query: QUERY });
     healthy();
     evidence('PASS', { realControllerProcess: true, realGatewayCli: true, disposablePostgres: true,
-      daemonCommands: deliveries.length, completionNotifications: notificationMessages().length,
+      daemonCommands: deliveries.length, notificationWireParts: notificationMessages().length,
+      reliableDelivery,
       confirmedPlan: { daemonCommands: 1, completionNotifications: 1 },
       directTask: { daemonCommands: 1, completionNotifications: 1, confirmationMessages: directConfirmationMessages(),
-        authorizationCalls: authorizationCalls.filter(call => call.content === DIRECT_TASK).length },
+        authorizationCalls: directAuthorizationCount },
       rejectedQuery: { authorizationCalls: authorizationCalls.filter(call => call.content === MISROUTED_QUERY).length },
       probes: ['query/negative zero dispatch', 'cancellation clears pending', 'short confirmation after query',
         'duplicate confirmation and input', 'wrong turn ignored', 'accepted progress is not completion',

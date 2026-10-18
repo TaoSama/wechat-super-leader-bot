@@ -6,7 +6,7 @@ export type GoalView = Pick<GoalRecord, "id" | "status" | "proposal" | "createdA
   actions: GoalDecisionInput["actions"];
 };
 type GoalCommandReader = Pick<IStore, "findCommandByRequestId">;
-export async function readGoalView(store: GoalCommandReader, goal: GoalRecord, now: number): Promise<GoalView> {
+export async function readGoalView(store: GoalCommandReader, goal: GoalRecord, now: number, metadataOnly = false): Promise<GoalView> {
   const { recordedOutput } = await import("../plans/input.js");
   const actions: GoalDecisionInput["actions"] = [];
   for (const [index, action] of goal.actions.entries()) {
@@ -18,9 +18,17 @@ export async function readGoalView(store: GoalCommandReader, goal: GoalRecord, n
     } else if (command) {
       let result;
       if (command.status === "completed") {
-        if (typeof command.output !== "string") { actions.push({ ...base, status: "uncertain" }); continue; }
-        try { result = { action: action.index, commandId: command.commandId, turnId: command.turnId!, ...recordedOutput(command.output) }; }
-        catch { actions.push({ ...base, status: "uncertain" }); continue; }
+        if (metadataOnly) {
+          // This is the immutable evidence already checked when the model decision was committed.
+          // Status verifies its exact receipt identity; dispatch/decision paths still hash full bodies.
+          const frozen = goal.decisions.at(-1)?.evidence.find(evidence => evidence.action === action.index &&
+            evidence.commandId === command.commandId && evidence.turnId === command.turnId);
+          if (frozen && "hasOutput" in command && command.hasOutput === true) result = structuredClone(frozen);
+        } else {
+          if (typeof command.output !== "string") { actions.push({ ...base, status: "uncertain" }); continue; }
+          try { result = { action: action.index, commandId: command.commandId, turnId: command.turnId!, ...recordedOutput(command.output) }; }
+          catch { actions.push({ ...base, status: "uncertain" }); continue; }
+        }
       }
       actions.push({ ...base, status: command.status, commandId: command.commandId,
         ...(command.turnId ? { turnId: command.turnId } : {}), ...(result ? { result } : {}) });

@@ -29,12 +29,12 @@ export function LeaderOverview({ data, nodes, selectedNodeId, onSelectNodeId, on
   const recent = [...data.commands].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .slice(0, RECENT_COMMAND_LIMIT).filter(command => !selectedNodeId || command.nodeId === selectedNodeId);
   const mode = data.leaderMode;
-  const modeLabel = mode === "model" ? "模型 Leader 模式" : mode === "rules" ? "规则模式（未启用模型 Leader）" : "Leader 模式未知";
+  const modeLabel = mode === "model" ? "智能协作" : mode === "rules" ? "基础协作" : "正在确认运行方式";
   const modeDescription = mode === "model"
-    ? "已配置模型工具循环；不代表模型当前可用或任务已完成。"
+    ? "已配置模型协作。具体任务的进展与结果，请查看下方记录。"
     : mode === "rules"
-      ? "当前不具备开放式模型规划；需要配置模型服务后启用。"
-      : "Controller 未报告运行模式，不能推断模型已启用。";
+      ? "目前按已有规则处理指令，尚未开启模型规划。"
+      : "暂未获取到运行方式，请稍后刷新。";
 
   function focusCommands(filter: CommandFilter) {
     setCommandFilter(filter);

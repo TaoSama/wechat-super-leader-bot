@@ -70,7 +70,7 @@ describe("ControllerServer & Hub Integration", () => {
   });
 
   it("does not expose database errors in status responses", async () => {
-    const failing = vi.spyOn(store, "listRecentCommands").mockRejectedValueOnce(new Error("private-database-connection-secret"));
+    const failing = vi.spyOn(store, "listRecentCommandSummaries").mockRejectedValueOnce(new Error("private-database-connection-secret"));
     try {
       const response = await fetch(`http://127.0.0.1:${port}/v1/status`, {
         headers: { Authorization: `Bearer ${controllerToken}` },

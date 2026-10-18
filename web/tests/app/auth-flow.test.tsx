@@ -222,7 +222,7 @@ describe("Web Console One-Time Link Authentication Flow", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("auth-invalid-link-banner")).toHaveTextContent("当前登录链接无效或已过期");
-      expect(screen.getByText("需要微信一次性登录链接")).toBeInTheDocument();
+      expect(screen.getByText("把工作带在身边")).toBeInTheDocument();
       expect(screen.getByText("给我控制台链接")).toBeInTheDocument();
     });
 
@@ -394,7 +394,7 @@ describe("Web Console One-Time Link Authentication Flow", () => {
 
     // Starts in unauthenticated guidance state
     await waitFor(() => {
-      expect(screen.getByText("需要微信一次性登录链接")).toBeInTheDocument();
+      expect(screen.getByText("把工作带在身边")).toBeInTheDocument();
     });
 
     // User receives new one-time link in the same open tab, triggering hashchange

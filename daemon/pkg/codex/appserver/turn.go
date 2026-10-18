@@ -10,6 +10,8 @@ import (
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 )
 
+const maxTurnInspectionFrameBytes = 64 * 1024 * 1024
+
 // InspectTurn queries the execution state of an explicitly identified turn via thread/read.
 // It never calls thread/resume or turn/start, never mutates session state, and never substitutes
 // thread status or other turns for the requested turn.
@@ -21,7 +23,7 @@ func (a *AppServerAdapter) InspectTurn(ctx context.Context, sessionID, turnID st
 		return codex.TurnObservation{}, errors.New("turnId is invalid")
 	}
 
-	rc, err := a.connect(ctx)
+	rc, err := a.connectWithReadLimit(ctx, maxTurnInspectionFrameBytes)
 	if err != nil {
 		return codex.TurnObservation{}, errors.New("codex connection unavailable")
 	}
@@ -32,6 +34,9 @@ func (a *AppServerAdapter) InspectTurn(ctx context.Context, sessionID, turnID st
 		"includeTurns": true,
 	}, a.rpcTimeout)
 	if err != nil {
+		if errors.Is(err, protocol.ErrTurnObservationLimit) {
+			return codex.TurnObservation{}, err
+		}
 		return codex.TurnObservation{}, errors.New("turn read unavailable")
 	}
 

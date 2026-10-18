@@ -22,6 +22,8 @@ var ErrDesktopSendBusy = errors.New("desktop thread is busy, awaiting input, or 
 
 var errDesktopCanonicalDuplicateReference = errors.New("duplicate canonical desktop history entry")
 
+const desktopTurnInspectionFrameLimit = 64 * 1024 * 1024
+
 func (s desktopControlSettings) ordinaryResumed() bool {
 	// Explicit null defaults to user in the native ordinary-thread predicate.
 	// Missing or unknown values remain unavailable rather than being defaulted.
@@ -71,6 +73,10 @@ type desktopControlState struct {
 // in-flight snapshots can satisfy it; revision checks do not prove freshness.
 // Patches are not used as receipts.
 func (p *preparedDesktopSend) snapshot(ctx context.Context) (*desktopControlState, error) {
+	return p.snapshotWithLimit(ctx, desktopInboundFrameLimit)
+}
+
+func (p *preparedDesktopSend) snapshotWithLimit(ctx context.Context, limit int) (*desktopControlState, error) {
 	if err := p.deadline(ctx); err != nil {
 		return nil, err
 	}
@@ -78,7 +84,7 @@ func (p *preparedDesktopSend) snapshot(ctx context.Context) (*desktopControlStat
 		return nil, err
 	}
 	for range desktopSkipLimit {
-		message, err := p.c.read()
+		message, err := p.c.readWithLimit(limit)
 		if err != nil {
 			return nil, err
 		}
@@ -116,7 +122,7 @@ func (p *preparedDesktopSend) snapshot(ctx context.Context) (*desktopControlStat
 		if params.Change.Type != "snapshot" || params.Change.Revision == nil || *params.Change.Revision > maxDesktopRevision {
 			return nil, errors.New("invalid desktop snapshot identity or revision")
 		}
-		state, err := decodeDesktopControlState(params.Change.ConversationState)
+		state, err := decodeDesktopControlStateWithLimit(params.Change.ConversationState, limit)
 		if err != nil {
 			return nil, err
 		}
@@ -199,8 +205,11 @@ func (d *DesktopController) InspectTurn(ctx context.Context, sessionID, turnID s
 		return codex.TurnObservation{}, err
 	}
 	defer p.Close()
-	state, err := p.snapshot(ctx)
+	state, err := p.snapshotWithLimit(ctx, desktopTurnInspectionFrameLimit)
 	if err != nil {
+		if errors.Is(err, errDesktopFrameTooLarge) || errors.Is(err, errDesktopControlStateLimit) {
+			return codex.TurnObservation{}, fmt.Errorf("%w: %w", protocol.ErrTurnObservationLimit, err)
+		}
 		return codex.TurnObservation{}, err
 	}
 	turns, err := state.recordedTurns()

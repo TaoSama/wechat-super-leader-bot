@@ -32,7 +32,8 @@ export function SessionDetails({ children, onClose }: Props) {
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
     }}>
     <div className="session-details-panel">
-      <header className="session-details-header"><div><p className="eyebrow">SESSION INFO</p><h2 id={titleId}>会话详情</h2></div><button ref={closeRef} type="button" className="icon-button" aria-label="关闭会话详情" onClick={onClose}><X size={20} aria-hidden="true" /></button></header>
+      <span className="sheet-handle" aria-hidden="true" />
+      <header className="session-details-header"><h2 id={titleId}>会话详情</h2><button ref={closeRef} type="button" className="icon-button" aria-label="关闭会话详情" onClick={onClose}><X size={20} aria-hidden="true" /></button></header>
       <div className="session-details-body">{children}</div>
     </div>
   </dialog>;

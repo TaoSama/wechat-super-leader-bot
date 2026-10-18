@@ -26,7 +26,7 @@ class FakeCommandPool {
       return { rows: row ? [structuredClone(row)] : [] };
     }
     if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql) || sql.startsWith("CREATE TABLE") || sql.startsWith("ALTER TABLE") ||
-        sql.startsWith("CREATE INDEX") || sql.startsWith("CREATE UNIQUE INDEX") || sql.startsWith("DELETE FROM node_sessions") || sql.startsWith("UPDATE commands")) return { rows: [] };
+        sql.startsWith("CREATE INDEX") || sql.startsWith("CREATE UNIQUE INDEX") || sql.startsWith("DROP INDEX") || sql.startsWith("INSERT INTO known_sessions") || sql.startsWith("DELETE FROM node_sessions") || sql.startsWith("UPDATE commands")) return { rows: [] };
     if (sql === "SELECT * FROM leader_notifications ORDER BY id FOR UPDATE") return { rows: [] };
     throw new Error(`Unexpected fixture SQL: ${sql}`);
   }

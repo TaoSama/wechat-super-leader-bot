@@ -106,7 +106,7 @@ describe("HTTP Leader model", () => {
     expect(failing).toHaveBeenCalledTimes(3);
   });
 
-  it("does not retry authorization or raw transport failures and sanitizes errors", async () => {
+  it("does not retry authorization or unrecognized transport failures and sanitizes errors", async () => {
     const fetcher = vi.fn<typeof fetch>(async () => new Response("private-key", { status: 401 }));
     await expect(new HttpLeaderModel({ ...config, fetchImpl: fetcher }).complete(messages, [])).rejects.toThrow("HTTP status 401");
     expect(fetcher).toHaveBeenCalledTimes(1);

@@ -3,7 +3,7 @@ import { responsePayload } from "./responses.js";
 import { parseAndValidateResponse } from "./response-parser.js";
 import { cancelBodySafely, readBoundedStream, sleepWithAbort } from "./transport.js";
 import type { LeaderModel, ModelMessage, ModelTool, ModelReply } from "./contracts.js";
-import { ModelFailure, isQuotaError, providerErrorCode, retryDelay } from './errors.js';
+import { ModelFailure, ModelTransportFailure, isQuotaError, providerErrorCode, retryDelay, transportFailure } from './errors.js';
 
 export interface HttpLeaderModelOptions {
   /**
@@ -31,6 +31,7 @@ const MAX_MAX_RESPONSE_BYTES = 10 * 1024 * 1024; // 10 MB
 const DEFAULT_RETRY_DELAY_MS = 250;
 const MIN_RETRY_DELAY_MS = 0;
 const MAX_RETRY_DELAY_MS = 5000;
+const MAX_MODEL_ATTEMPTS = 3;
 
 const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
 
@@ -176,10 +177,18 @@ export class HttpLeaderModel implements LeaderModel {
     const payload = responsePayload(this.model, messages, tools);
 
     const bodyString = JSON.stringify(payload);
-    const maxAttempts = 3; // 1 initial attempt + max 2 additional retry attempts
+    const retryTransport = async (failure: ModelTransportFailure, attempt: number): Promise<void> => {
+      if (!failure.retryable || attempt >= MAX_MODEL_ATTEMPTS - 1) throw failure;
+      const delayMs = retryDelay(undefined, this.retryDelayMs, attempt);
+      if (delayMs >= completionDeadline - Date.now()) {
+        throw new ModelFailure(`${failure.message}; retry exceeds request budget`, failure.diagnostic);
+      }
+      console.warn("Leader model temporary transport failure; retry scheduled", { ...failure.diagnostic, delayMs });
+      await sleepWithAbort(delayMs, combinedSignal);
+    };
 
     try {
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      for (let attempt = 0; attempt < MAX_MODEL_ATTEMPTS; attempt++) {
         if (combinedSignal.aborted) {
           throw combinedSignal.reason instanceof Error
             ? combinedSignal.reason
@@ -199,18 +208,17 @@ export class HttpLeaderModel implements LeaderModel {
             signal: combinedSignal,
           });
         } catch (fetchErr: unknown) {
-          void fetchErr;
           if (combinedSignal.aborted) {
             throw combinedSignal.reason instanceof Error
               ? combinedSignal.reason
               : new Error("Model request aborted");
           }
-          // Fixed generic message so provider URLs, headers, or tokens are never echoed
-          throw new ModelFailure("Model transport request failed", { category: "transport", attempts: attempt + 1 });
+          await retryTransport(transportFailure(fetchErr, "fetch", attempt + 1), attempt);
+          continue;
         }
 
         if (!response || typeof response.status !== "number") {
-          throw new Error("Invalid model transport response");
+          throw new ModelFailure("Invalid model transport response", { category: "invalid_response", attempts: attempt + 1 });
         }
 
         if (!response.ok) {
@@ -229,7 +237,7 @@ export class HttpLeaderModel implements LeaderModel {
           } else {
             cancelBodySafely(response.body);
           }
-          if (RETRYABLE_STATUS_CODES.has(response.status) && !isQuotaError(code) && attempt < maxAttempts - 1) {
+          if (RETRYABLE_STATUS_CODES.has(response.status) && !isQuotaError(code) && attempt < MAX_MODEL_ATTEMPTS - 1) {
             const delayMs = retryDelay(response, this.retryDelayMs, attempt);
             if (delayMs >= completionDeadline - Date.now()) {
               console.warn("Leader model temporary HTTP failure; retry exceeds request budget", {
@@ -260,11 +268,19 @@ export class HttpLeaderModel implements LeaderModel {
           });
         }
 
-        const rawText = await readBoundedStream(
-          response.body,
-          this.maxResponseBytes,
-          combinedSignal
-        );
+        let rawText: string;
+        try {
+          rawText = await readBoundedStream(response.body, this.maxResponseBytes, combinedSignal);
+        } catch (error) {
+          if (combinedSignal.aborted) throw combinedSignal.reason;
+          if (error instanceof ModelTransportFailure) {
+            const failure = new ModelTransportFailure(error.retryable, { ...error.diagnostic, attempts: attempt + 1 });
+            await retryTransport(failure, attempt);
+            continue;
+          }
+          if (error instanceof ModelFailure) throw new ModelFailure(error.message, { ...error.diagnostic, attempts: attempt + 1 });
+          throw new ModelFailure("Invalid model response stream", { category: "invalid_response", attempts: attempt + 1 });
+        }
         try {
           return parseAndValidateResponse(rawText);
         } catch (error) {

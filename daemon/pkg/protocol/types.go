@@ -13,9 +13,20 @@ import (
 // ActionType represents supported actions: "read", "send"
 type ActionType string
 
-// Controller's daemon WebSocket ingress limit. This is distinct from the
-// larger native app-server response limit.
+// Default Controller message budget. Command input and inventory keep this
+// limit; full final results have their own directional wire budget below.
 const MaxControllerMessageBytes = 1024 * 1024
+
+// MaxTurnOutputBytes bounds original UTF-8 output, before JSON encoding.
+const MaxTurnOutputBytes = 8 * 1024 * 1024
+
+// JSON can expand each byte to six bytes (for example, '<' to '\u003c').
+// Reserve separate space for the result identity and receipt metadata.
+const MaxDaemonResultMessageBytes = 6*MaxTurnOutputBytes + 64*1024
+
+var ErrTurnOutputLimit = errors.New("Turn output exceeds the 8 MiB delivery limit; full output was not delivered")
+
+var ErrTurnObservationLimit = errors.New("Turn observation exceeds the native response limit; full output was not delivered")
 
 const (
 	ActionRead ActionType = "read"
@@ -118,15 +129,17 @@ type ResultAckMessage struct {
 
 // ControllerCommandMessage: {type:"command",commandId,nodeId,sessionId,action,prompt?,expiresAt}
 type ControllerCommandMessage struct {
-	Type      string       `json:"type"`
-	CommandID string       `json:"commandId"`
-	NodeID    string       `json:"nodeId"`
-	SessionID string       `json:"sessionId"`
-	Action    ActionType   `json:"action"`
-	Prompt    string       `json:"prompt,omitempty"`
-	ExpiresAt string       `json:"expiresAt"`
-	Skills    []skills.Ref `json:"skills,omitempty"`
-	SendRoute SendRoute    `json:"sendRoute,omitempty"`
+	Type           string       `json:"type"`
+	CommandID      string       `json:"commandId"`
+	NodeID         string       `json:"nodeId"`
+	SessionID      string       `json:"sessionId"`
+	Action         ActionType   `json:"action"`
+	Prompt         string       `json:"prompt,omitempty"`
+	ExpiresAt      string       `json:"expiresAt"`
+	Skills         []skills.Ref `json:"skills,omitempty"`
+	SendRoute      SendRoute    `json:"sendRoute,omitempty"`
+	DeliveryMode   DeliveryMode `json:"deliveryMode,omitempty"`
+	ExpectedTurnID string       `json:"expectedTurnId,omitempty"`
 }
 
 // ParseExpiry parses ExpiresAt in RFC3339Nano or RFC3339 format.
@@ -184,6 +197,9 @@ func (c *ControllerCommandMessage) Validate(expectedNodeID string, now time.Time
 	if c.Action == ActionSend && strings.TrimSpace(c.Prompt) == "" {
 		return errors.New("prompt is required for send action")
 	}
+	if err := c.validateDelivery(); err != nil {
+		return err
+	}
 	if c.SendRoute != "" && (c.Action != ActionSend || (c.SendRoute != RouteControlSocket && c.SendRoute != RouteDesktopOwner && c.SendRoute != RouteTerminalPane && c.SendRoute != RouteAppServerResume)) {
 		return errors.New("invalid send route")
 	}
@@ -220,6 +236,9 @@ func (c *ControllerCommandMessage) PayloadFingerprint() string {
 	fields := []any{c.NodeID, c.SessionID, c.Action, c.Prompt, c.ExpiresAt, refs}
 	if c.SendRoute != "" {
 		fields = append(fields, c.SendRoute)
+	}
+	if c.DeliveryMode != "" || c.ExpectedTurnID != "" {
+		fields = append(fields, c.DeliveryMode, c.ExpectedTurnID)
 	}
 	encoded, err := json.Marshal(fields)
 	if err != nil {

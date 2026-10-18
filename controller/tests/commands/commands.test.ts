@@ -48,16 +48,16 @@ it("returns uncertain with a traceable command ID when transport delivery is amb
   expect(f.hub.sendCommand).toHaveBeenCalledTimes(1);
 });
 
-it("does not send to non-idle or read-only sessions", async () => {
+it("queues known busy or unloaded sessions without sending and rejects read-only targets", async () => {
   const f = setup();
   f.session.status = "active";
-  await expect(f.commands.submit(input)).rejects.toThrow("not idle");
+  expect((await f.commands.submit(input)).status).toBe("queued");
   f.session.status = "idle";
   f.session.loaded = false;
-  await expect(f.commands.submit(input)).rejects.toThrow("not loaded");
+  expect((await f.commands.submit({...input,requestId:"unloaded"})).status).toBe("queued");
   f.session.loaded = true;
   f.session.capabilities = ["read"];
-  await expect(f.commands.submit(input)).rejects.toThrow("does not support");
+  await expect(f.commands.submit({...input,requestId:"read-only"})).rejects.toThrow("does not support");
   expect(f.hub.sendCommand).not.toHaveBeenCalled();
 });
 
@@ -65,6 +65,17 @@ function desktopReady(): NonNullable<Session["sendAvailability"]> {
   const observed = Date.now();
   return { route: "desktop-owner", state: "ready", observedAt: new Date(observed).toISOString(), validUntil: new Date(observed + 45000).toISOString() };
 }
+
+it.each(["observation-only", "blocked", "expired"] as const)("rejects %s terminal input with its live qualification error and no queued record", async state => {
+  const f = setup();
+  Object.assign(f.session, {id:`terminal:${"a".repeat(43)}`,provider:"terminal/claude",capabilities:["read"],loaded:false});
+  if (state !== "observation-only") f.session.sendAvailability = {route:"terminal-pane",mode:"non-atomic",
+    state:state === "blocked" ? "blocked" : "ready",observedAt:new Date(Date.now()-1000).toISOString(),
+    validUntil:new Date(Date.now()+(state === "expired" ? -1 : 44000)).toISOString()};
+  await expect(f.commands.submit({...input,sessionId:f.session.id},0)).rejects.toMatchObject({httpStatus:409});
+  expect(await f.store.listRecentCommands()).toEqual([]);
+  expect(f.hub.sendCommand).not.toHaveBeenCalled();
+});
 
 it("persists desktop authority and dispatches it without native send capability", async () => {
   const f = setup();

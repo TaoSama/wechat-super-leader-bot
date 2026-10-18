@@ -1,3 +1,5 @@
+import { ModelFailure, transportFailure } from "./errors.js";
+
 export function cancelBodySafely(body: { cancel(): Promise<unknown> } | null | undefined): void {
   if (!body) return;
   try {
@@ -74,8 +76,8 @@ export async function readBoundedStream(
         if (signal.aborted) {
           throw signal.reason instanceof Error ? signal.reason : new Error("Model request aborted");
         }
-        void readErr;
-        throw new Error("Model response stream read failed");
+        cancelBodySafely(reader);
+        throw transportFailure(readErr, "response_body");
       }
 
       const { done, value } = readResult;
@@ -85,12 +87,12 @@ export async function readBoundedStream(
       if (value) {
         if (!(value instanceof Uint8Array)) {
           cancelBodySafely(reader);
-          throw new Error("Invalid model response: stream chunk must be Uint8Array");
+          throw new ModelFailure("Invalid model response: stream chunk must be Uint8Array", { category: "invalid_response" });
         }
         totalBytes += value.byteLength;
         if (totalBytes > maxBytes) {
           cancelBodySafely(reader);
-          throw new Error(`Model response exceeded maximum allowed size of ${maxBytes} bytes`);
+          throw new ModelFailure(`Model response exceeded maximum allowed size of ${maxBytes} bytes`, { category: "invalid_response" });
         }
         chunks.push(value);
       }

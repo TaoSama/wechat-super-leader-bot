@@ -68,6 +68,7 @@ type Daemon struct {
 	desktopHistory     desktopHistoryReader
 	historyContexts    *historyContexts
 	historyRequests    *historyRequests
+	mediaState         *mediaState
 }
 
 func NewDaemon(cfg *config.Config, adapter codex.SessionAdapter) *Daemon {
@@ -84,6 +85,7 @@ func NewDaemon(cfg *config.Config, adapter codex.SessionAdapter) *Daemon {
 		desktopGeneration:  make(map[string]uint64),
 		historyContexts:    newHistoryContexts(),
 		historyRequests:    newHistoryRequests(),
+		mediaState:         newMediaState(),
 		terminalDiscovery:  make(chan struct{}, 1),
 		terminalReadiness:  make(map[string]terminalReadinessRecord),
 	}

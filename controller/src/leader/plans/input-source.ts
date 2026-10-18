@@ -8,7 +8,7 @@ export class ExecutionInputError extends Error {
   constructor() { super("Execution result source is unavailable or inconsistent"); }
 }
 
-export async function collectExecutionInput(store: IStore, execution: ExecutionRecord, index: number): Promise<ExecutionInput | undefined> {
+export async function collectExecutionInput(store: Pick<IStore, "findCommandByRequestId">, execution: ExecutionRecord, index: number): Promise<ExecutionInput | undefined> {
   const action = execution.plan.actions[index];
   const resultFrom = action.resultFrom ?? [];
   if (!resultFrom.length) return undefined;
@@ -27,7 +27,7 @@ export async function collectExecutionInput(store: IStore, execution: ExecutionR
   return normalizeExecutionInput(action.prompt, resultFrom, { prompt: renderExecutionInput(action.prompt, sources), sources });
 }
 
-export async function verifyExecutionInput(store: IStore, execution: ExecutionRecord, index: number): Promise<boolean> {
+export async function verifyExecutionInput(store: Pick<IStore, "findCommandByRequestId">, execution: ExecutionRecord, index: number): Promise<boolean> {
   const frozen = execution.attempts[index]?.input;
   if (!(execution.plan.actions[index].resultFrom ?? []).length) return frozen === undefined;
   if (!frozen) return false;
@@ -39,4 +39,26 @@ export async function verifyExecutionInput(store: IStore, execution: ExecutionRe
     if (error instanceof ExecutionInputError) return false;
     throw error;
   }
+}
+
+/** Public status checks frozen provenance against exact immutable receipts without reading bodies. */
+export async function verifyExecutionInputMetadata(store: Pick<IStore, "findCommandByRequestId">,
+  execution: ExecutionRecord, index: number): Promise<boolean> {
+  const action = execution.plan.actions[index];
+  const resultFrom = action.resultFrom ?? [];
+  const frozen = execution.attempts[index]?.input;
+  if (!resultFrom.length) return frozen === undefined;
+  if (!frozen) return false;
+  const normalized = normalizeExecutionInput(action.prompt, resultFrom, frozen);
+  for (const source of normalized.sources) {
+    const parentIndex = source.step - 1;
+    if (parentIndex < 0 || parentIndex >= index || !action.dependsOn.includes(source.step) || !execution.attempts[parentIndex]) return false;
+    const command = await store.findCommandByRequestId(executionRequestId(execution, parentIndex));
+    if (!command || !matchesExecutionCommand(execution, parentIndex, command) || command.status !== "completed" ||
+        command.commandId !== source.commandId || command.turnId !== source.turnId || command.inputReceipt !== undefined ||
+        "hasOutput" in command && command.hasOutput !== true ||
+        command.sendRoute === "terminal-pane" || !TurnIdSchema.safeParse(command.turnId).success ||
+        !await verifyExecutionInputMetadata(store, execution, parentIndex)) return false;
+  }
+  return true;
 }

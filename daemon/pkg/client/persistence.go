@@ -18,7 +18,6 @@ import (
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/terminal"
 )
 
-const maxPersistedOutputBytes = 16 * 1024
 const maxPersistedErrorBytes = 1024
 
 type commandJournal interface {
@@ -28,6 +27,7 @@ type commandJournal interface {
 	BindTerminal(protocol.ControllerCommandMessage, terminal.DeliveryIdentity) error
 	ReadDispatch(string, string, string) (protocol.DispatchIdentity, error)
 	Finish(protocol.DaemonResultMessage) error
+	RecordTurnResult(string, protocol.DaemonResultMessage) error
 	Ack(protocol.ResultAckMessage) error
 	Unacked() ([]protocol.DaemonResultMessage, error)
 	Close() error
@@ -95,7 +95,7 @@ func (d *Daemon) ExecuteCommand(ctx context.Context, cmd protocol.ControllerComm
 		return entry.Result
 	}
 	res := d.executeVolatileCommand(ctx, cmd)
-	res.Output = boundedReceiptText(res.Output, maxPersistedOutputBytes)
+	res = completeResultReceipt(res)
 	res.Error = boundedReceiptText(res.Error, maxPersistedErrorBytes)
 	d.persistenceMu.Lock()
 	d.pendingPersistence[cmd.CommandID] = res
@@ -107,6 +107,24 @@ func (d *Daemon) ExecuteCommand(ctx context.Context, cmd protocol.ControllerComm
 	if err != nil {
 		log.Print("Command result persistence unavailable; retaining result for retry and blocking duplicate execution")
 		return journalFailure(cmd.CommandID)
+	}
+	return res
+}
+
+// A receipt must never claim completion for a shortened or JSON-repaired body.
+// Store a small explicit failure when the original output cannot be delivered.
+func completeResultReceipt(res protocol.DaemonResultMessage) protocol.DaemonResultMessage {
+	tooLarge := len(res.Output) > protocol.MaxTurnOutputBytes
+	if !tooLarge && utf8.ValidString(res.Output) {
+		return res
+	}
+	res.Status = protocol.StatusFailed
+	res.Output = ""
+	res.OutputPresent = false
+	if tooLarge {
+		res.Error = protocol.ErrTurnOutputLimit.Error()
+	} else {
+		res.Error = "Turn output contains invalid UTF-8; full output was not delivered"
 	}
 	return res
 }

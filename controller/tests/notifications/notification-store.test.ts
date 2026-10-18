@@ -5,7 +5,7 @@ import { PostgresStore } from "../../src/store/postgres.js";
 import { ConflictError, type IStore } from "../../src/store/interface.js";
 import { createExecution, executionRequestId, type ExecutionRecord } from "../../src/leader/plans/execution.js";
 import type { CommandRecord } from "../../src/types.js";
-import { normalizeNotification, NOTIFICATION_TTL_MS, NOTIFICATION_ATTEMPT_MS, type StoredNotification } from "../../src/notifications/contracts.js";
+import { normalizeNotification, NOTIFICATION_TTL_MS, NOTIFICATION_ATTEMPT_MS, NOTIFICATION_TEXT_LIMIT, type StoredNotification } from "../../src/notifications/contracts.js";
 
 vi.mock("pg", () => ({ default: { Pool: vi.fn() } }));
 const NOW = 1_700_000_000_000;
@@ -42,8 +42,14 @@ class NotificationPool {
       const row = this.commandRows.get(String(params[0]));
       return { rows: row ? [structuredClone(row)] : [] };
     }
+    if (query.startsWith("SELECT ") && query.includes(" FROM commands WHERE request_id = $1")) {
+      const row = this.commandRows.get(String(params[0]));
+      if (query.includes("AND status IN ('accepted','completed')") && row && !["accepted", "completed"].includes(String(row.status))) return { rows: [] };
+      const columns = query.slice("SELECT ".length, query.indexOf(" FROM commands")).split(",").map(column => column.trim());
+      return { rows: row ? [Object.fromEntries(columns.map(column => [column, structuredClone(row[column])]))] : [] };
+    }
     if (query.startsWith("SELECT pg_advisory_xact_lock(") || query.startsWith("SELECT id FROM leader_goals WHERE chat_id=$1")) return this.result();
-    if (/^(CREATE |ALTER |DELETE FROM node_sessions|UPDATE commands)/.test(query)) return this.result();
+    if (/^(CREATE |ALTER |DROP INDEX |INSERT INTO known_sessions |DELETE FROM node_sessions|UPDATE commands)/.test(query)) return this.result();
     if (query === "SELECT * FROM leader_notifications ORDER BY id FOR UPDATE") return this.result([...this.notifications.values()]);
     if (query.startsWith("INSERT INTO leader_executions")) {
       const record = JSON.parse(params[4] as string) as ExecutionRecord;
@@ -60,9 +66,13 @@ class NotificationPool {
       const row = this.notifications.get(params[0] as string);
       return this.result(row ? [row] : []);
     }
+    if (query.startsWith("SELECT * FROM leader_notifications WHERE execution_id=$1")) {
+      return this.result([...this.notifications.values()].filter(row => row.execution_id === params[0]));
+    }
     if (query.startsWith("SELECT * FROM leader_notifications WHERE chat_id=ANY")) {
-      expect(query).toContain("AND status='pending' AND expires_at>$2 ORDER BY created_at ASC,id ASC LIMIT $3");
-      expect(params[2]).toBe(4);
+      expect(query).toContain("AND status='pending' AND expires_at>$2");
+      expect(query).toContain("ORDER BY (kind='progress') ASC,created_at ASC,COALESCE((data->'part'->>'index')::int,1) ASC,id ASC LIMIT $3");
+      expect(params[2]).toBe(1);
       return this.result([...this.notifications.values()].filter(row => (params[0] as string[]).includes(row.chat_id) &&
         row.status === "pending" && Number(row.expires_at) > (params[1] as number))
         .sort((a, b) => Number(a.created_at) - Number(b.created_at) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).slice(0, params[2] as number));
@@ -130,6 +140,34 @@ function postgres() {
   vi.mocked(pg.Pool).mockImplementation(function () { return pool as unknown as pg.Pool; });
   return { store: new PostgresStore("postgresql://unused/notification-test"), pool };
 }
+
+it("PostgresStore progress projects only receipt metadata, never large output/error bodies", async () => {
+  const { store, pool } = postgres(), record = execution();
+  await store.createExecutionIfAbsent(record);
+  await store.compareAndSetExecution({ ...record, revision: 2, attempts: [{ token: attempt, startedAt: NOW, expiresAt: NOW + 15_000 }] }, 1, NOW);
+  const stamp = new Date(NOW).toISOString();
+  pool.commandRows.set(executionRequestId(record, 0), { command_id: "receipt", request_id: executionRequestId(record, 0),
+    node_id: "node", session_id: "session", action: "send", prompt: "private prompt", status: "accepted", turn_id: "exact-turn",
+    send_route: "control-socket", expires_at: new Date(NOW + 60_000).toISOString(), created_at: stamp, updated_at: stamp,
+    output: "x".repeat(NOTIFICATION_TEXT_LIMIT), error: "private large error", authority: { secret: "not progress evidence" } });
+  expect(await store.enqueueProgressNotification({ type: "plan", id: record.id }, NOW + 30_000)).toMatchObject({ kind: "progress" });
+  const queries = pool.queries.filter(query => query.includes(" FROM commands "));
+  expect(queries).toHaveLength(1);
+  const columns = queries[0].slice("SELECT ".length, queries[0].indexOf(" FROM commands")).split(",").map(column => column.trim());
+  expect(columns).toEqual(["command_id", "request_id", "node_id", "session_id", "action", "prompt", "status", "expires_at", "created_at", "updated_at",
+    "skills", "turn_id", "send_route", "input_receipt", "delivery_mode", "expected_turn_id"]);
+  expect(columns).not.toContain("output"); expect(columns).not.toContain("error"); expect(columns).not.toContain("*");
+});
+
+it("PostgresStore progress does not map queued commands without their omitted authorization", async () => {
+  const { store, pool } = postgres(), record = execution();
+  await store.createExecutionIfAbsent(record);
+  await store.compareAndSetExecution({ ...record, revision: 2, attempts: [{ token: attempt, startedAt: NOW, expiresAt: NOW + 15_000 }] }, 1, NOW);
+  pool.commandRows.set(executionRequestId(record, 0), { status: "queued" });
+  expect(await store.enqueueProgressNotification({ type: "plan", id: record.id }, NOW + 30_000)).toBeNull();
+  expect(pool.queries.find(query => query.includes(" FROM commands "))).toContain("AND status IN ('accepted','completed')");
+});
+
 async function terminal(store: IStore, index = 1, chatId = "allowed", status: ExecutionRecord["status"] = "completed", now = NOW) {
   const record = execution(index, chatId);
   await store.createExecutionIfAbsent(record);
@@ -166,7 +204,7 @@ for (const [name, factory] of [["memory", () => new MemoryStore()], ["postgres S
       const store = factory();
       for (const index of [8, 5, 2, 4, 1, 3, 6, 7]) await terminal(store, index, index <= 5 ? "allowed" : "forbidden", "completed", NOW + (index <= 5 ? 10 : 0));
       const list = await store.listPendingNotifications(["allowed"], NOW + 20);
-      expect(list.map(item => item.id)).toEqual([1, 2, 3, 4].map(uuid));
+      expect(list.map(item => item.id)).toEqual([1].map(uuid));
       list[0].text = "changed output";
       expect((await store.getNotification(uuid(1), NOW + 20))!.text).not.toBe("changed output");
       expect(await store.listPendingNotifications([], NOW + 20)).toEqual([]);
@@ -282,7 +320,7 @@ it("rejects forged row metadata, invalid text and unknown fields without publish
   row.chat_id = "forged";
   await expect(store.getNotification(record.id, NOW)).rejects.toThrow("metadata");
   row.chat_id = "allowed";
-  for (const invalid of [{ ...row.data, text: " " }, { ...row.data, text: "x".repeat(2001) }, { ...row.data, output: "secret" },
+  for (const invalid of [{ ...row.data, text: " " }, { ...row.data, text: "x".repeat(NOTIFICATION_TEXT_LIMIT + 1) }, { ...row.data, output: "secret" },
     { ...row.data, executionId: uuid(999) }, { ...row.data, attemptId: attempt }]) expect(() => normalizeNotification(invalid)).toThrow();
   pool.corruptUpdate = true;
   await expect(store.claimNotification(record.id, attempt, ["allowed"], NOW)).rejects.toThrow("metadata");
@@ -325,7 +363,7 @@ it.each(["memory", "postgres"] as const)("%s terminal CAS captures only the boun
   await store.compareAndSetExecution({ ...claimed, revision: 3, status: "completed" }, 2, NOW);
   const notification = (await store.getNotification(record.id, NOW))!;
   expect(notification.text).toContain("**任务**：private prompt");
-  expect(notification.text).toContain("> 核验结果：所有订单金额一致");
+  expect(notification.text).toContain("核验结果：所有订单金额一致");
   if (kind === "postgres") {
     const read = sql.pool.queries.lastIndexOf("SELECT * FROM commands WHERE request_id = $1");
     expect(read).toBeGreaterThan(sql.pool.queries.lastIndexOf("BEGIN"));

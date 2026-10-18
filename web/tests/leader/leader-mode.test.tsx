@@ -11,10 +11,10 @@ afterEach(() => {
 });
 
 it.each([
-  { mode: "rules", label: "规则模式（未启用模型 Leader）", detail: "不具备开放式模型规划" },
-  { mode: "model", label: "模型 Leader 模式", detail: "不代表模型当前可用或任务已完成" },
-  { mode: undefined, label: "Leader 模式未知", detail: "不能推断模型已启用" },
-  { mode: "unexpected", label: "Leader 模式未知", detail: "不能推断模型已启用" },
+  { mode: "rules", label: "基础协作", detail: "尚未开启模型规划" },
+  { mode: "model", label: "智能协作", detail: "具体任务的进展与结果" },
+  { mode: undefined, label: "正在确认运行方式", detail: "暂未获取到运行方式" },
+  { mode: "unexpected", label: "正在确认运行方式", detail: "暂未获取到运行方式" },
 ])("shows truthful Leader mode for $mode", async ({ mode, label, detail }) => {
   const fetchMock = vi.fn(async (url: string) => {
     if (url === "/auth/session") {

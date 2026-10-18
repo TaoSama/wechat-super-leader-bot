@@ -85,8 +85,8 @@ describe("send qualification contract", () => {
     expect(sessionSendBlockReason({ ...native, ...changes }, NOW)).not.toBeNull();
   });
 
-  it("keeps connectivity and stale inventory guards above both routes", () => {
-    expect(sendBlockReason(desktop(), false, false, NOW)).toContain("离线");
+  it("allows qualified offline queueing while preserving stale inventory denial", () => {
+    expect(sendBlockReason(desktop(), false, false, NOW)).toBeNull();
     expect(sendBlockReason(desktop(), true, true, NOW)).toContain("待更新");
   });
 });
@@ -114,8 +114,8 @@ describe("workspace send route feedback", () => {
     const { fetchMock } = setup();
     fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
     expect(screen.getByText("控制接口：未加载")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "关闭会话详情" }));
     expect(screen.getByText("通过原桌面会话发送 · 保留原会话设置")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭会话详情" }));
     const send = screen.getByRole("button", { name: "发送消息" });
     expect(send).toBeEnabled();
     expect(send).toHaveAccessibleDescription("Enter 发送 · Shift + Enter 换行");
@@ -153,7 +153,7 @@ describe("workspace send route feedback", () => {
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "发送消息" })));
     expect(sendCalls(fetchMock)).toHaveLength(1);
     vi.setSystemTime(NOW + 45_001);
-    fireEvent.click(screen.getByRole("button", { name: "恢复原请求" }));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "核查发送状态" })));
     expect(sendCalls(fetchMock)).toHaveLength(1);
     expect(screen.getByLabelText("发送给当前会话")).toHaveValue("继续原会话");
   });

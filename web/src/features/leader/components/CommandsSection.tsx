@@ -1,8 +1,10 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { ArrowUpRight, CheckCircle2, ChevronDown, Clock, AlertTriangle, Radio, XCircle } from "lucide-react";
 import { CommandRecord, COMMAND_STATUS_SEMANTICS, ScopedSession } from "../../../types";
 import { formatTimestamp, formatRelativeAge } from "../../../format";
 import { CommandFilter, matchesCommandFilter } from "../command-filters";
+import { canCancelWebQueue, QueuedCommandCancel } from "./QueuedCommandCancel";
+import { CommandDetails } from "./CommandDetails";
 
 interface Props {
   commands: CommandRecord[];
@@ -15,15 +17,17 @@ interface Props {
 }
 export const RECENT_COMMAND_LIMIT = 50;
 const GROUPS = [
-  { key: "attention", title: "需要处理", description: "优先核查异常与未确认的结果", statuses: ["uncertain", "failed"] },
-  { key: "running", title: "执行中", description: "等待响应或已经受理，最终结果尚未确认", statuses: ["pending", "accepted"] },
+  { key: "attention", title: "需要处理", description: "优先核查异常与未确认的结果", statuses: ["uncertain", "failed", "expired"] },
+  { key: "running", title: "执行中", description: "排队、等待响应或已经受理，最终结果尚未确认", statuses: ["queued", "pending", "accepted"] },
   { key: "input", title: "终端输入已写入", description: "仅输入投递结束，执行未确认；不是任务完成，勿自动重发", statuses: ["input-written"] },
   { key: "completed", title: "最近完成", description: "已收到最终回执的指令", statuses: ["completed"] },
+  { key: "cancelled", title: "已取消", description: "已从队列移除的消息", statuses: ["cancelled"] },
 ] as const;
-const STATUS_ICONS = { pending: Clock, accepted: Radio, "input-written": AlertTriangle, completed: CheckCircle2, failed: XCircle, uncertain: AlertTriangle };
+const STATUS_ICONS = { queued: Clock, pending: Clock, accepted: Radio, "input-written": AlertTriangle, completed: CheckCircle2, failed: XCircle, uncertain: AlertTriangle, cancelled: XCircle, expired: AlertTriangle };
 
 export function CommandsSection({ commands, selectedNodeId, sessions = [], onOpenSession, statusFilter, onStatusFilterChange, onClearNodeFilter }: Props) {
-  const recent = useMemo(() => [...commands].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, RECENT_COMMAND_LIMIT), [commands]);
+  const [receipts, setReceipts] = useState<Record<string, CommandRecord>>({});
+  const recent = useMemo(() => commands.map(command => receipts[command.commandId] ?? command).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, RECENT_COMMAND_LIMIT), [commands, receipts]);
   const filtered = recent.filter(command => (!selectedNodeId || command.nodeId === selectedNodeId) && matchesCommandFilter(command.status, statusFilter));
   const hasFilter = statusFilter !== "ALL" || !!selectedNodeId;
   function clearFilters() { onStatusFilterChange("ALL"); if (selectedNodeId) onClearNodeFilter?.(); }
@@ -50,14 +54,15 @@ export function CommandsSection({ commands, selectedNodeId, sessions = [], onOpe
               <div className="command-meta"><span>{command.nodeId}</span><span>{command.action === "send" ? "发送消息" : "读取会话"}</span><span className={`status-badge status-${command.status}`} data-testid={`command-status-${command.commandId}`}><Icon size={14} aria-hidden="true" />{semantics.label}</span></div>
               {(command.status === "uncertain" || command.status === "accepted" || command.status === "input-written") && <p className="command-caution">{semantics.description}</p>}
               {command.error && <p className="command-error">{command.error}</p>}
+              {canCancelWebQueue(command) && <QueuedCommandCancel command={command} onReceipt={receipt => setReceipts(previous => ({ ...previous, [receipt.commandId]: receipt }))} />}
             </div>
-            <details className="command-details"><summary>指令详情与回执</summary><div className="command-detail-content"><p>{semantics.description}</p><dl><div><dt>会话标识</dt><dd>{command.nodeId} / {command.sessionId}</dd></div><div><dt>指令 ID</dt><dd>{command.commandId}</dd></div><div><dt>请求 ID</dt><dd>{command.requestId}</dd></div></dl>{command.inputReceipt && <dl><div><dt>输入证明</dt><dd>{command.inputReceipt.kind}</dd></div><div><dt>证明会话</dt><dd>{command.inputReceipt.sessionId}</dd></div><div><dt>宿主请求 ID</dt><dd>{command.inputReceipt.requestId}</dd></div><div><dt>实际输入 SHA256</dt><dd>{command.inputReceipt.promptSHA256}</dd></div><div><dt>响应 / 观测版本</dt><dd>{command.inputReceipt.responseRevision} / {command.inputReceipt.observedRevision}</dd></div></dl>}{command.turnId && <p>关联 Turn: {command.turnId}（按该轮次核验，不以会话空闲状态判断完成）</p>}<p>创建: {formatTimestamp(command.createdAt)}</p><p>更新: {formatTimestamp(command.updatedAt)}</p><p>派发截止（非执行时限）: {formatTimestamp(command.expiresAt)}</p>{command.prompt && <div><h5>完整请求</h5><pre>{command.prompt}</pre></div>}{command.output && <div><h5>最终回执 / 返回快照</h5><pre>{command.output}</pre></div>}</div></details>
+            <CommandDetails command={command} />
           </article>;
         })}</div>;
       return <section className={`command-group group-${group.key}`} key={group.key} aria-label={group.title}>
-        {group.key === "completed"
-          ? <details className="command-history" key={statusFilter} open={statusFilter === "completed"}>
-              <summary>{heading}<span className="command-history-action">查看已完成<ChevronDown size={16} aria-hidden="true" /></span></summary>{list}
+        {group.key === "completed" || group.key === "cancelled"
+          ? <details className="command-history" key={statusFilter} open={statusFilter === group.key}>
+              <summary>{heading}<span className="command-history-action">{group.key === "cancelled" ? "查看已取消" : "查看已完成"}<ChevronDown size={16} aria-hidden="true" /></span></summary>{list}
             </details>
           : <>{heading}{list}</>}
       </section>;

@@ -157,6 +157,7 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 		<-readerDone
 		historyWorkers.Wait()
 		d.resetHistory()
+		d.resetMedia()
 		<-heartbeatDone
 		<-skillsDone
 		waitObservations()
@@ -176,6 +177,17 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 				continue
 			}
 			if cmd.Type != "command" {
+				if cmd.Type == "cancel_media" {
+					d.cancelMedia(data)
+					continue
+				}
+				if cmd.Type == "list_media" || cmd.Type == "read_media" {
+					if err := d.scheduleMediaRead(connCtx, data, historySlots, &historyWorkers, sendJSON, errCh); err != nil {
+						reportFailure(err)
+						return
+					}
+					continue
+				}
 				if cmd.Type == "cancel_history" {
 					d.cancelHistory(data)
 					continue

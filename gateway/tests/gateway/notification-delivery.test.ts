@@ -4,59 +4,71 @@ import * as fs from "node:fs";
 import nodeFs from "node:fs";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { StateManager } from "../../src/runtime/state.js";
 import { WeChatGateway } from "../../src/gateway.js";
 import { parseGatewayCli } from "../../src/cli/options.js";
 import { runCli, NOTIFICATION_DIAGNOSTIC_EXIT_CODE } from "../../src/cli/run.js";
 import { HealthTracker, checkGatewayHealth } from "../../src/runtime/health.js";
-import { TRUNCATION_NOTICE } from "../../src/wechat/markdown.js";
 import { harness, notification, goalNotification } from "../fixtures/notification-fixtures.js";
+
+function notificationClientId(state: StateManager, chatId: string, id: string, index = 0): string {
+  return `super-leader:${createHash("sha256")
+    .update(JSON.stringify([state.getLoginFingerprint(), chatId, `notification:${id}`, index])).digest("hex").slice(0, 24)}`;
+}
 
 test("terminal notification is one plain-text send with deterministic evidence ID and no state reset", async t => {
   const f = harness(t);
   f.state.commitCursor("original-cursor"); f.state.recordProcessedMessageKey("old-key");
-  const before = fs.readFileSync(f.statePath, "utf8");
+  const fingerprint = f.state.getLoginFingerprint();
   assert.deepEqual(await f.gateway.deliverNotificationsOnce(), { accepted: 1, uncertain: 0, skipped: 0 });
   const item = notification();
   assert.equal(f.sends.length, 1);
-  assert.equal(f.sends[0].client_id, `super-leader:notification:${item.id}`);
+  assert.equal(f.sends[0].client_id, notificationClientId(f.state, item.chatId, item.id));
   assert.equal(f.sends[0].to_user_id, "chat");
   assert.equal(f.sends[0].context_token, "synthetic-context");
   assert.deepEqual(f.sends[0].item_list, [{ type: 1, text_item: { text: item.text } }]);
-  assert.equal(fs.readFileSync(f.statePath, "utf8"), before);
+  assert.equal(f.state.getLoginFingerprint(), fingerprint);
+  assert.equal(f.state.syncBuf, "original-cursor");
+  assert.equal(f.state.isMessageProcessed("old-key"), true);
+  assert.equal(new StateManager(f.accountPath, f.statePath).replyDeliveries[`notification:${item.id}`].acknowledgedChunks, 1);
   assert.equal(f.records.get(item.id)?.status, "accepted");
   assert.deepEqual(await f.gateway.deliverNotificationsOnce(), { accepted: 0, uncertain: 0, skipped: 0 });
   assert.equal(f.sends.length, 1);
 });
-for (const source of ["plan", "goal"] as const) test(`${source} result Markdown is rendered as one readable WeChat message`, async t => {
+for (const source of ["plan", "goal"] as const) test(`${source} result Markdown is sent verbatim`, async t => {
   const item = source === "plan" ? notification() : goalNotification();
   item.text = "## 执行结果\n\n**完成**：修复确认流程。\n- 已通过 `pnpm test`\n- [查看变更](https://example.com/pull/42)";
   const f = harness(t, { items: [item] });
   assert.deepEqual(await f.gateway.deliverNotificationsOnce(), { accepted: 1, uncertain: 0, skipped: 0 });
   assert.equal(f.sends.length, 1);
   assert.deepEqual(f.sends[0].item_list, [{ type: 1, text_item: {
-    text: "执行结果\n\n完成：修复确认流程。\n• 已通过 pnpm test\n• 查看变更 (https://example.com/pull/42)",
+    text: item.text,
   } }]);
-  assert.equal(f.sends[0].client_id, `super-leader:notification:${item.id}`);
+  assert.equal(f.sends[0].client_id, notificationClientId(f.state, item.chatId, item.id));
   assert.equal(f.records.get(item.id)?.text, item.text, "receipts retain the original notification identity");
   await f.gateway.deliverNotificationsOnce();
   assert.equal(f.sends.length, 1);
 });
-test("long notification is truncated into a single bounded message despite multipart replies being enabled", async t => {
+test("long notification preserves all Markdown and Unicode across bounded chunks", async t => {
   const item = notification();
   item.text = "# 执行结果\n\n- **完成**：" + "验证通过🚀".repeat(200);
   const f = harness(t, { items: [item] }), maxChars = 96;
   const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink,
     notifications: true, splitMaxChars: maxChars, splitMultiPart: true });
   assert.equal((await gateway.deliverNotificationsOnce()).accepted, 1);
-  assert.equal(f.sends.length, 1);
-  const text = (f.sends[0].item_list as { text_item: { text: string } }[])[0].text_item.text;
-  assert.ok(text.startsWith("执行结果\n\n• 完成："));
-  assert.ok(text.endsWith(TRUNCATION_NOTICE));
-  assert.ok(text.length <= maxChars);
-  assert.equal(Buffer.from(text, "utf8").toString("utf8"), text);
+  assert.ok(f.sends.length > 1);
+  const texts = f.sends.map((send, index) => {
+    const text = (send.item_list as { text_item: { text: string } }[])[0].text_item.text;
+    assert.ok(text.length <= maxChars);
+    assert.equal(Buffer.from(text, "utf8").toString("utf8"), text);
+    assert.equal(send.client_id, notificationClientId(f.state, item.chatId, item.id, index));
+    return text;
+  });
+  assert.equal(texts.join(""), item.text);
+  const count = f.sends.length;
   await gateway.deliverNotificationsOnce();
-  assert.equal(f.sends.length, 1);
+  assert.equal(f.sends.length, count);
 });
 test("failed Markdown notification is permanently uncertain without another send after restart", async t => {
   const item = goalNotification();
@@ -79,7 +91,7 @@ for (const kind of ["completed", "blocked", "expired"] as const) test(`goal ${ki
   assert.equal(f.records.get(item.id)?.source.type, "goal");
   assert.equal(f.records.get(item.id)?.status, "accepted");
   assert.deepEqual(f.sends[0].item_list, [{ type: 1, text_item: { text: item.text } }]);
-  assert.equal(f.sends[0].client_id, `super-leader:notification:${item.id}`);
+  assert.equal(f.sends[0].client_id, notificationClientId(f.state, item.chatId, item.id));
   assert.equal(f.sends[0].to_user_id, item.chatId);
   await f.gateway.deliverNotificationsOnce();
   assert.equal(f.sends.length, 1);
@@ -137,14 +149,14 @@ test("over 128 contexts rotate sorted bounded chat batches without permanent sta
   assert.deepEqual(batches[1].slice(0, 2), ["chat-128", "chat-129"]);
   assert.equal(new Set(batches.flat()).size, 130);
 });
-test("notification delivery is single-flight and limited to four sends per cycle", async t => {
+test("notification delivery is single-flight and limited to one outbox item per cycle", async t => {
   const f = harness(t, { items: Array.from({ length: 5 }, (_, index) => notification(index + 1)) });
   let release!: () => void;
   f.hooks.pending = async () => new Promise<void>(resolve => { release = resolve; });
   const first = f.gateway.deliverNotificationsOnce();
   assert.deepEqual(await f.gateway.deliverNotificationsOnce(), { accepted: 0, uncertain: 0, skipped: 0 });
   release(); await first;
-  assert.equal(f.sends.length, 4);
+  assert.equal(f.sends.length, 1);
   assert.equal(f.requests.filter(request => request.url.endsWith("pending")).length, 1);
 });
 test("lost claim receipt is not retried, sent, or replayed after restart", async t => {
@@ -317,10 +329,11 @@ test("closed real stderr pipe exits CLI with code 2 after uncertainty, without r
   });
   assert.deepEqual(result, { code: NOTIFICATION_DIAGNOSTIC_EXIT_CODE, signal: null });
   const lines = output.trim().split("\n").map(line => JSON.parse(line));
-  assert.deepEqual(lines, [
-    { code: NOTIFICATION_DIAGNOSTIC_EXIT_CODE, sends: 1, polls: 0, status: "uncertain", stopped: "stopped" },
-    { restartCode: 0, sends: 1, polls: 1, status: "uncertain" },
-  ]);
+  assert.equal(lines.length, 2);
+  assert.deepEqual({ ...lines[0], polls: undefined },
+    { code: NOTIFICATION_DIAGNOSTIC_EXIT_CODE, sends: 1, polls: undefined, status: "uncertain", stopped: "stopped" });
+  assert.deepEqual({ ...lines[1], polls: undefined }, { restartCode: 0, sends: 1, polls: undefined, status: "uncertain" });
+  assert.ok(lines[1].polls > lines[0].polls);
 });
 test("failed notification receipt persistence does not emit a persisted-failure diagnostic or resend", async t => {
   const f = harness(t), diagnostics: string[] = [];
@@ -336,14 +349,13 @@ test("failed notification receipt persistence does not emit a persisted-failure 
 test("run loop reports a sanitized send failure even without consuming the delivery summary", async t => {
   const f = harness(t), diagnostics: string[] = [], cycleErrors: Error[] = [];
   f.hooks.send = () => { throw new TypeError("private token/context/text/chatId"); };
-  f.hooks.poll = () => { f.gateway.stop(); };
+  f.hooks.receipt = () => { f.gateway.stop(); };
   t.mock.method(nodeFs, "writeSync", (_fd: number, chunk: string) => { diagnostics.push(chunk); return Buffer.byteLength(chunk); });
   await f.gateway.runLoop(0, error => cycleErrors.push(error), error => cycleErrors.push(error));
   assert.equal(cycleErrors.length, 0);
   assert.equal(diagnostics.length, 1);
   assert.equal(JSON.parse(diagnostics[0]).errorType, "NetworkError");
   assert.equal([...f.records.values()][0].status, "uncertain");
-  assert.equal(f.state.syncBuf, "new-cursor");
   assert.equal(f.sends.length, 1);
 });
 test("accepted send with exhausted receipt retries leaves claim queryable, never sends again", async t => {
@@ -353,12 +365,12 @@ test("accepted send with exhausted receipt retries leaves claim queryable, never
   assert.equal([...f.records.values()][0].status, "claimed");
   await f.gateway.deliverNotificationsOnce(); assert.equal(f.sends.length, 1);
 });
-test("run loop checks notifications before inbound poll and isolates notification errors", async t => {
+test("run loop starts notification work alongside inbound polling and isolates notification errors", async t => {
   const f = harness(t); const order: string[] = [], errors: Error[] = [];
   f.hooks.pending = () => { order.push("notification"); throw new Error("list unavailable"); };
-  f.hooks.poll = () => { order.push("poll"); f.gateway.stop(); };
-  await f.gateway.runLoop(0, () => { assert.fail("inbound poll should succeed"); }, error => errors.push(error));
-  assert.deepEqual(order, ["notification", "poll"]); assert.equal(errors.length, 1);
+  f.hooks.poll = () => { order.push("poll"); };
+  await f.gateway.runLoop(0, () => { assert.fail("inbound poll should succeed"); }, error => { errors.push(error); f.gateway.stop(); });
+  assert.ok(order.includes("notification")); assert.ok(order.includes("poll")); assert.equal(errors.length, 1);
   assert.equal(f.state.syncBuf, "new-cursor");
 });
 test("stop remains terminal when runLoop is called after stopping", async t => {
@@ -366,7 +378,7 @@ test("stop remains terminal when runLoop is called after stopping", async t => {
   await f.gateway.runLoop(0);
   assert.equal(f.requests.length, 0); assert.equal(f.sends.length, 0);
 });
-test("notification processing has a finite healthy phase without fabricating inbound success or counts", async t => {
+test("notification work does not create a processing phase or hide stale inbound health", async t => {
   t.mock.timers.enable({ apis: ["Date"], now: 1800000000000 });
   const f = harness(t);
   const healthPath = path.join(path.dirname(f.statePath), "health.json");
@@ -377,15 +389,11 @@ test("notification processing has a finite healthy phase without fabricating inb
   f.hooks.pending = async () => new Promise<void>(resolve => { release = resolve; });
   const pending = gateway.deliverNotificationsOnce();
   t.mock.timers.tick(120001);
-  assert.equal(checkGatewayHealth(healthPath).ok, true);
-  assert.equal(checkGatewayHealth(healthPath).status, "processing");
+  assert.equal(checkGatewayHealth(healthPath).ok, false);
   const during = JSON.parse(fs.readFileSync(healthPath, "utf8"));
   assert.equal(during.last_poll_succeeded_at, before.last_poll_succeeded_at);
   assert.equal(during.processed_message_count, 0);
-  assert.equal(Date.parse(during.phase.deadline_at) - Date.parse(during.phase.started_at), 235000);
-  t.mock.timers.tick(115000);
-  assert.equal(checkGatewayHealth(healthPath).ok, false);
-  assert.equal(checkGatewayHealth(healthPath).reason, "ProcessingDeadlineExceeded");
+  assert.equal(during.phase, null);
   release(); await pending;
   const after = JSON.parse(fs.readFileSync(healthPath, "utf8"));
   assert.equal(after.phase, null);
@@ -404,6 +412,46 @@ test("notification cleanup does not erase a concurrent inbound polling health ph
   const phase = JSON.parse(fs.readFileSync(healthPath, "utf8")).phase;
   release(); await pending;
   assert.deepEqual(JSON.parse(fs.readFileSync(healthPath, "utf8")).phase, phase);
+});
+
+test("stop after the first notification chunk cancels the remaining chunks and records uncertainty", async t => {
+  const item = notification();
+  item.text = "# 结果\n" + "完整输出🚀\n".repeat(30);
+  const f = harness(t, { items: [item] });
+  const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink,
+    notifications: true, splitMaxChars: 32 });
+  f.hooks.send = () => { gateway.stop(); return { ret: 0 }; };
+  assert.deepEqual(await gateway.deliverNotificationsOnce(), { accepted: 0, uncertain: 1, skipped: 0 });
+  assert.equal(f.sends.length, 1);
+  assert.equal(f.records.get(item.id)?.status, "uncertain");
+  const restartedState = new StateManager(f.accountPath, f.statePath);
+  const restarted = new WeChatGateway({ stateManager: restartedState, controller: f.controller, ilink: f.ilink,
+    notifications: true, splitMaxChars: 32 });
+  await restarted.deliverNotificationsOnce();
+  assert.equal(f.sends.length, 1);
+});
+
+test("blocked notification work does not prevent inbound polling or replace its health phase", async t => {
+  const f = harness(t);
+  const healthPath = path.join(path.dirname(f.statePath), "health.json");
+  const health = new HealthTracker(healthPath); health.startRun();
+  const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink,
+    notifications: true, healthTracker: health });
+  let release!: () => void;
+  let notificationStarted = false;
+  f.hooks.pending = () => new Promise<void>(resolve => { notificationStarted = true; release = resolve; });
+  let polls = 0;
+  f.hooks.poll = () => {
+    polls++;
+    assert.equal(notificationStarted, true);
+    assert.equal(JSON.parse(fs.readFileSync(healthPath, "utf8")).phase.name, "polling");
+    gateway.stop();
+    release();
+  };
+  await gateway.runLoop(0);
+  assert.equal(polls, 1);
+  assert.equal(f.sends.length, 0);
+  assert.equal(f.records.get(notification().id)?.status, "pending");
 });
 test("CLI poll-once processes notifications only after a successful inbound cycle", async t => {
   const f = harness(t);

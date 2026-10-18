@@ -16,7 +16,11 @@ var errDesktopControlStateJSON = errors.New("invalid desktop control snapshot JS
 // Validate the whole state before allocating turns or arbitrary item trees.
 // Unknown fields count too; skipping them must not bypass the resource budget.
 func validateDesktopControlState(raw []byte) error {
-	if len(raw) > desktopInboundFrameLimit {
+	return validateDesktopControlStateWithLimit(raw, desktopInboundFrameLimit)
+}
+
+func validateDesktopControlStateWithLimit(raw []byte, limit int) error {
+	if limit <= 0 || len(raw) > limit {
 		return errDesktopControlStateLimit
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -72,7 +76,11 @@ func scanDesktopControlValue(decoder *json.Decoder, depth int, count *int) error
 }
 
 func decodeDesktopControlState(raw []byte) (*desktopControlState, error) {
-	if err := validateDesktopControlState(raw); err != nil {
+	return decodeDesktopControlStateWithLimit(raw, desktopInboundFrameLimit)
+}
+
+func decodeDesktopControlStateWithLimit(raw []byte, limit int) (*desktopControlState, error) {
+	if err := validateDesktopControlStateWithLimit(raw, limit); err != nil {
 		return nil, err
 	}
 	var state *desktopControlState

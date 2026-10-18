@@ -8,6 +8,7 @@ import * as path from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { createHash } from "node:crypto";
 import { StateManager, writePrivateJsonSync } from "../../src/runtime/state.js";
 import type { Notification } from "../../src/controller/notification-contract.js";
 import { claimed, notification } from "../fixtures/notification-fixtures.js";
@@ -19,6 +20,7 @@ const POLL_TIMEOUT_MS = 500;
 const BODY_LIMIT_BYTES = 64 * 1024;
 const CHAT = "synthetic-private-chat";
 const CONTEXT = "synthetic-private-context";
+const TYPING_TICKET = "synthetic-private-typing-ticket";
 const WECHAT_TOKEN = "synthetic-private-wechat-token";
 const CONTROLLER_TOKEN = "synthetic-private-controller-token";
 const INBOUND_TEXT = "synthetic private inbound text";
@@ -27,7 +29,7 @@ const NOTICE_TEXT = "synthetic private notification text";
 const UPSTREAM_ERROR = "synthetic private upstream errmsg";
 const MESSAGE_ID = "synthetic-inbound-message";
 const CLI_PATH = fileURLToPath(new URL("../../src/index.js", import.meta.url));
-const PRIVATE_VALUES = [CHAT, CONTEXT, WECHAT_TOKEN, CONTROLLER_TOKEN, INBOUND_TEXT, REPLY_TEXT, NOTICE_TEXT, UPSTREAM_ERROR];
+const PRIVATE_VALUES = [CHAT, CONTEXT, TYPING_TICKET, WECHAT_TOKEN, CONTROLLER_TOKEN, INBOUND_TEXT, REPLY_TEXT, NOTICE_TEXT, UPSTREAM_ERROR];
 
 type Options = {
   sendBody?: unknown;
@@ -147,13 +149,31 @@ async function fixture(t: TestContext, options: Options = {}) {
       }] : [] });
       return;
     }
+    if (req.url === "/ilink/bot/getconfig") {
+      assert.equal(body.ilink_user_id, CHAT);
+      assert.equal(body.context_token, CONTEXT);
+      json(res, { ret: 0, typing_ticket: TYPING_TICKET });
+      return;
+    }
+    if (req.url === "/ilink/bot/sendtyping") {
+      assert.equal(body.ilink_user_id, CHAT);
+      assert.equal(body.typing_ticket, TYPING_TICKET);
+      assert.ok(body.status === 1 || body.status === 2);
+      json(res, { ret: 0 });
+      return;
+    }
     assert.equal(req.url, "/ilink/bot/sendmessage");
     const msg = body.msg as Record<string, unknown>;
     assert.equal(msg.to_user_id, CHAT); assert.equal(msg.context_token, CONTEXT);
     assert.equal(msg.message_type, 2); assert.equal(msg.message_state, 2);
     const text = ((msg.item_list as { text_item: { text: string } }[])[0]).text_item.text;
     assert.ok(text === NOTICE_TEXT || text === REPLY_TEXT);
-    if (text === NOTICE_TEXT) assert.equal(msg.client_id, `super-leader:notification:${item.id}`);
+    if (text === NOTICE_TEXT) {
+      const digest = createHash("sha256").update(JSON.stringify([
+        state.getLoginFingerprint(), CHAT, `notification:${item.id}`, 0,
+      ])).digest("hex").slice(0, 24);
+      assert.equal(msg.client_id, `super-leader:${digest}`);
+    }
     sends.push(msg);
     json(res, options.sendBody ?? {}, options.sendStatus ?? 200);
   }));
@@ -161,6 +181,11 @@ async function fixture(t: TestContext, options: Options = {}) {
   const controller = http.createServer(handle(async (req, res) => {
     assert.equal(req.headers.authorization, `Bearer ${CONTROLLER_TOKEN}`); assert.equal(req.method, "POST");
     const body = await readBody(req);
+    if (req.url === "/v1/chats/authorize") {
+      assert.deepEqual(body, { chatId: CHAT });
+      json(res, { allowed: true });
+      return;
+    }
     if (req.url === "/v1/messages") {
       assert.deepEqual(body, { chatId: CHAT, messageId: MESSAGE_ID, text: INBOUND_TEXT });
       forwards.push(body);

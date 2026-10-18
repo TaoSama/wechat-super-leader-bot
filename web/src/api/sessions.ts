@@ -39,12 +39,24 @@ export async function fetchSessionHistory(nodeId: string, sessionId: string, cur
 export async function sendSessionMessage(nodeId: string, sessionId: string, prompt: string, requestId: string, signal?: AbortSignal): Promise<CommandRecord> {
   const raw = await sessionRequest(`${sessionPath(nodeId, sessionId)}/messages`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json", "X-Super-Leader-Intent": "session-message" }, body: JSON.stringify({ prompt, requestId }), signal });
   const command = normalizeCommand(raw);
-  if (!command || command.nodeId !== nodeId || command.sessionId !== sessionId) throw new Error("发送回执与当前会话不匹配，需核查");
+  if (!command || command.action !== "send" || command.nodeId !== nodeId || command.sessionId !== sessionId) throw new Error("发送回执与当前会话不匹配，需核查");
   return command;
 }
 
 export async function fetchCommand(commandId: string, signal?: AbortSignal): Promise<CommandRecord> {
   const command = normalizeCommand(await sessionRequest(`/v1/commands/${encodeURIComponent(commandId)}`, { method: "GET", headers: { Accept: "application/json" }, signal }));
   if (!command || command.commandId !== commandId) throw new Error("命令回执格式无效");
+  return command;
+}
+
+export async function fetchSessionMessage(nodeId: string, sessionId: string, requestId: string, signal?: AbortSignal): Promise<CommandRecord> {
+  const command = normalizeCommand(await sessionRequest(`${sessionPath(nodeId, sessionId)}/messages/${encodeURIComponent(requestId)}`, { method: "GET", headers: { Accept: "application/json" }, signal }));
+  if (!command || command.action !== "send" || command.nodeId !== nodeId || command.sessionId !== sessionId) throw new Error("原请求回执与当前会话不匹配，需核查");
+  return command;
+}
+
+export async function cancelSessionMessage(nodeId: string, sessionId: string, commandId: string, signal?: AbortSignal): Promise<CommandRecord> {
+  const command = normalizeCommand(await sessionRequest(`${sessionPath(nodeId, sessionId)}/messages`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json", "X-Super-Leader-Intent": "session-message" }, body: JSON.stringify({ cancelCommandId: commandId }), signal }));
+  if (!command || command.action !== "send" || command.commandId !== commandId || command.nodeId !== nodeId || command.sessionId !== sessionId) throw new Error("取消回执与当前请求不匹配，需核查");
   return command;
 }

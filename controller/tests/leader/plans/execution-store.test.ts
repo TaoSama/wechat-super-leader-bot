@@ -51,7 +51,7 @@ class FakeExecutionPool {
     this.queries.push(normalized);
     if (normalized.startsWith("SELECT pg_advisory_xact_lock(") || normalized.startsWith("SELECT id FROM leader_goals WHERE chat_id=$1")) return this.result([]);
     if (normalized === "SELECT * FROM leader_notifications ORDER BY id FOR UPDATE") return this.result([]);
-    if (/^(CREATE (UNIQUE )?(TABLE|INDEX)|ALTER TABLE|DELETE FROM node_sessions|UPDATE commands)/.test(normalized)) {
+    if (/^(CREATE (UNIQUE )?(TABLE|INDEX)|ALTER TABLE|DROP INDEX|DELETE FROM node_sessions|UPDATE commands|INSERT INTO known_sessions)/.test(normalized)) {
       return this.result([]);
     }
     if (normalized.startsWith("INSERT INTO leader_executions")) {

@@ -104,5 +104,5 @@ test("multipart replies preserve code indentation, blank lines and spaces exactl
       assert.equal(Buffer.from(chunk, "utf8").toString("utf8"), chunk);
     }
   }
-  assert.deepEqual(splitWeChatReply(" \n\t", 2), []);
+  assert.equal(splitWeChatReply(" \n\t", 2).join(""), " \n\t");
 });
