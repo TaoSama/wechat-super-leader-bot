@@ -12,12 +12,13 @@ import { ResultDeliveryService } from "../deliveries/service.js";
 import { FallbackService, MemoryFallbackRepository, PostgresFallbackRepository, parseFallbackEndpoints } from "../fallback/index.js";
 import { NotificationResultCollector } from "../notifications/result-collector.js";
 import { createAutomationRunner } from "./automation-runner.js";
+import { BackgroundExecution } from "./background.js";
 
 const DEFAULT_TICK_MS = 5_000;
 const SUMMARY_RETRY_MS = 60_000;
 const OUTBOX_BATCH_SIZE = 8;
 const DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60_000;
-const WORKERS = ["schedules", "results", "fallback"] as const;
+const WORKERS = ["schedules", "results", "fallback", "background"] as const;
 type WorkerName = typeof WORKERS[number];
 interface WorkerState { timer?: ReturnType<typeof setTimeout>; pending?: Promise<void> }
 
@@ -26,10 +27,13 @@ export class TaskNotifications {
   readonly automations: AutomationService;
   readonly results: ResultDeliveryService;
   readonly fallback: FallbackService;
+  private readonly backgroundExecution?: BackgroundExecution;
+  get background() { return this.backgroundExecution?.service; }
+  get backgroundArtifacts() { return this.backgroundExecution?.artifacts; }
   private readonly pool?: pg.Pool;
   private readonly fallbackRepository;
   private readonly collector: NotificationResultCollector;
-  private readonly workers: Record<WorkerName, WorkerState> = { schedules: {}, results: {}, fallback: {} };
+  private readonly workers: Record<WorkerName, WorkerState> = { schedules: {}, results: {}, fallback: {}, background: {} };
   private stopped = true;
   private nextMaintenance = 0;
   private maintenanceCursor = "";
@@ -47,10 +51,23 @@ export class TaskNotifications {
       signingSecret: createHash("sha256").update(`task-results:${config.controllerToken}`).digest("hex"),
       fileMaxBytes: config.taskNotifications?.fileMaxBytes, retentionMs: config.taskNotifications?.retentionMs,
     });
+    this.backgroundExecution = config.background
+      ? new BackgroundExecution(config, schedules, hub, this.pool, now, changed) : undefined;
+    const sessionRunner = createAutomationRunner(store, commands, chatId => config.allowedChatIds.has(chatId), async schedule =>
+      (await schedules.get(schedule.id, schedule.chatId))?.status === "active");
     this.automations = new AutomationService({ repository: schedules, now,
       resolveTarget: async (nodeId, sessionId) => discoverAutomationTarget(hub, nodeId, sessionId, now()),
-      runner: createAutomationRunner(store, commands, chatId => config.allowedChatIds.has(chatId), async schedule =>
-        (await schedules.get(schedule.id, schedule.chatId))?.status === "active"),
+      runner: this.backgroundExecution?.wrap(sessionRunner) ?? sessionRunner,
+      validateBackground: this.backgroundExecution ? async (spec, authority) => {
+        if (!config.allowedChatIds.has(authority.chatId)) throw new Error("Background chat is not allowed");
+        for (const source of spec.sources) {
+          const items = await hub.listAutomations(source.nodeId);
+          if (!items.some(item => item.id === source.automationId)) throw new Error("Source automation was not discovered on its configured node");
+        }
+      } : undefined,
+      onFinished: async (run, schedule, outcome) => {
+        if (schedule.kind === "background" && ["completed", "failed"].includes(outcome.status)) await this.backgroundExecution?.accept(run.id);
+      },
       onError: (_error, context) => console.warn("Scheduled task observation failed", { context }),
     });
     this.fallback = new FallbackService(this.fallbackRepository, {
@@ -76,6 +93,7 @@ export class TaskNotifications {
       await initDeliveryTables(this.pool);
     }
     await this.fallbackRepository.init();
+    await this.backgroundExecution?.initialize();
   }
   start(): void {
     if (!this.stopped) return;
@@ -95,7 +113,7 @@ export class TaskNotifications {
     const worker = this.workers[name];
     if (worker.pending) return worker.pending;
     const running = Promise.resolve().then(() => name === "schedules" ? this.automations.tick() :
-      name === "results" ? this.prepareResults() : this.drainFallback());
+      name === "results" ? this.prepareResults() : name === "background" ? this.backgroundExecution?.maintenance() : this.drainFallback());
     worker.pending = running;
     const release = () => { if (worker.pending === running) worker.pending = undefined; };
     void running.then(release, release);
@@ -120,8 +138,8 @@ export class TaskNotifications {
         const plan = await this.results.prepareResult({ id: item.id, key: `automation:${item.id}`, chatId: item.chatId,
           source: { type: "automation", id: item.scheduleId }, kind: item.kind, text: item.text,
           createdAt: item.createdAt, expiresAt: item.expiresAt,
-          business: { category: schedule?.kind === "reminder" ? "reminder" : "scheduled-result",
-            ...(schedule?.retention === "latest" ? { supersedes: `automation:${item.scheduleId}` } : {}) } });
+          business: { category: item.supplement ? "background-result" : schedule?.kind === "reminder" ? "reminder" : "scheduled-result",
+            ...(!item.supplement && schedule?.retention === "latest" ? { supersedes: `automation:${item.scheduleId}` } : {}) } });
         if (plan.status === "preparing") this.preparationRetries.set(plan.id, { retryAt: this.now() + SUMMARY_RETRY_MS, expiresAt: plan.expiresAt });
         await this.automations.repository.markPublished(item.id);
         this.publicationRetries.delete(item.id);
@@ -200,7 +218,9 @@ export class TaskNotifications {
   async stop(): Promise<void> {
     this.stopped = true;
     for (const worker of Object.values(this.workers)) if (worker.timer) { clearTimeout(worker.timer); worker.timer = undefined; }
-    await Promise.allSettled(Object.values(this.workers).map(worker => worker.pending));
-    await this.pool?.end();
+    const backgroundStop = this.backgroundExecution?.stop();
+    await Promise.allSettled([...Object.values(this.workers).map(worker => worker.pending), backgroundStop]);
+    try { await backgroundStop; }
+    finally { await this.pool?.end(); }
   }
 }

@@ -2,6 +2,7 @@ import { CronExpressionParser } from "cron-parser";
 import type { Schedule, CreateSchedule } from "./contracts.js";
 import { AutomationValidationError } from "./errors.js";
 
+export const BACKGROUND_IMMEDIATE_TOLERANCE_MS = 5 * 60_000;
 export function validateTiming(input: CreateSchedule, now: number): number {
   try { new Intl.DateTimeFormat("en", { timeZone: input.timezone }).format(now); }
   catch (error) {
@@ -10,7 +11,9 @@ export function validateTiming(input: CreateSchedule, now: number): number {
   }
   if (input.timing.type === "at") {
     const at = Date.parse(input.timing.at);
-    if (at <= now) throw new AutomationValidationError("Scheduled time must be in the future");
+    if (at <= now && !(input.kind === "background" && at >= now - BACKGROUND_IMMEDIATE_TOLERANCE_MS)) {
+      throw new AutomationValidationError(input.kind === "background" ? "Background time is older than the five-minute immediate-start window" : "Scheduled time must be in the future");
+    }
     return at;
   }
   if (input.timing.expression.trim().split(/\s+/).length !== 5) throw new AutomationValidationError("Cron must contain five fields (minute precision)");

@@ -18,10 +18,20 @@ RUN pnpm install --frozen-lockfile
 COPY web/ ./
 RUN pnpm run build
 
+FROM toolchain AS runtime-certificates
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 FROM node:24-bookworm-slim
+# Install on the target platform so Codex's native sandbox matches the deployed CPU.
+RUN npm install --global @openai/codex@0.163.0 \
+    && mkdir -p /var/lib/super-leader-background /var/lib/super-leader-artifacts \
+    && chown node:node /var/lib/super-leader-background /var/lib/super-leader-artifacts
 # Production dependencies copied across architectures must remain platform-independent.
-ENV NODE_ENV=production WEB_DIST_DIR=/app/web
+ENV NODE_ENV=production WEB_DIST_DIR=/app/web SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 WORKDIR /app
+COPY --from=runtime-certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=controller-build --chown=node:node /work/controller/package.json ./package.json
 COPY --from=controller-build --chown=node:node /work/controller/node_modules ./node_modules
 COPY --from=controller-build --chown=node:node /work/controller/dist ./dist
