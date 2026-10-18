@@ -308,6 +308,12 @@ node scripts/verify.mjs --list              # 查看计划，不运行检查
 验证清除真实业务配置与 LIVE 开关，使用合成模型、微信和桌面目标；
 不部署或触达正式会话。CI 在 Ubuntu 运行全量、macOS 运行 unit，使用 Node 24。
 
+真模型任务确认可单独运行 `node tests/live/task-confirmation.mjs --run --postgres`。
+预先通过环境提供 `LIVE_MODEL_BASE_URL`（HTTPS `/v1`）及 `LIVE_MODEL_API_KEY`；脚本不读取凭证文件。
+它使用隔离 Controller、临时 PostgreSQL 和合成执行会话，确认正文由 `gpt-6.1-sol` 生成，
+核对确认前读取本次回执及匹配轮次历史、accepted 不冒充执行、后续查询不重派及北京时间换算。
+它不请求微信或真实桌面会话，匿名结果保存在 `.runtime/verification/task-confirmation-live.json`。
+
 | 回执 | 能证明什么 |
 | --- | --- |
 | `queued` | 尚未投递，等待原会话可用；允许取消，超过有效期不会发送 |

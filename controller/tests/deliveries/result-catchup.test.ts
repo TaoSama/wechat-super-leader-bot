@@ -22,8 +22,10 @@ function fixture(model?: LeaderModel) {
 
 it("resumes several original outcomes as one complete delivery while preserving original Web artifacts", async () => {
   const { service, repository, create, now } = fixture();
-  const first = await create("# 研究结果一\n\n**完整内容 A** 😀");
-  const second = await create("# 研究结果二\n\n完整内容 B");
+  const firstText = "# 研究结果一\n\n**完整内容 A** 😀";
+  const secondText = "# 研究结果二\n\n完整内容 B";
+  const first = await create(firstText);
+  const second = await create(secondText);
   await repository.markChatWaiting(CHAT, "window_closed", now());
   const counts = await Promise.all(Array.from({ length: 8 }, () => service.resumeChat(CHAT, "inbound-one")));
   expect(counts.every(count => count === 1)).toBe(true);
@@ -32,9 +34,9 @@ it("resumes several original outcomes as one complete delivery while preserving 
   expect(pending[0]).toMatchObject({ mode: "text", source: { type: "catchup" } });
   expect(pending[0].messages.join("")).toContain(first.messages[0]);
   expect(pending[0].messages.join("")).toContain(second.messages[0]);
-  for (const original of [first, second]) {
+  for (const [original, rawText] of [[first, firstText], [second, secondText]] as const) {
     expect((await repository.get(original.id, now()))?.status).toBe("superseded");
-    expect((await repository.getArtifact(original.artifact.id))?.bytes.toString("utf8")).toBe(original.messages[0]);
+    expect((await repository.getArtifact(original.artifact.id))?.bytes.toString("utf8")).toBe(rawText);
   }
   const materialized = await service.materialize(pending[0].id);
   expect(materialized).not.toHaveProperty("catchupSourceIds");

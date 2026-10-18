@@ -203,16 +203,23 @@ globalThis.fetch = async (input, init) => {
     assert.equal((await state()).context_budgets[CHAT].remaining, 9);
     assert(events.includes('typing'));
 
-    const threeText = '甲'.repeat(11400), three = await prepare(threeText), beforeThree = sent.length;
+    const threeDisplayText = '甲'.repeat(11400), threeText = `**${threeDisplayText}**`;
+    const three = await prepare(threeText), beforeThree = sent.length;
     await runGateway();
     assert.equal((await getPlan(three.id)).status, 'accepted');
     assert.deepEqual(sent.slice(beforeThree).map(textOf).map(text => text.length), [3800, 3800, 3800]);
-    assert.equal(sent.slice(beforeThree).map(textOf).join(''), threeText);
+    assert.equal(sent.slice(beforeThree).map(textOf).join(''), threeDisplayText,
+      'Emphasis spanning all three messages was not rendered before the immutable split');
+    const threeFull = await fetch(`${controller.base}/v1/deliveries/${three.id}/full`, {
+      headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(HTTP_MS),
+    });
+    assert.equal(threeFull.status, 200);
+    assert.equal(await threeFull.text(), threeText, 'Displayed text replaced the original Markdown artifact');
     assert.equal(modelRequests.filter(item => item.summary).length, 0);
-    console.log('PASS actual Gateway CLI sends three complete texts, shared persisted budget charged per send, typing emitted');
+    console.log('PASS actual Gateway CLI sends three complete rendered texts; cross-message emphasis removed before frozen split, raw Markdown artifact retained, shared budget and typing verified');
 
     await input('刷新窗口');
-    const fileText = '乙'.repeat(11401), file = await prepare(fileText), beforeFile = sent.length;
+    const fileText = '# 完整成果\n\n**' + '乙'.repeat(11401) + '**', file = await prepare(fileText), beforeFile = sent.length;
     await runGateway();
     assert.equal((await getPlan(file.id)).status, 'ready');
     assert.equal(sent.length, beforeFile, 'Result dispatch interval was bypassed by CLI restart');
