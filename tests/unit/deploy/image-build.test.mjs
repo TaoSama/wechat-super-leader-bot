@@ -105,7 +105,8 @@ test('runtime dependency roots allow reviewed JavaScript packages and target-sel
   const controller = JSON.parse(readFileSync(new URL('../../../controller/package.json', import.meta.url), 'utf8'));
   const gateway = JSON.parse(readFileSync(new URL('../../../gateway/package.json', import.meta.url), 'utf8'));
   assert.deepEqual(controller.dependencies, {
-    compression: '^1.8.2', dotenv: '^18.0.6', express: '^5.2.1', pg: '^8.23.1', ws: '^8.22.0', zod: '^4.6.5',
+    compression: '^1.8.2', 'cron-parser': '^5.10.2', dotenv: '^18.0.6', express: '^5.2.1',
+    pg: '^8.23.1', ws: '^8.22.0', zod: '^4.6.5',
   }, 'new runtime dependencies require a platform-independence review');
   for (const manifest of [controller, gateway]) {
     assert.deepEqual(manifest.optionalDependencies ?? {}, {});
