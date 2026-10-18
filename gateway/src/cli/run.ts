@@ -28,7 +28,9 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
   }
 
   const validatedControllerUrl = validateControllerUrl(opts.controllerUrl, opts.allowInsecureController);
-  const stateManager = new StateManager(opts.credentialsPath, opts.statePath);
+  const stateManager = new StateManager(opts.credentialsPath, opts.statePath, {
+    contextWindowMs: opts.contextWindowMs, sendBudget: opts.sendBudget, outboxLimit: opts.outboxLimit,
+  });
   const ilink = new ILinkClient({
     stateManager,
     configuredBaseUrl: opts.wechatBaseUrl,

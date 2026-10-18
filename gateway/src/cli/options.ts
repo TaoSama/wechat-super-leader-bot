@@ -2,7 +2,9 @@ import { parseArgs } from "node:util";
 import { resolvePath } from "../runtime/state.js";
 import { DEFAULT_MESSAGE_MAX_CHARS } from "../wechat/markdown.js";
 import { DEFAULT_HEALTH_MAX_AGE_MS } from "../runtime/health.js";
-import { MAX_POLL_TIMEOUT_MS } from "../runtime/budgets.js";
+import { DEFAULT_POLL_TIMEOUT_MS, MAX_POLL_TIMEOUT_MS, POLL_NETWORK_MARGIN_MS } from "../runtime/budgets.js";
+import { DEFAULT_CONTEXT_POLICY, MAX_CONTEXT_WINDOW_MS, MAX_SEND_BUDGET, MAX_OUTBOX_LIMIT,
+  validateContextPolicy } from "../runtime/context-policy.js";
 
 export type GatewayCliMode = "check" | "establish-baseline" | "poll-once" | "run" | "healthcheck";
 
@@ -26,6 +28,9 @@ export interface ParsedCliOptions {
   pollIntervalMs: number;
   pollTimeoutMs: number;
   maxChars: number;
+  contextWindowMs: number;
+  sendBudget: number;
+  outboxLimit: number;
   notifications: boolean;
 }
 
@@ -53,8 +58,11 @@ export function getHelpText(): string {
     "      --baseline-max-batches <n> Max batches to drain during baseline (env: GATEWAY_BASELINE_MAX_BATCHES, default: 20)",
     "      --wechat-base-url <url>    Override WeChat iLink base URL (env: WECHAT_ILINK_BASE_URL)",
     "      --poll-interval-ms <ms>    Interval between poll cycles in ms (env: GATEWAY_POLL_INTERVAL_MS, default: 1000)",
-    "      --poll-timeout-ms <ms>     Timeout for iLink getupdates in ms (env: GATEWAY_POLL_TIMEOUT_MS, default: 35000)",
-    "      --max-chars <count>        Max characters per WeChat message chunk (default: 4000)",
+    `      --poll-timeout-ms <ms>     Initial iLink long-poll budget (env: GATEWAY_POLL_TIMEOUT_MS, default: ${DEFAULT_POLL_TIMEOUT_MS}; HTTP adds ${POLL_NETWORK_MARGIN_MS}ms; valid server hints update the next poll)`,
+    `      --max-chars <count>        Max UTF-16 units per WeChat chunk (env: GATEWAY_MAX_CHARS, default: ${DEFAULT_MESSAGE_MAX_CHARS}; positive safe integer; CLI overrides env)`,
+    `      --context-window-ms <ms>   Local reply window (env: GATEWAY_CONTEXT_WINDOW_MS, default: ${DEFAULT_CONTEXT_POLICY.contextWindowMs}; app resource maximum: ${MAX_CONTEXT_WINDOW_MS})`,
+    `      --send-budget <count>      Local sends per inbound window (env: GATEWAY_SEND_BUDGET, default: ${DEFAULT_CONTEXT_POLICY.sendBudget}; app resource maximum: ${MAX_SEND_BUDGET})`,
+    `      --outbox-limit <count>     Local deferred reply capacity (env: GATEWAY_OUTBOX_LIMIT, default: ${DEFAULT_CONTEXT_POLICY.outboxLimit}; app resource maximum: ${MAX_OUTBOX_LIMIT})`,
     "      --notifications            Deliver plan and goal state notifications (env: GATEWAY_NOTIFICATIONS=true, default: false)",
   ].join("\n");
 }
@@ -82,6 +90,9 @@ export function parseGatewayCli(args: string[], env: NodeJS.ProcessEnv = process
       "poll-interval-ms": { type: "string" },
       "poll-timeout-ms": { type: "string" },
       "max-chars": { type: "string" },
+      "context-window-ms": { type: "string" },
+      "send-budget": { type: "string" },
+      "outbox-limit": { type: "string" },
       notifications: { type: "boolean" },
     },
   });
@@ -139,15 +150,20 @@ export function parseGatewayCli(args: string[], env: NodeJS.ProcessEnv = process
     throw new Error("Invalid poll-interval-ms: must be a non-negative number");
   }
 
-  const pollTimeoutMs = Number(values["poll-timeout-ms"] ?? env.GATEWAY_POLL_TIMEOUT_MS ?? "35000");
+  const pollTimeoutMs = Number(values["poll-timeout-ms"] ?? env.GATEWAY_POLL_TIMEOUT_MS ?? String(DEFAULT_POLL_TIMEOUT_MS));
   if (!Number.isSafeInteger(pollTimeoutMs) || pollTimeoutMs <= 0 || pollTimeoutMs > MAX_POLL_TIMEOUT_MS) {
     throw new Error(`Invalid poll-timeout-ms: must be a positive integer up to ${MAX_POLL_TIMEOUT_MS}`);
   }
 
-  const maxChars = Number(values["max-chars"] ?? String(DEFAULT_MESSAGE_MAX_CHARS));
-  if (!Number.isFinite(maxChars) || maxChars <= 0) {
-    throw new Error("Invalid max-chars: must be a positive integer");
+  const maxChars = Number(values["max-chars"] ?? env.GATEWAY_MAX_CHARS ?? String(DEFAULT_MESSAGE_MAX_CHARS));
+  if (!Number.isSafeInteger(maxChars) || maxChars <= 0) {
+    throw new Error("Invalid max-chars: must be a positive safe integer");
   }
+  const policy = validateContextPolicy({
+    contextWindowMs: Number(values["context-window-ms"] ?? env.GATEWAY_CONTEXT_WINDOW_MS ?? DEFAULT_CONTEXT_POLICY.contextWindowMs),
+    sendBudget: Number(values["send-budget"] ?? env.GATEWAY_SEND_BUDGET ?? DEFAULT_CONTEXT_POLICY.sendBudget),
+    outboxLimit: Number(values["outbox-limit"] ?? env.GATEWAY_OUTBOX_LIMIT ?? DEFAULT_CONTEXT_POLICY.outboxLimit),
+  });
 
   return {
     help: Boolean(values.help),
@@ -169,6 +185,7 @@ export function parseGatewayCli(args: string[], env: NodeJS.ProcessEnv = process
     pollIntervalMs,
     pollTimeoutMs,
     maxChars,
+    ...policy,
     notifications: values.notifications ?? env.GATEWAY_NOTIFICATIONS === "true",
   };
 }

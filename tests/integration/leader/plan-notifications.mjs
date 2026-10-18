@@ -7,6 +7,7 @@ import { PLAN_CHAT } from './plan-execution.mjs';
 
 const HTTP_MS = 5000;
 const MAX_DRAINS = 128;
+const SYNTHETIC_SEND_BUDGET = 1_000;
 const ILINK_BASE = 'https://ilink.notification.invalid';
 const TEXT_ITEM_TYPE = 1;
 const notificationPath = id => '/v1/notifications/' + id;
@@ -92,7 +93,7 @@ export async function verifyPlanNotifications({ base, token, request, store, res
   };
   try {
     writePrivateJsonSync(credentials, { token: 'synthetic-notification-token', accountId: 'synthetic-account', baseUrl: ILINK_BASE });
-    state = new StateManager(credentials, statePath);
+    state = new StateManager(credentials, statePath, { sendBudget: SYNTHETIC_SEND_BUDGET });
     state.markBaselineEstablished();
     assert.equal((await get(planIds.completed)).kind, 'completed', 'Exact real plan completion has no notification');
     assert.equal((await get(planIds.failed)).kind, 'failed');
@@ -129,8 +130,8 @@ export async function verifyPlanNotifications({ base, token, request, store, res
     await makeGateway().deliverNotificationsOnce(); // No chat context: no claim.
     assert.equal(sent.length, 0);
     assert.deepEqual((await pending()).body.items.map(item => item.id), before);
-    state.setContextToken(PLAN_CHAT, 'synthetic-context');
-    state.saveState();
+    assert.equal(state.recordInboundContext('synthetic-plan-notification-input', PLAN_CHAT,
+      Date.now(), true, 'synthetic-context'), true);
     await makeGateway({ enabled: false }).deliverNotificationsOnce();
     assert.equal(sent.length, 0, 'Default-off control ignored');
 
@@ -168,10 +169,17 @@ export async function verifyPlanNotifications({ base, token, request, store, res
     const lostRecord = await get(lostClaim);
     assert.equal(lostRecord.status, 'claimed');
     assert.equal((await store.getNotification(lostClaim, lostRecord.attemptExpiresAt)).status, 'uncertain');
+    assert.equal((await get(lostClaim)).status, 'claimed', 'Future-time read projection changed the current stored claim');
     await restart(true);
-    const restored = new StateManager(credentials, statePath);
-    await makeGateway({ state: restored }).deliverNotificationsOnce();
-    assert.equal(sent.length, countBeforeLoss, 'Restart replayed a claimed notification');
+    const restored = new StateManager(credentials, statePath, { sendBudget: SYNTHETIC_SEND_BUDGET });
+    const recoveredGateway = makeGateway({ state: restored });
+    assert.equal((await recoveredGateway.deliverNotificationsOnce()).accepted, 1);
+    assert.equal(sent.length, countBeforeLoss + 1, 'Lost claim response did not resume its unattempted send exactly once');
+    const recovered = await get(lostClaim);
+    assert.equal(recovered.status, 'accepted');
+    assert.equal(recovered.attemptId, lostRecord.attemptId, 'Claim recovery started another attempt');
+    await recoveredGateway.deliverNotificationsOnce();
+    assert.equal(sent.length, countBeforeLoss + 1, 'Restart replayed an acknowledged notification');
 
     for (const mode of ['empty', 'rejected', 'drop']) {
       const id = await addFailure();

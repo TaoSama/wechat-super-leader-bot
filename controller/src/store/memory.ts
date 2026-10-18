@@ -15,8 +15,8 @@ import { notificationCommands, planNotificationRequestIds, goalNotificationReque
 import { notificationSource, sameNotificationSource, createProgressNotification, progressNotificationEligible, progressNotificationBudgetAvailable } from "../notifications/progress.js";
 import {NotificationSourceSchema, type NotificationSource } from "../notifications/contracts.js";
 import { createTerminalNotifications, createGoalNotifications, terminalNotificationPartEligible, readNotification, claimNotificationRecord, receiptNotificationRecord,
-  NotificationIdSchema, NotificationReceiptStatusSchema, validateNotificationTime, NOTIFICATION_BATCH_LIMIT,
-  type Notification, type StoredNotification, type NotificationReceiptStatus } from "../notifications/contracts.js";
+  deferNotificationRecord, NotificationDeferReasonSchema, NotificationIdSchema, NotificationReceiptStatusSchema, validateNotificationTime, NOTIFICATION_BATCH_LIMIT,
+  type Notification, type StoredNotification, type NotificationReceiptStatus, type NotificationDeferReason } from "../notifications/contracts.js";
 import { normalizeExecution, validateExecutionUpdate, executionPageLimit, EXECUTION_PAGE_SIZE,
   type CreateExecutionResult, type ExecutionRecord } from "../leader/plans/execution.js";
 import { assertExecutionConfirmation, normalizeExecutionConfirmation,
@@ -499,6 +499,18 @@ export class MemoryStore implements IStore {
     const current = this.notifications.get(id);
     if (!current) return null;
     const next = receiptNotificationRecord(current, attemptId, status, now);
+    this.notifications.set(id, next);
+    return readNotification(next, now);
+  }
+
+  async deferNotification(id: string, attemptId: string, reason: NotificationDeferReason, now: number): Promise<Notification | null> {
+    NotificationIdSchema.parse(id);
+    NotificationIdSchema.parse(attemptId);
+    NotificationDeferReasonSchema.parse(reason);
+    validateNotificationTime(now);
+    const current = this.notifications.get(id);
+    if (!current) return null;
+    const next = deferNotificationRecord(current, attemptId, reason, now);
     this.notifications.set(id, next);
     return readNotification(next, now);
   }

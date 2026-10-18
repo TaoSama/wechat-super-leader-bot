@@ -1,7 +1,7 @@
 import type { FetchLike } from "../wechat/client.js";
 import { beforeAbort } from "../runtime/abort.js";
 import { NOTIFICATION_LIMIT, NOTIFICATION_CHAT_LIMIT, NOTIFICATION_TIMEOUT_MS, NOTIFICATION_RESPONSE_BYTES, NOTIFICATION_RECEIPT_RETRIES,
-  notificationObject, notificationUuid, parseNotification, type Notification } from "./notification-contract.js";
+  notificationObject, notificationUuid, notificationDeferReason, parseNotification, type Notification, type NotificationDeferReason } from "./notification-contract.js";
 
 class NotificationHttpError extends Error {
   constructor(public readonly status: number) { super(`Controller notification request HTTP ${status}`); }
@@ -86,6 +86,15 @@ export class NotificationClient {
     const item = await this.record("/receipt", id, { attemptId, status }, NOTIFICATION_RECEIPT_RETRIES);
     if (item.attemptId !== attemptId || !["accepted", "uncertain"].includes(item.status) || status === "accepted" && item.status !== "accepted") {
       throw new Error("Controller notification receipt identity mismatch");
+    }
+    return item;
+  }
+  public async deferNotification(id: string, attemptId: string, reason: NotificationDeferReason): Promise<Notification> {
+    notificationUuid(attemptId);
+    notificationDeferReason(reason);
+    const item = await this.record("/defer", id, { attemptId, reason });
+    if (item.status !== "pending" || item.lastDeferredAttemptId !== attemptId || item.lastDeferReason !== reason) {
+      throw new Error("Controller notification defer identity mismatch");
     }
     return item;
   }

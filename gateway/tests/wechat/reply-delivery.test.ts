@@ -5,6 +5,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { StateManager } from "../../src/runtime/state.js";
 import { ILinkClient } from "../../src/wechat/client.js";
+import { ILinkSendReceiptError } from "../../src/wechat/send-receipt.js";
+
+const MULTIPART_TEST_SEND_BUDGET = 1000;
 
 function fixture(t: TestContext) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-reply-delivery-"));
@@ -12,8 +15,9 @@ function fixture(t: TestContext) {
   const credentials = path.join(directory, "account.json");
   const statePath = path.join(directory, "state.json");
   fs.writeFileSync(credentials, JSON.stringify({ token: "synthetic", accountId: "fixture" }));
-  const state = new StateManager(credentials, statePath);
+  const state = new StateManager(credentials, statePath, { sendBudget: MULTIPART_TEST_SEND_BUDGET });
   state.setContextToken("chat", "synthetic-context");
+  state.recordInboundContext("synthetic-inbound-key", "chat", Date.now() - 1000);
   const sent: string[] = [];
   const clientIds: string[] = [];
   let failure: ((index: number) => void | Record<string, unknown>) | undefined;
@@ -31,6 +35,17 @@ function fixture(t: TestContext) {
     fail: (hook: typeof failure) => { failure = hook; },
     client: (manager = state) => new ILinkClient({ stateManager: manager, fetchImpl }) };
 }
+
+test("default delivery preserves over-budget raw Markdown and emoji in 3800-unit chunks", async t => {
+  const f = fixture(t);
+  const original = "中".repeat(3799) + "🚀\n\n```ts\n  **literal**\n```\n\t";
+  const result = await f.client().sendMarkdownReply("chat", original, { deliveryKey: "default-budget" });
+  assert.equal(result, 2);
+  assert.equal(f.sent[0].length, 3799);
+  assert.equal(f.sent.join(""), original);
+  assert.ok(f.sent.every(chunk => chunk.length <= 3800 && Buffer.from(chunk, "utf8").toString("utf8") === chunk));
+  assert.equal(f.state.getReplySentChunks("default-budget"), result);
+});
 
 test("transport preserves full Markdown, Unicode, code fences and whitespace in every mode", async t => {
   const f = fixture(t);
@@ -88,6 +103,44 @@ test("unconfirmed receipt forbids replay rather than treating unknown shape as r
   await assert.rejects(f.client().sendMarkdownReply("chat", "body", { deliveryKey: "receipt" }), /delivery uncertain/);
   assert.equal(f.sent.length, 1);
 });
+
+test("zero-byte HTTP send response persists uncertainty and forbids replay after restart", async t => {
+  const f = fixture(t);
+  let attempts = 0;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    if (!String(input).endsWith("sendmessage")) return f.fetchImpl(input, init);
+    attempts++;
+    return new Response("");
+  };
+  const client = new ILinkClient({ stateManager: f.state, fetchImpl });
+  await assert.rejects(client.sendMarkdownReply("chat", "body", { deliveryKey: "empty-body" }), error => {
+    assert.ok(error instanceof ILinkSendReceiptError);
+    assert.equal(error.reason, "EmptyResponse");
+    return true;
+  });
+  assert.equal(f.state.getReplySentChunks("empty-body"), 0);
+  assert.equal(f.state.replyDeliveries["empty-body"].inFlight, true);
+  const resumed = new StateManager(f.credentials, f.statePath, f.state.policy);
+  assert.equal(resumed.getReplySentChunks("empty-body"), 0);
+  assert.equal(resumed.replyDeliveries["empty-body"].inFlight, true);
+  await assert.rejects(new ILinkClient({ stateManager: resumed, fetchImpl }).sendMarkdownReply("chat", "body", {
+    deliveryKey: "empty-body",
+  }), /delivery uncertain/);
+  assert.equal(attempts, 1);
+});
+
+for (const response of [{}, { errmsg: "" }]) {
+  test(`JSON receipt ${JSON.stringify(response)} accepts delivery and prevents replay after restart`, async t => {
+    const f = fixture(t);
+    f.fail(() => response);
+    assert.equal(await f.client().sendMarkdownReply("chat", "body", { deliveryKey: "receipt-accepted" }), 1);
+    assert.equal(f.state.getReplySentChunks("receipt-accepted"), 1);
+    const resumed = new StateManager(f.credentials, f.statePath);
+    f.fail(undefined);
+    assert.equal(await f.client(resumed).sendMarkdownReply("chat", "body", { deliveryKey: "receipt-accepted" }), 1);
+    assert.equal(f.sent.length, 1);
+  });
+}
 
 test("confirmed send followed by failed checkpoint remains uncertain in memory and on disk", async t => {
   const f = fixture(t);

@@ -1,5 +1,5 @@
 // Conservative client budget in UTF-16 code units; the protocol publishes no text hard limit.
-export const DEFAULT_MESSAGE_MAX_CHARS = 4000;
+export const DEFAULT_MESSAGE_MAX_CHARS = 3800;
 export const TRUNCATION_NOTICE = "\n\n[内容过长，已截断]";
 
 // Budgets use UTF-16 units, but boundaries must not divide surrogate pairs.

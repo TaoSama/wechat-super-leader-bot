@@ -1,4 +1,4 @@
-const CHANNEL_VERSION = "0.3.0";
+import { CHANNEL_VERSION } from "./protocol.js";
 const MAX_TIMEOUT_MS = 1_000;
 const TICKET_TTL_MS = 24 * 60 * 60 * 1_000;
 const FAILURE_BACKOFF_MS = 2_000;

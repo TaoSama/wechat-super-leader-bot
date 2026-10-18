@@ -36,6 +36,7 @@ export async function sendImageReply(options: {
   getImageBytes: (image: ImageAttachment, signal?: AbortSignal) => Promise<Buffer>;
   uploadImage: (bytes: Buffer, signal?: AbortSignal) => Promise<UploadedImageItem>;
   sendImage: (item: UploadedImageItem, clientId: string, signal?: AbortSignal) => Promise<void>;
+  beforeBeginChunk?: () => void;
   signal?: AbortSignal;
   shouldContinue?: () => boolean;
 }): Promise<number> {
@@ -69,6 +70,7 @@ export async function sendImageReply(options: {
       stateManager.getLoginFingerprint(), chatId, deliveryKey, index,
     ])).digest("hex").slice(0, 24)}`;
     // Only sendmessage has an uncertain delivery outcome; a failed upload can safely be repeated.
+    options.beforeBeginChunk?.();
     stateManager.beginReplyChunk(deliveryKey, index);
     try {
       await beforeAbort(options.sendImage(uploaded, clientId, signal), signal);

@@ -3,6 +3,20 @@ import assert from "node:assert/strict";
 import { markdownToWeChat, markdownForWeChat, TRUNCATION_NOTICE, DEFAULT_MESSAGE_MAX_CHARS } from "../../src/wechat/markdown.js";
 import { splitWeChatReply } from "../../src/wechat/client.js";
 
+test("default reply chunks use a 3800 UTF-16-unit budget and preserve full source", () => {
+  assert.equal(DEFAULT_MESSAGE_MAX_CHARS, 3800);
+  const source = "中".repeat(DEFAULT_MESSAGE_MAX_CHARS - 1) + "🚀" + " end\n  **原文**\n";
+  const chunks = splitWeChatReply(source);
+  assert.ok(chunks.length > 1);
+  assert.equal(chunks.join(""), source);
+  assert.equal(chunks[0].length, DEFAULT_MESSAGE_MAX_CHARS - 1);
+  for (const chunk of chunks) {
+    assert.ok(chunk.length <= DEFAULT_MESSAGE_MAX_CHARS);
+    assert.equal(Buffer.from(chunk, "utf8").toString("utf8"), chunk);
+  }
+  assert.deepEqual(splitWeChatReply("🚀".repeat(DEFAULT_MESSAGE_MAX_CHARS / 2)), ["🚀".repeat(DEFAULT_MESSAGE_MAX_CHARS / 2)]);
+});
+
 test("markdownToWeChat strips headers, bullets, and converts links with layout", () => {
   const source = "# 标题\n\n**重点** 与 `代码`\n- 一项\n[文档](https://example.com)";
   const expected = "标题\n\n重点 与 代码\n• 一项\n文档 (https://example.com)";

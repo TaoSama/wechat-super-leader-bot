@@ -18,6 +18,7 @@ export const NotificationIdSchema = z.string().uuid();
 export const NotificationSourceSchema = z.object({ type: z.enum(["plan", "goal"]), id: NotificationIdSchema }).strict();
 export type NotificationSource = z.infer<typeof NotificationSourceSchema>;
 export const NotificationReceiptStatusSchema = z.enum(["accepted", "uncertain"]);
+export const NotificationDeferReasonSchema = z.enum(["budget_exhausted", "window_expired", "context_changed"]);
 const timestamp = z.number().int().nonnegative().refine(Number.isSafeInteger);
 const PlanNotificationKindSchema = z.enum(["completed", "failed", "expired"]);
 const GoalNotificationKindSchema = z.enum(["completed", "blocked", "expired"]);
@@ -28,6 +29,7 @@ const notificationFields = {
   createdAt: timestamp, expiresAt: timestamp,
   status: z.enum(["pending", "claimed", "accepted", "uncertain"]),
   attemptId: NotificationIdSchema.optional(), attemptedAt: timestamp.optional(), attemptExpiresAt: timestamp.optional(),
+  lastDeferredAttemptId: NotificationIdSchema.optional(), lastDeferReason: NotificationDeferReasonSchema.optional(),
 };
 export const StoredNotificationSchema = z.union([
   z.object({ ...notificationFields, source: z.object({ type: z.literal("plan"), id: NotificationIdSchema }).strict(), kind: PlanNotificationKindSchema, part }).strict(),
@@ -40,6 +42,7 @@ export type StoredNotification = z.infer<typeof StoredNotificationSchema>;
 type ReadNotification<T> = T extends StoredNotification ? Omit<T, "status"> & { status: StoredNotification["status"] | "expired" } : never;
 export type Notification = ReadNotification<StoredNotification>;
 export type NotificationReceiptStatus = z.infer<typeof NotificationReceiptStatusSchema>;
+export type NotificationDeferReason = z.infer<typeof NotificationDeferReasonSchema>;
 
 export function validateNotificationTime(now: number): number { return timestamp.parse(now); }
 
@@ -53,6 +56,8 @@ export function normalizeNotification(value: unknown): StoredNotification {
       notification.expiresAt - notification.createdAt !== NOTIFICATION_TTL_MS ||
       (!notification.text.trim() && (notification.kind === "progress" || !notification.part || notification.part.total === 1)) ||
       Buffer.byteLength(notification.text, "utf8") > NOTIFICATION_TEXT_BYTES ||
+      (notification.lastDeferredAttemptId === undefined) !== (notification.lastDeferReason === undefined) ||
+      notification.attemptId !== undefined && notification.attemptId === notification.lastDeferredAttemptId ||
       (notification.status === "pending" ? attemptId !== undefined || attemptedAt !== undefined || attemptExpiresAt !== undefined :
         !attemptId || attemptedAt === undefined || attemptExpiresAt === undefined || attemptedAt < notification.createdAt ||
         attemptedAt >= notification.expiresAt || ![NOTIFICATION_ATTEMPT_MS, LEGACY_NOTIFICATION_ATTEMPT_MS]
@@ -120,11 +125,31 @@ export function claimNotificationRecord(value: StoredNotification, attemptId: st
   NotificationIdSchema.parse(attemptId);
   validateNotificationTime(now);
   const notification = normalizeNotification(value);
-  if (notification.status !== "pending" || notification.expiresAt <= now || now < notification.createdAt || !chatIds.includes(notification.chatId)) {
+  if (notification.status !== "pending" || notification.expiresAt <= now || now < notification.createdAt ||
+      notification.lastDeferredAttemptId === attemptId || !chatIds.includes(notification.chatId)) {
     throw new ConflictError("Notification cannot be claimed");
   }
   return normalizeNotification({ ...notification, status: "claimed", attemptId, attemptedAt: now,
     attemptExpiresAt: Math.min(notification.expiresAt, now + NOTIFICATION_ATTEMPT_MS) });
+}
+
+/** A gateway may release only a known idle attempt; unknown delivery outcomes remain permanent. */
+export function deferNotificationRecord(value: StoredNotification, attemptId: string, reason: NotificationDeferReason,
+  now: number): StoredNotification {
+  NotificationIdSchema.parse(attemptId);
+  NotificationDeferReasonSchema.parse(reason);
+  validateNotificationTime(now);
+  const notification = normalizeNotification(value);
+  if (notification.expiresAt <= now || now < notification.createdAt) throw new ConflictError("Notification cannot be deferred");
+  if (notification.status === "pending" && notification.lastDeferredAttemptId === attemptId && notification.lastDeferReason === reason) {
+    return notification;
+  }
+  if (notification.status !== "claimed" || notification.attemptId !== attemptId ||
+      now < notification.attemptedAt! || notification.attemptExpiresAt! <= now) {
+    throw new ConflictError("Notification defer does not match an active attempt");
+  }
+  const { attemptId: _attemptId, attemptedAt: _attemptedAt, attemptExpiresAt: _attemptExpiresAt, ...retained } = notification;
+  return normalizeNotification({ ...retained, status: "pending", lastDeferredAttemptId: attemptId, lastDeferReason: reason });
 }
 
 export function receiptNotificationRecord(value: StoredNotification, attemptId: string, status: NotificationReceiptStatus, now: number): StoredNotification {

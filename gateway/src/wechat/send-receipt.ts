@@ -1,5 +1,5 @@
 type SendReceiptFailure = "InvalidRet" | "RejectedRet" | "InvalidErrcode" | "RejectedErrcode" |
-  "UnsupportedShape" | "InvalidMessageId" | "InvalidErrorMessage" | "UnconfirmedErrorMessage";
+  "UnsupportedShape" | "InvalidMessageId" | "InvalidErrorMessage" | "UnconfirmedErrorMessage" | "EmptyResponse";
 
 export class ILinkSendReceiptError extends Error {
   constructor(public readonly reason: SendReceiptFailure) {
@@ -10,6 +10,18 @@ export class ILinkSendReceiptError extends Error {
 }
 
 const SEND_RESPONSE_FIELDS = new Set(["ret", "errcode", "message_id", "errmsg"]);
+const LOSSLESS_ID_FIELDS = new Set(["message_id", "msg_id", "svr_id"]);
+
+/** Preserve uint64 identifiers from their JSON source before numeric precision is lost. */
+export function parseILinkJson(raw: string): unknown {
+  return JSON.parse(raw, (key: string, value: unknown, context?: { source?: string }) => {
+    if (LOSSLESS_ID_FIELDS.has(key) && typeof value === "number") {
+      if (context?.source && /^(?:0|[1-9][0-9]*)$/.test(context.source)) return context.source;
+      if (!Number.isSafeInteger(value)) throw new ILinkSendReceiptError("InvalidMessageId");
+    }
+    return value;
+  });
+}
 
 /** An HTTP-success JSON object may omit its zero code; acceptance is not delivery proof. */
 export function validateSendReceipt(response: Record<string, unknown>): void {
@@ -27,8 +39,7 @@ export function validateSendReceipt(response: Record<string, unknown>): void {
   }
   if (Object.hasOwn(response, "message_id")) {
     const id = response.message_id;
-    // Numeric IDs are only shape-checked, never used as lossless identity evidence.
-    if (!(typeof id === "string" && id.trim() || typeof id === "number" && Number.isInteger(id) && id >= 0)) {
+    if (!(typeof id === "string" && id.trim() || typeof id === "number" && Number.isSafeInteger(id) && id >= 0)) {
       throw new ILinkSendReceiptError("InvalidMessageId");
     }
   }

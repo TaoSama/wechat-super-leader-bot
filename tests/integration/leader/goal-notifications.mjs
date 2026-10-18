@@ -8,6 +8,7 @@ import { withTestCleanup } from '../../support/cleanup.mjs';
 
 const PROVIDER = 'https://goal-notification.invalid';
 const MAX_DRAINS = 128;
+const SYNTHETIC_SEND_BUDGET = 1_000;
 
 // Uses goals completed by the real HTTP/model/WS fixture, never invented completion records.
 export async function verifyGoalNotifications({ base, token, request, store, restart, goalIds }) {
@@ -79,7 +80,7 @@ export async function verifyGoalNotifications({ base, token, request, store, res
       return Response.json({ ret: 0, errcode: 0 });
     };
     writePrivateJsonSync(credentials, { token: 'synthetic-token', accountId: 'synthetic-account', baseUrl: PROVIDER });
-    const state = new StateManager(credentials, statePath); state.markBaselineEstablished();
+    const state = new StateManager(credentials, statePath, { sendBudget: SYNTHETIC_SEND_BUDGET }); state.markBaselineEstablished();
     const make = (notifications = true) => {
       const instance = new WeChatGateway({ stateManager: state, notifications,
         controller: new ControllerClient({ controllerUrl: base, controllerToken: token }),
@@ -89,7 +90,7 @@ export async function verifyGoalNotifications({ base, token, request, store, res
     const initial = await pending(); assert(initial.length > 0);
     await make().deliverNotificationsOnce();
     assert.deepEqual(await pending(), initial); assert.equal(sent.length, 0);
-    state.setContextToken(GOAL_CHAT, 'synthetic-goal-context'); state.saveState();
+    state.recordInboundContext('synthetic-goal-budget-input', GOAL_CHAT, Date.now(), true, 'synthetic-goal-context');
     await make(false).deliverNotificationsOnce(); assert.equal(sent.length, 0);
     const gateway = make();
     for (let index = 0; (await pending()).length && index < MAX_DRAINS; index++) await gateway.deliverNotificationsOnce();
