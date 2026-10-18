@@ -60,6 +60,21 @@ test('production tmpfs options form exactly one mount', () => {
   assert.deepEqual(production.services.controller.tmpfs, ['/tmp:size=64m,mode=1777']);
 });
 
+test('small-host memory and worker concurrency overrides preserve the sandbox', () => {
+  const configured = JSON.parse(execCompose([
+    '--env-file', '/dev/null',
+    '-f', fileURLToPath(new URL('../../../compose.yaml', import.meta.url)),
+    '-f', fileURLToPath(new URL('../../../deploy/compose.production.yaml', import.meta.url)),
+    'config', '--format', 'json',
+  ], { encoding: 'utf8', timeout: 10000,
+    env: { ...fakeEnv, CONTROLLER_MEMORY_LIMIT: '512m', BACKGROUND_MAX_CONCURRENT: '1' } })).services.controller;
+  assert.equal(configured.mem_limit, '536870912');
+  assert.equal(configured.environment.BACKGROUND_MAX_CONCURRENT, '1');
+  assert.deepEqual(configured.security_opt, production.services.controller.security_opt);
+  assert.equal(configured.read_only, true);
+  assert.equal(configured.init, true);
+});
+
 test('production uses the explicitly configured console origin', () => {
   assert.equal(production.services.controller.environment.CONSOLE_PUBLIC_URL, 'https://leader.taoai.site');
 });

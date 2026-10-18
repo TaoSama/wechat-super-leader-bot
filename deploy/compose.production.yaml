@@ -20,7 +20,7 @@ services:
       - background-artifacts:/var/lib/super-leader-artifacts
     user: "1000:1000"
     init: true
-    mem_limit: 1536m
+    mem_limit: ${CONTROLLER_MEMORY_LIMIT:-1536m}
     cpus: 2.0
     pids_limit: 512
     read_only: true

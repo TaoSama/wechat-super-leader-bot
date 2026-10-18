@@ -371,6 +371,7 @@ Web 定时任务卡片区分“后台任务”，执行状态与成果投递状�
 | `BACKGROUND_MODEL_NAME` / `BACKGROUND_MODEL_BASE_URL` / `BACKGROUND_MODEL_API_KEY` | 默认复用 Leader 模型配置，可分别覆盖 |
 | `BACKGROUND_TURN_TIMEOUT_MS` | `600000`，单次模型轮次上限，最大 `3600000`；与会话 24 小时保留期独立 |
 | `BACKGROUND_MAX_CONCURRENT` | `2`，全局后台并发数，范围 1–8 |
+| `CONTROLLER_MEMORY_LIMIT` | `1536m`，生产 Compose 的 Controller 容器内存上限；按宿主容量和实测负载配置 |
 
 部署时为工作目录和成果目录分别提供持久可写卷，Controller 重启后保留同一 thread 和防重回执。
 生产 Compose 默认关闭后台执行；启用时设置 `BACKGROUND_WORKER_ROOT=/var/lib/super-leader-background`，
@@ -378,8 +379,10 @@ Web 定时任务卡片区分“后台任务”，执行状态与成果投递状�
 运行时使用独立 HOME/CODEX_HOME 与工作目录写入权限，不继承日常聊天配置；
 生产 Compose 已分别挂载 `background-workers` 和 `background-artifacts`，可通过
 `BACKGROUND_WORKER_VOLUME` / `BACKGROUND_ARTIFACT_VOLUME` 指定现有卷名。
-Controller 使用 UID/GID `1000:1000`、只读根文件系统、1.5 GiB 内存、2 CPU、512 PID 上限和 64 MiB `/tmp`，
+Controller 使用 UID/GID `1000:1000`、只读根文件系统、默认 1.5 GiB 内存上限、2 CPU、512 PID 上限和 64 MiB `/tmp`，
 镜像内固定安装 Codex CLI `0.163.0`。
+资源上限不是预留容量；小内存宿主应先用 `BACKGROUND_MAX_CONCURRENT=1` 验证实际峰值，
+同时为 Gateway、数据库和其他服务留出余量，再设置 `CONTROLLER_MEMORY_LIMIT`。单个小任务的峰值不代表任意脚本的最大占用。
 
 Linux 宿主机必须允许非特权 user namespace，容器使用
 `deploy/security/codex-seccomp.json` 与 `super-leader-codex` AppArmor profile。

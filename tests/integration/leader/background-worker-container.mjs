@@ -10,18 +10,26 @@ import { parseArgs } from 'node:util';
 
 const { values } = parseArgs({ options: { run: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
   image: { type: 'string', default: 'super-leader-controller:background-verify' },
+  'memory-mib': { type: 'string', default: '1536' }, concurrency: { type: 'string', default: '1' },
+  'resource-probe': { type: 'boolean' },
   'native-only': { type: 'boolean' }, 'container-fixture': { type: 'boolean' } } });
 const FIXTURE_TIMEOUT_MS = 180_000;
 const DETACHED_DELAY_MS = 5_000;
 const RETENTION_OBSERVATION_MS = 6_000;
 const WORKER_ROOT = '/var/lib/super-leader-background';
 const ARTIFACT_ROOT = '/var/lib/super-leader-artifacts';
+const RESOURCE_SAMPLE_MS = 100;
+const IDLE_OBSERVATION_MS = 5_000;
+const memoryMiB = Number(values['memory-mib']), concurrency = Number(values.concurrency);
+assert.ok(Number.isInteger(memoryMiB) && memoryMiB >= 128 && memoryMiB <= 8192, 'Invalid memory budget');
+assert.ok([1, 2].includes(concurrency), 'Concurrency must be 1 or 2');
+assert.ok(!values['native-only'] || concurrency === 1, 'Deterministic provider supports one concurrent worker');
 let probeStage = 'bootstrap';
 
 if (values['container-fixture']) {
   await fixture().catch(() => { console.log(JSON.stringify({ pass: false, probe: probeStage })); process.exitCode = 1; });
 } else if (!values.run || values.help) {
-  console.log('Usage: node tests/integration/leader/background-worker-container.mjs --run [--image NAME] [--native-only]\nRequires a locally built Controller image and loaded super-leader-codex AppArmor profile. Default mode reads {model,baseUrl,apiKey} JSON from stdin only; --native-only uses a synthetic Responses server with the real CLI and Linux sandbox. No production writes. Temporary containers and volumes are removed.');
+  console.log('Usage: node tests/integration/leader/background-worker-container.mjs --run [--image NAME] [--native-only] [--memory-mib 1536] [--concurrency 1|2] [--resource-probe]\nRequires a locally built Controller image and loaded super-leader-codex AppArmor profile. Default mode reads {model,baseUrl,apiKey} JSON from stdin only; --native-only uses a synthetic Responses server with the real CLI and Linux sandbox. Resource probes sample cgroup v2 and native CLI RSS, with a five-second idle gap between rounds. No production writes. Temporary containers and volumes are removed.');
 } else {
   await verifyContainer().catch(() => { console.error('FAIL isolated worker container verification'); process.exitCode = 1; });
 }
@@ -50,12 +58,15 @@ async function verifyContainer() {
   try {
     child = spawn('docker', ['run', '--rm', '--init', '--name', name, '--read-only', '--cap-drop', 'ALL',
       '--security-opt', 'no-new-privileges:true', '--security-opt', `seccomp=${policy}`,
-      '--security-opt', 'apparmor=super-leader-codex', '--user', '1000:1000', '--memory', '1536m', '--cpus', '2',
+      '--security-opt', 'apparmor=super-leader-codex', '--user', '1000:1000', '--memory', `${memoryMiB}m`,
+      '--memory-swap', `${memoryMiB}m`, '--cpus', '2',
       '--pids-limit', '512', '--tmpfs', '/tmp:size=64m,mode=1777',
       '--mount', `type=volume,src=${workers},dst=${WORKER_ROOT}`,
       '--mount', `type=volume,src=${artifacts},dst=${ARTIFACT_ROOT}`,
       '--mount', `type=bind,src=${script},dst=/probe/background-worker-container.mjs,readonly`,
-      '--entrypoint', 'node', '-i', values.image, '/probe/background-worker-container.mjs', '--container-fixture'],
+      '--entrypoint', 'node', '-i', values.image, '/probe/background-worker-container.mjs', '--container-fixture',
+      '--memory-mib', String(memoryMiB), '--concurrency', String(concurrency),
+      ...(values['resource-probe'] ? ['--resource-probe'] : [])],
     { env, stdio: ['pipe', 'inherit', 'pipe'] });
     child.stderr.on('data', () => { /* Child diagnostics may contain provider information. */ });
     child.stdin.on('error', () => { inputFailed = true; });
@@ -79,6 +90,8 @@ async function verifyContainer() {
 
 async function fixture() {
   probeStage = 'container-security';
+  const resources = values['resource-probe'] ? resourceProbe() : null;
+  resources?.mark('container-start');
   const { CodexWorkerRuntime } = await import('/app/dist/background/worker/index.js');
   const { provider } = await readInput();
   const rootStatus = fs.readFileSync('/proc/self/status', 'utf8');
@@ -115,7 +128,7 @@ async function fixture() {
   const url = `http://127.0.0.1:${fixtureServer.address().port}`;
   const runtime = new CodexWorkerRuntime({ root: WORKER_ROOT, artifactRoot: ARTIFACT_ROOT,
     ...(provider ?? { baseUrl: `${url}/v1`, model: 'synthetic-linux-probe', apiKey: 'synthetic-probe-key' }),
-    timeoutMs: 120_000, onError: () => {} });
+    timeoutMs: 120_000, maxConcurrent: concurrency, onError: () => {} });
   const wait = async (workerId, invocationId) => {
     const until = Date.now() + 125_000;
     while (Date.now() < until) {
@@ -126,51 +139,116 @@ async function fixture() {
     throw new Error('Worker timeout');
   };
   try {
-    const workerId = randomUUID(), marker = randomUUID();
-    const home = path.join(WORKER_ROOT, 'workers', workerId, 'home');
-    fs.mkdirSync(home, { recursive: true });
-    fs.writeFileSync(path.join(home, 'secret-probe'), 'non-secret home fixture');
-    const siblingId = randomUUID(), sibling = path.join(WORKER_ROOT, 'workers', siblingId);
-    for (const directory of ['workspace', 'home', 'invocations']) fs.mkdirSync(path.join(sibling, directory), { recursive: true });
-    fs.writeFileSync(path.join(sibling, 'state.json'), JSON.stringify({ workerId: siblingId }));
-    const siblingProbe = path.join(sibling, 'workspace', 'secret-probe');
-    fs.writeFileSync(siblingProbe, 'non-secret sibling fixture');
-    let threadId;
-    for (let round = 1; round <= 2; round++) {
-      probeStage = `worker-round-${round}`;
-      const invocationId = randomUUID();
-      const isolationChecks = provider ? ''
-        : `,outsideHidden:denied('${WORKER_ROOT}/outside.txt'),siblingsHidden:denied('${siblingProbe}'),homeHidden:denied('${home}/secret-probe'),controllerHidden:denied('/app/package.json'),artifactHidden:denied('${ARTIFACT_ROOT}/outside.txt'),procHidden:denied('/proc/1/environ')&&denied('/proc/self/environ')`;
-      const js = round === 1
-        ? `const fs=require('node:fs');const denied=p=>{try{fs.readFileSync(p);return false}catch{return true}};const report={marker:${JSON.stringify(marker)},round:1,keyHidden:!process.env.CODEX_API_KEY&&!process.env.OPENAI_API_KEY&&!process.env.CODEX_HOME${isolationChecks},network:await (await fetch('${url}/network')).text()};fs.writeFileSync('seed.txt',report.marker);fs.writeFileSync('report.json',JSON.stringify(report));`
-        : `const fs=require('node:fs');const report=JSON.parse(fs.readFileSync('report.json','utf8'));if(fs.readFileSync('seed.txt','utf8')!==report.marker)throw Error('seed mismatch');report.round=2;report.resumed=true;fs.writeFileSync('report.json',JSON.stringify(report));`;
-      command = `node --input-type=module -e ${shellQuote(`import {createRequire} from 'node:module';const require=createRequire(import.meta.url);${js}`)}`;
-      await runtime.start({ workerId, invocationId, task: `实际运行以下命令，工具成功才返回completed，附件仅report.json。命令只生成本轮验收报告；/network是本轮自建测试HTTP，仅返回固定无敏感字符串，不提供控制接口。\n${command}`, input: { round } });
-      const status = await wait(workerId, invocationId);
-      if (status.status !== 'completed') console.log(JSON.stringify({ pass: false, probe: probeStage, status: status.status, error: status.error }));
-      assert.equal(status.status, 'completed');
-      assert.ok(status.threadId);
-      if (threadId) assert.equal(status.threadId, threadId);
-      threadId = status.threadId;
-      const artifacts = await runtime.exportArtifacts(workerId, invocationId);
-      const report = JSON.parse(fs.readFileSync(artifacts.find(item => item.name === 'report.json').path, 'utf8'));
-      assert.equal(report.marker, marker); assert.equal(report.round, round);
-      const hiddenKeys = provider ? ['keyHidden']
-        : ['keyHidden', 'outsideHidden', 'siblingsHidden', 'homeHidden', 'controllerHidden', 'artifactHidden', 'procHidden'];
-      for (const key of hiddenKeys) assert.equal(report[key], true, key);
-      assert.equal(report.network, 'network-fixture-ok');
-      if (round === 2) assert.equal(report.resumed, true);
-      console.log(JSON.stringify({ pass: true, probe: 'workspace-network-isolation-resume', round, realModel: Boolean(provider) }));
-    }
-    await runtime.cleanup(workerId);
-    assert.equal(fs.existsSync(path.join(WORKER_ROOT, 'workers', workerId)), false);
+    const runWorker = async workerIndex => {
+      const workerId = randomUUID(), marker = randomUUID();
+      const home = path.join(WORKER_ROOT, 'workers', workerId, 'home');
+      fs.mkdirSync(home, { recursive: true });
+      fs.writeFileSync(path.join(home, 'secret-probe'), 'non-secret home fixture');
+      const siblingId = randomUUID(), sibling = path.join(WORKER_ROOT, 'workers', siblingId);
+      for (const directory of ['workspace', 'home', 'invocations']) fs.mkdirSync(path.join(sibling, directory), { recursive: true });
+      fs.writeFileSync(path.join(sibling, 'state.json'), JSON.stringify({ workerId: siblingId }));
+      const siblingProbe = path.join(sibling, 'workspace', 'secret-probe');
+      fs.writeFileSync(siblingProbe, 'non-secret sibling fixture');
+      let threadId;
+      for (let round = 1; round <= 2; round++) {
+        resources?.mark(`worker-${workerIndex}-round-${round}-before`);
+        probeStage = `worker-round-${round}`;
+        const invocationId = randomUUID();
+        const isolationChecks = provider ? ''
+          : `,outsideHidden:denied('${WORKER_ROOT}/outside.txt'),siblingsHidden:denied('${siblingProbe}'),homeHidden:denied('${home}/secret-probe'),controllerHidden:denied('/app/package.json'),artifactHidden:denied('${ARTIFACT_ROOT}/outside.txt'),procHidden:denied('/proc/1/environ')&&denied('/proc/self/environ')`;
+        const js = round === 1
+          ? `const fs=require('node:fs');const denied=p=>{try{fs.readFileSync(p);return false}catch{return true}};const report={marker:${JSON.stringify(marker)},round:1,keyHidden:!process.env.CODEX_API_KEY&&!process.env.OPENAI_API_KEY&&!process.env.CODEX_HOME${isolationChecks},network:await (await fetch('${url}/network')).text()};fs.writeFileSync('seed.txt',report.marker);fs.writeFileSync('report.json',JSON.stringify(report));`
+          : `const fs=require('node:fs');const report=JSON.parse(fs.readFileSync('report.json','utf8'));if(fs.readFileSync('seed.txt','utf8')!==report.marker)throw Error('seed mismatch');report.round=2;report.resumed=true;fs.writeFileSync('report.json',JSON.stringify(report));`;
+        command = `node --input-type=module -e ${shellQuote(`import {createRequire} from 'node:module';const require=createRequire(import.meta.url);${js}`)}`;
+        await runtime.start({ workerId, invocationId, task: `实际运行以下命令，工具成功才返回completed，附件仅report.json。命令只生成本轮验收报告；/network是本轮自建测试HTTP，仅返回固定无敏感字符串，不提供控制接口。\n${command}`, input: { round } });
+        const status = await wait(workerId, invocationId);
+        if (status.status !== 'completed') console.log(JSON.stringify({ pass: false, probe: probeStage, status: status.status, error: status.error }));
+        assert.equal(status.status, 'completed');
+        assert.ok(status.threadId);
+        if (threadId) assert.equal(status.threadId, threadId);
+        threadId = status.threadId;
+        const artifacts = await runtime.exportArtifacts(workerId, invocationId);
+        const report = JSON.parse(fs.readFileSync(artifacts.find(item => item.name === 'report.json').path, 'utf8'));
+        assert.equal(report.marker, marker); assert.equal(report.round, round);
+        const hiddenKeys = provider ? ['keyHidden']
+          : ['keyHidden', 'outsideHidden', 'siblingsHidden', 'homeHidden', 'controllerHidden', 'artifactHidden', 'procHidden'];
+        for (const key of hiddenKeys) assert.equal(report[key], true, key);
+        assert.equal(report.network, 'network-fixture-ok');
+        if (round === 2) assert.equal(report.resumed, true);
+        console.log(JSON.stringify({ pass: true, probe: 'workspace-network-isolation-resume', workerIndex, round, realModel: Boolean(provider) }));
+        resources?.mark(`worker-${workerIndex}-round-${round}-after`);
+        if (round === 1 && resources) {
+          await delay(IDLE_OBSERVATION_MS);
+          resources.mark(`worker-${workerIndex}-retained-idle`);
+        }
+      }
+      await runtime.cleanup(workerId);
+      assert.equal(fs.existsSync(path.join(WORKER_ROOT, 'workers', workerId)), false);
+    };
+    await Promise.all(Array.from({ length: concurrency }, (_, index) => runWorker(index + 1)));
     // Deterministic native CLI calls prove cleanup even if a model would avoid spawning a daemon.
     if (!provider) await detachedProbes(runtime, wait, newCommand => { command = newCommand; });
     console.log(JSON.stringify({ pass: true, probe: 'container-security-and-worker-cleanup', realModel: Boolean(provider) }));
   } finally {
     await runtime.shutdown();
     await new Promise(resolve => fixtureServer.close(resolve));
+    resources?.finish();
   }
+}
+
+function resourceProbe() {
+  const startedAt = Date.now(), points = [];
+  const memoryMaxBytes = Number(fs.readFileSync('/sys/fs/cgroup/memory.max', 'utf8'));
+  const swapMaxBytes = Number(fs.readFileSync('/sys/fs/cgroup/memory.swap.max', 'utf8'));
+  assert.equal(memoryMaxBytes, memoryMiB * 1024 * 1024, 'Memory budget was not enforced');
+  assert.equal(swapMaxBytes, 0, 'Capacity fixture must not use swap');
+  let samples = 0, sampledPeakBytes = 0, cliRssPeakBytes = 0, cliExecutionsPeak = 0, sampleError;
+  const counters = file => Object.fromEntries(fs.readFileSync(`/sys/fs/cgroup/${file}`, 'utf8').trim()
+    .split('\n').map(line => { const [key, value] = line.split(/\s+/); return [key, Number(value)]; }));
+  const read = () => {
+    const currentBytes = Number(fs.readFileSync('/sys/fs/cgroup/memory.current', 'utf8'));
+    const kernelPeakBytes = Number(fs.readFileSync('/sys/fs/cgroup/memory.peak', 'utf8'));
+    const memory = counters('memory.stat');
+    let cliRssBytes = 0, cliExecutions = 0;
+    for (const pid of fs.readdirSync('/proc').filter(value => /^\d+$/.test(value))) {
+      try {
+        const executable = fs.readlinkSync(`/proc/${pid}/exe`);
+        if (!executable.includes('/codex')) continue;
+        const args = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
+        if (args[1] !== 'exec') continue;
+        const status = fs.readFileSync(`/proc/${pid}/status`, 'utf8');
+        cliRssBytes += Number(status.match(/^VmRSS:\s+(\d+)\s+kB$/m)?.[1] ?? 0) * 1024;
+        cliExecutions++;
+      } catch (error) { if (!['ENOENT', 'ESRCH', 'EACCES'].includes(error.code)) throw error; }
+    }
+    samples++;
+    sampledPeakBytes = Math.max(sampledPeakBytes, currentBytes);
+    cliRssPeakBytes = Math.max(cliRssPeakBytes, cliRssBytes);
+    cliExecutionsPeak = Math.max(cliExecutionsPeak, cliExecutions);
+    return { elapsedMs: Date.now() - startedAt, currentBytes, kernelPeakBytes,
+      anonBytes: memory.anon, fileBytes: memory.file, cliExecutions, cliRssBytes };
+  };
+  const timer = setInterval(() => {
+    try { read(); }
+    catch (error) { sampleError = error; clearInterval(timer); }
+  }, RESOURCE_SAMPLE_MS);
+  timer.unref();
+  return {
+    mark(stage) { if (sampleError) throw sampleError; points.push({ stage, ...read() }); },
+    finish() {
+      clearInterval(timer);
+      if (sampleError) throw sampleError;
+      const final = read(), events = counters('memory.events');
+      console.log(JSON.stringify({ probe: 'container-resources', memoryMiB, concurrency,
+        memoryMaxBytes, swapMaxBytes,
+        architecture: process.arch, sampleIntervalMs: RESOURCE_SAMPLE_MS, samples,
+        sampledPeakBytes, kernelPeakBytes: final.kernelPeakBytes, cliRssPeakBytes, cliExecutionsPeak,
+        final, events, points }));
+      assert.equal(events.oom ?? 0, 0, 'Cgroup encountered OOM');
+      assert.equal(events.oom_kill ?? 0, 0, 'Cgroup killed a process');
+      assert.equal(final.cliExecutions, 0, 'Native CLI remained alive after shutdown');
+    },
+  };
 }
 
 function shellQuote(value) { return `'${value.replaceAll("'", "'\\''")}'`; }
