@@ -8,8 +8,8 @@ const EXCERPT_CODE_POINT_LIMIT = 1000;
 const MAX_TURN_ID_BYTES = 128;
 const MAX_DATE_MS = 8_640_000_000_000_000;
 const EXECUTION_STATUSES = new Set(["active", "completed", "failed", "cancelled", "expired"]);
-const STEP_STATUSES = new Set(["waiting", "claimed", "pending", "accepted", "completed", "failed", "uncertain", "cancelled", "expired"]);
-const CLAIMED_SOURCE_STATUSES = new Set(["claimed", "pending", "accepted", "completed"]);
+const STEP_STATUSES = new Set(["waiting", "claimed", "queued", "pending", "accepted", "completed", "failed", "uncertain", "cancelled", "expired"]);
+const CLAIMED_SOURCE_STATUSES = new Set(["claimed", "queued", "pending", "accepted", "completed"]);
 const INVALID_EXECUTIONS = "持久计划状态格式无效，无法确认计划进度";
 
 function invalid(): never { throw new Error(INVALID_EXECUTIONS); }

@@ -73,13 +73,17 @@ it("preserves the explicitly selected order across multiple frozen sources", () 
     "步骤 2已记录输出为空", "步骤 1已裁剪 · 引用 1000 / 4827 字符",
   ]);
 });
-it.each(["claimed", "uncertain", "accepted", "failed", "completed"] as const)("does not use frozen input to upgrade the %s receipt", status => {
+it.each(["claimed", "queued", "uncertain", "accepted", "failed", "completed"] as const)("does not use frozen input to upgrade the %s receipt", status => {
   const plan = frozen(); plan.steps[1].status = status;
   if (status === "accepted" || status === "completed") Object.assign(plan.steps[1], { commandId: "second-command", turnId: "second-turn" });
   const { second } = setup(plan);
   expect(second).toHaveTextContent("冻结不代表已送达");
   expect(screen.getByRole("progressbar")).toHaveAttribute("value", status === "completed" ? "2" : "1");
   if (status !== "completed") expect(within(second).queryByText("精确完成", { exact: true })).toBeNull();
+  if (status === "queued") {
+    expect(second).toHaveTextContent("已排队 · 尚未发送");
+    expect(second).toHaveTextContent("等待会话空闲或机器上线；尚未发送");
+  }
 });
 it("uses semantic disclosures without inline sizing or animation and keeps them available after updates", () => {
   const plan = frozen();

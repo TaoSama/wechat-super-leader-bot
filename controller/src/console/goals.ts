@@ -20,7 +20,7 @@ const GoalItemSchema = z.object({
   criteria: z.array(z.object({ index: z.number().int().min(1).max(8), text: z.string().min(1).max(500),
     supported: z.boolean(), actions: z.array(number).max(12) }).strict()).min(1).max(8),
   actions: z.array(z.object({ index: number, target: z.number().int().min(1).max(4), prompt: z.string(), promptTruncated: z.boolean(),
-    sourceActions: z.array(number).max(3), status: z.enum(["waiting", "claimed", "pending", "accepted", "completed", "failed", "uncertain", "blocked", "cancelled", "expired"]),
+    sourceActions: z.array(number).max(3), status: z.enum(["waiting", "claimed", "queued", "pending", "accepted", "completed", "failed", "uncertain", "blocked", "cancelled", "expired"]),
     commandId: z.string().min(1).max(64).optional(), turnId: TurnIdSchema.optional(),
   }).strict()).max(12),
 }).strict();

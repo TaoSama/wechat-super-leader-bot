@@ -12,7 +12,7 @@ const timestamp = z.number().int().nonnegative().refine(Number.isSafeInteger);
 const identifier = z.string().min(1).max(64);
 const stepNumber = z.number().int().min(1).max(MAX_PLAN_ACTIONS);
 const RESULT_SOURCE_LIMIT = MAX_PLAN_ACTIONS - 1;
-const CLAIMED_SOURCE_STATUSES = new Set(["claimed", "pending", "accepted", "completed"]);
+const CLAIMED_SOURCE_STATUSES = new Set(["claimed", "queued", "pending", "accepted", "completed"]);
 const length = z.number().int().nonnegative().refine(Number.isSafeInteger);
 const ResultSourceSchema = z.object({
   step: stepNumber, commandId: identifier.refine(value => value.trim().length > 0), turnId: TurnIdSchema,
@@ -28,7 +28,7 @@ const StepSchema = z.object({
   dependsOn: z.array(z.number().int().min(1).max(MAX_PLAN_ACTIONS)).max(MAX_PLAN_ACTIONS - 1),
   resultFrom: z.array(stepNumber).max(RESULT_SOURCE_LIMIT),
   resultSources: z.array(ResultSourceSchema).min(1).max(RESULT_SOURCE_LIMIT).optional(),
-  status: z.enum(["waiting", "claimed", "pending", "accepted", "completed", "failed", "uncertain", "cancelled", "expired"]),
+  status: z.enum(["waiting", "claimed", "queued", "pending", "accepted", "completed", "failed", "uncertain", "cancelled", "expired"]),
   commandId: identifier.optional(), turnId: TurnIdSchema.optional(),
 }).strict();
 export const ConsoleExecutionsSchema = z.object({

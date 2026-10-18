@@ -129,7 +129,7 @@ export interface ControlPlaneStatusResponse {
 }
 
 export type ExecutionStatus = "active" | "completed" | "failed" | "cancelled" | "expired";
-export type ExecutionStepStatus = Exclude<CommandStatus, "input-written" | "queued"> | "waiting" | "claimed";
+export type ExecutionStepStatus = Exclude<CommandStatus, "input-written"> | "waiting" | "claimed";
 export interface ExecutionResultSource {
   step: number;
   commandId: string;

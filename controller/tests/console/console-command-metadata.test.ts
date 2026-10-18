@@ -6,7 +6,7 @@ import { readConsoleGoals } from "../../src/console/goals.js";
 import { createExecution, executionRequestId, EXECUTION_CLAIM_MS } from "../../src/leader/plans/execution.js";
 import { recordedOutput, renderExecutionInput, type ExecutionResultSource } from "../../src/leader/plans/input.js";
 import { readExecutionView } from "../../src/leader/plans/view.js";
-import { createGoal, goalRequestId, renderGoalAction, GOAL_SEND_CLAIM_MS } from "../../src/leader/goals/goal.js";
+import { createGoal, goalRequestId, normalizeGoal, renderGoalAction, GOAL_SEND_CLAIM_MS, type GoalRecord } from "../../src/leader/goals/goal.js";
 import { MemoryStore } from "../../src/store/memory.js";
 import type { CommandRecord } from "../../src/types.js";
 
@@ -144,4 +144,65 @@ it.each(["valid", "commandId", "turnId", "hasOutput"] as const)("preserves compl
   expect(metadata).toHaveBeenCalledWith(command.requestId);
   fullReads.forEach(read => expect(read).not.toHaveBeenCalled());
   for (const secret of [CHAT, output, "private constraints", '"input"', '"authority"']) expect(JSON.stringify(result)).not.toContain(secret);
+});
+
+it.each([false, true])("preserves a claimed plan's queued command with metadataOnly=%s", async metadataOnly => {
+  const store = new MemoryStore();
+  const execution = createExecution(CHAT, { id: uuid(20), expiresAt: NOW + 60_000, actions: [
+    { nodeId: "node", sessionId: "queued-plan", prompt: "queued task", dependsOn: [], sendRoute: "control-socket" },
+  ] }, NOW);
+  await store.createExecutionIfAbsent(execution);
+  execution.attempts[0] = { token: uuid(21), startedAt: NOW, expiresAt: NOW + EXECUTION_CLAIM_MS };
+  execution.revision++;
+  expect(await store.compareAndSetExecution(execution, 1, NOW)).not.toBeNull();
+  await store.createCommandIfAbsent({ commandId: "queued-plan-command", requestId: executionRequestId(execution, 0),
+    nodeId: "node", sessionId: "queued-plan", action: "send", prompt: "queued task", sendRoute: "control-socket", status: "queued",
+    authority: { type: "plan", id: execution.id, chatId: CHAT }, createdAt: stamp, updatedAt: stamp, expiresAt: stamp });
+  const fullReads = metadataOnly ? blockFullReads(store) : [];
+  const result = await readConsoleExecutions(store, [CHAT], NOW, metadataOnly);
+  expect(result.items[0]).toMatchObject({ status: "active", steps: [{ status: "queued", commandId: "queued-plan-command" }] });
+  expect(result.items[0].steps[0]).not.toHaveProperty("turnId");
+  fullReads.forEach(read => expect(read).not.toHaveBeenCalled());
+});
+
+it.each([false, true])("preserves a goal's queued command with metadataOnly=%s without claiming criterion completion", async metadataOnly => {
+  const store = new MemoryStore();
+  const goal = createGoal(CHAT, { id: uuid(30), expiresAt: NOW + 60_000, objective: "queued goal",
+    criteria: ["test passes"], targets: [{ nodeId: "node", sessionId: "queued-goal", sendRoute: "control-socket" }],
+    constraints: "scope", maxActions: 3, maxDecisions: 5, durationMinutes: 30, shareResults: true }, NOW);
+  const prompt = "queued goal task";
+  goal.actions.push({ index: 1, target: 1, prompt, sourceActions: [], input: { prompt: renderGoalAction(goal.proposal, prompt, []), sources: [] },
+    attempt: { token: uuid(31), startedAt: NOW, expiresAt: NOW + GOAL_SEND_CLAIM_MS } });
+  const records = (store as unknown as { goals: Map<string, GoalRecord> }).goals;
+  records.set(goal.id, normalizeGoal(goal));
+  await store.createCommandIfAbsent({ commandId: "queued-goal-command", requestId: goalRequestId(goal, 0),
+    nodeId: "node", sessionId: "queued-goal", action: "send", prompt: goal.actions[0].input.prompt, sendRoute: "control-socket", status: "queued",
+    authority: { type: "goal", id: goal.id, chatId: CHAT }, createdAt: stamp, updatedAt: stamp, expiresAt: stamp });
+  const fullReads = metadataOnly ? blockFullReads(store) : [];
+  const result = await readConsoleGoals(store, [CHAT], NOW, metadataOnly);
+  expect(result.items[0]).toMatchObject({ status: "active", actions: [{ status: "queued", commandId: "queued-goal-command" }],
+    criteria: [{ supported: false, actions: [] }] });
+  expect(result.items[0].actions[0]).not.toHaveProperty("turnId");
+  fullReads.forEach(read => expect(read).not.toHaveBeenCalled());
+});
+
+it.each(["strict", "metadata", "invalid-source"])("validates frozen sources for queued result-sharing steps in %s mode", async variant => {
+  const { store, execution, parent, child } = await executionFixture();
+  const records = (store as unknown as { commands: Map<string, CommandRecord> }).commands;
+  records.set(child.commandId, { ...child, status: "queued", output: undefined, turnId: undefined,
+    authority: { type: "plan", id: execution.id, chatId: CHAT } });
+  const metadataOnly = variant !== "strict";
+  const fullReads = metadataOnly ? blockFullReads(store) : [];
+  if (variant === "invalid-source") {
+    const original = store.findCommandMetadataByRequestId.bind(store);
+    vi.spyOn(store, "findCommandMetadataByRequestId").mockImplementation(async id => {
+      const metadata = await original(id);
+      return metadata && id === parent.requestId ? { ...metadata, prompt: "foreign task" } : metadata;
+    });
+  }
+  const result = await readConsoleExecutions(store, [CHAT], NOW, metadataOnly);
+  expect(result.items[0].steps[1]).toMatchObject({ status: variant === "invalid-source" ? "uncertain" : "queued",
+    resultSources: [{ commandId: parent.commandId, turnId: parent.turnId }] });
+  if (variant !== "invalid-source") expect(result.items[0].steps[1].commandId).toBe(child.commandId);
+  fullReads.forEach(read => expect(read).not.toHaveBeenCalled());
 });
