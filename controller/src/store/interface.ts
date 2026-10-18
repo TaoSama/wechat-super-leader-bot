@@ -1,10 +1,12 @@
-import { CommandRecord, MessageRecord, ScopedSession, Session } from "../types.js";
+import { CommandRecord, CommandAuthority, MessageRecord, ScopedSession, Session, SendRoute } from "../types.js";
 import { InputReceipt } from "../sessions/input-receipt.js";
 import { LeaderState } from "../leader/state.js";
 import type { CreateExecutionResult, ExecutionRecord } from "../leader/plans/execution.js";
 import type { ExecutionConfirmationAuthority } from "../leader/plans/confirmation.js";
-import type { Notification, NotificationReceiptStatus } from "../notifications/contracts.js";
+import type { Notification, NotificationReceiptStatus, NotificationSource } from "../notifications/contracts.js";
 import type { GoalRecord, GoalConfirmationAuthority, CreateGoalResult } from "../leader/goals/goal.js";
+import type { MessageImageStore } from "../sessions/message-images.js";
+import type { CommandSummary } from "../commands/public.js";
 import {
   ConsoleLinkRecord,
   ConsoleSessionRecord,
@@ -32,7 +34,7 @@ export interface CreateCommandResult {
   command: CommandRecord;
 }
 
-export interface IStore extends IConsoleAuthStore {
+export interface IStore extends IConsoleAuthStore, MessageImageStore {
   init(): Promise<void>;
   close(): Promise<void>;
 
@@ -40,6 +42,7 @@ export interface IStore extends IConsoleAuthStore {
   createCommandIfAbsent(cmd: CommandRecord): Promise<CreateCommandResult>;
   getCommand(commandId: string): Promise<CommandRecord | null>;
   findCommandByRequestId(requestId: string): Promise<CommandRecord | null>;
+  findCommandMetadataByRequestId(requestId: string): Promise<CommandSummary | null>;
   updateCommandStatus(
     commandId: string,
     status: CommandRecord["status"],
@@ -51,7 +54,11 @@ export interface IStore extends IConsoleAuthStore {
   markNodeActiveCommandsUncertain(nodeId: string, reason: string): Promise<void>;
   markExpiredActiveCommandsUncertain(): Promise<void>;
   listRecentCommands(limit?: number): Promise<CommandRecord[]>;
+  listRecentCommandSummaries(limit?: number): Promise<CommandSummary[]>;
   listInspectableCommands(nodeId: string, limit?: number, afterCommandId?: string): Promise<CommandRecord[]>;
+  listQueuedCommands(limit?: number, afterCommandId?: string): Promise<CommandRecord[]>;
+  claimQueuedCommand(commandId: string, route: SendRoute): Promise<CommandRecord | null>;
+  cancelQueuedCommand(commandId: string, authority?: CommandAuthority): Promise<CommandRecord | null>;
 
   // Messages
   recordMessage(msg: MessageRecord): Promise<void>;
@@ -62,6 +69,7 @@ export interface IStore extends IConsoleAuthStore {
   getNodeSessions(nodeId: string): Promise<ScopedSession[]>;
   getAllSessions(): Promise<ScopedSession[]>;
   removeNodeSessions(nodeId: string): Promise<void>;
+  getKnownSession(nodeId: string, sessionId: string): Promise<Session | null>;
 
   // Leader State
   getLeaderState(chatId: string): Promise<LeaderState | null>;
@@ -88,6 +96,7 @@ export interface IStore extends IConsoleAuthStore {
   listRecentGoals(chatIds: readonly string[], limit: number): Promise<GoalRecord[]>;
 
   listPendingNotifications(chatIds: readonly string[], now: number): Promise<Notification[]>;
+  enqueueProgressNotification(source: NotificationSource, now?: number): Promise<Notification | null>;
   getNotification(id: string, now: number): Promise<Notification | null>;
   claimNotification(id: string, attemptId: string, chatIds: readonly string[], now: number): Promise<Notification | null>;
   recordNotificationReceipt(id: string, attemptId: string, status: NotificationReceiptStatus, now: number): Promise<Notification | null>;

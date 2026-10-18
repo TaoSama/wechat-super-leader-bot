@@ -16,10 +16,18 @@ it("requires goals on HTTP and SSE and clones the same exact bounded public cont
   expect(() => normalizeControlPlaneStatus({ ...body, goals: undefined })).toThrow("持续目标状态格式无效");
 });
 it.each([
-  "waiting", "claimed", "pending", "accepted", "completed", "failed", "uncertain", "blocked", "cancelled", "expired",
+  "waiting", "claimed", "queued", "pending", "accepted", "completed", "failed", "uncertain", "blocked", "cancelled", "expired",
 ])("recognizes projected action state %s without inventing successful completion", status => {
   const value = snapshot(); Object.assign(value.items[0].actions[1], { status });
   expect(parseConsoleGoals(value).items[0].criteria[0].supported).toBe(false);
+});
+it("retains queued actions and their source references without a nonexistent turn receipt", () => {
+  const goals = snapshot(); goals.items[0].actions[1].status = "queued";
+  delete goals.items[0].actions[1].turnId;
+  const body = { nodes: [], sessions: [], commands: [], executions: emptyExecutions(), goals };
+  expect(normalizeControlPlaneStatus(body).goals).toEqual(goals);
+  expect(parseConsoleGoals(goals).items[0].actions[1]).toMatchObject({ status: "queued", commandId: "command-2", sourceActions: [1] });
+  expect(parseConsoleGoals(goals).items[0].criteria[0].supported).toBe(false);
 });
 const mutations: ((value: ReturnType<typeof snapshot>) => unknown)[] = [
   () => undefined, () => null, () => [], value => ({ ...value, limit: 13 }), value => ({ ...value, observedAt: -1 }),

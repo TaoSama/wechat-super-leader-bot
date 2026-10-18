@@ -21,7 +21,7 @@ describe("explicit managed resume capability", () => {
     expect(sessionSendBlockReason(parsed, NOW)).toBeNull();
     expect(sessionSendBlockReason({ ...parsed, status: "idle" }, NOW)).toBeNull();
     expect(sendRouteLabel("app-server-resume")).toContain("执行时检查占用");
-    expect(sendBlockReason(parsed, false, false, NOW)).toContain("离线");
+    expect(sendBlockReason(parsed, false, false, NOW)).toBeNull();
     expect(sendBlockReason(parsed, true, true, NOW)).toContain("待更新");
   });
 
@@ -68,7 +68,9 @@ describe("resume composer semantics", () => {
     fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "继续" } });
     await act(async () => {});
     expect(screen.getAllByText("未加载").length).toBeGreaterThan(0);
-    expect(screen.getByText("可按需恢复原会话 · 执行时检查占用")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "查看发送说明" }));
+    expect(screen.getByText("会话需要时会自动恢复，发送前检查是否正在使用。")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "关闭会话详情" }));
     expect(screen.getByRole("button", { name: "发送消息" })).toBeEnabled();
     await act(async () => vi.advanceTimersByTimeAsync(45001));
     expect(screen.getByRole("button", { name: "发送消息" })).toBeDisabled();

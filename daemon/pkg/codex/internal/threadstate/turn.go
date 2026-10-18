@@ -3,6 +3,9 @@ package threadstate
 import (
 	"errors"
 	"strings"
+	"unicode/utf8"
+
+	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 )
 
 // NormalizeTurnStatus maps raw status strictly to exactly: inProgress, completed, failed, interrupted.
@@ -44,7 +47,6 @@ func ExtractTurnOutput(turnMap map[string]any) (string, error) {
 			if !ok {
 				return "", errors.New("turn output text unavailable")
 			}
-			text = strings.TrimSpace(text)
 			phase := ""
 			if rawPhase := item["phase"]; rawPhase != nil {
 				phase, ok = rawPhase.(string)
@@ -66,11 +68,21 @@ func ExtractTurnOutput(turnMap map[string]any) (string, error) {
 	}
 
 	if hasFinalOutput {
-		return TruncateText(finalOutput, MaxReadLineLength), nil
+		return completeTurnOutput(finalOutput)
 	}
 
 	// Older providers omit phase; retain only their last recorded message.
-	return TruncateText(lastUnphasedOutput, MaxReadLineLength), nil
+	return completeTurnOutput(lastUnphasedOutput)
+}
+
+func completeTurnOutput(output string) (string, error) {
+	if len(output) > protocol.MaxTurnOutputBytes {
+		return "", protocol.ErrTurnOutputLimit
+	}
+	if !utf8.ValidString(output) {
+		return "", errors.New("turn output contains invalid UTF-8")
+	}
+	return output, nil
 }
 
 // ExtractTurnError provides static sanitized error descriptions without leaking upstream error payloads or keys.

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { StateManager } from "../../src/runtime/state.js";
+import { MAX_REPLY_DELIVERIES, StateManager } from "../../src/runtime/state.js";
 
 test("failed processed checkpoint preserves reply progress in memory and on disk", (t) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-rollback-test-"));
@@ -117,4 +117,135 @@ test("StateManager fails closed on corrupted credentials or corrupted state file
     }
   );
 
+});
+
+test("reply intent and acknowledgment roll back safely when durable checkpoints fail", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-delivery-state-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const credentials = path.join(directory, "account.json");
+  const statePath = path.join(directory, "state.json");
+  fs.writeFileSync(credentials, JSON.stringify({ token: "synthetic", accountId: "fixture" }));
+  const state = new StateManager(credentials, statePath);
+  const digest = "a".repeat(64);
+  state.prepareReplyDelivery("key", digest, 2);
+  const failure = new Error("synthetic checkpoint failure");
+  let mock = t.mock.method(state, "saveState", () => { throw failure; });
+  assert.throws(() => state.beginReplyChunk("key", 0), error => error === failure);
+  assert.equal(state.replyDeliveries.key.inFlight, false);
+  mock.mock.restore();
+  state.beginReplyChunk("key", 0);
+  mock = t.mock.method(state, "saveState", () => { throw failure; });
+  assert.throws(() => state.confirmReplyChunk("key", 0), error => error === failure);
+  assert.equal(state.replyDeliveries.key.inFlight, true);
+  assert.equal(state.getReplySentChunks("key"), 0);
+  const disk = new StateManager(credentials, statePath);
+  assert.equal(disk.replyDeliveries.key.inFlight, true);
+  assert.throws(() => disk.prepareReplyDelivery("key", digest, 2), /uncertain/);
+  mock.mock.restore();
+});
+
+test("login replacement clears durable reply delivery intents", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-delivery-account-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const credentials = path.join(directory, "account.json");
+  const statePath = path.join(directory, "state.json");
+  fs.writeFileSync(credentials, JSON.stringify({ token: "synthetic-one", accountId: "fixture" }));
+  const state = new StateManager(credentials, statePath);
+  state.prepareReplyDelivery("key", "b".repeat(64), 1);
+  state.beginReplyChunk("key", 0);
+  fs.writeFileSync(credentials, JSON.stringify({ token: "synthetic-two", accountId: "fixture" }));
+  const changed = new StateManager(credentials, statePath);
+  assert.deepEqual(changed.replyDeliveries, {});
+  assert.deepEqual(changed.sentReplyProgress, {});
+});
+
+test("reply state capacity only evicts completed deliveries and keeps uncertain intents", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-delivery-capacity-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const credentials = path.join(directory, "account.json");
+  const statePath = path.join(directory, "state.json");
+  fs.writeFileSync(credentials, JSON.stringify({ token: "synthetic", accountId: "fixture" }));
+  const state = new StateManager(credentials, statePath);
+  for (let index = 0; index < MAX_REPLY_DELIVERIES; index++) {
+    state.replyDeliveries[`pending-${index}`] = {
+      digest: "c".repeat(64), totalChunks: 1, acknowledgedChunks: 0, inFlight: true,
+    };
+  }
+  assert.throws(() => state.prepareReplyDelivery("new", "d".repeat(64), 1), /capacity exhausted/);
+  state.replyDeliveries["pending-0"] = {
+    digest: "c".repeat(64), totalChunks: 1, acknowledgedChunks: 1, inFlight: false,
+  };
+  state.sentReplyProgress["pending-0"] = 1;
+  state.prepareReplyDelivery("new", "d".repeat(64), 1);
+  assert.equal(Object.keys(state.replyDeliveries).length, MAX_REPLY_DELIVERIES);
+  assert.equal(Object.hasOwn(state.replyDeliveries, "pending-0"), false);
+  assert.equal(state.getReplySentChunks("pending-0"), 0);
+  assert.equal(state.replyDeliveries["pending-1"].inFlight, true);
+});
+
+test("unknown reply quarantine preserves evidence and fails closed if its checkpoint cannot persist", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-quarantine-state-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const credentials = path.join(directory, "account.json"), statePath = path.join(directory, "state.json");
+  fs.writeFileSync(credentials, JSON.stringify({ token: "synthetic", accountId: "fixture" }));
+  const state = new StateManager(credentials, statePath);
+  state.prepareReplyDelivery("key", "d".repeat(64), 2);
+  state.beginReplyChunk("key", 0);
+  const save = t.mock.method(state, "saveState", () => { throw new Error("synthetic persistence failure"); });
+  assert.throws(() => state.recordProcessedMessageKey("key", { preserveReplyEvidence: true }), /persistence failure/);
+  assert.equal(state.isMessageProcessed("key"), false);
+  assert.equal(state.hasUncertainReply("key"), true);
+  save.mock.restore();
+  state.recordProcessedMessageKey("key", { preserveReplyEvidence: true });
+  const reloaded = new StateManager(credentials, statePath);
+  assert.equal(reloaded.isMessageProcessed("key"), true);
+  assert.equal(reloaded.hasUncertainReply("key"), true);
+});
+
+test("permanent image failure persists, blocks replay and rolls back failed checkpoints", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-permanent-failure-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const credentials = path.join(directory, "account.json"), statePath = path.join(directory, "state.json");
+  fs.writeFileSync(credentials, JSON.stringify({ token: "synthetic", accountId: "fixture" }));
+  const state = new StateManager(credentials, statePath);
+  const key = "image-reply:key", digest = "e".repeat(64);
+  state.prepareReplyDelivery(key, digest, 2);
+  state.beginReplyChunk(key, 0);
+  assert.throws(() => state.recordReplyFailure(key, "AttachmentExpired"), /Invalid/);
+  state.confirmReplyChunk(key, 0);
+  const failure = new Error("synthetic persistence failure");
+  const save = t.mock.method(state, "saveState", () => { throw failure; });
+  assert.throws(() => state.recordReplyFailure(key, "AttachmentExpired"), error => error === failure);
+  assert.equal(state.hasPermanentReplyFailure(key), false);
+  assert.equal(new StateManager(credentials, statePath).hasPermanentReplyFailure(key), false);
+  save.mock.restore();
+  state.recordReplyFailure(key, "AttachmentExpired");
+  state.recordProcessedMessageKey("key", { preserveReplyEvidence: true });
+  const reloaded = new StateManager(credentials, statePath);
+  assert.equal(reloaded.hasPermanentReplyFailure(key), true);
+  assert.equal(reloaded.replyDeliveries[key].acknowledgedChunks, 1);
+  assert.equal(reloaded.replyDeliveries[key].failureReason, "AttachmentExpired");
+  assert.throws(() => reloaded.prepareReplyDelivery(key, digest, 2), /permanently failed/);
+  assert.throws(() => reloaded.beginReplyChunk(key, 1), /Invalid/);
+  assert.throws(() => reloaded.recordReplyFailure(key, "AttachmentUnavailable"), /Invalid/);
+});
+
+test("corrupt permanent failure state fails closed", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-invalid-permanent-failure-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const credentials = path.join(directory, "account.json"), statePath = path.join(directory, "state.json");
+  fs.writeFileSync(credentials, JSON.stringify({ token: "synthetic", accountId: "fixture" }));
+  const state = new StateManager(credentials, statePath);
+  for (const invalid of [
+    { failureReason: "Unrecognized" },
+    { failureReason: "AttachmentExpired", inFlight: true },
+    { failureReason: "AttachmentUnavailable", acknowledgedChunks: 1 },
+  ]) {
+    state.replyDeliveries.key = {
+      digest: "f".repeat(64), totalChunks: 1, acknowledgedChunks: 0, inFlight: false,
+      ...invalid,
+    } as typeof state.replyDeliveries[string];
+    state.saveState();
+    assert.throws(() => new StateManager(credentials, statePath), /Failed to load gateway state/);
+  }
 });

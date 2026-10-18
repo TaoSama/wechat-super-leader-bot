@@ -5,7 +5,7 @@ import { formatTimestamp } from "../../../format";
 
 interface Props { goals: ConsoleGoals; sessions: ScopedSession[]; selectedNodeId: string | null; schedulerEnabled: boolean; onOpenSession: (session: ScopedSession) => void }
 const LABELS = { active: "持续推进中", blocked: "需要处理", completed: "模型判断条件已满足", cancelled: "后续已取消", expired: "授权已过期" };
-const ACTIONS = { waiting: "等待发送资格", claimed: "已领取 · 回执待核对", pending: "等待受理", accepted: "已受理 · 尚未完成",
+const ACTIONS = { waiting: "等待发送资格", claimed: "已领取 · 回执待核对", queued: "已排队 · 尚未发送", pending: "等待受理", accepted: "已受理 · 尚未完成",
   completed: "精确完成", failed: "失败", uncertain: "结果存疑 · 不重发", blocked: "已暂停", cancelled: "后续已取消", expired: "授权已过期" };
 
 export function GoalsSection({ goals, sessions, selectedNodeId, schedulerEnabled, onOpenSession }: Props) {

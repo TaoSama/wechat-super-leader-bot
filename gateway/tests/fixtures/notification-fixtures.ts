@@ -6,7 +6,7 @@ import { StateManager } from "../../src/runtime/state.js";
 import { ILinkClient } from "../../src/wechat/client.js";
 import { ControllerClient } from "../../src/controller/client.js";
 import { WeChatGateway } from "../../src/gateway.js";
-import type { Notification } from "../../src/controller/notification-contract.js";
+import { NOTIFICATION_LIMIT, type Notification } from "../../src/controller/notification-contract.js";
 
 export const ID = "00000000-0000-4000-8000-000000000001";
 export const ATTEMPT = "00000000-0000-4000-8000-000000000002";
@@ -41,6 +41,7 @@ export function harness(t: TestContext, options: { enabled?: boolean; items?: No
   const records = new Map((options.items ?? [notification()]).map(item => [item.id, item]));
   const requests: { url: string; body: Record<string, unknown> }[] = [];
   const sends: Record<string, unknown>[] = [];
+  const typings: Record<string, unknown>[] = [];
   const hooks: {
     pending?: (chatIds: string[]) => void | Promise<void>;
     claim?: (item: Notification) => Notification | Promise<Notification>;
@@ -52,10 +53,11 @@ export function harness(t: TestContext, options: { enabled?: boolean; items?: No
     const pathname = new URL(String(url)).pathname;
     const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
     requests.push({ url: pathname, body });
+    if (pathname === "/v1/chats/authorize") return json({ allowed: true });
     if (pathname.endsWith("/pending")) {
       const chatIds = body.chatIds as string[];
       await hooks.pending?.(chatIds);
-      return json({ items: [...records.values()].filter(item => item.status === "pending" && chatIds.includes(item.chatId)).slice(0, 4) });
+      return json({ items: [...records.values()].filter(item => item.status === "pending" && chatIds.includes(item.chatId)).slice(0, NOTIFICATION_LIMIT) });
     }
     const id = pathname.split("/")[3], item = records.get(id);
     if (!item) return json({}, 404);
@@ -75,9 +77,14 @@ export function harness(t: TestContext, options: { enabled?: boolean; items?: No
   } });
   const ilink = new ILinkClient({ stateManager: state, fetchImpl: async (url, init) => {
     if (String(url).endsWith("getupdates")) { hooks.poll?.(); return json({ ret: 0, msgs: [], get_updates_buf: "new-cursor" }); }
+    if (String(url).endsWith("getconfig")) return json({ ret: 0, typing_ticket: "synthetic-ticket" });
+    if (String(url).endsWith("sendtyping")) {
+      typings.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return json({ ret: 0 });
+    }
     sends.push(JSON.parse(String(init?.body)).msg);
     return json(hooks.send ? await hooks.send() : { ret: 0, errcode: 0 });
   } });
   const gateway = new WeChatGateway({ stateManager: state, controller, ilink, notifications: options.enabled ?? true });
-  return { gateway, controller, ilink, state, records, requests, sends, hooks, accountPath, statePath };
+  return { gateway, controller, ilink, state, records, requests, sends, typings, hooks, accountPath, statePath };
 }

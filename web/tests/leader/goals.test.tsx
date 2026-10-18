@@ -36,6 +36,16 @@ it("only announces model completion with all supported criteria; live replacemen
   expect(card).toHaveTextContent("模型判断条件已满足"); expect(card).toHaveTextContent("不是独立业务验收");
   expect(within(card).getByText("所有测试通过")).toBeVisible();
 });
+it("shows queued actions without inventing a turn or goal completion", () => {
+  const { card, goal, props, expand, rerender } = setup();
+  goal.actions[1].status = "queued"; delete goal.actions[1].turnId;
+  rerender(<GoalsSection {...props} />); expand();
+  expect(card).toHaveTextContent("已排队 · 尚未发送");
+  expect(card).toHaveTextContent("使用动作 1 的已记录结果");
+  expect(card).toHaveTextContent("尚未证实"); expect(card).toHaveTextContent("持续推进中");
+  expect(card).not.toHaveTextContent("turn-2");
+  expect(within(card).queryByRole("button", { name: /确认|重发|取消/ })).toBeNull();
+});
 it("shows blocked unsent actions and missing exact targets without replay or wrong-machine navigation", () => {
   const { card, goal, props, expand, rerender } = setup();
   goal.status = "blocked"; goal.reason = "需要用户补充信息"; goal.actions[1].status = "blocked";

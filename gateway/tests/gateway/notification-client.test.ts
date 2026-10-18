@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 import { ControllerClient } from "../../src/controller/client.js";
-import { parseNotification, sameNotification, NOTIFICATION_RESPONSE_BYTES } from "../../src/controller/notification-contract.js";
+import { parseNotification, sameNotification, NOTIFICATION_RESPONSE_BYTES, NOTIFICATION_TEXT_BYTES,
+  NOTIFICATION_ATTEMPT_MS, LEGACY_NOTIFICATION_ATTEMPT_MS, NOTIFICATION_LIMIT, NOTIFICATION_PART_LIMIT } from "../../src/controller/notification-contract.js";
 import { ATTEMPT, ID, claimed, json, notification, goalNotification } from "../fixtures/notification-fixtures.js";
 
 test("notification client uses bounded pending POST, exact Bearer paths and strict claim/receipt/get", async () => {
@@ -38,7 +39,7 @@ for (const [name, change] of [
   ["blocked plan", (item: Record<string, unknown>) => { item.kind = "blocked"; }],
   ["failed goal", (item: Record<string, unknown>) => { item.source = { type: "goal", id: item.id }; item.kind = "failed"; }],
   ["empty chat", (item: Record<string, unknown>) => { item.chatId = ""; }],
-  ["overlong text", (item: Record<string, unknown>) => { item.text = "😀".repeat(1001); }],
+  ["overlong text", (item: Record<string, unknown>) => { item.text = "😀".repeat(NOTIFICATION_TEXT_BYTES / 4 + 1); }],
   ["missing text", (item: Record<string, unknown>) => { delete item.text; }],
   ["invalid date", (item: Record<string, unknown>) => { item.createdAt = Infinity; }],
   ["bad attempt", (item: Record<string, unknown>) => { item.status = "claimed"; item.attemptId = ATTEMPT; }],
@@ -47,10 +48,100 @@ for (const [name, change] of [
   const item: Record<string, unknown> = { ...notification() }; change(item);
   assert.throws(() => parseNotification(item), /schema invalid/);
 });
-test("notification parser allows expired pending projection, uncertain claim and exact UTF16 budget", () => {
+test("notification parser allows expired pending projection, uncertain claim and exact UTF8 budget", () => {
   assert.equal(parseNotification({ ...notification(), status: "expired" }).status, "expired");
   assert.equal(parseNotification({ ...claimed(), status: "uncertain" }).status, "uncertain");
-  assert.equal(parseNotification({ ...notification(), text: "😀".repeat(1000) }).text.length, 2000);
+  for (const text of ["a".repeat(NOTIFICATION_TEXT_BYTES), "😀".repeat(NOTIFICATION_TEXT_BYTES / 4),
+    "中".repeat(Math.floor(NOTIFICATION_TEXT_BYTES / 3)) + "aa"]) {
+    assert.equal(Buffer.byteLength(text, "utf8"), NOTIFICATION_TEXT_BYTES);
+    assert.equal(parseNotification({ ...notification(), text }).text, text);
+  }
+  assert.throws(() => parseNotification({ ...notification(), text: "a".repeat(NOTIFICATION_TEXT_BYTES + 1) }), /schema invalid/);
+  assert.throws(() => parseNotification({ ...notification(), text: "中".repeat(Math.ceil(NOTIFICATION_TEXT_BYTES / 3)) }), /schema invalid/);
+});
+test("notification parser accepts exact new and legacy claim windows, including expiry clipping", () => {
+  const item = notification(), attemptedAt = item.createdAt + 100;
+  for (const duration of [NOTIFICATION_ATTEMPT_MS, LEGACY_NOTIFICATION_ATTEMPT_MS]) {
+    for (const expiresAt of [item.expiresAt, attemptedAt + 1000]) {
+      const value = { ...item, status: "claimed", attemptId: ATTEMPT, attemptedAt, expiresAt,
+        attemptExpiresAt: Math.min(expiresAt, attemptedAt + duration) };
+      assert.deepEqual(parseNotification(value), value);
+    }
+  }
+  for (const duration of [1, LEGACY_NOTIFICATION_ATTEMPT_MS + 1, NOTIFICATION_ATTEMPT_MS + 1]) {
+    assert.throws(() => parseNotification({ ...claimed(item), attemptedAt, attemptExpiresAt: attemptedAt + duration }), /schema invalid/);
+  }
+});
+test("progress notifications preserve independent identity, strict metadata and source type", () => {
+  for (const type of ["plan", "goal"] as const) {
+    for (const sequence of [1, 2, 3]) {
+      const item = { ...notification(), id: ATTEMPT, source: { type, id: ID }, kind: "progress", progress: { sequence, eventKey: "e".repeat(256) } };
+      assert.deepEqual(parseNotification(item), item);
+    }
+  }
+  const item = { ...notification(), id: ATTEMPT, kind: "progress", progress: { sequence: 1, eventKey: "event" } };
+  for (const change of [{ id: ID }, { progress: undefined }, { progress: null }, { progress: [] }, { part: { index: 1, total: 1 } },
+    { progress: { sequence: 0, eventKey: "event" } }, { progress: { sequence: 4, eventKey: "event" } },
+    { progress: { sequence: 1.5, eventKey: "event" } }, { progress: { sequence: "1", eventKey: "event" } },
+    { progress: { sequence: 1, eventKey: "" } }, { progress: { sequence: 1, eventKey: "e".repeat(257) } },
+    { progress: { sequence: 1, eventKey: "event", extra: true } }]) {
+    assert.throws(() => parseNotification({ ...item, ...change }), /schema invalid/);
+  }
+  assert.throws(() => parseNotification({ ...notification(), progress: item.progress }), /schema invalid/);
+  const parsed = parseNotification(item);
+  assert.equal(sameNotification(parsed, { ...parsed, progress: { sequence: 2, eventKey: "event" } }), false);
+  assert.equal(sameNotification(parsed, { ...parsed, progress: { sequence: 1, eventKey: "other" } }), false);
+  assert.equal(sameNotification(parsed, claimed(parsed)), true);
+});
+test("terminal parts preserve source identity and strict ordered metadata while legacy JSON stays unchanged", () => {
+  for (const item of [notification(), goalNotification()]) {
+    assert.deepEqual(parseNotification(item), item);
+    for (const [index, total] of [[1, 1], [1, 2], [2, 2], [NOTIFICATION_PART_LIMIT, NOTIFICATION_PART_LIMIT]]) {
+      const value = { ...item, id: index === 1 ? item.source.id : ATTEMPT, part: { index, total } };
+      assert.deepEqual(parseNotification(value), value);
+    }
+    assert.equal(sameNotification(item, { ...item, part: { index: 1, total: 1 } }), true);
+    assert.equal(sameNotification(item, { ...item, part: { index: 1, total: 2 } }), false);
+    assert.equal(sameNotification(item, { ...item, part: { index: 2, total: 2 } }), false);
+    for (const change of [{ part: null }, { part: undefined }, { part: [] }, { part: {} },
+      { part: { index: 0, total: 2 } }, { part: { index: 1, total: 0 } }, { part: { index: 3, total: 2 } },
+      { part: { index: 1.5, total: 2 } }, { part: { index: 1, total: 2.5 } }, { part: { index: "1", total: 2 } },
+      { part: { index: 1, total: NOTIFICATION_PART_LIMIT + 1 } }, { part: { index: 1, total: 2, extra: true } },
+      { id: ATTEMPT, part: { index: 1, total: 2 } }, { id: item.source.id, part: { index: 2, total: 2 } }]) {
+      assert.throws(() => parseNotification({ ...item, ...change }), /schema invalid/);
+    }
+  }
+});
+test("multipart terminal text preserves whitespace continuations without permitting empty bodies", () => {
+  for (const item of [notification(), goalNotification()]) {
+    for (const index of [1, 2]) {
+      const value = { ...item, id: index === 1 ? item.id : ATTEMPT, part: { index, total: 2 }, text: " \n\t\r " };
+      assert.deepEqual(parseNotification(value), value);
+      assert.throws(() => parseNotification({ ...value, text: "" }), /schema invalid/);
+    }
+    assert.throws(() => parseNotification({ ...item, text: " \n\t" }), /schema invalid/);
+    assert.throws(() => parseNotification({ ...item, part: { index: 1, total: 1 }, text: " \n\t" }), /schema invalid/);
+  }
+  assert.throws(() => parseNotification({ ...notification(), id: ATTEMPT, kind: "progress",
+    progress: { sequence: 1, eventKey: "event" }, text: " \n\t" }), /schema invalid/);
+});
+test("notification client accepts one large UTF8 body and JSON escaped text beyond the old response limit", async () => {
+  const text = "中文😀\u0001\"\\\n".repeat(16_384);
+  const items = Array.from({ length: NOTIFICATION_LIMIT }, (_, index) => ({ ...notification(index + 1), text }));
+  const body = JSON.stringify({ items });
+  assert.ok(Buffer.byteLength(body, "utf8") > 64 * 1024);
+  // Every UTF8 byte can become a six-byte JSON escape, in addition to object metadata.
+  assert.ok(NOTIFICATION_RESPONSE_BYTES > NOTIFICATION_LIMIT * NOTIFICATION_TEXT_BYTES * 6);
+  const client = new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic", fetchImpl: async () => new Response(body) });
+  assert.deepEqual(await client.listNotifications(["chat"]), items);
+});
+test("notification response budget accepts a fully escaped exact 8MiB terminal part", async () => {
+  const item = { ...notification(), text: "\u0001".repeat(NOTIFICATION_TEXT_BYTES), part: { index: 1, total: 2 } };
+  const body = JSON.stringify({ items: [item] });
+  assert.ok(Buffer.byteLength(body, "utf8") > NOTIFICATION_TEXT_BYTES * 6);
+  assert.ok(Buffer.byteLength(body, "utf8") < NOTIFICATION_RESPONSE_BYTES);
+  const client = new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic", fetchImpl: async () => new Response(body) });
+  assert.deepEqual(await client.listNotifications(["chat"]), [item]);
 });
 test("notification parser allows only source-specific kinds and preserves generic source", () => {
   for (const kind of ["completed", "failed", "expired"] as const) {
@@ -99,7 +190,7 @@ test("receipt gives up after three failures and rejects auth without retry", asy
   }
 });
 test("notification lists reject overfull, duplicate, foreign-chat and malformed projections", async () => {
-  const values = [{ items: Array.from({ length: 5 }, (_, index) => notification(index + 1)) },
+  const values = [{ items: Array.from({ length: NOTIFICATION_LIMIT + 1 }, (_, index) => notification(index + 1)) },
     { items: [notification(), notification()] }, { items: [notification(1, "foreign")] }, { items: null }, {}, { items: [], secret: "no" }];
   for (const value of values) {
     const client = new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic", fetchImpl: async () => json(value) });
@@ -109,7 +200,7 @@ test("notification lists reject overfull, duplicate, foreign-chat and malformed 
 test("notifications enforce request identity and response byte budgets", async () => {
   let calls = 0;
   const client = new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic", fetchImpl: async () => {
-    calls++; return new Response(" ".repeat(NOTIFICATION_RESPONSE_BYTES + 1));
+    calls++; return new Response(new Uint8Array(NOTIFICATION_RESPONSE_BYTES + 1));
   } });
   await assert.rejects(client.listNotifications(Array(129).fill("chat")), /Invalid/);
   await assert.rejects(client.claimNotification("../../escape", ATTEMPT), /schema invalid/);

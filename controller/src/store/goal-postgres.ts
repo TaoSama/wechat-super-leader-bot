@@ -7,7 +7,7 @@ import type { LeaderState } from "../leader/state.js";
 import type { IStore } from "./interface.js";
 import { validateGoalProofs } from "../leader/goals/view.js";
 import { validateChatId, validateExpectedRevision } from "../leader/state.js";
-import { createGoalNotification } from "../notifications/contracts.js";
+import { createGoalNotifications } from "../notifications/contracts.js";
 import { insertTerminalNotification } from "./notification-postgres.js";
 import { notificationCommands, goalNotificationRequestIds } from "../notifications/presentation.js";
 
@@ -84,8 +84,8 @@ export async function pgCompareAndSetGoal(pool: pg.Pool, next: GoalRecord, revis
     const commitTime = now();
     validateGoalUpdate(current, input, commitTime);
     const saved = fromRow(result.rows[0]);
-    const notification = createGoalNotification(current, saved, commitTime, commands);
-    if (notification) await insertTerminalNotification(client, notification);
+    const notifications = createGoalNotifications(current, saved, commitTime, commands);
+    for (const notification of notifications) await insertTerminalNotification(client, notification);
     await client.query("COMMIT"); return saved;
   } catch (error) { await client.query("ROLLBACK"); throw error; }
   finally { client.release(); }

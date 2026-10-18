@@ -1,9 +1,13 @@
 import * as crypto from "node:crypto";
 import { InboundWeChatMessage } from "../types.js";
 import { StateManager } from "../runtime/state.js";
-import { markdownToWeChat, DEFAULT_MESSAGE_MAX_CHARS, unicodeSafeBoundary } from "./markdown.js";
-import { DEFAULT_POLL_TIMEOUT_MS, MAX_POLL_TIMEOUT_MS, MAX_POLL_ATTEMPTS, SEND_REQUEST_TIMEOUT_MS, REPLY_TIMEOUT_MS } from "../runtime/budgets.js";
-import { validateSendReceipt } from "./send-receipt.js";
+import { DEFAULT_MESSAGE_MAX_CHARS, unicodeSafeBoundary } from "./markdown.js";
+import { DEFAULT_POLL_TIMEOUT_MS, MAX_POLL_TIMEOUT_MS, MAX_POLL_ATTEMPTS, SEND_REQUEST_TIMEOUT_MS, REPLY_TIMEOUT_MS, NOTIFICATION_REPLY_TIMEOUT_MS } from "../runtime/budgets.js";
+import { ILinkSendReceiptError, validateSendReceipt } from "./send-receipt.js";
+import { TypingIndicator } from "./typing.js";
+import { ImageUploader, type UploadedImageItem } from "./media-upload.js";
+import { sendImageReply as deliverImages, validateImageAttachments, type ImageAttachment } from "./media-delivery.js";
+import { beforeAbort } from "../runtime/abort.js";
 
 export const DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com";
 export const CHANNEL_VERSION = "0.3.0";
@@ -37,7 +41,7 @@ export function splitWeChatReply(renderedText: string, maxChars: number = DEFAUL
   if (!Number.isSafeInteger(maxChars) || maxChars <= 0) {
     throw new RangeError("maxChars must be a positive safe integer");
   }
-  if (!renderedText.trim()) {
+  if (renderedText.length === 0) {
     return [];
   }
   if (renderedText.length <= maxChars) {
@@ -66,6 +70,9 @@ export class ILinkClient {
   private readonly stateManager: StateManager;
   private readonly fetchImpl: FetchLike;
   private readonly pollTimeoutMs: number;
+  private readonly typing: TypingIndicator;
+  private readonly chatSends = new Map<string, Promise<void>>();
+  private readonly imageUploader: ImageUploader;
 
   constructor(options: {
     stateManager: StateManager;
@@ -82,9 +89,28 @@ export class ILinkClient {
 
     const selected = options.configuredBaseUrl || this.stateManager.account?.baseUrl || DEFAULT_ILINK_BASE_URL;
     this.baseUrl = validateILinkBaseUrl(selected);
+    this.typing = new TypingIndicator({
+      request: (endpoint, payload, token, timeoutMs, signal) => this.request(endpoint, payload, token, timeoutMs, signal),
+      getAccount: () => this.stateManager.account ? {
+        token: this.stateManager.account.token, fingerprint: this.stateManager.getLoginFingerprint(),
+      } : null,
+      getContextToken: chatId => this.stateManager.contextTokens[chatId],
+    });
+    this.imageUploader = new ImageUploader({
+      fetchImpl: this.fetchImpl,
+      request: (endpoint, payload, timeoutMs, signal) => {
+        const token = this.stateManager.account?.token;
+        if (!token) throw new Error("WeChat is not logged in");
+        return this.request(endpoint, { ...payload, base_info: { channel_version: CHANNEL_VERSION } }, token, timeoutMs, signal);
+      },
+    });
   }
 
   public get pollBudgetMs(): number { return this.pollTimeoutMs * MAX_POLL_ATTEMPTS; }
+
+  public async sendTyping(chatId: string, status: 1 | 2 = 1): Promise<boolean> {
+    return this.typing.send(chatId, status);
+  }
 
   private async request(
     endpoint: string,
@@ -102,7 +128,7 @@ export class ILinkClient {
     signal.throwIfAborted();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await this.fetchImpl(url, {
+      const response = await beforeAbort(this.fetchImpl(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -113,11 +139,11 @@ export class ILinkClient {
         body: JSON.stringify(payload),
         redirect: "error",
         signal,
-      });
+      }), signal);
       if (!response.ok) {
         throw new Error(`WeChat iLink HTTP ${response.status} on ${endpoint}`);
       }
-      const parsed: unknown = await response.json();
+      const parsed: unknown = await beforeAbort(response.json(), signal);
       signal.throwIfAborted();
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
         throw new Error("WeChat iLink returned a non-object JSON response");
@@ -125,6 +151,7 @@ export class ILinkClient {
       return parsed as Record<string, unknown>;
     } finally {
       clearTimeout(timer);
+      controller.abort();
     }
   }
 
@@ -241,6 +268,34 @@ export class ILinkClient {
   }
 
   public async sendSingleText(chatId: string, formattedText: string, clientIdOverride?: string, signal?: AbortSignal): Promise<void> {
+    await this.withChatSend(chatId, () => this.sendSingleTextNow(chatId, formattedText, clientIdOverride, signal), signal);
+  }
+
+  private async withChatSend<T>(chatId: string, send: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const previous = this.chatSends.get(chatId) ?? Promise.resolve();
+    let release!: () => void;
+    const slot = new Promise<void>(resolve => { release = resolve; });
+    const current = previous.then(() => slot);
+    this.chatSends.set(chatId, current);
+    void current.then(() => {
+      if (this.chatSends.get(chatId) === current) this.chatSends.delete(chatId);
+    });
+    try {
+      if (signal) await beforeAbort(previous, signal);
+      else await previous;
+      signal?.throwIfAborted();
+      return await send();
+    } finally {
+      release();
+    }
+  }
+
+  private async sendSingleTextNow(chatId: string, formattedText: string, clientIdOverride?: string, signal?: AbortSignal): Promise<void> {
+    await this.sendMessageItem(chatId, { type: ITEM_TYPE_TEXT, text_item: { text: formattedText } }, clientIdOverride, signal);
+  }
+
+  private async sendMessageItem(chatId: string, item: Record<string, unknown> | UploadedImageItem,
+    clientIdOverride?: string, signal?: AbortSignal): Promise<void> {
     const account = this.stateManager.account;
     if (!account || !account.token) {
       throw new Error("WeChat is not logged in");
@@ -259,7 +314,7 @@ export class ILinkClient {
           client_id: clientId,
           message_type: MESSAGE_TYPE_OUTBOUND_TEXT,
           message_state: MESSAGE_STATE_OUTBOUND,
-          item_list: [{ type: ITEM_TYPE_TEXT, text_item: { text: formattedText } }],
+          item_list: [item],
           context_token: contextToken,
         },
         base_info: { channel_version: CHANNEL_VERSION },
@@ -272,41 +327,89 @@ export class ILinkClient {
     validateSendReceipt(response);
   }
 
+  public async sendImageReply(chatId: string, images: ImageAttachment[], options: {
+    deliveryKey: string;
+    getImageBytes: (image: ImageAttachment, signal?: AbortSignal) => Promise<Buffer>;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+    shouldContinue?: () => boolean;
+  }): Promise<number> {
+    const attachments = validateImageAttachments(images);
+    if (attachments.length === 0) return 0;
+    const fingerprint = this.stateManager.getLoginFingerprint();
+    const contextToken = this.stateManager.contextTokens[chatId];
+    if (!fingerprint || !contextToken) throw new Error("WeChat image delivery requires an active account and chat context");
+    const shouldContinue = () => fingerprint === this.stateManager.getLoginFingerprint() &&
+      contextToken === this.stateManager.contextTokens[chatId] && (!options.shouldContinue || options.shouldContinue());
+    const timeoutMs = options.timeoutMs ?? REPLY_TIMEOUT_MS;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > NOTIFICATION_REPLY_TIMEOUT_MS) {
+      throw new Error("Invalid WeChat image reply timeout budget");
+    }
+    const controller = new AbortController();
+    const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
+    const timer = setTimeout(() => controller.abort(new Error("WeChat image reply timed out")), timeoutMs);
+    try {
+      return await this.withChatSend(chatId, async () => {
+        if (!shouldContinue()) throw new Error("WeChat image reply interrupted before completion");
+        await this.sendTyping(chatId);
+        return deliverImages({ stateManager: this.stateManager, chatId, deliveryKey: options.deliveryKey,
+          images: attachments, getImageBytes: options.getImageBytes,
+          uploadImage: bytes => {
+            if (!shouldContinue()) throw new Error("WeChat image reply interrupted before completion");
+            return this.imageUploader.upload(chatId, bytes, signal);
+          },
+          sendImage: (item, clientId) => this.sendMessageItem(chatId, item, clientId, signal),
+          signal, shouldContinue,
+        });
+      }, signal);
+    } finally {
+      clearTimeout(timer);
+      controller.abort();
+    }
+  }
+
   public async sendMarkdownReply(
     chatId: string,
     rawMarkdown: string,
-    options?: { deliveryKey?: string; maxCharsPerChunk?: number; splitMultiPart?: boolean }
+    options?: { deliveryKey?: string; maxCharsPerChunk?: number; splitMultiPart?: boolean;
+      timeoutMs?: number; signal?: AbortSignal; shouldContinue?: () => boolean }
   ): Promise<number> {
     const maxChars = options?.maxCharsPerChunk ?? DEFAULT_MESSAGE_MAX_CHARS;
-    const splitMultiPart = options?.splitMultiPart ?? true;
-    const deliveryKey = options?.deliveryKey || "";
+    // All reply modes preserve the full original Markdown. The limit is UTF-16 units.
+    const chunks = splitWeChatReply(rawMarkdown, maxChars);
+    if (chunks.length === 0) return 0;
+    const timeoutMs = options?.timeoutMs ?? REPLY_TIMEOUT_MS;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > NOTIFICATION_REPLY_TIMEOUT_MS) {
+      throw new Error("Invalid WeChat reply timeout budget");
+    }
+    options?.signal?.throwIfAborted();
+    const deliveryKey = options?.deliveryKey || `reply:${crypto.randomUUID()}`;
+    const digest = crypto.createHash("sha256")
+      .update(JSON.stringify([this.stateManager.getLoginFingerprint(), chatId, maxChars, rawMarkdown])).digest("hex");
+    const delivery = this.stateManager.prepareReplyDelivery(deliveryKey, digest, chunks.length);
+    if (delivery.acknowledgedChunks === chunks.length) return chunks.length;
     const replyController = new AbortController();
-    const replyTimer = setTimeout(() => replyController.abort(new Error("WeChat reply timed out")), REPLY_TIMEOUT_MS);
+    const replySignal = options?.signal ? AbortSignal.any([replyController.signal, options.signal]) : replyController.signal;
+    const replyTimer = setTimeout(() => replyController.abort(new Error("WeChat reply timed out")), timeoutMs);
     try {
-      if (!splitMultiPart) {
-        const single = markdownToWeChat(rawMarkdown, maxChars);
-        if (!single) return 0;
-        const deterministicClientId = deliveryKey
-          ? `super-leader:${crypto.createHash("sha256").update(`${deliveryKey}:chunk:0`).digest("hex").slice(0, 24)}`
-          : undefined;
-        await this.sendSingleText(chatId, single, deterministicClientId, replyController.signal);
-        return 1;
-      }
-
-      const renderedFull = markdownToWeChat(rawMarkdown, Number.MAX_SAFE_INTEGER);
-      const chunks = splitWeChatReply(renderedFull, maxChars);
-      if (chunks.length === 0) return 0;
-
-      const alreadySent = deliveryKey ? this.stateManager.getReplySentChunks(deliveryKey) : 0;
-      for (let idx = alreadySent; idx < chunks.length; idx++) {
-        const deterministicClientId = deliveryKey
-          ? `super-leader:${crypto.createHash("sha256").update(`${deliveryKey}:chunk:${idx}`).digest("hex").slice(0, 24)}`
-          : undefined;
-        replyController.signal.throwIfAborted();
-        await this.sendSingleText(chatId, chunks[idx], deterministicClientId, replyController.signal);
-        if (deliveryKey && (chunks.length > 1 || idx + 1 < chunks.length)) {
-          this.stateManager.recordReplyChunkProgress(deliveryKey, idx + 1);
+      await this.sendTyping(chatId);
+      for (let idx = delivery.acknowledgedChunks; idx < chunks.length; idx++) {
+        const deterministicClientId = `super-leader:${crypto.createHash("sha256")
+          .update(JSON.stringify([this.stateManager.getLoginFingerprint(), chatId, deliveryKey, idx])).digest("hex").slice(0, 24)}`;
+        replySignal.throwIfAborted();
+        if (options?.shouldContinue && !options.shouldContinue()) throw new Error("WeChat reply interrupted before completion");
+        // Persist intent before the network call. A crash or ambiguous response cannot trigger a replay.
+        this.stateManager.beginReplyChunk(deliveryKey, idx);
+        try {
+          await this.sendSingleText(chatId, chunks[idx], deterministicClientId, replySignal);
+        } catch (error) {
+          if (error instanceof ILinkSendReceiptError &&
+              (error.reason === "RejectedRet" || error.reason === "RejectedErrcode")) {
+            this.stateManager.rejectReplyChunk(deliveryKey, idx);
+          }
+          throw error;
         }
+        this.stateManager.confirmReplyChunk(deliveryKey, idx);
       }
       return chunks.length;
     } finally {

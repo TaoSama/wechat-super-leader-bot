@@ -1,8 +1,10 @@
 import { ControllerMessageRequest, ControllerMessageResponse } from "../types.js";
 import { FetchLike } from "../wechat/client.js";
-import { DEFAULT_CONTROLLER_TIMEOUT_MS, DEFAULT_CONTROLLER_MAX_RETRIES } from "../runtime/budgets.js";
+import { CHAT_AUTHORIZATION_TIMEOUT_MS, DEFAULT_CONTROLLER_TIMEOUT_MS, DEFAULT_CONTROLLER_MAX_RETRIES } from "../runtime/budgets.js";
 import { NotificationClient } from "./notification-client.js";
 import { NOTIFICATION_TIMEOUT_MS } from "./notification-contract.js";
+import { downloadControllerImage } from "./image-client.js";
+import { validateImageAttachments, type ImageAttachment } from "../wechat/media-delivery.js";
 export { DEFAULT_CONTROLLER_TIMEOUT_MS } from "../runtime/budgets.js";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
@@ -79,6 +81,55 @@ export class ControllerClient {
   }
 
   public get requestBudgetMs(): number { return this.timeoutMs * (this.maxRetries + 1); }
+  public get authorizationBudgetMs(): number { return Math.min(this.timeoutMs, CHAT_AUTHORIZATION_TIMEOUT_MS); }
+
+  public downloadImage(request: { chatId: string; messageId: string; image: ImageAttachment }, signal?: AbortSignal): Promise<Buffer> {
+    return downloadControllerImage({ baseUrl: this.baseUrl, token: this.token, fetchImpl: this.fetchImpl,
+      timeoutMs: this.timeoutMs }, request, signal);
+  }
+
+  public async assertChatAllowed(chatId: string): Promise<void> {
+    if (!chatId.trim()) throw new Error("Invalid Controller chat authorization request");
+    const abort = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        abort.abort();
+        reject(new Error("Controller chat authorization timed out"));
+      }, this.authorizationBudgetMs);
+    });
+    try {
+      const result = (async () => {
+        const response = await this.fetchImpl(`${this.baseUrl}/v1/chats/authorize`, {
+          method: "POST", redirect: "error", signal: abort.signal,
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.token}` },
+          body: JSON.stringify({ chatId }),
+        });
+        abort.signal.throwIfAborted();
+        if (!response.ok && response.status !== 403) {
+          throw new Error(`Controller chat authorization failed HTTP ${response.status}`);
+        }
+        let data: unknown;
+        try { data = await response.json(); }
+        catch {
+          if (response.status !== 403) throw new Error("Controller chat authorization returned invalid response schema");
+          data = {};
+        }
+        abort.signal.throwIfAborted();
+        if (response.status === 403 && data && typeof data === "object" &&
+            (data as Record<string, unknown>).code === "CHAT_NOT_ALLOWED") throw new ChatNotAllowedError(chatId);
+        if (!response.ok) throw new Error(`Controller chat authorization failed HTTP ${response.status}`);
+        if (!data || typeof data !== "object" || Array.isArray(data) ||
+            Object.keys(data).length !== 1 || (data as Record<string, unknown>).allowed !== true) {
+          throw new Error("Controller chat authorization returned invalid response schema");
+        }
+      })();
+      await Promise.race([result, expired]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      abort.abort();
+    }
+  }
   public listNotifications(chatIds: string[]) { return this.notifications.listNotifications(chatIds); }
   public getNotification(id: string) { return this.notifications.getNotification(id); }
   public claimNotification(id: string, attemptId: string) { return this.notifications.claimNotification(id, attemptId); }
@@ -146,9 +197,15 @@ export class ControllerClient {
           throw new Error("Controller /v1/messages returned invalid response schema (missing string text field)");
         }
         const record = data as Record<string, unknown>;
+        let images: ImageAttachment[] | undefined;
+        if (Object.hasOwn(record, "images")) {
+          try { images = validateImageAttachments(record.images); }
+          catch { throw new Error("Controller /v1/messages returned invalid response schema (image attachments)"); }
+        }
         return {
           text: record.text as string,
           commandId: typeof record.commandId === "string" ? record.commandId : undefined,
+          ...(images === undefined ? {} : { images }),
         };
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));

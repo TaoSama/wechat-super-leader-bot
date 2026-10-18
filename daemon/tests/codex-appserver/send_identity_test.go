@@ -158,7 +158,7 @@ func TestSendPromptRejectsIdentifiersRepairedByJSONDecoder(t *testing.T) {
 			defer cancel()
 			output, err := appserver.NewAppServerAdapter(sock).SendPrompt(ctx, "session", "fixture prompt")
 			if err == nil || !codex.IsUncertain(err) || output != "" || err.Error() != protocol.InvalidTurnAcknowledgement {
-				t.Fatal("JSON-decoder-repaired identifier established an accepted turn")
+				t.Fatalf("JSON-decoder-repaired identifier receipt: outputBytes=%d uncertain=%v error=%v", len(output), codex.IsUncertain(err), err)
 			}
 		})
 	}

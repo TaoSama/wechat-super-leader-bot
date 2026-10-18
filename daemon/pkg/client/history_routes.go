@@ -141,6 +141,15 @@ func (d *Daemon) preferredHistorySource(sessionID string) string {
 	if isTerminalSession(sessionID) {
 		return protocol.HistorySourceTerminal
 	}
+	// A native paginated reader can return the latest bounded page without
+	// hydrating the desktop owner's entire conversation state first.
+	if reader, ok := d.adapter.(interface{ PagedHistoryAvailable() bool }); ok && reader.PagedHistoryAvailable() {
+		return protocol.HistorySourceControl
+	}
+	return d.desktopHistorySource(sessionID)
+}
+
+func (d *Daemon) desktopHistorySource(sessionID string) string {
 	if d.desktopHistory != nil {
 		d.snapshotMu.RLock()
 		observation, observed := d.desktopSnapshot[sessionID]
@@ -174,49 +183,9 @@ func (d *Daemon) readRoutedHistory(ctx context.Context, msg protocol.ReadHistory
 	}
 	switch binding.source {
 	case protocol.HistorySourceDesktop, protocol.HistorySourceTerminal:
-		reader := d.desktopHistory
-		if binding.source == protocol.HistorySourceTerminal {
-			reader = d.terminalHistory
-			available := false
-			for _, session := range d.cachedSessions() {
-				if session.ID == msg.SessionID && session.HistorySource == protocol.HistorySourceTerminal {
-					available = true
-					break
-				}
-			}
-			if !available {
-				if msg.HistoryContext != "" {
-					return history, errors.New(protocol.HistoryContextExpired)
-				}
-				return history, errors.New(protocol.HistoryUnavailable)
-			}
-		}
-		if reader == nil {
-			return history, errors.New(protocol.HistoryUnavailable)
-		}
-		var generation string
-		history, generation, err = reader.ReadHistory(ctx, msg.SessionID, binding.generation, cursor, limit)
+		history, err = d.readFileOrDesktopHistory(ctx, msg, binding, cursor, limit)
 		if err != nil {
 			return history, err
-		}
-		if history.Session.ID != msg.SessionID {
-			return history, errors.New(protocol.HistoryFailed)
-		}
-		if !protocol.ValidHistoryIdentity(generation) || (binding.generation != "" && generation != binding.generation) {
-			return history, errors.New(protocol.HistoryContextExpired)
-		}
-		binding.generation = generation
-		// File and desktop history never create native loaded/status/send facts.
-		found := false
-		for _, session := range d.cachedSessions() {
-			if session.ID == msg.SessionID {
-				history.Session = session
-				found = true
-				break
-			}
-		}
-		if binding.source == protocol.HistorySourceTerminal && (!found || history.Session.HistorySource != protocol.HistorySourceTerminal) {
-			return history, errors.New(protocol.HistoryContextExpired)
 		}
 	case protocol.HistorySourceControl:
 		if isTerminalSession(msg.SessionID) {
@@ -227,6 +196,15 @@ func (d *Daemon) readRoutedHistory(ctx context.Context, msg protocol.ReadHistory
 			return history, errors.New(protocol.HistoryUnavailable)
 		}
 		history, err = reader.ReadHistory(ctx, msg.SessionID, cursor, limit)
+		if err != nil && err.Error() == protocol.HistoryUnavailable && ctx.Err() == nil && msg.HistoryContext == "" &&
+			msg.Source == "" && d.desktopHistorySource(msg.SessionID) == protocol.HistorySourceDesktop {
+			// No page or cursor has been exposed yet. Older clients without the
+			// native items API can establish a desktop binding for this first read.
+			d.historyContexts.mu.Lock()
+			binding.source = protocol.HistorySourceDesktop
+			d.historyContexts.mu.Unlock()
+			history, err = d.readFileOrDesktopHistory(ctx, msg, binding, "", limit)
+		}
 		if err != nil {
 			return history, err
 		}
@@ -247,6 +225,54 @@ func (d *Daemon) readRoutedHistory(ctx context.Context, msg protocol.ReadHistory
 		return history, err
 	}
 	history.Source, history.HistoryContext = binding.source, binding.token
+	return history, nil
+}
+
+func (d *Daemon) readFileOrDesktopHistory(ctx context.Context, msg protocol.ReadHistoryMessage, binding *historyBinding, cursor string, limit int) (protocol.SessionHistory, error) {
+	var history protocol.SessionHistory
+	reader := d.desktopHistory
+	if binding.source == protocol.HistorySourceTerminal {
+		reader = d.terminalHistory
+		available := false
+		for _, session := range d.cachedSessions() {
+			if session.ID == msg.SessionID && session.HistorySource == protocol.HistorySourceTerminal {
+				available = true
+				break
+			}
+		}
+		if !available {
+			if msg.HistoryContext != "" {
+				return history, errors.New(protocol.HistoryContextExpired)
+			}
+			return history, errors.New(protocol.HistoryUnavailable)
+		}
+	}
+	if reader == nil {
+		return history, errors.New(protocol.HistoryUnavailable)
+	}
+	history, generation, err := reader.ReadHistory(ctx, msg.SessionID, binding.generation, cursor, limit)
+	if err != nil {
+		return history, err
+	}
+	if history.Session.ID != msg.SessionID {
+		return history, errors.New(protocol.HistoryFailed)
+	}
+	if !protocol.ValidHistoryIdentity(generation) || binding.generation != "" && generation != binding.generation {
+		return history, errors.New(protocol.HistoryContextExpired)
+	}
+	binding.generation = generation
+	// File and desktop history never create native loaded/status/send facts.
+	found := false
+	for _, session := range d.cachedSessions() {
+		if session.ID == msg.SessionID {
+			history.Session = session
+			found = true
+			break
+		}
+	}
+	if binding.source == protocol.HistorySourceTerminal && (!found || history.Session.HistorySource != protocol.HistorySourceTerminal) {
+		return history, errors.New(protocol.HistoryContextExpired)
+	}
 	return history, nil
 }
 

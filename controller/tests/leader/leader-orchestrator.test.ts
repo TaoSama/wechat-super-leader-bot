@@ -3,6 +3,7 @@ import { LeaderOrchestrator } from "../../src/leader/orchestrator.js";
 import { MemoryStore } from "../../src/store/memory.js";
 import { ExecutionScheduler } from "../../src/leader/plans/scheduler.js";
 import { CLAIM_TTL_MS, PLAN_TTL_MS } from "../../src/leader/contracts.js";
+import { selectSendRoute } from "../../src/sessions/send-eligibility.js";
 import type { LeaderModel, ModelMessage, ModelReply } from "../../src/leader/model/contracts.js";
 import type { CommandRecord, PostCommandRequest, ScopedSession, SendRoute } from "../../src/types.js";
 
@@ -52,7 +53,15 @@ function fixture(replies: ModelReply[] = []) {
     const stored = await store.createCommandIfAbsent(result);
     return stored.command;
   }) };
-  const executions = new ExecutionScheduler(store, commands, { now: () => clock });
+  const executions = new ExecutionScheduler(store, commands, { now: () => clock,
+    canDispatch: (execution, index) => {
+      const action = execution.plan.actions[index];
+      const session = hub.getNodeSession(action.nodeId, action.sessionId);
+      if (!hub.isNodeConnected(action.nodeId) || !session || !action.sendRoute) return false;
+      const eligibility = selectSendRoute(session, clock, action.sendRoute);
+      return eligibility.ready && eligibility.route === action.sendRoute;
+    },
+  });
   const create = (nextModel: LeaderModel = model) => new LeaderOrchestrator(store, hub, commands, nextModel, () => clock, undefined, executions);
   return { store, model, hub, commands, sessions, create, executions, refresh: () => { for (const session of sessions) session.observedAt = new Date(clock).toISOString(); }, tick: (ms: number) => { clock += ms; } };
 }
@@ -273,15 +282,33 @@ describe("Leader orchestration", () => {
     expect(other.calls[0].some(m => m.content?.includes("喜欢中文"))).toBe(false);
   });
 
-  it("rejects stale, changed, unknown and read-only plan targets", async () => {
+  it.each(["active", "busy", "stale"])("persists a confirmed plan while its target is %s and waits for readiness", async change => {
     const f = fixture([tool("propose_plan", { actions })]);
     await f.create().handle("chat", "m1", "生成计划");
-    f.sessions[0].status = "active";
-    expect((await f.create().handle("chat", "m2", "确认执行")).text).toContain("状态已变化");
+    if (change === "stale") f.tick(45001);
+    else f.sessions[0].status = change;
+    expect((await f.create().handle("chat", "m2", "确认执行")).text).toContain("自动推进中");
+    const execution = (await f.store.getLatestExecution("chat"))!;
+    expect(execution).toMatchObject({ status: "active", attempts: [null] });
+    expect((await f.executions.view(execution.id, "chat"))?.steps[0].status).toBe("waiting");
+    await f.executions.advance(execution.id);
     expect(f.commands.submit).not.toHaveBeenCalled();
-    const unknown = new ScriptedModel([tool("propose_plan", { actions: [{ ...actions[0], nodeId: "wrong" }] }), final("请澄清机器")]);
-    await f.create(unknown).handle("chat", "m3", "去别的机器执行");
-    expect(unknown.calls[1].some(m => m.role === "tool" && m.content?.includes("[wrong] s1：节点已断开连接"))).toBe(true);
+    expect(await f.store.listRecentCommands()).toEqual([]);
+    expect((await f.store.getExecution(execution.id))?.attempts).toEqual([null]);
+    f.sessions[0].status = "idle";
+    f.refresh();
+    await f.executions.advance(execution.id);
+    expect(f.commands.submit).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["unknown", "read-only", "unknown-capabilities"])("rejects a plan for an %s target without dispatch", async change => {
+    const target = change === "unknown" ? { ...actions[0], nodeId: "wrong" } : actions[0];
+    const f = fixture([tool("propose_plan", { actions: [target] }), final("请澄清目标会话")]);
+    if (change !== "unknown") f.sessions[0].capabilities = change === "read-only" ? ["read"] : [];
+    await f.create().handle("chat", "preview", "生成计划");
+    expect(f.model.calls[1].some(m => m.role === "tool" && m.content?.includes("unavailable, busy or read-only targets"))).toBe(true);
+    expect((await f.store.getLeaderState("chat"))?.data.pending).toBeUndefined();
+    expect(await f.store.listActiveExecutions()).toEqual([]);
     expect(f.commands.submit).not.toHaveBeenCalled();
   });
 
@@ -310,7 +337,7 @@ describe("Leader orchestration", () => {
     expect(f.commands.submit.mock.calls[0][3]).toBe("desktop-owner");
   });
 
-  it.each(["route-changed", "expired", "active", "unavailable"])("refuses desktop confirmation after %s without dispatch", async change => {
+  it.each(["route-changed", "expired", "active", "unavailable"])("preserves desktop authorization safely after %s without dispatch", async change => {
     const f = fixture([tool("propose_plan", { actions })]);
     const observed = Date.parse(f.sessions[0].observedAt);
     f.sessions[0].sendAvailability = { route: "desktop-owner", state: "ready", observedAt: new Date(observed).toISOString(), validUntil: new Date(observed + 45000).toISOString() };
@@ -321,8 +348,29 @@ describe("Leader orchestration", () => {
       source: "codex-desktop", availability: change === "unavailable" ? "unavailable" : "available",
       status: change === "active" ? "active" : "idle", observedAt: f.sessions[0].observedAt,
     };
-    expect((await f.create().handle("chat", "c", "确认执行")).text).toContain("状态已变化");
+    const reply = await f.create().handle("chat", "c", "确认执行");
     expect(f.commands.submit).not.toHaveBeenCalled();
+    if (change === "route-changed") {
+      expect(reply.text).toContain("状态已变化");
+      expect(await f.store.listActiveExecutions()).toEqual([]);
+      return;
+    }
+    expect(reply.text).toContain("自动推进中");
+    const execution = (await f.store.getLatestExecution("chat"))!;
+    expect(execution).toMatchObject({ status: "active", attempts: [null] });
+    expect(execution.plan.actions[0].sendRoute).toBe("desktop-owner");
+    expect((await f.executions.view(execution.id, "chat"))?.steps[0].status).toBe("waiting");
+    await f.executions.advance(execution.id);
+    expect(f.commands.submit).not.toHaveBeenCalled();
+    expect(await f.store.listRecentCommands()).toEqual([]);
+    f.refresh();
+    const refreshed = Date.parse(f.sessions[0].observedAt);
+    f.sessions[0].sendAvailability = { route: "desktop-owner", state: "ready",
+      observedAt: f.sessions[0].observedAt, validUntil: new Date(refreshed + 45000).toISOString() };
+    f.sessions[0].desktopObservation = { source: "codex-desktop", availability: "available", status: "idle", observedAt: f.sessions[0].observedAt };
+    await f.executions.advance(execution.id);
+    expect(f.commands.submit).toHaveBeenCalledTimes(1);
+    expect(f.commands.submit.mock.calls[0][3]).toBe("desktop-owner");
   });
 
   it("refuses a historical plan without a bound route even when the target is ready", async () => {

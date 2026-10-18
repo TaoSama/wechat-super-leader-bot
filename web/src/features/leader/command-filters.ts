@@ -3,8 +3,8 @@ import type { CommandStatus } from "../../types";
 export type CommandFilter = CommandStatus | "ALL" | "attention" | "running";
 
 const FILTER_STATUSES: Record<"attention" | "running", readonly CommandStatus[]> = {
-  attention: ["uncertain", "failed", "input-written"],
-  running: ["pending", "accepted"],
+  attention: ["uncertain", "failed", "input-written", "expired"],
+  running: ["queued", "pending", "accepted"],
 };
 
 export function matchesCommandFilter(status: CommandStatus, filter: CommandFilter): boolean {

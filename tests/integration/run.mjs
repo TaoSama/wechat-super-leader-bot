@@ -216,6 +216,12 @@ async function main() {
       await once(socket, 'open');
       socket.on('message', raw => {
       const command = JSON.parse(raw.toString());
+      if (command.type === 'inspect_command') {
+        inspections.push(command);
+        socket.send(JSON.stringify({ type: 'result', commandId: command.commandId,
+          status: 'uncertain', error: 'Synthetic journal has no immutable terminal receipt' }));
+        return;
+      }
       if (command.type === 'inspect_turn') {
         inspections.push(command);
         socket.send(JSON.stringify({ type: 'result', commandId: command.commandId, turnId: command.turnId,
@@ -229,10 +235,12 @@ async function main() {
       socket.send(JSON.stringify({ type: 'result', commandId: command.commandId, status: command.action === 'send' ? 'accepted' : 'completed',
         ...(command.action === 'send' ? { turnId: `turn-${command.commandId}` } : {}), output: 'integration-result' }));
       });
-      socket.send(JSON.stringify({ type: 'hello', version: 1, nodeId: 'test-node', sessions: [{
-      id: 'test-session', provider: 'codex-app', title: 'integration', cwd: '/test', status: 'idle', loaded: true, capabilities: ['read', 'send'], observedAt: new Date().toISOString(),
-      }], skills: fixtureSkills }));
-      await waitFor(async () => (await request('/v1/status')).body.sessions.length === 1, 'Daemon registration');
+      const sessions = () => ['test-session', 'pending-session'].map(id => ({
+      id, provider: 'codex-app', title: 'integration', cwd: '/test', status: 'idle', loaded: true, capabilities: ['read', 'send'], observedAt: new Date().toISOString(),
+      }));
+      socket.send(JSON.stringify({ type: 'hello', version: 1, nodeId: 'test-node', sessions: sessions(), skills: fixtureSkills }));
+      await waitFor(async () => (await request('/v1/status')).body.sessions.length === 2, 'Daemon registration');
+      return () => socket.send(JSON.stringify({type:'heartbeat',sessions:sessions(),skills:fixtureSkills}));
     };
     await connectFake();
     const oversized = await request('/v1/messages', {
@@ -276,8 +284,11 @@ async function main() {
     assert.equal(plan.status, 200, JSON.stringify(plan.body));
     assert(plan.body.text.includes('尚未派发'));
     assert.equal(deliveries, 3, 'Model planning dispatched a write before human confirmation');
-    const pending = await request('/v1/commands', { ...payload, action: 'send', prompt: 'leave-pending', requestId: randomUUID() });
+    // The accepted turn deliberately stays unfinished until restart inspection.
+    // Exercise disconnect ambiguity on another exact target instead of bypassing its FIFO fence.
+    const pending = await request('/v1/commands', { ...payload, sessionId: 'pending-session', action: 'send', prompt: 'leave-pending', requestId: randomUUID() });
     await waitFor(async () => deliveries === 4, 'Pending dispatch');
+    assert.equal((await request(`/v1/commands/${send.body.commandId}`)).body.status, 'accepted');
     await closeTestWebSocket(socket);
     socket = undefined;
     await waitFor(async () => (await request(`/v1/commands/${pending.body.commandId}`)).body.status === 'uncertain', 'Disconnect uncertainty');
@@ -291,14 +302,26 @@ async function main() {
       'Controller restart lost ordered skill refs or exact desktop skill receipt');
     assert.equal((await request(`/v1/commands/${id}`)).body.status, 'completed');
     assert.equal((await request('/v1/commands', payload)).body.commandId, id, 'Restart lost idempotency');
-    await connectFake();
-    await waitFor(async () => (await request(`/v1/commands/${send.body.commandId}`)).body.status === 'completed', 'Exact turn reconciliation after restart');
+    const heartbeat = await connectFake();
+    await waitFor(async () => {
+      heartbeat();
+      return (await request(`/v1/commands/${send.body.commandId}`)).body.status === 'completed';
+    }, 'Exact turn reconciliation after restart');
     const tracked = (await request(`/v1/commands/${send.body.commandId}`)).body;
     assert.equal(tracked.turnId, `turn-${send.body.commandId}`);
     assert.equal(tracked.output, 'exact tracked turn final');
     assert.equal(tracked.error, undefined);
     assert.equal(deliveries, 4, 'Reconciliation replayed a send');
     assert(inspections.some(query => query.commandId === send.body.commandId && query.turnId === tracked.turnId));
+    await waitFor(async () => {
+      heartbeat();
+      return inspections.some(query => query.type === 'inspect_command' && query.commandId === pending.body.commandId);
+    }, 'Unknown command journal inspection without replay');
+    const unknownInspection = inspections.find(query => query.type === 'inspect_command' && query.commandId === pending.body.commandId);
+    assert.equal(unknownInspection.sessionId, 'pending-session');
+    assert.equal(unknownInspection.prompt, 'leave-pending');
+    assert.equal((await request(`/v1/commands/${pending.body.commandId}`)).body.status, 'uncertain');
+    assert.equal(deliveries, 4, 'Unknown journal inspection replayed a mutation');
     socket.send(JSON.stringify({ type: 'result', commandId: send.body.commandId, turnId: tracked.turnId, status: 'accepted', output: 'late acceptance' }));
     await delay(100);
     assert.deepEqual((await request(`/v1/commands/${send.body.commandId}`)).body, tracked);

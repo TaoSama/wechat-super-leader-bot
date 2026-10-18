@@ -26,6 +26,32 @@ beforeEach(() => {
 });
 afterEach(() => { resetAuthHelperForTesting(); vi.unstubAllGlobals(); });
 
+it("明暗外观切换即时生效，切换不重置当前草稿", async () => {
+  render(<App />);
+  fireEvent.click(await screen.findByTestId("session-row-local-session-one"));
+  await screen.findByText("可读的历史消息");
+  fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "保留这段草稿" } });
+  const shell = document.querySelector(".app-shell")!;
+  expect(shell).not.toHaveAttribute("data-theme");
+  fireEvent.click(screen.getByRole("button", { name: "切换明暗外观" }));
+  expect(shell).toHaveAttribute("data-theme", "dark");
+  fireEvent.click(screen.getByRole("button", { name: "切换明暗外观" }));
+  expect(shell).toHaveAttribute("data-theme", "light");
+  expect(screen.getByLabelText("发送给当前会话")).toHaveValue("保留这段草稿");
+});
+
+it("聊天输入区收起发送通道说明，详情仍可查看模型设置和草稿说明", async () => {
+  render(<App />);
+  fireEvent.click(await screen.findByTestId("session-row-local-session-one"));
+  await screen.findByText("可读的历史消息");
+  expect(document.querySelector(".composer-route-details")).toBeNull();
+  expect(document.querySelector(".composer-input .send-button")).not.toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "查看发送说明" }));
+  const details = screen.getByRole("dialog", { name: "会话详情" });
+  expect(within(details).getByText(/保留原来的模型与设置/)).toBeVisible();
+  expect(within(details).getByText(/关闭页面后不会保存/)).toBeVisible();
+});
+
 it("会话三行突出标题、最近消息和模型，技术字段在详情中", async () => {
   render(<App />);
   const row = await screen.findByTestId("session-row-local-session-one");
@@ -46,7 +72,7 @@ it("会话三行突出标题、最近消息和模型，技术字段在详情中"
   expect(within(metadata).getByText(session.cwd)).toBeVisible();
 });
 
-it("历史超限提供显式分页入口，选择后标注来源且不发送消息", async () => {
+it("历史超限提供简单的重新加载入口，技术来源收进详情且不发送消息", async () => {
   const baseFetch = vi.mocked(fetch).getMockImplementation()!;
   const calls: string[] = [];
   vi.mocked(fetch).mockImplementation(async (url, init) => {
@@ -58,10 +84,10 @@ it("历史超限提供显式分页入口，选择后标注来源且不发送消�
   });
   render(<App />);
   fireEvent.click(await screen.findByTestId("session-row-local-session-one"));
-  fireEvent.click(await screen.findByRole("button", { name: "使用分页历史接口" }));
+  fireEvent.click(await screen.findByRole("button", { name: "重新加载会话" }));
   await screen.findByText("可读的历史消息");
-  expect(screen.getByText("已切换为原生分页历史")).toBeVisible();
-  fireEvent.click(screen.getByRole("button", { name: "查看来源" }));
+  expect(screen.queryByText("已切换为原生分页历史")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
   const metadata = screen.getByRole("dialog", { name: "会话详情" });
   expect(within(metadata).getByText(/原生分页历史 · 读取同一会话/)).toBeVisible();
   expect(screen.queryByText("历史超出读取大小限制。")).toBeNull();

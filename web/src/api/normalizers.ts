@@ -7,6 +7,9 @@ import { parseConsoleGoals } from "../features/leader/goal-contract";
 import { normalizeInputReceipt, TERMINAL_SESSION_ID } from "../features/sessions/input-receipt";
 
 const VALID_COMMAND_STATUSES: ReadonlySet<CommandStatus> = new Set([
+  "queued",
+  "cancelled",
+  "expired",
   "pending",
   "accepted",
   "input-written",
@@ -116,6 +119,9 @@ export function normalizeCommand(raw: unknown): CommandRecord | null {
     prompt: typeof obj.prompt === "string" ? obj.prompt : undefined,
     status,
     output: typeof obj.output === "string" ? obj.output : undefined,
+    hasOutput: typeof obj.hasOutput === "boolean" ? obj.hasOutput : undefined,
+    outputPreview: typeof obj.outputPreview === "string" ? obj.outputPreview : undefined,
+    outputTruncated: typeof obj.outputTruncated === "boolean" ? obj.outputTruncated : undefined,
     error: typeof obj.error === "string" ? obj.error : undefined,
     turnId: typeof obj.turnId === "string" ? obj.turnId : undefined,
     sendRoute: obj.sendRoute === "desktop-owner" || obj.sendRoute === "control-socket" || obj.sendRoute === "app-server-resume" || obj.sendRoute === "terminal-pane" ? obj.sendRoute : undefined,

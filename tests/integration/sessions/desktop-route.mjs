@@ -252,8 +252,21 @@ export async function verifyDesktopRoute({ base, request, nodeToken, waitFor, on
     assert.equal(updated.desktopObservation.reasoningEffort, 'medium');
     assert.equal(updated.model, undefined, 'Model patch rewrote the native metadata');
     await checkLeaderModel('fixture-updated-model', 'medium');
-    const blocked = await request(path, { ...payload, requestId: randomUUID() });
-    assert.equal(blocked.status, 409);
+    const blockedPayload = { ...payload, requestId: randomUUID() };
+    const blocked = await request(path, blockedPayload);
+    assert.equal(blocked.status, 202, JSON.stringify(blocked.body));
+    assert.equal(blocked.body.status, 'queued');
+    assert.equal(blocked.body.sendRoute, 'desktop-owner');
+    const queued = (await request(`/v1/commands/${blocked.body.commandId}`)).body;
+    assert.equal(queued.status, 'queued', 'Busy owner work was not persisted');
+    assert.equal(queued.nodeId, NODE_ID);
+    assert.equal(queued.sessionId, SESSION_ID);
+    const queuedDuplicate = await request(path, blockedPayload);
+    assert.equal(queuedDuplicate.body.commandId, queued.commandId, 'Busy retry created another queued command');
+    assert.equal(queuedDuplicate.body.status, 'queued');
+    const cancelled = await request(`/v1/commands/${queued.commandId}/cancel`, {});
+    assert.equal(cancelled.status, 200, JSON.stringify(cancelled.body));
+    assert.equal(cancelled.body.status, 'cancelled');
     const duplicate = await request(path, payload);
     assert.equal(duplicate.body.commandId, receipt.commandId);
     assert.equal(duplicate.body.sendRoute, 'desktop-owner');
@@ -327,9 +340,12 @@ export async function verifyDesktopRoute({ base, request, nodeToken, waitFor, on
     assertHealthy();
     console.log('PASS >16 MiB original-owner snapshots across observer, readiness, dispatch preflight, exact-turn inspection and history; private padding omitted from public status');
     console.log('PASS real Go history: response-before/after patch ordering; complete older pages; active owner read; fixed context incremental updates; one full load; revision gap → HTTP 409; explicit new context recovers; no native metadata rewrite or sends');
-    console.log('PASS HTTP → PostgreSQL → WS → real Go Daemon → simulated original desktop owner; model snapshot and patch preserve native facts; ready with native loaded=false; exact native turn and output; busy veto; duplicate request no resend');
+    console.log('PASS HTTP → PostgreSQL → WS → real Go Daemon → simulated original desktop owner; model snapshot and patch preserve native facts; ready with native loaded=false; exact native turn and output; busy durable queue, exact route, duplicate and cancellation with zero extra native sends');
     state.threadRuntimeStatus.type = 'idle';
     publishPatches([{ op: 'replace', path: ['threadRuntimeStatus', 'type'], value: 'idle' }]);
+    await waitFor(async () => (await status())?.sendAvailability?.state === 'ready', 'Original desktop owner recovers after queued cancellation');
+    assert.equal((await request(`/v1/commands/${queued.commandId}`)).body.status, 'cancelled');
+    assert.equal(starts, 1, 'Cancelled busy command was sent when the owner recovered');
     const skillReceipt = await verifySkillCombination({ request, waitFor, status, assertHealthy, starts: () => starts,
       nodeId: NODE_ID, sessionId: SESSION_ID, fixtures, plainReceipt: receipt });
     await onSkillReceipt?.(skillReceipt);

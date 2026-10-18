@@ -6,7 +6,7 @@ SELECT name,to_regclass('public.' || name) IS NOT NULL AS exists
 FROM unnest(ARRAY['commands','messages','leader_states','leader_executions','leader_notifications','leader_goals']) AS t(name);
 SELECT status,count(*) FROM commands GROUP BY status ORDER BY status;
 SELECT command_id,node_id,session_id,action,status,turn_id,expires_at,updated_at
-FROM commands WHERE status NOT IN ('completed','failed','input-written') ORDER BY command_id;
+FROM commands WHERE status NOT IN ('completed','failed','input-written','cancelled','expired') ORDER BY command_id;
 SELECT md5(chat_id) AS chat_hash,revision,
  data ? 'inflight' AS has_claim,
  data ? 'pending' AS has_pending_plan,

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiAuthError, ApiHistoryError } from "../../api/errors";
-import { fetchSessionHistory } from "../../api/sessions";
-import { HistoryItem, ScopedSession, SessionHistory } from "../../types";
+import { ScopedSession, SessionHistory } from "../../types";
 import { HISTORY_CONTEXT_EXPIRED_MESSAGE, isHistoryContext, isSessionHistorySource, terminalHistoryBlockReason } from "./history-contract";
 import { isTerminalSession, MAX_TERMINAL_OBSERVATION_AGE_MS } from "./terminal-session";
+import { HistoryCache, readSharedHistory } from "./history-cache";
+import { mergeHistoryPage } from "./history-page";
 
 const HISTORY_POLL_MS = 2000;
 const MAX_RETRY_MS = 30_000;
@@ -33,29 +34,21 @@ interface HistoryState {
 }
 interface Gap { beforeId: string; cursor: string | null; previousIds: Set<string>; seen: Set<string> }
 interface Job { older: boolean; reset: boolean; resolve: (loaded: boolean) => void; promise: Promise<boolean> }
-const EMPTY: HistoryState = { owner: "", history: null, loading: false, loadingOlder: false, loadingLatest: false, error: null, gap: false, gapBeforeId: null, gapBeforeIds: [], memoryGap: false, pollingPaused: false, contextExpired: false, windowNotice: null };
-
-// Page order is authoritative; existing IDs retain their place while their contents update.
-function mergePage(current: HistoryItem[], incoming: HistoryItem[], insertion: number): HistoryItem[] {
-  const result = [...current];
-  const unique = [...new Map(incoming.map((item) => [item.id, item])).values()];
-  let position = insertion;
-  for (let i = 0; i < unique.length; i++) {
-    const item = unique[i];
-    const existing = result.findIndex((value) => value.id === item.id);
-    if (existing >= 0) { result[existing] = item; position = existing + 1; continue; }
-    const next = unique.slice(i + 1).map((value) => result.findIndex((entry) => entry.id === value.id)).find((index) => index >= 0);
-    if (next !== undefined) position = next;
-    result.splice(position, 0, item);
-    position++;
-  }
-  return result;
+interface CachedHistory {
+  state: HistoryState;
+  oldestCursor: string | null;
+  olderSeen: Set<string>;
+  gaps: Gap[];
+  provider: string;
+  historySource?: ScopedSession["historySource"];
 }
+const EMPTY: HistoryState = { owner: "", history: null, loading: false, loadingOlder: false, loadingLatest: false, error: null, gap: false, gapBeforeId: null, gapBeforeIds: [], memoryGap: false, pollingPaused: false, contextExpired: false, windowNotice: null };
 
 export function useSessionHistory(session: ScopedSession | null, connected: boolean, onAuthFailure: () => void) {
   const owner = session ? sessionKey(session) : "";
   const terminalObservedAt = session && isTerminalSession(session) ? session.observedAt : undefined;
   const [state, setState] = useState<HistoryState>(EMPTY);
+  const cacheRef = useRef(new HistoryCache<CachedHistory>());
   const requestRef = useRef<(older?: boolean, reset?: boolean) => Promise<boolean>>(async () => false);
   const lifecycleRef = useRef<() => void>(() => undefined);
   const sourceRef = useRef<(source?: "control-socket") => Promise<boolean>>(async () => false);
@@ -69,15 +62,19 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
   useEffect(() => {
     if (!session) { setState({ ...EMPTY, owner }); return; }
     const target = session;
+    const saved = cacheRef.current.get(owner);
+    const cached = saved?.provider === target.provider && saved.historySource === target.historySource &&
+      saved.state.requestedSource === undefined && !terminalHistoryBlockReason(target) ? saved : undefined;
+    let published: HistoryState = cached?.state ?? { ...EMPTY, owner };
     let disposed = false;
     let active: { controller: AbortController; job: Job } | null = null;
     let timer: number | undefined;
     let observationTimer: number | undefined;
-    let latest: SessionHistory | null = null;
-    let oldestCursor: string | null = null;
-    let olderSeen = new Set<string>();
-    let gaps: Gap[] = [];
-    let memoryGap = false;
+    let latest: SessionHistory | null = cached?.state.history ?? null;
+    let oldestCursor: string | null = cached?.oldestCursor ?? null;
+    let olderSeen = cached?.olderSeen ?? new Set<string>();
+    let gaps: Gap[] = cached?.gaps ?? [];
+    let memoryGap = cached?.state.memoryGap ?? false;
     let paginationError: string | null = null;
     let failures = 0;
     let contextExpired = false;
@@ -87,15 +84,16 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
     const queue: Job[] = [];
     const readable = () => !!sessionRef.current && sessionKey(sessionRef.current) === owner && !terminalHistoryBlockReason(sessionRef.current);
     const available = () => connectedRef.current && readable() && navigator.onLine !== false && document.visibilityState !== "hidden";
-    setState({ ...EMPTY, owner, loading: available(), pollingPaused: !available() });
+    setState({ ...published, loading: !latest && available(), pollingPaused: !available() });
 
     function publish(error: string | null = null) {
       const cursor = contextExpired ? null : gaps.length && !memoryGap ? gaps[gaps.length - 1].cursor : oldestCursor;
-      setState({ owner, history: latest ? { ...latest, nextCursor: cursor } : null, loading: !!active,
+      published = { owner, history: latest ? { ...latest, nextCursor: cursor } : null, loading: !!active,
         loadingOlder: !!active?.job.older, loadingLatest: !!active && !active.job.older, error: error ?? paginationError,
         gap: gaps.length > 0, gapBeforeId: gaps[0]?.beforeId ?? null, gapBeforeIds: gaps.map((gap) => gap.beforeId),
         memoryGap, pollingPaused: contextExpired || sizeBlocked || !available(), contextExpired, requestedSource, sizeBlocked,
-        windowNotice: memoryGap ? "历史窗口最多保留2000条：较早消息与最新30条之间部分内容未显示。继续向上可加载更早历史，重新读取最新页可释放历史窗口并恢复最新一段连续记录。" : null });
+        windowNotice: memoryGap ? "历史窗口最多保留2000条：较早消息与最新30条之间部分内容未显示。继续向上可加载更早历史，重新读取最新页可释放历史窗口并恢复最新一段连续记录。" : null };
+      setState(published);
     }
 
     function cancel() {
@@ -127,7 +125,7 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
       let error: string | null = null;
       try {
         const historyContext = needsReset ? undefined : latest?.historyContext;
-        const page = await fetchSessionHistory(target.nodeId, target.id, cursor ?? undefined, controller.signal, historyContext, requestedSource);
+        const page = await readSharedHistory(target.nodeId, target.id, cursor ?? undefined, controller.signal, historyContext, requestedSource);
         const current = sessionRef.current;
         if (disposed || controller.signal.aborted || active !== flight || !current || !available()) return;
         if (!isHistoryContext(page.historyContext) || page.session.nodeId !== target.nodeId || page.session.id !== target.id ||
@@ -153,7 +151,7 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
           const stalled = !!next && seen.has(next);
           const insertion = bridge ? latest.items.findIndex((item) => item.id === bridge.beforeId) : 0;
           const overlap = bridge && page.items.some((item) => bridge.previousIds.has(item.id));
-          latest = { ...latest, items: mergePage(latest.items, page.items, Math.max(0, insertion)), truncated: latest.truncated || page.truncated };
+          latest = { ...latest, items: mergeHistoryPage(latest.items, page.items, Math.max(0, insertion)), truncated: latest.truncated || page.truncated };
           if (bridge) {
             if (overlap) gaps = gaps.filter((gap) => gap !== bridge);
             else { bridge.beforeId = page.items[0]?.id ?? bridge.beforeId; bridge.cursor = stalled ? null : next; }
@@ -166,7 +164,7 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
           const overlap = page.items.some((item) => ids.has(item.id));
           if (latest.items.length && !overlap) gaps.push({ beforeId: page.items[0].id, cursor: page.nextCursor, previousIds: ids, seen: new Set() });
           if (!latest.items.length) { oldestCursor = page.nextCursor; olderSeen.clear(); }
-          latest = { ...page, items: mergePage(latest.items, page.items, latest.items.length), truncated: latest.truncated || page.truncated };
+          latest = { ...page, items: mergeHistoryPage(latest.items, page.items, latest.items.length), truncated: latest.truncated || page.truncated };
         } else latest = { ...latest, fetchedAt: page.fetchedAt, session: page.session };
         if (latest.items.length > MAX_DISPLAY_ITEMS) {
           latest = { ...latest, items: [...latest.items.slice(0, MAX_DISPLAY_ITEMS - LIVE_TAIL_ITEMS), ...latest.items.slice(-LIVE_TAIL_ITEMS)] };
@@ -184,6 +182,7 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
           disposed = true;
           cancel();
           latest = null;
+          cacheRef.current.clear();
           gaps = [];
           olderSeen.clear();
           detach();
@@ -217,6 +216,7 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
     function request(older = false, reset = false): Promise<boolean> {
       if (disposed || !available()) return Promise.resolve(false);
       if (reset) {
+        cacheRef.current.delete(owner);
         cancel();
         contextExpired = false;
         needsReset = true;
@@ -271,6 +271,13 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
     return () => {
       disposed = true;
       cancel();
+      if (latest && !contextExpired && !needsReset && !sizeBlocked && requestedSource === undefined) {
+        // UTF-16 text plus conservative per-row metadata overhead bounds retained
+        // memory without serializing a large history on every background poll.
+        const bytes = latest.items.reduce((total, item) => total + item.text.length * 2 + 1024, 0);
+        cacheRef.current.set(owner, { state: { ...published, loading: false, loadingOlder: false, loadingLatest: false },
+          oldestCursor, olderSeen, gaps, provider: target.provider, historySource: target.historySource }, bytes);
+      } else cacheRef.current.delete(owner);
       window.clearTimeout(observationTimer);
       detach();
       requestRef.current = async () => false;

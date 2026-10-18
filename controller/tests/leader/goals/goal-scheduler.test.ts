@@ -37,8 +37,8 @@ describe("durable continuous goal scheduler", () => {
     const notification = (await f.store.getNotification(f.goal.id, f.now()))!;
     expect(notification).toMatchObject({ source: { type: "goal", id: f.goal.id }, kind: "completed", status: "pending" });
     expect(notification.text).toContain(`**任务**：${f.goal.proposal.objective}`);
-    expect(notification.text).toContain("> 交叉核验通过");
-    expect(notification.text).toContain("> 调查结果😀");
+    expect(notification.text).toContain("交叉核验通过");
+    expect(notification.text).toContain("调查结果😀");
     await f.create().advance(f.goal.id);
     expect(await f.store.listPendingNotifications(["chat"], f.now())).toEqual([notification]);
   });

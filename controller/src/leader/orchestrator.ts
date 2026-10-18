@@ -6,6 +6,7 @@ import type { LeaderModel, ModelMessage, ModelToolCall } from "./model/contracts
 import { hasSkillRefs } from "../skills/catalog.js";
 import { selectExecutionObservation, selectModelObservation } from "../sessions/observation.js";
 import { selectSendRoute } from "../sessions/send-eligibility.js";
+import { queueSendRoute } from "../commands/queue.js";
 import { readinessFailure, waitForSendReadiness, type ReadinessHub } from "../sessions/send-readiness.js";
 import { failureReply, modelDiagnostic } from "./model/errors.js";
 import { classifyUserAuthorization } from "./model/user-authorization.js";
@@ -14,6 +15,8 @@ import { assertTerminalSingleStep, submitTerminalPlan, TERMINAL_INPUT_WARNING } 
 import { ExecutionScheduler } from "./plans/scheduler.js";
 import { executionSummary, sessionLabels } from "./plans/presentation.js";
 import { readSessionHistory } from "./queries/session-history.js";
+import { authorizeImageDelivery, sendSessionImages } from "./queries/session-images.js";
+import type { MediaHub } from "../sessions/message-images.js";
 import { GoalConversation, goalConfirmation, goalCancellation } from "./goals/conversation.js";
 import { GoalScheduler } from "./goals/scheduler.js";
 import { createGoalDecider } from "./goals/model.js";
@@ -32,7 +35,7 @@ const clip = (text: string, length: number) => {
 };
 const confirmation = /^(?:请)?(?:确认|执行|开始|开始执行|确认执行|确认开始|按这个计划执行|就按这个执行|确认这个计划)[。！!]?$/;
 const cancellation = /^(?:请|帮我)?(?:取消计划|不用执行|取消执行|停止后续任务|停止后续执行|先别跑后面的任务)[。！!]?$/;
-type Hub = Pick<NodeHub, "getAllSessions" | "getNodeStatusList" | "getNodeSession" | "isNodeConnected" | "getAllSkills" | "getNodeSkills" | "readHistory"> & ReadinessHub;
+type Hub = Pick<NodeHub, "getAllSessions" | "getNodeStatusList" | "getNodeSession" | "isNodeConnected" | "getAllSkills" | "getNodeSkills" | "readHistory"> & ReadinessHub & Partial<MediaHub>;
 
 
 const sanitizeConsoleLinkSecrets = (text: string, issuedUrl?: string): string => {
@@ -85,7 +88,7 @@ export class LeaderOrchestrator {
     const receipt = data.receipts.find(item => item.messageId === messageId);
     if (receipt) {
       if (receipt.inputHash !== inputHash) throw new ConflictError("Message ID already used with different text");
-      return { text: receipt.text, commandId: receipt.commandId };
+      return { text: receipt.text, commandId: receipt.commandId, ...(receipt.images ? { images: receipt.images } : {}) };
     }
     if (data.inflight) {
       if (data.inflight.expiresAt > this.now()) throw new CommandError(409, "上一条请求尚未结束，请稍后查询");
@@ -154,7 +157,7 @@ export class LeaderOrchestrator {
       try {
         const reasoned = await this.reason(chatId, text, data, linkContext, trace, previousPlan);
         execution = reasoned.execution;
-        reply = { text: reasoned.text, commandId: reasoned.commandId };
+        reply = { text: reasoned.text, commandId: reasoned.commandId, ...(reasoned.images ? { images: reasoned.images } : {}) };
       } catch (error) {
         if (error instanceof ConflictError) throw error;
         console.warn('Leader processing failed; no plan dispatched', {
@@ -215,25 +218,38 @@ export class LeaderOrchestrator {
     try { assertTerminalSingleStep(plan); }
     catch { return { text: "终端输入只支持独立单步，不能加入多步或依赖计划，没有派发。" }; }
     if (plan.actions.some(action => !action.sendRoute)) return { text: "计划中的会话状态已变化（发送路线缺失），没有派发。请重新生成计划。" };
-    const readiness = await waitForSendReadiness(this.hub, plan.actions, {
+    const readiness = hasTerminalTarget(plan) ? await waitForSendReadiness(this.hub, plan.actions, {
       now: this.now, timeoutMs: Math.min(plan.expiresAt, data.inflight!.expiresAt) - this.now(),
-    });
+    }) : {ready:true as const};
     if (!readiness.ready) return { text: `计划中的节点或会话状态已变化：${readinessFailure(readiness)}。没有派发。` };
     if (plan.expiresAt <= this.now()) return { text: "等待期间计划已过期，没有派发。请重新生成计划。" };
     // Validate every target before beginning; revalidate again inside CommandService immediately before dispatch.
     for (const action of plan.actions) {
-      const session = this.hub.getNodeSession(action.nodeId, action.sessionId);
-      if (action.skills?.length && !hasSkillRefs(this.hub.getNodeSkills(action.nodeId), action.skills)) {
+      const session = this.hub.getNodeSession(action.nodeId, action.sessionId) ?? await this.store.getKnownSession(action.nodeId,action.sessionId);
+      if (action.skills?.length && this.hub.isNodeConnected(action.nodeId) && !hasSkillRefs(this.hub.getNodeSkills(action.nodeId), action.skills)) {
         return { text: "计划中的技能已变化或不可用，没有派发。请重新查询技能并生成计划。" };
       }
-      const eligibility = session ? selectSendRoute(session, this.now(), action.sendRoute) : undefined;
-      if (!this.hub.isNodeConnected(action.nodeId) || !action.sendRoute || !eligibility?.ready || eligibility.route !== action.sendRoute) {
+      const route = session && queueSendRoute(session,action.sendRoute);
+      if (!action.sendRoute || !route || route !== action.sendRoute) {
         return { text: "计划中的节点或会话状态已变化，没有派发。请重新查询并生成计划。" };
       }
     }
     const current = await this.store.getLeaderState(chatId);
     if (current?.revision !== revision || data.inflight!.expiresAt <= this.now()) {
       return { text: "处理所有权或时限已变化，没有创建新的执行计划，请核验已有回执。" };
+    }
+    if (plan.actions.length === 1 && plan.actions[0].deliveryMode === "steer") {
+      const action = plan.actions[0];
+      const command = await this.commands.submit({nodeId:action.nodeId,sessionId:action.sessionId,action:"send",prompt:action.prompt,
+        skills:action.skills,deliveryMode:"steer",expectedTurnId:action.expectedTurnId,requestId:`leader_steer_${hash([chatId,plan.id])}`},0,async()=>{
+        const latest = await this.store.getLeaderState(chatId);
+        const inflight = latest && LeaderDataSchema.parse(latest.data).inflight;
+        if (latest?.revision !== revision || !inflight || inflight.expiresAt<=this.now() || JSON.stringify(inflight.plan)!==JSON.stringify(plan)) {
+          throw new CommandError(409,"Current-turn supplement authority changed");
+        }
+      },action.sendRoute,{type:"chat",chatId});
+      data.commandIds.push(command.commandId);
+      return {text:command.status === "accepted" ? "补充已由原会话当前轮受理，完成后继续同步结果。" : `当前轮补充${command.status === "queued" ? "已保存，等待核对原轮次" : "结果待核查"}；不会改成新任务或重复发送。`,commandId:command.commandId};
     }
     if (hasTerminalTarget(plan)) {
       if (await this.goals.hasUnfinished(chatId)) return { text: "已有active/blocked持续目标，未派发终端计划；请先查询或取消目标。" };
@@ -296,6 +312,18 @@ export class LeaderOrchestrator {
         toolCount++;
         trace.toolCalls = toolCount;
         trace.lastTool = Object.hasOwn(ToolArguments, call.function.name) ? call.function.name : "unsupported";
+        if (call.function.name === "send_session_images") {
+          let args: unknown;
+          try { args = call.function.arguments.length <= 8000 ? JSON.parse(call.function.arguments) : undefined; }
+          catch { return { text: "图片目标参数无效，未发送图片。" }; }
+          const target = ToolArguments.send_session_images.safeParse(args);
+          if (!target.success) return { text: "图片目标参数无效，未发送图片。" };
+          if (!await authorizeImageDelivery(this.model, sanitizedUserPrompt, signal)) return { text: "本条消息未明确要求向当前微信聊天发图，未发送图片。" };
+          const session = this.hub.getNodeSession(target.data.nodeId, target.data.sessionId);
+          if (!this.hub.isNodeConnected(target.data.nodeId) || !session?.capabilities.includes("read") ||
+              !this.hub.listMedia || !this.hub.readMedia) return { text: "原会话图片读取能力不可用，未发送图片。" };
+          return sendSessionImages(this.hub as Hub & MediaHub, this.store, chatId, data.inflight!.messageId, target.data, signal, this.now);
+        }
         if (call.function.name === "execute_plan" || call.function.name === "execute_goal") {
           if (!authorization) {
             const authorizationStartedAt = Date.now();
@@ -458,27 +486,29 @@ export class LeaderOrchestrator {
         catch { return { error: "终端输入无法证明任务完成，只支持独立单步，不能加入多步或依赖计划" }; }
         try { validatePlanDependencies({ actions }); }
         catch { return { error: "Invalid plan dependencies or result sources; resultFrom must select distinct direct earlier dependencies, and same-session tasks must form a chain" }; }
-        if ((await this.store.getLatestExecution(chatId))?.status === "active") return { error: "An active plan already exists; query its progress or ask the user to cancel it" };
-        if (await this.goals.hasUnfinished(chatId)) return { error: "An active or blocked goal already exists; query its progress or cancel it" };
-        const readiness = await waitForSendReadiness(this.hub, actions, {
+        const supplement = actions.length === 1 && actions[0].deliveryMode === "steer";
+        if (!supplement && (await this.store.getLatestExecution(chatId))?.status === "active") return { error: "An active plan already exists; query its progress or ask the user to cancel it" };
+        if (!supplement && await this.goals.hasUnfinished(chatId)) return { error: "An active or blocked goal already exists; query its progress or cancel it" };
+        const readiness = hasTerminalTarget({actions}) ? await waitForSendReadiness(this.hub, actions, {
           signal, now: this.now, timeoutMs: data.inflight!.expiresAt - this.now(),
-        });
+        }) : {ready:true as const,routes:[]};
         if (!readiness.ready) return { error: readinessFailure(readiness) };
         if (data.inflight!.expiresAt <= this.now()) return { error: "等待期间处理授权已过期，未生成计划或派发" };
         const boundActions: Plan["actions"] = [];
         for (const [index, action] of actions.entries()) {
-          const session = this.hub.getNodeSession(action.nodeId, action.sessionId);
-          if (action.skills?.length && !hasSkillRefs(this.hub.getNodeSkills(action.nodeId), action.skills)) {
+          const session = this.hub.getNodeSession(action.nodeId, action.sessionId) ?? await this.store.getKnownSession(action.nodeId,action.sessionId);
+          if (action.skills?.length && this.hub.isNodeConnected(action.nodeId) && !hasSkillRefs(this.hub.getNodeSkills(action.nodeId), action.skills)) {
             return { error: "Selected skill unavailable or changed; query this node's skills first" };
           }
-          const eligibility = session ? selectSendRoute(session, this.now(), readiness.routes[index]) : undefined;
-          if (!this.hub.isNodeConnected(action.nodeId) || !eligibility?.ready) {
+          const route = session ? queueSendRoute(session,readiness.routes[index]) : undefined;
+          if (!route) {
             return { error: "Plan contains unavailable, busy or read-only targets; clarify with the user" };
           }
-          if (eligibility.route !== readiness.routes[index]) {
+          if (readiness.routes[index] && route !== readiness.routes[index]) {
             return { error: `[${action.nodeId}] ${action.sessionId}：发送路线已变化，请重新生成计划` };
           }
-          boundActions.push({ ...action, sendRoute: readiness.routes[index] });
+          if (action.deliveryMode === "steer" ? !action.expectedTurnId : action.expectedTurnId !== undefined) return {error:"补充当前轮需要准确expectedTurnId，普通任务不能绑定其他轮次"};
+          boundActions.push({ ...action, sendRoute: route });
         }
         try { assertTerminalSingleStep({ actions: boundActions }); }
         catch { data.pending = undefined; return { error: "终端输入无法证明任务完成，只支持独立单步，不能加入多步或依赖计划" }; }

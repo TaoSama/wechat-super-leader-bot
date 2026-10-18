@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { verifyNotificationProgress } from './notification-progress.mjs';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const CLAIM_MS = 60_000;
+const CLAIM_MS = 30 * 60_000;
 const TASK_NAME = '核对通知存储结果';
 const BOUND_RESULT = '核验结果：所有订单金额一致';
 const UNRELATED_RESULT = 'unrelated-session-result-must-not-appear';
@@ -103,7 +104,7 @@ export async function verifyNotificationStore({ stores, pool, reopenStore }) {
     await assert.rejects(stores[0].claimNotification(expired.id, randomUUID(), [chat], now + DAY_MS));
     assert(!(await stores[0].listPendingNotifications([chat], now + DAY_MS)).length);
 
-    // Unauthorized older events must not consume the four available slots.
+    // Unauthorized older events must not consume the single bounded delivery slot.
     const hidden = 'notification-hidden-' + randomUUID();
     for (let index = 0; index < 5; index++) {
       const record = await make(hidden);
@@ -118,7 +119,7 @@ export async function verifyNotificationStore({ stores, pool, reopenStore }) {
     }
     ordered.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
     const list = await stores[1].listPendingNotifications([visible], now + 10);
-    assert.deepEqual(list.map(item => item.id), ordered.slice(0, 4).map(item => item.id));
+    assert.deepEqual(list.map(item => item.id), ordered.slice(0, 1).map(item => item.id));
     assert.deepEqual(await stores[1].listPendingNotifications([], now), []);
     list[0].text = 'mutated caller copy';
     assert.notEqual((await stores[0].getNotification(list[0].id, now)).text, list[0].text);
@@ -127,6 +128,7 @@ export async function verifyNotificationStore({ stores, pool, reopenStore }) {
     assert.equal((await reopened.getNotification(race.id, now)).status, 'accepted');
     assert.equal((await reopened.getNotification(race.id, now)).attemptId, claimed.attemptId);
     await assert.rejects(reopened.claimNotification(race.id, randomUUID(), [chat], now));
+    await verifyNotificationProgress({ stores, pool, reopenStore });
     console.log('PASS real PG terminal/outbox atomic rollback, named exact-command results and same-session isolation, one terminal event, concurrent permanent claim, late exact receipt, TTL, filtered bounded order and reopen without replay');
   } finally {
     if (rejectingConstraint) await pool.query('ALTER TABLE leader_notifications DROP CONSTRAINT notification_fixture_reject');

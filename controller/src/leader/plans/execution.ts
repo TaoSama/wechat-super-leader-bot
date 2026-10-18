@@ -38,6 +38,8 @@ export function validatePlanDependencies(plan: Pick<Plan, "actions">): void {
   const targets = new Map<string, number>();
   for (const [index, action] of plan.actions.entries()) {
     const dependencies = action.dependsOn;
+    if (action.deliveryMode === "steer" ? !action.expectedTurnId : action.expectedTurnId !== undefined) throw new Error("Steer requires an exact expected turn");
+    if (action.deliveryMode === "steer" && (dependencies.length || (action.resultFrom?.length ?? 0))) throw new Error("Steer cannot wait for dependencies or consume future result inputs");
     if (new Set(dependencies).size !== dependencies.length || dependencies.some(step => step < 1 || step > index)) {
       throw new Error("Dependencies must refer to distinct earlier steps");
     }
@@ -111,7 +113,8 @@ export function matchesExecutionCommand(execution: ExecutionRecord, index: numbe
   const action = execution.plan.actions[index];
   return command.requestId === executionRequestId(execution, index) && command.action === "send" &&
     command.nodeId === action.nodeId && command.sessionId === action.sessionId && command.prompt === executionPrompt(execution, index) &&
-    command.sendRoute === action.sendRoute && sameSkillRefs(command.skills, action.skills);
+    command.sendRoute === action.sendRoute && sameSkillRefs(command.skills, action.skills) &&
+    (command.deliveryMode ?? "next-turn") === (action.deliveryMode ?? "next-turn") && command.expectedTurnId === action.expectedTurnId;
 }
 
 export function executionPrompt(execution: ExecutionRecord, index: number): string {

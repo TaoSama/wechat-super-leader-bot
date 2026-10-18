@@ -70,3 +70,44 @@ test("ControllerClient retries 5xx, throws ChatNotAllowedError on CHAT_NOT_ALLOW
   );
   assert.equal(authCalls, 1);
 });
+
+test("chat authorization uses an authenticated read-only check before any model work", async () => {
+  const calls: { url: string; init?: RequestInit }[] = [];
+  const client = new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic",
+    fetchImpl: async (input, init) => { calls.push({ url: String(input), init }); return Response.json({ allowed: true }); } });
+  await client.assertChatAllowed("chat");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "http://127.0.0.1:8790/v1/chats/authorize");
+  assert.equal(calls[0].init?.method, "POST");
+  assert.equal(calls[0].init?.redirect, "error");
+  assert.equal((calls[0].init?.headers as Record<string, string>).Authorization, "Bearer synthetic");
+  assert.deepEqual(JSON.parse(String(calls[0].init?.body)), { chatId: "chat" });
+});
+
+test("chat authorization rejects denied chats and malformed responses without retrying", async () => {
+  for (const [status, body] of [[403, { code: "CHAT_NOT_ALLOWED" }], [200, { allowed: false }],
+    [200, { allowed: true, extra: "secret" }], [200, {}], [200, []], [401, {}], [500, {}]] as const) {
+    let calls = 0;
+    const client = new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic",
+      fetchImpl: async () => { calls++; return Response.json(body, { status }); } });
+    await assert.rejects(client.assertChatAllowed("chat"), error => {
+      if (status === 403) assert.ok(error instanceof ChatNotAllowedError);
+      return true;
+    });
+    assert.equal(calls, 1);
+  }
+});
+
+test("authorization remains bounded when fetch or response parsing ignores cancellation", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  for (const phase of ["fetch", "body"]) {
+    const client = new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic",
+      fetchImpl: async () => phase === "fetch" ? new Promise<Response>(() => {}) :
+        new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode("{")); } })) });
+    const pending = client.assertChatAllowed("chat");
+    const rejected = assert.rejects(pending, /authorization timed out/);
+    for (let step = 0; step < 8; step++) await Promise.resolve();
+    t.mock.timers.tick(client.authorizationBudgetMs);
+    await rejected;
+  }
+});

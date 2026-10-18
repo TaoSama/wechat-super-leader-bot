@@ -10,7 +10,7 @@ interface Props {
   onOpenSession: (session: ScopedSession) => void;
 }
 const PLAN_LABELS = { active: "自动推进中", completed: "计划已完成", failed: "已停止 · 失败", cancelled: "已取消后续", expired: "授权已过期" };
-const STEP_LABELS = { waiting: "等待派发", claimed: "已领取 · 回执待核对", pending: "等待响应", accepted: "已受理 · 尚未完成",
+const STEP_LABELS = { waiting: "等待派发", claimed: "已领取 · 回执待核对", queued: "已排队 · 尚未发送", pending: "等待响应", accepted: "已受理 · 尚未完成",
   completed: "精确完成", failed: "失败", uncertain: "结果存疑", cancelled: "后续已取消", expired: "授权已过期" };
 const time = (value: number) => formatTimestamp(new Date(value).toISOString());
 
@@ -28,7 +28,7 @@ function stepDescription(step: ConsoleExecutionStep, plan: ConsoleExecution, pau
     if (waitingFor.length) return `等待步骤 ${waitingFor.join("、")} 的精确完成回执。`;
     return schedulerEnabled ? "等待调度检查固定目标的发送资格；具体原因未报告。" : "调度未启用，等待后续派发；已有回执保持原状态。";
   }
-  return { claimed: "已领取项可能已发送，尚无可确认的命令回执。", pending: "等待宿主响应，尚未完成。",
+  return { claimed: "已领取项可能已发送，尚无可确认的命令回执。", queued: "请求已持久保存，等待会话空闲或机器上线；尚未发送。", pending: "等待宿主响应，尚未完成。",
     accepted: "输入已被受理，执行结果尚未确认。", completed: "已收到该步骤的精确完成回执。",
     failed: "本步骤失败，后续派发已停止。", uncertain: "结果不明，先核验原回执，请勿重发。",
     cancelled: "未领取的后续已取消；不会停止原会话已有任务。", expired: "后续派发授权已过期。" }[step.status];

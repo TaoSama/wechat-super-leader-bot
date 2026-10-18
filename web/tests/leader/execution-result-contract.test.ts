@@ -43,7 +43,16 @@ describe("frozen result source projection", () => {
     const waiting = value.items[0].steps[3]; waiting.status = "waiting"; delete waiting.resultSources;
     expect(parseConsoleExecutions(value).items[0].steps[3].resultFrom).toEqual([3, 1, 2]);
   });
-  it.each(["claimed", "pending", "accepted", "completed"] as const)("requires source metadata after the %s step was claimed", status => {
+  it("retains queued steps and frozen source metadata before a target turn exists", () => {
+    const value = snapshot(); const step = value.items[0].steps[3];
+    step.status = "queued"; step.commandId = "queued-target-command"; delete step.turnId;
+    const before = structuredClone(value);
+    const wire: unknown = JSON.parse(JSON.stringify(value));
+    expect(parseConsoleExecutions(wire)).toEqual(before);
+    expect(normalizeControlPlaneStatus({ nodes: [], sessions: [], commands: [], goals: emptyGoals(), executions: wire }).executions).toEqual(before);
+    expect(value).toEqual(before);
+  });
+  it.each(["claimed", "queued", "pending", "accepted", "completed"] as const)("requires source metadata after the %s step was claimed", status => {
     const value = snapshot(); const step = value.items[0].steps[3];
     Object.assign(step, { status, commandId: "target-command", turnId: "target-turn" }); delete step.resultSources;
     expect(() => parseConsoleExecutions(value)).toThrow("持久计划状态格式无效");

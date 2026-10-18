@@ -9,10 +9,14 @@ import {
   ScopedSession,
   Session,
   SessionHistory,
+  MAX_DAEMON_CONTROL_MESSAGE_BYTES,
 } from "../types.js";
 import { IStore } from "../store/interface.js";
 import { Skill } from "../skills/catalog.js";
 import { HistoryError, SessionHistoryRequests } from "../sessions/history.js";
+import { SessionMediaRequests } from "../sessions/media.js";
+import { MediaError, type MediaListing, type MediaDescriptor } from "../sessions/media-contracts.js";
+import { isTerminalSession } from "../sessions/terminal.js";
 import { validateCommandTurnBinding } from "../store/command-state.js";
 import { sameInputReceipt } from "../sessions/input-receipt.js";
 import { InvalidSessionInventoryError, validateNodeSessionInventory } from "../store/node-sessions.js";
@@ -26,7 +30,7 @@ export interface ConnectedNode {
   skills: Skill[];
   isHelloCompleted: boolean;
   heartbeatTimer?: NodeJS.Timeout;
-  inspection?: { commandId: string; turnId: string; deadline: number };
+  inspection?: { commandId: string; turnId?: string; deadline: number };
   inspectionCursor?: string;
   reconciling?: boolean;
 }
@@ -36,6 +40,23 @@ export class NodeHub {
   private store: IStore;
   private tokenToNode: Map<string, string>;
   private historyRequests = new SessionHistoryRequests();
+  private mediaRequests = new SessionMediaRequests();
+
+  private mediaNode(nodeId: string, sessionId: string): ConnectedNode {
+    const node = this.nodes.get(nodeId);
+    if (!node || !node.isHelloCompleted || node.ws.readyState !== WebSocket.OPEN) throw new MediaError(503, "media_offline");
+    const session = node.sessions.find(item => item.id === sessionId);
+    if (!session || !session.capabilities.includes("read") || isTerminalSession(session)) throw new MediaError(403, "media_forbidden");
+    return node;
+  }
+
+  listMedia(nodeId: string, sessionId: string, signal?: AbortSignal): Promise<MediaListing> {
+    return this.mediaRequests.list({ nodeId, sessionId }, this.mediaNode(nodeId, sessionId).ws, signal);
+  }
+
+  readMedia(nodeId: string, sessionId: string, listing: MediaListing, image: MediaDescriptor, signal?: AbortSignal): Promise<Buffer> {
+    return this.mediaRequests.read({ nodeId, sessionId }, this.mediaNode(nodeId, sessionId).ws, listing, image, signal);
+  }
 
   // Callbacks for command results: commandId -> callback
   private commandResultWaiters = new Map<
@@ -140,8 +161,15 @@ export class NodeHub {
       try {
         const text = typeof data === "string" ? data : data.toString("utf8");
         const json = JSON.parse(text);
+        if (json?.type !== "result" && Buffer.byteLength(text,"utf8") > MAX_DAEMON_CONTROL_MESSAGE_BYTES) {
+          ws.close(4000,"Daemon control message exceeds limit"); return;
+        }
         if (json?.type === "history" && nodeRecord.isHelloCompleted) {
           if (this.historyRequests.receive(nodeId, ws, json)) resetHeartbeatWatchdog();
+          return;
+        }
+        if ((json?.type === "media_list" || json?.type === "media_chunk") && nodeRecord.isHelloCompleted) {
+          if (this.mediaRequests.receive(nodeId, ws, json)) resetHeartbeatWatchdog();
           return;
         }
         const parseResult = DaemonMessageSchema.safeParse(json);
@@ -180,6 +208,7 @@ export class NodeHub {
     ws.on("close", async () => {
       if (nodeRecord.heartbeatTimer) clearTimeout(nodeRecord.heartbeatTimer);
       this.historyRequests.disconnect(ws);
+      this.mediaRequests.disconnect(ws);
       if (this.nodes.get(nodeId)?.ws === ws) {
         this.nodes.delete(nodeId);
         this.sessionsChanged(nodeId);
@@ -205,6 +234,7 @@ export class NodeHub {
 
     ws.on("error", (err) => {
       this.historyRequests.disconnect(ws);
+      this.mediaRequests.disconnect(ws);
       console.error(`[${nodeId}] ws error:`, err);
     });
   }
@@ -325,7 +355,7 @@ export class NodeHub {
       const waiter = this.commandResultWaiters.get(msg.commandId);
       if (waiter) {
         if (persisted) waiter({ type: "result", commandId: persisted.commandId,
-          status: persisted.status === "pending" ? "uncertain" : persisted.status,
+          status: ["pending","queued","cancelled","expired"].includes(persisted.status) ? "uncertain" : persisted.status as DaemonResultMessage["status"],
           turnId: persisted.turnId, inputReceipt: persisted.inputReceipt, output: persisted.output, error: persisted.error });
       }
     }
@@ -363,12 +393,16 @@ export class NodeHub {
       }
       if (this.nodes.get(node.nodeId) !== node || node.ws.readyState !== WebSocket.OPEN) return;
       const cmd = candidates[0];
-      if (!cmd?.turnId || cmd.sendRoute === "terminal-pane" || cmd.sessionId.startsWith("terminal:") || cmd.inputReceipt) return;
+      if (!cmd || cmd.sendRoute === "terminal-pane" || cmd.sessionId.startsWith("terminal:") || cmd.inputReceipt) return;
       node.inspectionCursor = cmd.commandId;
       const inspection = { commandId: cmd.commandId, turnId: cmd.turnId, deadline: Date.now() + NodeHub.INSPECTION_TIMEOUT_MS };
       node.inspection = inspection;
-      node.ws.send(JSON.stringify({ type: "inspect_turn", commandId: cmd.commandId,
-        nodeId: cmd.nodeId, sessionId: cmd.sessionId, turnId: cmd.turnId }), error => {
+      const message = cmd.turnId ? { type: "inspect_turn", commandId: cmd.commandId,
+        nodeId: cmd.nodeId, sessionId: cmd.sessionId, turnId: cmd.turnId } : {
+        type:"inspect_command",commandId:cmd.commandId,nodeId:cmd.nodeId,sessionId:cmd.sessionId,action:cmd.action,
+        prompt:cmd.prompt,expiresAt:cmd.expiresAt,skills:cmd.skills,sendRoute:cmd.sendRoute,
+        deliveryMode:cmd.deliveryMode,expectedTurnId:cmd.expectedTurnId};
+      node.ws.send(JSON.stringify(message), error => {
         if (error) {
           if (node.inspection === inspection) node.inspection = undefined;
           console.warn(`[${node.nodeId}] Turn inspection transport failed`);
@@ -468,6 +502,7 @@ export class NodeHub {
 
   async closeAll(): Promise<void> {
     this.historyRequests.closeAll();
+    this.mediaRequests.closeAll();
     const closingNodes = [...this.nodes.entries()];
     this.nodes.clear();
     for (const [nodeId] of closingNodes) this.sessionsChanged(nodeId);

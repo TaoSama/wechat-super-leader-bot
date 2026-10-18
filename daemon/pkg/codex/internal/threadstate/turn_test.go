@@ -1,8 +1,11 @@
 package threadstate
 
 import (
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 )
 
 func TestExtractTurnOutputSelectsTerminalMessage(t *testing.T) {
@@ -17,7 +20,7 @@ func TestExtractTurnOutputSelectsTerminalMessage(t *testing.T) {
 		{"final-survives-long-commentary", []any{
 			message(strings.Repeat("进度", MaxReadLineLength), "commentary"),
 			message("  已完成，结果正确。  ", "final_answer"),
-		}, "已完成，结果正确。"},
+		}, "  已完成，结果正确。  "},
 		{"final-preferred-over-unphased", []any{
 			message("最终结果", "final_answer"), message("后续未分类消息", nil),
 		}, "最终结果"},
@@ -33,7 +36,7 @@ func TestExtractTurnOutputSelectsTerminalMessage(t *testing.T) {
 		}, ""},
 		{"empty-final-does-not-reuse-progress", []any{
 			message("开始处理", nil), message(" ", "final_answer"),
-		}, ""},
+		}, " "},
 		{"empty-latest-unphased", []any{
 			message("开始处理", nil), message("", nil),
 		}, ""},
@@ -42,9 +45,9 @@ func TestExtractTurnOutputSelectsTerminalMessage(t *testing.T) {
 			map[string]any{"type": "commandExecution", "aggregatedOutput": "tool output"},
 			message("结果", "final_answer"),
 		}, "结果"},
-		{"final-truncation-retains-unicode", []any{
+		{"full-final-retains-unicode", []any{
 			message(strings.Repeat("中", MaxReadLineLength+1), "final_answer"),
-		}, strings.Repeat("中", MaxReadLineLength) + "...(truncated)"},
+		}, strings.Repeat("中", MaxReadLineLength+1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := ExtractTurnOutput(map[string]any{"items": tc.items})
@@ -52,6 +55,29 @@ func TestExtractTurnOutputSelectsTerminalMessage(t *testing.T) {
 				t.Fatalf("output = %q, error = %v; want %q", got, err, tc.want)
 			}
 		})
+	}
+}
+
+func TestExtractTurnOutputPreservesLargeMarkdownAndExplicitLimit(t *testing.T) {
+	for _, length := range []int{256 * 1024, protocol.MaxTurnOutputBytes, protocol.MaxTurnOutputBytes + 1} {
+		output := strings.Repeat("<", length)
+		got, err := ExtractTurnOutput(map[string]any{"items": []any{
+			map[string]any{"type": "agentMessage", "text": output, "phase": "final_answer"},
+		}})
+		if length > protocol.MaxTurnOutputBytes {
+			if !errors.Is(err, protocol.ErrTurnOutputLimit) || got != "" {
+				t.Fatalf("over-limit final was not explicitly rejected: len=%d err=%v", len(got), err)
+			}
+		} else if err != nil || got != output {
+			t.Fatalf("final changed: input=%d output=%d err=%v", length, len(got), err)
+		}
+	}
+	markdown := "\n  ```go\n\tcode()  \n```\n\n"
+	got, err := ExtractTurnOutput(map[string]any{"items": []any{
+		map[string]any{"type": "agentMessage", "text": markdown, "phase": "final_answer"},
+	}})
+	if err != nil || got != markdown {
+		t.Fatalf("Markdown whitespace changed: %q err=%v", got, err)
 	}
 }
 

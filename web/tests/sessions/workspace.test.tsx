@@ -133,7 +133,7 @@ describe("会话工作台交互与安全", () => {
     fireEvent.click(screen.getByRole("button", { name: "返回会话列表" }));
     expect(screen.queryByLabelText("发送给当前会话")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "退出控制台登录" }));
-    await screen.findByText("需要微信一次性登录链接");
+    await screen.findByText("把工作带在身边");
     expect(screen.queryByText("完成分析")).toBeNull();
     expect(screen.queryByTestId("session-row-air-same-id")).toBeNull();
   });
@@ -163,9 +163,9 @@ describe("会话工作台交互与安全", () => {
     expect(fetchMock.mock.calls.some(([url]) => url === "/v1/commands" || url === "/v1/messages")).toBe(false);
   });
 
-  it("网络不确定保留草稿、requestId，手动恢复沿用同一个请求", async () => {
+  it("网络不确定保留草稿和requestId，手动核查只读取原请求", async () => {
     let attempt = 0;
-    const fetchMock = installFetch((url) => url.endsWith("/messages") && ++attempt === 1 ? Promise.reject(new Error("network")) : undefined);
+    const fetchMock = installFetch((url) => url.endsWith("/messages") && ++attempt === 1 ? Promise.reject(new Error("network")) : url.includes("/messages/") ? Promise.resolve(response(command)) : undefined);
     render(<App />);
     await openSession();
     fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "不重复执行" } });
@@ -173,21 +173,19 @@ describe("会话工作台交互与安全", () => {
     await screen.findByText("提交结果待核查");
     expect(screen.getByLabelText("发送给当前会话")).toHaveValue("不重复执行");
     expect(fetchMock.mock.calls.filter(([url]) => url.endsWith("/messages"))).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "恢复原请求" }));
+    fireEvent.click(screen.getByRole("button", { name: "核查发送状态" }));
     await screen.findByText("已受理 (Accepted)", { selector: ".send-receipt > span" });
     const calls = fetchMock.mock.calls.filter(([url]) => url.endsWith("/messages"));
-    expect(calls).toHaveLength(2);
-    expect(calls[1][1]?.body).toBe(calls[0][1]?.body);
+    expect(calls).toHaveLength(1);
+    const originalRequest = JSON.parse(String(calls[0][1]?.body)).requestId;
+    expect(fetchMock.mock.calls.find(([url]) => url.endsWith(`/messages/${originalRequest}`))?.[1]?.method).toBe("GET");
   });
 
   it.each([
     [{ ...session, loaded: undefined }, true, false, "当前控制接口未加载此会话，暂时只读"],
     [{ ...session, loaded: false }, true, false, "当前控制接口未加载此会话，暂时只读"],
-    [{ ...session, status: "active" }, true, false, "正在执行"],
-    [{ ...session, status: "busy" }, true, false, "正在执行"],
     [{ ...session, status: "notLoaded" }, true, false, "当前控制接口未加载此会话，暂时只读"],
     [{ ...session, capabilities: [] }, true, false, "发送能力"],
-    [session, false, false, "离线"],
     [session, true, true, "待更新"],
   ])("不可发送原因正确 %#", (value, connected, stale, text) => {
     expect(sendBlockReason(value as ScopedSession, connected as boolean, stale as boolean)).toContain(text);
@@ -308,7 +306,7 @@ describe("请求隔离与轮询", () => {
 
   it("A→B→A 旧请求 finally 不解除新请求发送锁", async () => {
     const resolvers: Array<(value: Response) => void> = [];
-    const fetchMock = installFetch((url) => url.endsWith("/messages") ? new Promise((resolve) => resolvers.push(resolve)) : undefined);
+    const fetchMock = installFetch((url) => url.endsWith("/messages") || url.includes("/messages/") ? new Promise((resolve) => resolvers.push(resolve)) : undefined);
     const { result, rerender } = renderHook(({ current }) => useSessionMessages(current, vi.fn()), { initialProps: { current: session } });
     act(() => result.current.setDraft("A消息"));
     act(() => { void result.current.submit(); });
@@ -319,7 +317,8 @@ describe("请求隔离与轮询", () => {
     await act(async () => resolvers[0](response(command)));
     expect(result.current.sending).toBe(true);
     await act(async () => result.current.submit(true));
-    expect(fetchMock.mock.calls.filter(([url]) => url.endsWith("/messages"))).toHaveLength(2);
+    expect(fetchMock.mock.calls.filter(([url]) => url.endsWith("/messages"))).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url]) => url.includes("/messages/"))).toHaveLength(1);
     await act(async () => resolvers[1](response(command)));
     expect(result.current.sending).toBe(false);
   });
