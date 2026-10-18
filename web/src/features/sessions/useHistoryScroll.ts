@@ -1,8 +1,8 @@
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { HistoryItem } from "../../types";
 
-const NEAR_TOP_PX = 120;
-const NEAR_BOTTOM_PX = 96;
+const NEAR_TOP_PX = 96;
+const NEAR_BOTTOM_PX = 64;
 const MAX_READING_POSITIONS = 8;
 interface Options {
   owner: string;

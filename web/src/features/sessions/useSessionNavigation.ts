@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-export const MOBILE_SESSION_QUERY = "(max-width: 767px)";
+export const MOBILE_SESSION_QUERY = "(max-width: 719px)";
 const HISTORY_NAMESPACE = "superLeaderSessionWorkspace";
 interface NavigationEntry { owner: string; sessionKey: string }
 

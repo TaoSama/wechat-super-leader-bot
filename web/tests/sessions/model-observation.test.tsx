@@ -89,8 +89,8 @@ describe("workspace model views", () => {
     const row = screen.getByTestId("session-row-node-session");
     expect(row.querySelector(".session-model")).toHaveTextContent("desktop-model");
     fireEvent.click(row);
-    expect(document.querySelector(".detail-model")).toHaveTextContent("desktop-model");
-    expect(document.querySelector(".composer-label span")).toHaveTextContent("desktop-model");
+    expect(document.querySelector(".detail-model")).toBeNull();
+    expect(document.querySelector(".composer-model")).toHaveTextContent("desktop-model");
     fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
     const details = document.querySelector(".session-metadata") as HTMLElement;
     expect(within(details).getByText("desktop-provider")).toBeInTheDocument();

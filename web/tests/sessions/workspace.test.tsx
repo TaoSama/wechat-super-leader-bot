@@ -34,6 +34,12 @@ async function openSession() {
   await screen.findByText("完成分析");
 }
 
+async function refreshHistory() {
+  fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
+  fireEvent.click(await screen.findByRole("button", { name: "从详情刷新会话历史" }));
+  fireEvent.click(screen.getByRole("button", { name: "关闭会话详情" }));
+}
+
 beforeEach(() => {
   vi.spyOn(Date, "now").mockReturnValue(Date.parse(session.observedAt));
   resetAuthHelperForTesting();
@@ -57,7 +63,7 @@ describe("会话工作台交互与安全", () => {
     Object.defineProperties(scroll, { scrollHeight: { value: 1000, configurable: true }, clientHeight: { value: 200, configurable: true } });
     scroll.scrollTop = scrollTop;
     fireEvent.scroll(scroll);
-    fireEvent.click(screen.getByRole("button", { name: "刷新会话历史" }));
+    await refreshHistory();
     await screen.findByText(/历史读取上下文已失效/);
     const alert = screen.getByRole("alert");
     expect(alert.closest(".detail-heading")).not.toBeNull();
@@ -67,7 +73,9 @@ describe("会话工作台交互与安全", () => {
     expect(scroll.scrollTop).toBe(scrollTop);
     expect(screen.getByText("完成分析")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "重试读取" })).toBeNull();
-    expect(screen.getByRole("button", { name: "刷新会话历史" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
+    expect(screen.getByRole("button", { name: "从详情刷新会话历史" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "关闭会话详情" }));
     expect(screen.queryByRole("button", { name: "加载更早的消息" })).toBeNull();
     const historyCalls = () => fetchMock.mock.calls.filter(([url]) => url.includes("/history"));
     expect(historyCalls()[1][0]).toContain(`historyContext=${page.historyContext}`);
@@ -88,10 +96,10 @@ describe("会话工作台交互与安全", () => {
     });
     render(<App />);
     await openSession();
-    fireEvent.click(screen.getByRole("button", { name: "刷新会话历史" }));
+    await refreshHistory();
     await screen.findByText("较新的消息");
     expect(screen.getByRole("button", { name: "补齐这段历史" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "刷新会话历史" }));
+    await refreshHistory();
     await screen.findByText(/历史读取上下文已失效/);
     expect(screen.getByText(/此处还有未加载的消息/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "补齐这段历史" })).toBeNull();
@@ -216,7 +224,7 @@ describe("会话工作台交互与安全", () => {
     scroll.scrollTop = 150;
     fireEvent.scroll(scroll);
     tailVersion = 1;
-    fireEvent.click(screen.getByRole("button", { name: "刷新会话历史" }));
+    await refreshHistory();
     await screen.findByText("最新消息");
     expect(scroll.scrollTop).toBe(150);
     expect(screen.getByRole("button", { name: "有新消息 · 跳到最新" })).toBeInTheDocument();
@@ -242,7 +250,7 @@ describe("会话工作台交互与安全", () => {
     await screen.findByText("请求未成功 (HTTP 409)");
     expect(screen.getByLabelText("发送给当前会话")).toHaveValue("保留这段草稿");
     rejectHistory = true;
-    fireEvent.click(screen.getByRole("button", { name: "刷新会话历史" }));
+    await refreshHistory();
     await screen.findByTestId("auth-expired-banner");
     expect(screen.queryByLabelText("发送给当前会话")).toBeNull();
     expect(screen.queryByText("完成分析")).toBeNull();

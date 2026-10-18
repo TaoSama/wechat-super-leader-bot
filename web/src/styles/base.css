@@ -1,0 +1,29 @@
+* { box-sizing: border-box; }
+:root { font-family: var(--font-ui); font-synthesis: none; }
+html, body, #root { margin: 0; padding: 0; min-height: 100%; background: var(--surface-0); color: var(--text); }
+body { font-size: 14px; }
+button, input, textarea, select { font: inherit; }
+button { cursor: pointer; touch-action: manipulation; transition: background-color 150ms, color 150ms, border-color 150ms; }
+button:disabled { cursor: not-allowed; opacity: .5; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible, a:focus-visible, [tabindex]:focus-visible { outline: 3px solid var(--accent-teal); outline-offset: 3px; }
+button svg { flex-shrink: 0; stroke-width: 1.5; }
+button:active:enabled { background-color: var(--interaction-highlight); }
+[hidden] { display: none !important; }
+.tabular-nums, time { font-variant-numeric: tabular-nums; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+.skip-link { position: absolute; left: 16px; top: -100px; z-index: 50; padding: 12px; background: var(--surface-0); }
+.skip-link:focus { top: 8px; }
+.eyebrow { font-size: 12px; font-weight: 500; line-height: 1.5; color: var(--text-secondary); }
+.icon-button { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; border-radius: 8px; color: var(--text-secondary); gap: 6px; }
+.icon-button:hover { background: var(--surface-2); }
+.filter-select { min-width: 44px; min-height: 32px; max-width: 180px; width: auto; flex: 0 1 auto; align-self: center; border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; background: var(--surface-2); color: var(--text-secondary); font-size: 12px; line-height: 20px; cursor: pointer; touch-action: manipulation; }
+.online { color: var(--accent-bright); }
+.offline { color: var(--warning); }
+.text-button { min-height: 44px; color: var(--accent-teal); font-size: 12px; }
+.muted, .image-placeholder { color: var(--text-secondary); font-size: 12px; }
+@media (max-width: 719px), (pointer: coarse) {
+  .filter-select { min-height: 44px; padding-block: 10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+}
