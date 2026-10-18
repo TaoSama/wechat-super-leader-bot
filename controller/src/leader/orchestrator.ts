@@ -17,6 +17,7 @@ import { GoalConversation, goalConfirmation, goalCancellation } from "./goals/co
 import { GoalScheduler } from "./goals/scheduler.js";
 import { createGoalDecider } from "./goals/model.js";
 import { goalPreview } from "./goals/presentation.js";
+import type { GoalProposal } from "./goals/goal.js";
 import {
   CLAIM_TTL_MS, ConsoleLinkIssued, ConsoleLinkIssuer, LEADER_TOOLS, LeaderData, LeaderDataSchema, LeaderReply, MAX_HISTORY_ITEMS,
   MAX_MODEL_STEPS, MAX_RECEIPTS, MAX_REPLY_CHARS, MAX_RESULT_CODE_POINTS, MAX_RESULT_JSON_CHARS, MAX_TOOL_CALLS, PLAN_TTL_MS, Plan,
@@ -48,6 +49,7 @@ interface LinkContext {
   issuedLink?: ConsoleLinkIssued;
 }
 interface QueryTrace { modelSteps: number; toolCalls: number; lastTool?: string; lastModelMs?: number; totalModelMs: number }
+type ReasonedReply = LeaderReply & { execution?: { plan: Plan } | { goal: GoalProposal } };
 
 export class LeaderOrchestrator {
   private active = new Map<string, { messageId: string; inputHash: string; promise: Promise<LeaderReply> }>();
@@ -114,7 +116,7 @@ export class LeaderOrchestrator {
     if (plan || data.pending && data.pending.expiresAt <= confirmationTime) data.pending = undefined;
     if (goal || data.pendingGoal && data.pendingGoal.expiresAt <= confirmationTime) data.pendingGoal = undefined;
     data.inflight = { messageId, inputHash, expiresAt: this.now() + CLAIM_TTL_MS, plan, goal };
-    const claimed = await this.save(chatId, saved?.revision ?? 0, data);
+    let claimed = await this.save(chatId, saved?.revision ?? 0, data);
     let reply: LeaderReply;
     const linkContext: LinkContext = {
       requestId: `console_link_${hash([chatId, messageId])}`,
@@ -147,8 +149,11 @@ export class LeaderOrchestrator {
       const startedAt = Date.now();
       const reference = hash([chatId, messageId]).slice(0, 12);
       const trace: QueryTrace = { modelSteps: 0, toolCalls: 0, totalModelMs: 0 };
+      let execution: ReasonedReply["execution"];
       try {
-        reply = await this.reason(chatId, text, data, linkContext, trace, previousPlan);
+        const reasoned = await this.reason(chatId, text, data, linkContext, trace, previousPlan);
+        execution = reasoned.execution;
+        reply = { text: reasoned.text, commandId: reasoned.commandId };
       } catch (error) {
         if (error instanceof ConflictError) throw error;
         console.warn('Leader processing failed; no plan dispatched', {
@@ -158,6 +163,23 @@ export class LeaderOrchestrator {
         data.pending = previousPlan && previousPlan.expiresAt > this.now() ? previousPlan : undefined;
         data.pendingGoal = pendingGoalBefore && pendingGoalBefore.expiresAt > this.now() ? pendingGoalBefore : undefined;
         reply = { text: failureReply(error, reference) };
+      }
+      if (execution) {
+        data.pending = undefined;
+        data.pendingGoal = undefined;
+        if (data.inflight!.expiresAt <= this.now()) {
+          reply = { text: "本次请求已超时，未派发任务，请重新下达指令。" };
+        } else {
+          // Freeze the original user's request under the same claim before dispatch.
+          // Execution errors stay outside the model catch: a persisted attempt must
+          // never be reported as a harmless query failure or retried automatically.
+          data.inflight = { ...data.inflight!, ...execution };
+          claimed = await this.save(chatId, claimed.revision, data);
+          reply = "plan" in execution
+            ? await this.executePlan(chatId, claimed.revision, execution.plan, data)
+            : await this.goals.confirm(chatId, claimed.revision, execution.goal, data);
+          reply.text = this.attachConsoleLink(reply.text, linkContext);
+        }
       }
     }
     // Confirmation must never authorize steps or skill versions hidden by clipping.
@@ -238,7 +260,7 @@ export class LeaderOrchestrator {
     return { text: executionSummary(view, (nodeId, sessionId) => this.hub.getNodeSession(nodeId, sessionId)?.title), commandId: commandIds.at(-1) };
   }
 
-  private async reason(chatId: string, text: string, data: LeaderData, linkContext: LinkContext, trace: QueryTrace, previousPlan?: Plan): Promise<LeaderReply> {
+  private async reason(chatId: string, text: string, data: LeaderData, linkContext: LinkContext, trace: QueryTrace, previousPlan?: Plan): Promise<ReasonedReply> {
     const signal = AbortSignal.timeout(TURN_TIMEOUT_MS);
     const sanitizedUserPrompt = sanitizeConsoleLinkSecrets(text);
     const messages: ModelMessage[] = [
@@ -276,6 +298,12 @@ export class LeaderOrchestrator {
         const priorGoal = data.pendingGoal;
         const output = await this.callTool(call, chatId, data, memoryChanges, linkContext, signal);
         signal.throwIfAborted();
+        if (call.function.name === "execute_plan" && data.pending && data.pending !== priorPlan) {
+          return { text: "", execution: { plan: data.pending } };
+        }
+        if (call.function.name === "execute_goal" && data.pendingGoal && data.pendingGoal !== priorGoal) {
+          return { text: "", execution: { goal: data.pendingGoal } };
+        }
         if (data.pending && data.pending !== priorPlan) return { text: this.attachConsoleLink(this.preview(data.pending), linkContext) };
         if (data.pendingGoal && data.pendingGoal !== priorGoal) return { text: this.attachConsoleLink(goalPreview(data.pendingGoal, node => this.hub.getNodeSkills(node), (node, session) => this.hub.getNodeSession(node, session)?.title), linkContext) };
         const content = JSON.stringify(output);
@@ -395,6 +423,7 @@ export class LeaderOrchestrator {
         const { goalId } = ToolArguments.get_goal_progress.parse(raw);
         return this.goals.progress(chatId, goalId);
       }
+      case "execute_goal":
       case "propose_goal": {
         const proposal = await this.goals.propose(chatId, ToolArguments.propose_goal.parse(raw));
         if ("error" in proposal) return proposal;
@@ -402,6 +431,7 @@ export class LeaderOrchestrator {
         data.pendingGoal = proposal;
         return { pending: true };
       }
+      case "execute_plan":
       case "propose_plan": {
         const { actions } = ToolArguments.propose_plan.parse(raw);
         data.pending = undefined;
