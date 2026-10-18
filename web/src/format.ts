@@ -1,3 +1,18 @@
+export const DISPLAY_TIME_ZONE = "Asia/Shanghai";
+
+const clockFormatter = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: DISPLAY_TIME_ZONE, hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+});
+const timestampFormatter = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: DISPLAY_TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+});
+
+export function formatClock(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? "--:--" : clockFormatter.format(date);
+}
+
 export function formatTimestamp(iso: string): string {
   if (!iso || iso.trim() === "") {
     return "--";
@@ -6,14 +21,8 @@ export function formatTimestamp(iso: string): string {
   if (Number.isNaN(date.getTime())) {
     return iso;
   }
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const year = date.getFullYear();
-  const month = pad(date.getMonth() + 1);
-  const day = pad(date.getDate());
-  const hours = pad(date.getHours());
-  const minutes = pad(date.getMinutes());
-  const seconds = pad(date.getSeconds());
-  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+  const parts = Object.fromEntries(timestampFormatter.formatToParts(date).map(part => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
 }
 
 export function projectName(cwd: string): string {
@@ -25,10 +34,7 @@ export function formatTimeShort(date: Date | null): string {
   if (!date || Number.isNaN(date.getTime())) {
     return "--:--:--";
   }
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(
-    date.getSeconds()
-  )}`;
+  return formatTimestamp(date.toISOString()).split(" ")[1];
 }
 
 export function formatRelativeAge(iso: string, nowMs: number = Date.now()): string {

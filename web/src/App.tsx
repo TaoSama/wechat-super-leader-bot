@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
-import { LockKeyhole, LogOut, RefreshCw, Layers, LayoutDashboard, MessagesSquare, Moon, Sun } from "lucide-react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { Ellipsis, LockKeyhole, LogOut, RefreshCw, Layers, LayoutDashboard, MessagesSquare, Moon, Sun } from "lucide-react";
 import { LeaderOverview } from "./features/leader/components/LeaderOverview";
 import { SessionWorkspace } from "./features/sessions/components/SessionWorkspace";
 import { useStatusPolling } from "./features/status/useStatusPolling";
@@ -21,7 +21,9 @@ export function App({ pollIntervalMs = POLL_INTERVAL_MS }: AppProps) {
   const [requestedSessionRevision, setRequestedSessionRevision] = useState(0);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [detailVisible, setDetailVisible] = useState(false);
-  const [theme, setTheme] = useState<"light" | "dark" | undefined>();
+  const [theme, setTheme] = useState<"light" | "dark">("dark");
+  const [utilitiesOpen, setUtilitiesOpen] = useState(false);
+  const utilityRef = useRef<HTMLDivElement>(null);
   const viewportHeight = useViewportHeight();
   const handleAuthFailure = useCallback(() => {
     setUnauthenticatedSession("expired");
@@ -40,6 +42,17 @@ export function App({ pollIntervalMs = POLL_INTERVAL_MS }: AppProps) {
     void getOrInitAuthSession().then((state) => { if (!cancelled) setAuthState(state); });
     return () => { cancelled = true; unsubscribe(); };
   }, []);
+
+  useEffect(() => {
+    if (!utilitiesOpen) return;
+    function closeOnOutsidePress(event: PointerEvent) {
+      if (event.target instanceof Node && !utilityRef.current?.contains(event.target)) setUtilitiesOpen(false);
+    }
+    document.addEventListener("pointerdown", closeOnOutsidePress);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePress);
+  }, [utilitiesOpen]);
+
+  useEffect(() => { setUtilitiesOpen(false); }, [view, detailVisible]);
 
   async function logout() {
     if (loggingOut) return;
@@ -66,22 +79,24 @@ export function App({ pollIntervalMs = POLL_INTERVAL_MS }: AppProps) {
   const connectionLabels = { connecting: "正在连接", live: "实时连接", reconnecting: "正在重连", polling: "定时更新", offline: "连接中断" };
 
   function toggleTheme() {
-    const dark = theme === "dark" || !theme && window.matchMedia?.("(prefers-color-scheme: dark)").matches;
-    setTheme(dark ? "light" : "dark");
+    setTheme((current) => current === "dark" ? "light" : "dark");
   }
 
-  return <div data-theme={theme} className={`app-shell ${authenticated ? "is-authenticated" : ""} ${view === "sessions" && detailVisible ? "mobile-detail-open" : ""}`} style={viewportHeight ? { height: viewportHeight } : undefined}>
+  return <div data-theme={theme} data-view={view} className={`app-shell ${authenticated ? "is-authenticated" : ""} ${view === "sessions" && detailVisible ? "mobile-detail-open" : ""}`} style={viewportHeight ? { height: viewportHeight } : undefined}>
     <a href="#main-workspace" className="skip-link">跳转至会话工作区</a>
     <header className="app-header">
       <div className="brand"><span className="brand-mark"><Layers size={22} aria-hidden="true" /></span><div><h1>Super Leader</h1><span>你的随身工作台</span></div></div>
       {authenticated && <nav className="primary-nav" aria-label="主导航"><button type="button" className={view === "sessions" ? "active" : ""} aria-current={view === "sessions" ? "page" : undefined} onClick={() => setView("sessions")}><MessagesSquare size={17} aria-hidden="true" />会话</button><button type="button" aria-label="Super Leader" className={view === "leader" ? "active" : ""} aria-current={view === "leader" ? "page" : undefined} onClick={() => setView("leader")}><LayoutDashboard size={17} aria-hidden="true" />工作看板</button></nav>}
-      <div className="header-actions">
+      <div ref={utilityRef} className={`header-actions ${utilitiesOpen ? "utilities-open" : ""}`} onKeyDown={(event) => { if (event.key === "Escape") { setUtilitiesOpen(false); utilityRef.current?.querySelector<HTMLButtonElement>(".utilities-toggle")?.focus(); } }}>
+        <button type="button" className="utilities-toggle" aria-label="工作台选项" aria-expanded={utilitiesOpen} aria-controls="workspace-utilities" onClick={() => setUtilitiesOpen((open) => !open)}><Ellipsis size={16} aria-hidden="true" /></button>
+        <div id="workspace-utilities" className="utility-actions">
         <button type="button" className="theme-toggle" aria-label="切换明暗外观" onClick={toggleTheme}><Sun className="theme-sun" size={18} aria-hidden="true" /><Moon className="theme-moon" size={18} aria-hidden="true" /></button>
         {authenticated ? <>
           <span className={`header-connection ${telemetry.error ? "degraded" : ""}`} role="status"><span className="connection-dot" aria-hidden="true" /><span>{telemetry.error ? "状态待恢复" : connectionLabels[telemetry.connectionState]}<small>{telemetry.lastUpdatedAt ? `更新于 ${formatTimeShort(telemetry.lastUpdatedAt)}` : "正在同步状态"}</small></span></span>
           <button type="button" onClick={telemetry.manualRefresh} disabled={telemetry.isRefreshing || telemetry.isLoading} aria-label="立即刷新控制平面状态"><RefreshCw size={16} aria-hidden="true" /><span>刷新</span></button>
           <button type="button" aria-label="退出控制台登录" onClick={() => void logout()} disabled={loggingOut}><LogOut size={16} aria-hidden="true" /><span>退出登录</span></button>
         </> : <span className="header-connection"><LockKeyhole size={14} aria-hidden="true" />安全会话</span>}
+        </div>
       </div>
     </header>
     <main id="main-workspace" className="main-workspace">

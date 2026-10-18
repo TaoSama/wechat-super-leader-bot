@@ -2,6 +2,7 @@ import { memo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { HistoryItem } from "../../../types";
+import { formatClock } from "../../../format";
 
 const ROLE_NAMES = { user: "你", assistant: "助手", tool: "工具", system: "系统" };
 
@@ -20,7 +21,7 @@ export const HistoryMessage = memo(function HistoryMessage({ item }: { item: His
     {expanded && <div className="markdown"><Markdown text={item.text} />{item.truncated && <p className="muted">内容已裁剪</p>}</div>}
   </details>;
   return <article className={`history-message role-${item.kind}`} data-history-id={item.id}>
-    <div className="message-meta"><span>{transcriptChunk ? `${ROLE_NAMES[item.kind]} · 文本片段（非完整轮次）` : ROLE_NAMES[item.kind]}</span>{item.timestamp && <time dateTime={item.timestamp}>{new Date(item.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time>}</div>
+    <div className={`message-meta ${!transcriptChunk && item.kind !== "system" ? "sr-only" : ""}`}><span>{transcriptChunk ? `${ROLE_NAMES[item.kind]} · 文本片段（非完整轮次）` : ROLE_NAMES[item.kind]}</span>{item.timestamp && <time dateTime={item.timestamp}>{formatClock(item.timestamp)}</time>}</div>
     <div className="markdown"><Markdown text={item.text} /></div>
     {item.truncated && <p className="muted">内容已裁剪</p>}
   </article>;

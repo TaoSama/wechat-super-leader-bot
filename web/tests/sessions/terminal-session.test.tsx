@@ -32,7 +32,8 @@ describe("terminal observation workspace", () => {
     const { unmount } = render(<SessionWorkspace data={{ nodes, sessions: [terminal], commands: [], goals: emptyGoals(), executions: emptyExecutions() }}
       nodes={nodes} stale={false} onAuthFailure={vi.fn()} />);
     fireEvent.click(screen.getByTestId(`session-row-fixture-${terminal.id}`));
-    expect(screen.getAllByText("等待处理")).toHaveLength(2);
+    expect(screen.getByText("需要回复")).toBeInTheDocument();
+    expect(screen.getAllByRole("img", { name: "需要回复" })).toHaveLength(2);
     expect(screen.getByLabelText("终端观测说明")).toHaveTextContent("不是完整对话记录");
     expect(screen.getByText(TERMINAL_READ_ONLY_REASON)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "刷新会话历史" })).not.toBeInTheDocument();
@@ -41,7 +42,8 @@ describe("terminal observation workspace", () => {
     fireEvent.keyDown(screen.getByLabelText("发送给当前会话"), { key: "Enter" });
     expect(screen.getByRole("button", { name: "发送消息" })).toBeDisabled();
     await act(async () => vi.advanceTimersByTimeAsync(45001));
-    expect(screen.getAllByText("状态未知")).toHaveLength(2);
+    expect(screen.getAllByRole("img", { name: "状态未知" })).toHaveLength(2);
+    expect(screen.queryByText("需要回复")).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
     unmount();
     expect(vi.getTimerCount()).toBe(0);

@@ -217,7 +217,8 @@ export class PostgresStore implements IStore {
   }
 
   async listRecentCommandSummaries(limit = 50): Promise<CommandSummary[]> {
-    const result = await this.pool.query(this.commandSummarySelect() + " ORDER BY created_at DESC LIMIT $2",
+    const result = await this.pool.query(this.commandSummarySelect() +
+      " WHERE (console_hidden_at IS NULL OR status NOT IN ('completed','failed','cancelled','expired')) ORDER BY created_at DESC LIMIT $2",
       [COMMAND_PREVIEW_CODE_POINTS, inspectionLimit(limit)]);
     return result.rows.map(row => this.mapCommandSummaryRow(row));
   }

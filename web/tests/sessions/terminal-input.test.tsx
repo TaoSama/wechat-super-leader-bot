@@ -90,7 +90,7 @@ describe("terminal composer and receipt behavior", () => {
   it("shows non-atomic hazards, posts one explicit input, stops polling and never claims execution complete", async () => {
     const { fetchMock, unmount } = setup();
     expect(screen.getByText("发送到原终端，写入后仍需确认执行结果。")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "查看发送说明" }));
+    fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
     expect(screen.getByText(/原终端输入 · 非原子：CLI 退出、同类进程替换或人工输入/)).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "关闭会话详情" }));
     expect(screen.getByRole("button", { name: "发送消息" })).toBeEnabled();

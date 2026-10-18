@@ -31,6 +31,7 @@ import { createNotificationRouter } from "../notifications/routes.js";
 import { hashConsoleToken } from "../console/types.js";
 import { createMediaRouter } from "../sessions/media-routes.js";
 import { createMessageReplyRouter } from "../sessions/message-reply-routes.js";
+import { createReadResponseCompression } from "./response-compression.js";
 
 function makeMessageRequestId(chatId: string, messageId: string): string {
   // Use sha256 of JSON tuple to guarantee zero collision even if chatId or messageId contains delimiter characters
@@ -174,6 +175,7 @@ export class ControllerServer {
       res.setHeader("Referrer-Policy", "no-referrer");
       next();
     });
+    this.app.use(createReadResponseCompression());
     this.app.use(express.json({ limit: "1mb" }));
     this.app.use("/auth", createConsoleAuthRouter(this.consoleAuth));
 

@@ -73,6 +73,7 @@ class FakeExecutionPool {
           Number(b.created_at) - Number(a.created_at) || (a.id < b.id ? 1 : -1)).slice(0, 1));
     }
     if (normalized.startsWith("SELECT * FROM leader_executions WHERE chat_id=ANY($1::text[])")) {
+      expect(normalized).toContain("AND (console_hidden_at IS NULL OR status NOT IN ('completed','failed','cancelled','expired')) ORDER BY");
       expect(normalized).toContain("ORDER BY (status='active') DESC, created_at DESC, id DESC LIMIT $2");
       return this.result([...this.rows.values()].filter(row => (params[0] as string[]).includes(row.chat_id))
         .sort((a, b) => Number(b.status === "active") - Number(a.status === "active") ||
@@ -318,6 +319,7 @@ describe("postgres execution transaction safety", () => {
     expect(await store.getExecution(original.id)).toEqual(original);
     expect(pool.queries.some(sql => sql.includes("CREATE UNIQUE INDEX") && sql.includes("leader_executions") && sql.includes("WHERE status='active'"))).toBe(true);
     expect(pool.queries.some(sql => sql.includes('id VARCHAR(36) COLLATE "C"'))).toBe(true);
+    expect(pool.queries).toContain("ALTER TABLE leader_executions ADD COLUMN IF NOT EXISTS console_hidden_at TIMESTAMPTZ");
     expect(pool.queries.some(sql => sql.startsWith("DELETE FROM node_sessions"))).toBe(true);
     expect(pool.queries.some(sql => sql.startsWith("UPDATE commands") && sql.includes("status = 'uncertain'"))).toBe(true);
     expect(pool.queries.some(sql => sql.startsWith("DELETE FROM leader_executions"))).toBe(false);
