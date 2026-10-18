@@ -52,7 +52,8 @@ export function planNotificationText(execution: ExecutionRecord, commands: reado
   const kind = execution.status as Exclude<TerminalKind, "blocked">;
   const steps = execution.plan.actions.map((action, index) => {
     const command = execution.attempts[index] && commands.find(item => matchesExecutionCommand(execution, index, item));
-    return `**${index + 1}. ${title(action.prompt)}**\n${result(command || undefined)}`;
+    const output = result(command || undefined);
+    return execution.plan.actions.length === 1 ? output : `**${index + 1}. ${title(action.prompt)}**\n${output}`;
   });
   return `${header(kind, execution.plan.actions[0].prompt)}\n\n${steps.join("\n\n")}` +
     (kind === "completed" ? "" : "\n\n后续派发已停止；原会话中的任务可能仍在执行。");
