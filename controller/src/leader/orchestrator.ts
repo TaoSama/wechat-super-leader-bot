@@ -8,6 +8,7 @@ import { selectExecutionObservation, selectModelObservation } from "../sessions/
 import { selectSendRoute } from "../sessions/send-eligibility.js";
 import { readinessFailure, waitForSendReadiness, type ReadinessHub } from "../sessions/send-readiness.js";
 import { failureReply, modelDiagnostic } from "./model/errors.js";
+import { classifyUserAuthorization } from "./model/user-authorization.js";
 import { createExecution, hasTerminalTarget, matchesExecutionCommand, validatePlanDependencies } from "./plans/execution.js";
 import { assertTerminalSingleStep, submitTerminalPlan, TERMINAL_INPUT_WARNING } from "./plans/terminal.js";
 import { ExecutionScheduler } from "./plans/scheduler.js";
@@ -270,6 +271,7 @@ export class LeaderOrchestrator {
       { role: "user", content: sanitizedUserPrompt },
     ];
     let toolCount = 0;
+    let authorization: ReturnType<typeof classifyUserAuthorization> | undefined;
     const memoryChanges: string[] = [];
     for (let step = 0; step < MAX_MODEL_STEPS; step++) {
       signal.throwIfAborted();
@@ -294,6 +296,23 @@ export class LeaderOrchestrator {
         toolCount++;
         trace.toolCalls = toolCount;
         trace.lastTool = Object.hasOwn(ToolArguments, call.function.name) ? call.function.name : "unsupported";
+        if (call.function.name === "execute_plan" || call.function.name === "execute_goal") {
+          if (!authorization) {
+            const authorizationStartedAt = Date.now();
+            authorization = classifyUserAuthorization(this.model, sanitizedUserPrompt, signal);
+            try { await authorization; }
+            finally {
+              trace.lastModelMs = Date.now() - authorizationStartedAt;
+              trace.totalModelMs += trace.lastModelMs;
+            }
+          }
+          const intent = await authorization;
+          const requiredIntent = call.function.name === "execute_plan" ? "task" : "goal";
+          if (intent !== requiredIntent) return { text: this.attachConsoleLink(
+            intent === "query" ? "这条消息只是在查询，没有派发任务。请说明想查看哪个会话的状态或结果。"
+              : intent === "preview" ? "按你的要求，暂不执行。请说明需要预览的目标会话和任务。"
+              : "本次未派发。请说明目标会话、要完成的任务和执行范围；持续目标还需要明确条件与预算。", linkContext) };
+        }
         const priorPlan = data.pending;
         const priorGoal = data.pendingGoal;
         const output = await this.callTool(call, chatId, data, memoryChanges, linkContext, signal);

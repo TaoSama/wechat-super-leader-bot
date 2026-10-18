@@ -26,6 +26,7 @@ const DIRECT_PROMPT = '统计合成待办记录并报告最终数量';
 const DIRECT_FINAL = '**直接执行最终结果**：共 23 条待办，其中 5 条已完成。';
 const DIRECT_FINAL_PLAIN = '直接执行最终结果：共 23 条待办，其中 5 条已完成。';
 const QUERY = '开始执行了吗？';
+const MISROUTED_QUERY = '合成会话里的待办记录统计完了吗？';
 const NEGATIVE = '暂时不要执行';
 const PROGRESS = 'SYNTHETIC_PROGRESS_ONLY：正在统计，尚未完成';
 const FINAL = '**验收最终结果**：共 17 条记录，其中 3 条需要复核。';
@@ -36,6 +37,7 @@ const HEARTBEAT_MS = 500;
 const TICK_OBSERVATION_MS = 2_200;
 const MESSAGE_TYPE_TEXT = 1;
 const NOTIFICATION_PREFIX = 'super-leader:notification:';
+const CONFIRMATION_INPUT = /^(?:请)?(?:确认|执行|开始|开始执行|确认执行|确认开始|按这个计划执行|就按这个执行|确认这个计划)[。！!]?$/u;
 const { values } = parseArgs({ options: { help: { type: 'boolean', short: 'h' }, run: { type: 'boolean' } } });
 
 if (values.help || !values.run) {
@@ -77,7 +79,8 @@ async function main() {
   const statePath = join(dir, 'synthetic-state.json');
   const certPath = join(dir, 'localhost-cert.pem');
   const keyPath = join(dir, 'localhost-key.pem');
-  const sent = [], incoming = [], deliveries = [], acknowledgements = [], modelCalls = [], errors = [], logs = [];
+  const sent = [], incoming = [], inputs = [], deliveries = [], acknowledgements = [], modelCalls = [], errors = [], logs = [];
+  const authorizationCalls = [];
   let controller, model, wechat, socket, heartbeat, gatewayChild, cursor = 0;
   const healthy = () => { if (errors.length) throw errors[0]; };
   const evidence = (step, data) => console.log(JSON.stringify({ step, ...data }, (_key, value) =>
@@ -95,13 +98,26 @@ async function main() {
         assert.equal(request.method, 'POST');
         const body = await jsonBody(request);
         const last = body.input.at(-1);
+        if (body.tools?.length === 1 && body.tools[0].name === 'classify_user_authorization') {
+          assert.equal(body.input.length, 2, 'Authorization included planner history or tool results');
+          assert.deepEqual(body.input.map(item => item.role), ['system', 'user']);
+          assert([DIRECT_TASK, MISROUTED_QUERY].includes(last.content), 'Unexpected authorization input: ' + JSON.stringify(last));
+          for (const history of [PROPOSAL, DIRECT_PROMPT, PROGRESS, FINAL]) {
+            assert(!JSON.stringify(body.input[0]).includes(history), 'Authorization system input included planner history');
+          }
+          authorizationCalls.push(last);
+          respond(response, { status: 'completed', output: [{ type: 'function_call',
+            call_id: 'synthetic-authorization-' + authorizationCalls.length, name: 'classify_user_authorization',
+            arguments: JSON.stringify({ intent: last.content === DIRECT_TASK ? 'task' : 'query' }) }] });
+          return;
+        }
         modelCalls.push(last);
         let output;
         if (last.content === PROPOSAL) {
           output = [{ type: 'function_call', call_id: 'synthetic-proposal-' + modelCalls.length, name: 'propose_plan',
             arguments: JSON.stringify({ actions: [{ nodeId: NODE, sessionId: SESSION,
               prompt: '统计合成记录并报告最终数量', dependsOn: [] }] }) }];
-        } else if (last.content === DIRECT_TASK) {
+        } else if ([DIRECT_TASK, MISROUTED_QUERY].includes(last.content)) {
           assert(body.tools.some(tool => tool.name === 'execute_plan'), 'Model was not offered the direct execution tool');
           output = [{ type: 'function_call', call_id: 'synthetic-execution-' + modelCalls.length, name: 'execute_plan',
             arguments: JSON.stringify({ actions: [{ nodeId: NODE, sessionId: SESSION,
@@ -201,6 +217,7 @@ async function main() {
     };
     const input = async (text, messageId = randomUUID()) => {
       const before = sent.length;
+      inputs.push({ text, messageId });
       incoming.push({ message_type: MESSAGE_TYPE_TEXT, from_user_id: CHAT, client_id: messageId,
         context_token: CONTEXT, item_list: [{ type: MESSAGE_TYPE_TEXT, text_item: { text } }] });
       const summary = await runGateway('--poll-once');
@@ -283,6 +300,28 @@ async function main() {
     const persisted = await controller.request('/v1/notifications/' + notification.id);
     assert.equal(persisted.body.notification.status, 'accepted');
 
+    const misroutedQuery = await input(MISROUTED_QUERY);
+    assert(misroutedQuery.replies.length > 0, 'Rejected planner execution did not answer the query');
+    assert.equal(modelCalls.filter(call => call.content === MISROUTED_QUERY).length, 1);
+    assert.equal(authorizationCalls.filter(call => call.content === MISROUTED_QUERY).length, 1,
+      'Planner execution on a query was not independently classified');
+    await delay(TICK_OBSERVATION_MS);
+    await runGateway('--poll-once');
+    assert.equal(deliveries.length, 1, 'Planner execute_plan on a query dispatched a command');
+    assert.equal((await pending()).length, 0, 'Rejected query execution created a completion notification');
+    assert.equal(notificationMessages().length, 1);
+    const misroutedReplay = await input(MISROUTED_QUERY, misroutedQuery.messageId);
+    assert.equal(misroutedReplay.summary.processedCount, 0);
+    assert.equal(misroutedReplay.replies.length, 0);
+    assert.equal(authorizationCalls.filter(call => call.content === MISROUTED_QUERY).length, 1,
+      'Rejected query replay requested authorization again');
+    evidence('query-execution-rejected', { plannerTool: 'execute_plan', authorization: 'query',
+      authorizationCalls: authorizationCalls.filter(call => call.content === MISROUTED_QUERY).length,
+      daemonCommands: deliveries.length - 1, completionNotifications: notificationMessages().length - 1 });
+
+    const directInputStart = inputs.length;
+    const directConfirmationMessages = () => inputs.slice(directInputStart)
+      .filter(message => CONFIRMATION_INPUT.test(message.text.trim())).length;
     const directInput = await input(DIRECT_TASK);
     await waitFor(() => {
       healthy();
@@ -299,7 +338,13 @@ async function main() {
     assert.equal((await pending()).length, 0, 'Direct accepted progress created a completion notification');
     const directModelCallCount = modelCalls.filter(call => call.content === DIRECT_TASK).length;
     assert.equal(directModelCallCount, 1, 'Direct task required another model turn');
+    assert.equal(authorizationCalls.filter(call => call.content === DIRECT_TASK).length, 1,
+      'Direct task was not independently authorized exactly once');
     assert(directInput.replies.length > 0, 'Direct task did not acknowledge its dispatch');
+    const directReplyText = directInput.replies.map(message => message.item_list[0].text_item.text).join('\n');
+    assert.doesNotMatch(directReplyText.replaceAll('无需再次确认', ''),
+      /确认|尚未派发|(?:回复|发送|输入|等待)[^\n。；]*(?:执行|开始)/u,
+      'Direct task reply asked for confirmation or reported an undispatched preview: ' + directReplyText);
 
     const directReplay = await input(DIRECT_TASK, directInput.messageId);
     assert.equal(directReplay.summary.processedCount, 0, 'Repeated direct input was processed twice');
@@ -315,6 +360,8 @@ async function main() {
     assert.equal(deliveries.length, 2, 'Direct message replay or empty poll dispatched another command');
     assert.equal(modelCalls.filter(call => call.content === DIRECT_TASK).length, directModelCallCount,
       'Direct message replay called the model again');
+    assert.equal(authorizationCalls.filter(call => call.content === DIRECT_TASK).length, 1,
+      'Direct message replay requested authorization again');
 
     const directReceipt = () => sendFrame({ type: 'result', commandId: directCommand.commandId,
       turnId: 'synthetic-turn-' + directCommand.commandId, status: 'completed', output: DIRECT_FINAL });
@@ -335,8 +382,9 @@ async function main() {
     assert(directActual.includes(DIRECT_FINAL_PLAIN), 'Direct WeChat send omitted its result: ' + directActual);
     assert(!directActual.includes('**') && !directActual.includes('###'), 'Direct notification contains raw Markdown');
     assert(!directActual.includes(PROGRESS), 'Direct notification sent accepted progress instead of the result');
+    assert.equal(directConfirmationMessages(), 0, 'Direct task received a user confirmation before completion');
     evidence('direct-execution-completion', { commandStatus: directComplete.body.status,
-      daemonOutput: directComplete.body.output, confirmationMessages: 0, daemonCommands: 1,
+      daemonOutput: directComplete.body.output, confirmationMessages: directConfirmationMessages(), daemonCommands: 1,
       notificationKind: directNotification.kind, actualWeChatText: directActual, completionNotifications: 1 });
 
     const directSentAfterCompletion = sent.length;
@@ -350,16 +398,21 @@ async function main() {
     assert.equal(deliveries.length, 2, 'Repeated direct completion/poll dispatched another command');
     const directPersisted = await controller.request('/v1/notifications/' + directNotification.id);
     assert.equal(directPersisted.body.notification.status, 'accepted');
+    assert.equal(authorizationCalls.filter(call => call.content === DIRECT_TASK).length, 1,
+      'Direct completion replay requested authorization again');
     healthy();
     evidence('PASS', { realControllerProcess: true, realGatewayCli: true, disposablePostgres: true,
       daemonCommands: deliveries.length, completionNotifications: notificationMessages().length,
       confirmedPlan: { daemonCommands: 1, completionNotifications: 1 },
-      directTask: { daemonCommands: 1, completionNotifications: 1, confirmationMessages: 0 },
+      directTask: { daemonCommands: 1, completionNotifications: 1, confirmationMessages: directConfirmationMessages(),
+        authorizationCalls: authorizationCalls.filter(call => call.content === DIRECT_TASK).length },
+      rejectedQuery: { authorizationCalls: authorizationCalls.filter(call => call.content === MISROUTED_QUERY).length },
       probes: ['query/negative zero dispatch', 'cancellation clears pending', 'short confirmation after query',
         'duplicate confirmation and input', 'wrong turn ignored', 'accepted progress is not completion',
         'duplicate completion and poll', 'direct task executes in original message without confirmation',
         'direct messageId replay and empty polls do not dispatch or send', 'direct accepted-to-completed automatic notification',
-        'duplicate direct completion and poll'] });
+        'duplicate direct completion and poll', 'authorization sees only current user text',
+        'independent authorization rejects planner execute_plan on a query'] });
   }, [
     { label: 'gateway child', cleanup: () => stopTestProcess(gatewayChild) },
     { label: 'heartbeat', cleanup: () => { clearInterval(heartbeat); } },
