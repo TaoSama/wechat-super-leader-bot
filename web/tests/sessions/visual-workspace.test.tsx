@@ -32,11 +32,11 @@ it("明暗外观切换即时生效，切换不重置当前草稿", async () => {
   await screen.findByText("可读的历史消息");
   fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "保留这段草稿" } });
   const shell = document.querySelector(".app-shell")!;
-  expect(shell).not.toHaveAttribute("data-theme");
-  fireEvent.click(screen.getByRole("button", { name: "切换明暗外观" }));
   expect(shell).toHaveAttribute("data-theme", "dark");
   fireEvent.click(screen.getByRole("button", { name: "切换明暗外观" }));
   expect(shell).toHaveAttribute("data-theme", "light");
+  fireEvent.click(screen.getByRole("button", { name: "切换明暗外观" }));
+  expect(shell).toHaveAttribute("data-theme", "dark");
   expect(screen.getByLabelText("发送给当前会话")).toHaveValue("保留这段草稿");
 });
 
@@ -46,18 +46,20 @@ it("聊天输入区收起发送通道说明，详情仍可查看模型设置和�
   await screen.findByText("可读的历史消息");
   expect(document.querySelector(".composer-route-details")).toBeNull();
   expect(document.querySelector(".composer-input .send-button")).not.toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "查看发送说明" }));
+  expect(screen.queryByText(/保留原来的模型与设置/)).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
   const details = screen.getByRole("dialog", { name: "会话详情" });
   expect(within(details).getByText(/保留原来的模型与设置/)).toBeVisible();
   expect(within(details).getByText(/关闭页面后不会保存/)).toBeVisible();
 });
 
-it("会话三行突出标题、最近消息和模型，技术字段在详情中", async () => {
+it("会话列表突出标题、项目和模型，不展示消息预览和时间，技术字段在详情中", async () => {
   render(<App />);
   const row = await screen.findByTestId("session-row-local-session-one");
-  expect(row.children).toHaveLength(3);
   expect(row).toHaveTextContent(session.title);
-  expect(row).toHaveTextContent(session.preview!);
+  expect(row).not.toHaveTextContent(session.preview!);
+  expect(row.querySelector("time")).toBeNull();
+  expect(within(row).getByRole("img", { name: "空闲" })).toBeInTheDocument();
   expect(row).toHaveTextContent("gpt-6.1-sol");
   expect(row).toHaveTextContent("editorial-project");
   expect(row).not.toHaveTextContent("/workspace/");
@@ -70,6 +72,7 @@ it("会话三行突出标题、最近消息和模型，技术字段在详情中"
   const metadata = screen.getByRole("dialog", { name: "会话详情" });
   expect(metadata).toHaveAttribute("open");
   expect(within(metadata).getByText(session.cwd)).toBeVisible();
+  expect(within(metadata).getByText("最近更新").parentElement).toHaveTextContent("2026-10-11 18:00:00");
 });
 
 it("历史超限提供简单的重新加载入口，技术来源收进详情且不发送消息", async () => {
@@ -89,7 +92,8 @@ it("历史超限提供简单的重新加载入口，技术来源收进详情且�
   expect(screen.queryByText("已切换为原生分页历史")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
   const metadata = screen.getByRole("dialog", { name: "会话详情" });
-  expect(within(metadata).getByText(/原生分页历史 · 读取同一会话/)).toBeVisible();
+  expect(within(metadata).getByText("读取当前会话已保存的记录，可能稍有延迟。")).toBeVisible();
+  expect(within(metadata).getByRole("button", { name: "恢复自动来源" })).toBeEnabled();
   expect(screen.queryByText("历史超出读取大小限制。")).toBeNull();
   expect(calls.some(url => url.includes("source=control-socket"))).toBe(true);
   expect(calls.some(url => url.includes("/messages"))).toBe(false);
@@ -113,8 +117,10 @@ it("已有旧页游标时最新页413停止近顶自动加载，保留手动旧�
   render(<App />);
   fireEvent.click(await screen.findByTestId("session-row-local-session-one"));
   await screen.findByText("可读的历史消息");
-  fireEvent.click(screen.getByRole("button", { name: "刷新会话历史" }));
+  fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
+  fireEvent.click(screen.getByRole("button", { name: "从详情刷新会话历史" }));
   await screen.findByText("历史超出读取大小限制。");
+  fireEvent.click(screen.getByRole("button", { name: "关闭会话详情" }));
   expect(historyCalls).toHaveLength(2);
   const history = screen.getByLabelText("会话历史");
   history.scrollTop = 20;
@@ -134,7 +140,7 @@ it("机器和模型搜索可以交叉筛选，并提供匹配为空的反馈", a
   expect(screen.queryByTestId("session-row-local-session-one")).toBeNull();
   expect(screen.getByTestId("session-row-remote-session-two")).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("搜索会话"), { target: { value: "gpt-6.1-sol" } });
-  expect(screen.getByText("未匹配到符合条件的宿主会话")).toBeInTheDocument();
+  expect(screen.getByText("没有匹配的会话")).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("筛选机器"), { target: { value: "" } });
   expect(screen.getByTestId("session-row-local-session-one")).toBeInTheDocument();
   expect(screen.queryByTestId("session-row-remote-session-two")).toBeNull();
@@ -148,7 +154,7 @@ it("紧凑机器与状态筛选保留原生选择语义、Tab焦点和选中后�
   expect(machine.tagName).toBe("SELECT");
   expect(machine).toHaveClass("filter-select");
   screen.getByRole("textbox", { name: "搜索会话" }).focus();
-  await user.tab();
+  await user.tab({ shift: true });
   expect(machine).toHaveFocus();
   await user.selectOptions(machine, "remote");
   expect(machine).toHaveValue("remote");

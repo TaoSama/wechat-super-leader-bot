@@ -67,8 +67,9 @@ describe("resume composer semantics", () => {
     fireEvent.click(screen.getByTestId("session-row-air-original"));
     fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "继续" } });
     await act(async () => {});
-    expect(screen.getAllByText("未加载").length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByRole("button", { name: "查看发送说明" }));
+    expect(screen.queryByText("未加载")).toBeNull();
+    expect(screen.getAllByRole("img", { name: "状态未知" })).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
     expect(screen.getByText("会话需要时会自动恢复，发送前检查是否正在使用。")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "关闭会话详情" }));
     expect(screen.getByRole("button", { name: "发送消息" })).toBeEnabled();

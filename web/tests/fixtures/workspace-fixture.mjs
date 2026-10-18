@@ -17,7 +17,8 @@ if (values.help) {
 const port = Number(values.port);
 if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("Invalid --port");
 const root = fileURLToPath(new URL("../../dist/", import.meta.url));
-const PAGE_SIZE = 30;
+const DEFAULT_HISTORY_PAGE_SIZE = 20;
+const MAX_HISTORY_PAGE_SIZE = 50;
 const MODEL_EXPIRY_PROBE_AGE_MS = 40_000;
 const FIXTURE_TIMEOUT_MS = 20 * 60 * 1000;
 const now = () => new Date().toISOString();
@@ -143,6 +144,8 @@ async function handle(req, res) {
     if (!session) return json(res, { error: "unknown session" }, 404);
     if (session.provider.startsWith("terminal/")) return json(res, { code: "history_unavailable", error: "Terminal snapshots are not native chat history" }, 502);
     const cursor = url.searchParams.get("cursor");
+    const limit = Number(url.searchParams.get("limit") ?? DEFAULT_HISTORY_PAGE_SIZE);
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_HISTORY_PAGE_SIZE) return json(res, { code: "history_invalid_request", error: "Invalid history limit" }, 400);
     const requestedSource = url.searchParams.get("source");
     if (requestedSource !== null && requestedSource !== "control-socket") return json(res, { code: "history_invalid_request" }, 400);
     metrics[cursor ? "older" : "latest"]++;
@@ -165,7 +168,7 @@ async function handle(req, res) {
     if (cursor && failOlder) return json(res, { error: "synthetic older failure" }, 503);
     const end = cursor ? pageCursor.end : items.length;
     if (!Number.isInteger(end) || end < 0 || end > items.length) return json(res, { error: "bad cursor" }, 400);
-    const start = Math.max(0, end - PAGE_SIZE);
+    const start = Math.max(0, end - limit);
     let nextCursor = null;
     if (start) {
       const anchor = JSON.stringify([historyContext, start]);

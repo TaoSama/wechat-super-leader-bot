@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "compression": "^1.8.2",
     "dotenv": "^18.0.6",
     "express": "^5.2.1",
     "pg": "^8.23.1",
@@ -19,6 +20,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@types/compression": "^1.8.1",
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.4",
     "@types/pg": "^8.23.1",

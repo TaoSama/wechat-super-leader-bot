@@ -1,36 +1,81 @@
-@media (prefers-color-scheme: dark) {
-  .app-shell {
-    --bg-canvas: #181b1a; --bg-panel: #141716; --bg-surface: #181b1a; --bg-elevated: #252b27;
-    --border-subtle: #303832; --border-strong: #546359;
-    --text-primary: #e9eee8; --text-secondary: #b6c2b8; --text-muted: #95a598;
-    --accent-teal: #88caa2; --accent-tint: #203a2b; --on-accent: #12281b;
-    --danger: #eeaa9b; --warning: #dbbd86; --ink: #28372e;
-    --warning-surface: #342e21; --danger-surface: #382722;
-    color-scheme: dark;
-  }
-  .app-shell:not([data-theme="light"]) .theme-sun { display: block; }
-  .app-shell:not([data-theme="light"]) .theme-moon { display: none; }
-}
-.app-shell[data-theme="dark"] {
-  --bg-canvas: #181b1a; --bg-panel: #141716; --bg-surface: #181b1a; --bg-elevated: #252b27;
-  --border-subtle: #303832; --border-strong: #546359;
-  --text-primary: #e9eee8; --text-secondary: #b6c2b8; --text-muted: #95a598;
-  --accent-teal: #88caa2; --accent-tint: #203a2b; --on-accent: #12281b;
-  --danger: #eeaa9b; --warning: #dbbd86; --ink: #28372e;
-  --warning-surface: #342e21; --danger-surface: #382722;
+:root, .app-shell[data-theme="dark"] {
+  --surface-0: #181b1a;
+  --surface-1: #1e2120;
+  --surface-2: #272a29;
+  --surface-3: #434645;
+  --surface-4: #595b5b;
+  --sidebar: #141716;
+  --sidebar-hover: var(--surface-1);
+  --sidebar-selected: var(--surface-2);
+  --workspace: var(--surface-1);
+  --text: #fafafa;
+  --text-secondary: #a1a5a4;
+  --text-tertiary: #717574;
+  --border: #252b2a;
+  --border-accent: #2f3534;
+  --accent: #20744a;
+  --accent-bright: #7ccba0;
+  --primary: #fafafa;
+  --primary-foreground: #181b1a;
+  --danger: #c64f43;
+  --warning: #e9b96e;
+  --status-running: #5caaf6;
+  --status-needs-input: #db932e;
+  --warning-surface: #30291e;
+  --danger-surface: #342322;
+  --interaction-highlight: rgb(255 255 255 / 8%);
   color-scheme: dark;
 }
 .app-shell[data-theme="light"] {
-  --bg-canvas: #f7f7f2; --bg-panel: #f0f1eb; --bg-surface: #fafaf6; --bg-elevated: #e9ece5;
-  --border-subtle: #dfe3da; --border-strong: #b7beb4;
-  --text-primary: #202923; --text-secondary: #505e55; --text-muted: #5f6d62;
-  --accent-teal: #19705d; --accent-tint: #e7f1ec; --on-accent: #fff;
-  --danger: #a44236; --warning: #8a5c22; --ink: #26332c;
-  --warning-surface: #f7eedb; --danger-surface: #f7e9e4;
+  --surface-0: #fff;
+  --surface-1: #fafafa;
+  --surface-2: #f4f4f5;
+  --surface-3: #e4e4e7;
+  --surface-4: #d4d4d8;
+  --sidebar: #f4f4f5;
+  --sidebar-hover: var(--surface-3);
+  --sidebar-selected: var(--surface-4);
+  --workspace: var(--surface-0);
+  --text: #1a1a1e;
+  --text-secondary: #71717a;
+  --text-tertiary: #a1a1aa;
+  --border: #e4e4e7;
+  --border-accent: #ececf1;
+  --accent: #20744a;
+  --accent-bright: #239956;
+  --primary: #18181b;
+  --primary-foreground: #fafafa;
+  --danger: #b04138;
+  --warning: #946b18;
+  --status-running: #268ae0;
+  --status-needs-input: #b37824;
+  --warning-surface: #fbf4e4;
+  --danger-surface: #fbebea;
+  --interaction-highlight: rgb(0 0 0 / 6%);
   color-scheme: light;
 }
-.theme-sun { display: none; }
-.app-shell[data-theme="dark"] .theme-sun { display: block; }
-.app-shell[data-theme="dark"] .theme-moon { display: none; }
-.app-shell[data-theme="light"] .theme-sun { display: none; }
+:root, .app-shell {
+  --bg-canvas: var(--surface-0);
+  --bg-panel: var(--surface-2);
+  --bg-surface: var(--surface-0);
+  --bg-elevated: var(--surface-2);
+  --border-subtle: var(--border);
+  --border-strong: var(--surface-3);
+  --text-primary: var(--text);
+  --text-muted: var(--text-secondary);
+  --accent-teal: var(--accent-bright);
+  --accent-tint: color-mix(in srgb, var(--accent) 15%, var(--surface-0));
+  --ink: var(--primary);
+  --on-accent: #fff;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+  --content-max-width: 820px;
+  --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+.theme-moon { display: none; }
 .app-shell[data-theme="light"] .theme-moon { display: block; }
+.app-shell[data-theme="light"] .theme-sun { display: none; }

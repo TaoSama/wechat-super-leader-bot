@@ -31,6 +31,12 @@ function workspace(target = session) {
     nodes={nodes} stale={false} onAuthFailure={vi.fn()} />;
 }
 
+async function refreshHistory() {
+  fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "从详情刷新会话历史" })));
+  fireEvent.click(screen.getByRole("button", { name: "关闭会话详情" }));
+}
+
 beforeEach(() => {
   vi.useFakeTimers(); vi.setSystemTime(NOW);
   vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
@@ -155,7 +161,7 @@ describe("terminal transcript workspace", () => {
     fireEvent.click(screen.getByTestId(`session-row-fixture-${SESSION_ID}`));
     await settle();
     expect(screen.getByText("助手 · 文本片段（非完整轮次）")).toBeInTheDocument();
-    expect(screen.getByLabelText("会话历史")).toHaveTextContent("Grok 可见片段");
+    expect(screen.getByRole("region", { name: "会话历史" })).toHaveTextContent("Grok 可见片段");
     expect(screen.queryByText("执行完成 (Completed)")).toBeNull();
     expect(screen.getByRole("button", { name: "发送消息" })).toBeDisabled();
   });
@@ -175,7 +181,7 @@ describe("terminal transcript workspace", () => {
       .toEqual(["更早回答", "可见回答"]);
     expect(fetch.mock.calls[1][0]).toContain(`historyContext=${CONTEXT}`);
     expect(fetch.mock.calls[1][0]).toContain("cursor=older");
-    await act(async () => fireEvent.click(screen.getByRole("button", { name: "刷新会话历史" })));
+    await refreshHistory();
     expect(screen.getByLabelText("会话历史")).toHaveTextContent("追加回答");
     expect(fetch.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
   });
@@ -190,7 +196,9 @@ describe("terminal transcript workspace", () => {
     expect(screen.getByLabelText("会话历史")).toHaveTextContent("可见回答");
     expect(screen.queryByLabelText("终端观测说明")).toBeNull();
     expect(screen.getByText(/CLI 会话记录来源不可用/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "刷新会话历史" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
+    expect(screen.getByRole("button", { name: "从详情刷新会话历史" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "关闭会话详情" }));
     expect(screen.getByRole("button", { name: "加载更早的消息" })).toBeDisabled();
     expect(fetch).toHaveBeenCalledTimes(1);
   });
@@ -200,7 +208,7 @@ describe("terminal transcript workspace", () => {
     render(workspace({ ...session, historySource: undefined }));
     fireEvent.click(screen.getByTestId(`session-row-fixture-${SESSION_ID}`));
     await advance(60000);
-    expect(screen.getByLabelText("终端观测说明")).toHaveTextContent("不是完整对话记录");
+    expect(screen.getByRole("region", { name: "终端观测说明" })).toHaveTextContent("不是完整对话记录");
     expect(screen.queryByRole("button", { name: "刷新会话历史" })).toBeNull();
     expect(fetch).not.toHaveBeenCalled();
   });

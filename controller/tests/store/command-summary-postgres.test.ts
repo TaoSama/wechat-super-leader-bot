@@ -37,6 +37,7 @@ it("projects bounded summaries in SQL and excludes raw output and internal autho
   const summaries = await store.listRecentCommandSummaries(50);
   const [sql, params] = query.mock.calls[0];
   expectBoundedProjection(sql);
+  expect(sql).toMatch(/WHERE \(console_hidden_at IS NULL OR status NOT IN \('completed','failed','cancelled','expired'\)\) ORDER BY/);
   expect(sql).toMatch(/ORDER BY created_at DESC LIMIT \$2/);
   expect(params).toEqual([PREVIEW_POINTS, 50]);
   expect(summaries).toHaveLength(1);
@@ -63,6 +64,7 @@ it("looks up exact request metadata with the bounded projection and keeps full d
   expect((await store.findCommandMetadataByRequestId("req"))?.commandId).toBe("cmd");
   expectBoundedProjection(query.mock.calls[0][0]);
   expect(query.mock.calls[0][0]).toMatch(/WHERE request_id=\$2/);
+  expect(query.mock.calls[0][0]).not.toContain("console_hidden_at");
   expect(query.mock.calls[0][1]).toEqual([PREVIEW_POINTS, "req"]);
   query.mockResolvedValueOnce({ rows: [row({ output })] });
   expect((await store.getCommand("cmd"))?.output).toBe(output);

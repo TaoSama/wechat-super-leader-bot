@@ -1,6 +1,6 @@
 import { emptyGoals, emptyExecutions  } from "../fixtures/status-fixtures";
 // React 17+ JSX transform
-import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act, within } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import App from "../../src/App";
 import { ControlPlaneStatusResponse } from "../../src/types";
@@ -251,14 +251,14 @@ describe("Super Leader 会话工作台", () => {
     // Sessions and capabilities
     const alphaRow = screen.getByTestId("session-row-demomini-sess_alpha");
     expect(alphaRow).toHaveTextContent("模型未报告");
-    expect(alphaRow).toHaveTextContent("执行中");
+    expect(within(alphaRow).getByRole("img", { name: "执行中" })).toBeInTheDocument();
     expect(alphaRow).toHaveTextContent("重构 控制平面状态存储");
 
     const roRow = screen.getByTestId("session-row-demomini-sess_readonly");
-    expect(roRow).toHaveTextContent("空闲");
+    expect(within(roRow).getByRole("img", { name: "空闲" })).toBeInTheDocument();
 
     const noneRow = screen.getByTestId("session-row-linux-worker-9-sess_legacy");
-    expect(noneRow).toHaveTextContent("状态未知");
+    expect(within(noneRow).getByRole("img", { name: "状态未知" })).toBeInTheDocument();
 
     // Command 5 statuses check:
     // 1) pending

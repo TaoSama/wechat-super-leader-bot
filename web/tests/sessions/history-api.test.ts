@@ -10,6 +10,15 @@ const response = (value: unknown, status = 200) => new Response(JSON.stringify(v
 afterEach(() => vi.unstubAllGlobals());
 
 describe("history API contract", () => {
+  it("requests a fixed 20-item page and rejects oversized responses before publishing rows", async () => {
+    const fetch = vi.fn().mockResolvedValue(response(PAGE));
+    vi.stubGlobal("fetch", fetch);
+    await fetchSessionHistory("node", "session");
+    expect(new URL(fetch.mock.calls[0][0], "https://workspace.test").searchParams.get("limit")).toBe("20");
+    const items = Array.from({ length: 21 }, (_, index) => ({ id: String(index), turnId: "turn", text: "row", kind: "assistant" }));
+    fetch.mockResolvedValue(response({ ...PAGE, items }));
+    await expect(fetchSessionHistory("node", "session")).rejects.toThrow("单页条数限制");
+  });
   it("only selects the paginated source explicitly and rejects a different response source", async () => {
     const fetch = vi.fn().mockResolvedValue(response({ ...PAGE, source: "control-socket" }));
     vi.stubGlobal("fetch", fetch);

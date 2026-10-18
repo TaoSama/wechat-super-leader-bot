@@ -80,87 +80,82 @@ describe("read-only desktop display selection", () => {
   });
 });
 
-describe("workspace desktop observations", () => {
-  it.each(["active", "idle"] as const)("shows desktop %s in list and detail while retaining read-only send", status => {
+describe("workspace execution indicators", () => {
+  it.each(["active", "idle"] as const)("shows a fresh %s indicator without exposing desktop diagnostics", status => {
     vi.spyOn(Date, "now").mockReturnValue(NOW);
     const raw = session("notLoaded", desktop({ status }));
     render(<SessionWorkspace data={{ nodes, sessions: [raw], commands: [], goals: emptyGoals(), executions: emptyExecutions() }} nodes={nodes} stale={false}
       active={false} onAuthFailure={vi.fn()} />);
     const row = screen.getByTestId("session-row-node-session");
-    expect(row.querySelector(".session-state")).toHaveTextContent(status === "active" ? "执行中" : "空闲");
+    const label = status === "active" ? "执行中" : "空闲";
+    expect(within(row).getByRole("img", { name: label })).toHaveClass(`state-${status}`);
     expect(row.querySelector(".session-observation")).toBeNull();
-    expect(row.children).toHaveLength(3);
+    expect(row.querySelector(".session-preview")).toBeNull();
+    expect(row.children).toHaveLength(2);
     fireEvent.click(row);
-    expect(document.querySelector(".detail-title .status-label")).toHaveTextContent(status === "active" ? "执行中" : "空闲");
+    expect(document.querySelector(".detail-title .session-status-dot")).toHaveAccessibleName(label);
     fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
-    expect(screen.getByText("控制接口：未加载")).toBeInTheDocument();
-    expect(screen.getByText("桌面观测", { exact: false, selector: ".detail-subline > span" })).toHaveTextContent("2026-10-11");
+    expect(screen.queryByText(/控制接口：|桌面观测|桌面已失联/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "关闭会话详情" }));
     fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "不会发送" } });
     expect(screen.getByRole("button", { name: "发送消息" })).toBeDisabled();
     expect(raw).toMatchObject({ status: "notLoaded", loaded: false, capabilities: ["read"], observedAt: iso(-1000) });
   });
 
-  it("reports desktop loss while retaining the raw control state", () => {
-    vi.spyOn(Date, "now").mockReturnValue(NOW);
-    render(<SessionWorkspace data={{ nodes, sessions: [session("notLoaded", desktop({ availability: "unavailable" }))], commands: [], goals: emptyGoals(), executions: emptyExecutions() }}
-      nodes={nodes} stale={false} active={false} onAuthFailure={vi.fn()} />);
-    const row = screen.getByTestId("session-row-node-session");
-    expect(within(row).getByText("未加载")).toBeInTheDocument();
-    expect(row).toHaveTextContent("桌面已失联");
-  });
-
   it.each([
-    [desktop({ availability: "unavailable" }), "桌面已失联"],
-    [desktop({ observedAt: iso(-45001) }), "桌面观测已过期"],
-    [desktop({ observedAt: iso(1) }), "桌面观测时间异常"],
-    [desktop({ observedAt: undefined }), "桌面观测时间缺失"],
-    [desktop({ status: "unknown" }), "桌面状态未知"],
-  ] as const)("异常观测在列表中只显示简短原因，完整时间与说明在详情中 %#", (observation, label) => {
+    desktop({ availability: "unavailable" }),
+    desktop({ observedAt: iso(-45001) }),
+    desktop({ observedAt: iso(1) }),
+    desktop({ observedAt: undefined }),
+    desktop({ status: "unknown" }),
+  ])("omits unusable desktop diagnostics from list, header and details %#", observation => {
     vi.spyOn(Date, "now").mockReturnValue(NOW);
     const raw = session("notLoaded", observation);
     render(<SessionWorkspace data={{ nodes, sessions: [raw], commands: [], goals: emptyGoals(), executions: emptyExecutions() }}
       nodes={nodes} stale={false} active={false} onAuthFailure={vi.fn()} />);
     const row = screen.getByTestId("session-row-node-session");
-    expect(row.querySelector(".session-observation")?.textContent).toBe(label);
+    expect(within(row).getByRole("img", { name: "状态未知" })).not.toHaveClass("state-idle");
+    expect(row).not.toHaveTextContent(/桌面|未加载|空闲/);
     fireEvent.click(row);
+    expect(document.querySelector(".detail-title")).not.toHaveTextContent(/桌面|未加载|空闲/);
     fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
-    expect(within(screen.getByRole("dialog")).getByText(describeDesktopObservation(observation, NOW)!)).toBeVisible();
+    expect(screen.queryByText(/桌面已失联|桌面观测已过期|桌面观测时间异常|桌面观测时间缺失|桌面状态未知|控制接口：/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "关闭会话详情" }));
+    fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "继续工作" } });
+    expect(screen.getByRole("button", { name: "发送消息" })).toBeDisabled();
   });
 
-  it("expires desktop status after 45 seconds even without a new status event", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(NOW);
+  it("expires desktop status without replacing an unknown state with idle", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(NOW);
     const { unmount } = render(<SessionWorkspace data={{ nodes, sessions: [session("notLoaded", desktop())], commands: [], goals: emptyGoals(), executions: emptyExecutions() }}
       nodes={nodes} stale={false} onAuthFailure={vi.fn()} />);
     const row = screen.getByTestId("session-row-node-session");
-    expect(row.querySelector(".session-state")).toHaveTextContent("执行中");
+    expect(within(row).getByRole("img", { name: "执行中" })).toBeInTheDocument();
     await act(async () => { await vi.advanceTimersByTimeAsync(MAX_DESKTOP_OBSERVATION_AGE_MS); });
-    expect(row.querySelector(".session-state")).toHaveTextContent("执行中");
+    expect(within(row).getByRole("img", { name: "执行中" })).toBeInTheDocument();
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-    expect(row.querySelector(".session-state")).toHaveTextContent("未加载");
-    expect(row).toHaveTextContent("观测已过期");
+    expect(within(row).getByRole("img", { name: "状态未知" })).not.toHaveClass("state-idle");
+    expect(row).not.toHaveTextContent(/观测已过期|空闲/);
     unmount();
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("expires successive desktop observations with one timer and clears it on deactivation", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(NOW);
+  it("expires successive observations with one timer and clears it on deactivation", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(NOW);
     const first = { ...session("notLoaded", desktop({ observedAt: iso(-1000) })), id: "first" };
     const second = { ...session("notLoaded", desktop()), id: "second" };
     const data = { nodes, sessions: [first, second], commands: [], goals: emptyGoals(), executions: emptyExecutions() };
     const { rerender, unmount } = render(<SessionWorkspace data={data} nodes={nodes} stale={false} onAuthFailure={vi.fn()} />);
     expect(vi.getTimerCount()).toBe(1);
     await act(async () => { await vi.advanceTimersByTimeAsync(MAX_DESKTOP_OBSERVATION_AGE_MS - 999); });
-    expect(screen.getByTestId("session-row-node-first").querySelector(".session-state")).toHaveTextContent("未加载");
-    expect(screen.getByTestId("session-row-node-second").querySelector(".session-state")).toHaveTextContent("执行中");
+    expect(within(screen.getByTestId("session-row-node-first")).getByRole("img", { name: "状态未知" })).toBeInTheDocument();
+    expect(within(screen.getByTestId("session-row-node-second")).getByRole("img", { name: "执行中" })).toBeInTheDocument();
     expect(vi.getTimerCount()).toBe(1);
     rerender(<SessionWorkspace data={data} nodes={nodes} stale={false} active={false} onAuthFailure={vi.fn()} />);
     expect(vi.getTimerCount()).toBe(0);
     await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
     rerender(<SessionWorkspace data={data} nodes={nodes} stale={false} active={true} onAuthFailure={vi.fn()} />);
-    expect(screen.getByTestId("session-row-node-second").querySelector(".session-state")).toHaveTextContent("未加载");
+    expect(within(screen.getByTestId("session-row-node-second")).getByRole("img", { name: "状态未知" })).toBeInTheDocument();
     expect(vi.getTimerCount()).toBe(0);
     unmount();
   });

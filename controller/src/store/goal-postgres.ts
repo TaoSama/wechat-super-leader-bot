@@ -20,6 +20,7 @@ export async function initGoalTables(client: pg.PoolClient): Promise<void> {
     id VARCHAR(36) COLLATE "C" PRIMARY KEY, chat_id VARCHAR(64) NOT NULL, revision BIGINT NOT NULL CHECK (revision>=1),
     status VARCHAR(16) NOT NULL CHECK (status IN ('active','blocked','completed','cancelled','expired')),
     created_at BIGINT NOT NULL, data JSONB NOT NULL)`);
+  await client.query("ALTER TABLE leader_goals ADD COLUMN IF NOT EXISTS console_hidden_at TIMESTAMPTZ");
   await client.query("CREATE UNIQUE INDEX IF NOT EXISTS leader_goals_open_chat_idx ON leader_goals(chat_id) WHERE status IN ('active','blocked')");
 }
 interface GoalRow { id: string; chat_id: string; revision: string | number; status: string; created_at: string | number; data: unknown }
@@ -103,6 +104,8 @@ export async function pgListRunnableGoals(pool: pg.Pool, limit = 8, afterId = ""
 export async function pgListRecentGoals(pool: pg.Pool, chats: readonly string[], limit: number): Promise<GoalRecord[]> {
   const query = executionListQuery(chats, limit);
   if (!query.chatIds.length) return [];
-  const result = await pool.query<GoalRow>("SELECT * FROM leader_goals WHERE chat_id=ANY($1::text[]) ORDER BY (status IN ('active','blocked')) DESC,created_at DESC,id DESC LIMIT $2", [query.chatIds, query.count]);
+  const result = await pool.query<GoalRow>(`SELECT * FROM leader_goals WHERE chat_id=ANY($1::text[])
+    AND (console_hidden_at IS NULL OR status NOT IN ('completed','cancelled','expired'))
+    ORDER BY (status IN ('active','blocked')) DESC,created_at DESC,id DESC LIMIT $2`, [query.chatIds, query.count]);
   return result.rows.map(fromRow);
 }
