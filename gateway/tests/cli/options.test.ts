@@ -93,3 +93,17 @@ test("Codex mode validates its selection and keeps credentials out of parsed opt
   assert.throws(() => parseGatewayCli(["--leader-model", " "], {}), /Invalid leader-model/);
   assert.equal(parseGatewayCli([], { GATEWAY_LEADER_MODE: "codex" }).leaderMode, "codex");
 });
+
+
+test("result attachments use an explicit configurable application budget", () => {
+  assert.equal(parseGatewayCli([], {}).resultFileMaxBytes, 50 * 1024 * 1024);
+  assert.equal(parseGatewayCli([], { RESULT_FILE_MAX_BYTES: "1024", CONSOLE_PUBLIC_URL: "https://results.example" }).resultFileMaxBytes, 1024);
+  const opts = parseGatewayCli(["--result-file-max-bytes", "2048", "--result-public-origin", "https://override.example"], {
+    RESULT_FILE_MAX_BYTES: "invalid", CONSOLE_PUBLIC_URL: "https://results.example",
+  });
+  assert.equal(opts.resultFileMaxBytes, 2048);
+  assert.equal(opts.resultPublicOrigin, "https://override.example");
+  for (const value of ["0", "-1", "1.5", "536870913", "invalid"]) {
+    assert.throws(() => parseGatewayCli([`--result-file-max-bytes=${value}`], {}), /Invalid result-file-max-bytes/);
+  }
+});

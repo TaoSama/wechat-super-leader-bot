@@ -1,8 +1,12 @@
 import { randomUUID } from "node:crypto";
+import express from "express";
+import type { AddressInfo } from "node:net";
 import { expect, it, vi } from "vitest";
 import { MemoryDeliveryRepository } from "../../src/deliveries/memory.js";
 import { ResultDeliveryService } from "../../src/deliveries/service.js";
 import type { LeaderModel } from "../../src/leader/model/contracts.js";
+import { MAX_CATCHUP_ARTIFACT_BYTES, MAX_CATCHUP_SOURCES } from "../../src/deliveries/contracts.js";
+import { createResultDeliveryRouter } from "../../src/deliveries/routes.js";
 
 const NOW = 1_800_000_000_000;
 const CHAT = "catchup-user";
@@ -139,4 +143,72 @@ it("refuses to activate an aggregate if original business data expires during su
   expect(await repository.get(first.id, now())).toMatchObject({ status: "waiting_for_user" });
   expect((await repository.get(first.id, now()))?.catchupId).toBeUndefined();
   expect((await repository.get(second.id, now()))?.catchupId).toBeUndefined();
+});
+
+it("bounds the original set per generation and leaves additional complete results waiting and available on the Web", async () => {
+  const { service, repository, create, now } = fixture();
+  const originals = [];
+  for (let index = 0; index < MAX_CATCHUP_SOURCES + 3; index++) originals.push(await create(`完整成果 ${index}`));
+  await repository.markChatWaiting(CHAT, "no_context", now());
+  expect(await repository.listCatchupCandidates(CHAT, now(), 1000)).toHaveLength(MAX_CATCHUP_SOURCES);
+  await service.resumeChat(CHAT, "bounded-inbound");
+  const pending = await repository.listPending([CHAT], now());
+  expect(pending).toHaveLength(1);
+  expect(pending[0].catchupSourceIds).toHaveLength(MAX_CATCHUP_SOURCES);
+  const outcomes = await Promise.all(originals.map(plan => repository.get(plan.id, now())));
+  expect(outcomes.filter(plan => plan?.status === "superseded")).toHaveLength(MAX_CATCHUP_SOURCES);
+  expect(outcomes.filter(plan => plan?.status === "waiting_for_user")).toHaveLength(3);
+  for (const original of originals) expect(await repository.getArtifact(original.artifact.id)).not.toBeNull();
+  await service.resumeChat(CHAT, "bounded-inbound");
+  expect(await repository.listPending([CHAT], now())).toHaveLength(1);
+});
+
+it("checks byte budgets before fetching oversized originals and resumes at most one existing complete result", async () => {
+  const { service, repository, create, now } = fixture();
+  const small = await create("small complete original");
+  for (let index = 0; index < 2; index++) {
+    const id = randomUUID(), artifactId = randomUUID();
+    const metadata = { ...small.artifact, id: artifactId, size: MAX_CATCHUP_ARTIFACT_BYTES };
+    await repository.createIfAbsent({ ...small, id, key: randomUUID(), source: { type: "plan", id }, artifact: metadata },
+      { ...metadata, bytes: Buffer.from("not fetched by the budget planner") });
+  }
+  await repository.markChatWaiting(CHAT, "no_context", now());
+  const getArtifact = vi.spyOn(repository, "getArtifact");
+  await service.resumeChat(CHAT, "bounded-bytes");
+  expect(getArtifact).not.toHaveBeenCalled();
+  const pending = await repository.listPending([CHAT], now());
+  expect(pending).toHaveLength(1);
+  expect(pending[0].id).toBe(small.id);
+  expect((await repository.listMaintenance([CHAT], now())).filter(plan => plan.status === "waiting_for_user")).toHaveLength(2);
+  await service.resumeChat(CHAT, "bounded-bytes");
+  expect(getArtifact).not.toHaveBeenCalled();
+});
+
+it("exposes the stable resume HTTP contract while keeping reservation fields private and original content readable", async () => {
+  const { service, repository, create, now } = fixture();
+  const originals = [await create("完整成果 A"), await create("完整成果 B")];
+  await repository.markChatWaiting(CHAT, "no_context", now());
+  const app = express(); app.use(express.json());
+  app.use("/v1/deliveries", createResultDeliveryRouter(service, () => new Set([CHAT])));
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>(resolve => server.once("listening", resolve));
+  try {
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/deliveries`;
+    const resume = () => fetch(base + "/resume", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chatId: CHAT, generation: "one-inbound" }) });
+    expect(await (await resume()).json()).toEqual({ resumed: 1 });
+    const listed = (await (await fetch(base)).json()).items;
+    expect(listed.filter((item: { status: string }) => item.status === "ready")).toHaveLength(1);
+    for (const item of listed) {
+      expect(item).not.toHaveProperty("catchupSourceIds"); expect(item).not.toHaveProperty("catchupId");
+      expect(item).not.toHaveProperty("resumeGeneration");
+    }
+    for (const original of originals) expect(await (await fetch(base + `/${original.id}/full`)).text()).toBe(original.messages[0]);
+    const later = await create("同次入站响应丢失后才完成的新成果");
+    await repository.markChatWaiting(CHAT, "no_context", now());
+    expect(await (await resume()).json()).toEqual({ resumed: 1 });
+    expect((await repository.get(later.id, now()))?.status).toBe("waiting_for_user");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
 });

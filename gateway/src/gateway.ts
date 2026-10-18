@@ -8,7 +8,13 @@ import { HealthTracker } from "./runtime/health.js";
 import { CHECKPOINT_MARGIN_MS, ENTRY_TYPING_BUDGET_MS, REPLY_TIMEOUT_MS } from "./runtime/budgets.js";
 import { type NotificationDeliverySummary } from "./controller/notification-contract.js";
 import { NotificationOutbox, NotificationDiagnosticError } from "./runtime/notification-outbox.js";
-import { LocalSendDeferredError } from "./runtime/context-policy.js";
+import { ResultClient } from "./controller/result-client.js";
+import { FileResultOutbox } from "./results/outbox.js";
+import { ResultDeliveryRunner } from "./results/delivery.js";
+import { ResultDispatcher } from "./results/dispatcher.js";
+import { RenewalNotifier, renewalDeliveryKey } from "./results/renewal.js";
+import { RESULT_TEXT_CHARS } from "./results/contracts.js";
+import { getDeferReason, LocalSendDeferredError } from "./runtime/context-policy.js";
 import type { ControllerMessageResponse, DeliveryOutboxItem } from "./types.js";
 import { OutboxBackpressureError } from "./runtime/delivery-state.js";
 import { CONFLICT_REPLY, ReplyEngineBackpressureError, ReplyEngineConflictError, ReplyEngineUnavailableError, type GatewayReplyEngine } from "./leader/contracts.js";
@@ -16,6 +22,7 @@ export type { GatewayReplyEngine } from "./leader/contracts.js";
 export { NotificationDiagnosticError } from "./runtime/notification-outbox.js";
 
 const MIN_NOTIFICATION_INTERVAL_MS = 1;
+const NOTIFICATION_INTEREST_CACHE_MS = 30_000;
 
 async function waitForNotificationPoll(intervalMs: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return;
@@ -55,7 +62,12 @@ export class WeChatGateway {
   public readonly notifications: boolean;
   private readonly replyEngine?: GatewayReplyEngine;
   private stopped: boolean = false;
-  private readonly notificationOutbox: NotificationOutbox;
+  private readonly notificationOutbox?: NotificationOutbox;
+  private readonly resultDispatcher?: ResultDispatcher;
+  private readonly renewalNotifier?: RenewalNotifier;
+  private readonly resultClient?: ResultClient;
+  private notificationInterest?: { fetchedAt: number; chatIds: string[]; interested: string[] };
+  private readonly activeInboundChats = new Set<string>();
   private flushingReplies = false;
   private readonly activeReplyDeliveries = new Set<string>();
   private replyOutboxCursor = 0;
@@ -70,6 +82,8 @@ export class WeChatGateway {
     healthTracker?: HealthTracker;
     notifications?: boolean;
     replyEngine?: GatewayReplyEngine;
+    resultClient?: ResultClient;
+    resultOutbox?: FileResultOutbox;
   }) {
     this.replyEngine = options.replyEngine;
     this.stateManager = options.stateManager;
@@ -79,10 +93,37 @@ export class WeChatGateway {
     this.splitMultiPart = options.splitMultiPart ?? true;
     this.healthTracker = options.healthTracker;
     this.notifications = options.notifications ?? false;
-    this.notificationOutbox = new NotificationOutbox({ stateManager: this.stateManager, ilink: this.ilink,
-      controller: this.controller, splitMaxChars: this.splitMaxChars, signal: this.notificationAbort.signal,
-      splitMultiPart: this.splitMultiPart,
-      shouldContinue: () => !this.stopped && this.stateManager.isReadyForActivePolling() });
+    if (options.resultClient && options.resultOutbox) {
+      this.resultClient = options.resultClient;
+      const active = () => !this.stopped && this.stateManager.isReadyForActivePolling();
+      const isReplyPending = (chatId: string) => this.isReplyPending(chatId);
+      const canDispatch = (chatId: string, kind: "final" | "progress") => Boolean(this.stateManager.contextTokens[chatId]) && this.stateManager.canSendToChat(chatId, kind);
+      const deferReason = (chatId: string, kind: "final" | "progress") => getDeferReason(this.stateManager.contextBudgets[chatId], this.stateManager.policy, kind) ?? "context_changed";
+      const runner = new ResultDeliveryRunner({ state: this.stateManager,
+        transport: {
+          sendText: (chatId, text, sendOptions) => this.ilink.sendMarkdownReply(chatId, text, { ...sendOptions, maxCharsPerChunk: RESULT_TEXT_CHARS, splitMultiPart: false }),
+          sendFile: (chatId, artifact, bytes, sendOptions) => this.ilink.sendFileReply(chatId, bytes,
+            { fileName: artifact.name, byteLength: artifact.size, sha256: artifact.sha256 }, sendOptions),
+        },
+        downloadArtifact: (artifact, signal) => options.resultClient!.downloadArtifact(artifact, signal),
+        budget: (chatId, kind) => ({ allowed: canDispatch(chatId, kind), remaining: this.stateManager.remainingSendBudget(chatId), reason: deferReason(chatId, kind) }),
+        contextFingerprint: chatId => JSON.stringify([this.stateManager.contextTokens[chatId], this.stateManager.contextBudgets[chatId]?.lastInboundKey]),
+        isReplyPending,
+      });
+      this.resultDispatcher = new ResultDispatcher({ controller: options.resultClient, store: options.resultOutbox,
+        runner, state: this.stateManager, canDispatch, deferReason, isReplyPending, active, signal: this.notificationAbort.signal });
+      this.renewalNotifier = new RenewalNotifier({ state: this.stateManager, isReplyPending, active, signal: this.notificationAbort.signal,
+        send: (chatId, text, sendOptions) => this.ilink.sendMarkdownReply(chatId, text, sendOptions) });
+      this.stateManager.setReplyEvidenceProtection(key => options.resultOutbox!.protectsDeliveryKey(key) ||
+        Object.entries(this.stateManager.contextBudgets).some(([chatId, budget]) => Date.now() >= budget.refreshedAt &&
+          Date.now() - budget.refreshedAt < this.stateManager.policy.contextWindowMs &&
+          key === renewalDeliveryKey(this.stateManager.getLoginFingerprint(), chatId, budget.refreshedAt)));
+    } else {
+      if (options.resultClient || options.resultOutbox) throw new Error("Result client and outbox must be configured together");
+      this.notificationOutbox = new NotificationOutbox({ stateManager: this.stateManager, ilink: this.ilink,
+        controller: this.controller, splitMaxChars: this.splitMaxChars, signal: this.notificationAbort.signal,
+        splitMultiPart: this.splitMultiPart, shouldContinue: () => !this.stopped && this.stateManager.isReadyForActivePolling() });
+    }
   }
 
   public stop(): void {
@@ -95,7 +136,14 @@ export class WeChatGateway {
     if (!this.notifications || this.stopped || !this.stateManager.isReadyForActivePolling()) return { accepted: 0, uncertain: 0, skipped: 0 };
     let replyError: unknown;
     try { await this.flushRepliesOnce(); } catch (error) { replyError = error; }
-    const summary = await this.notificationOutbox.deliverOnce();
+    let summary: NotificationDeliverySummary;
+    if (this.resultDispatcher && this.resultClient) {
+      if (!this.notificationInterest || Date.now() - this.notificationInterest.fetchedAt >= NOTIFICATION_INTEREST_CACHE_MS) {
+        this.notificationInterest = { ...await this.resultClient.notificationInterest(this.notificationAbort.signal), fetchedAt: Date.now() };
+      }
+      summary = await this.resultDispatcher.deliverOnce(this.notificationInterest.chatIds);
+      await this.renewalNotifier!.deliverOnce(this.notificationInterest.interested);
+    } else summary = await this.notificationOutbox!.deliverOnce();
     if (replyError) throw replyError;
     return summary;
   }
@@ -171,6 +219,7 @@ export class WeChatGateway {
         if (this.stopped) { interrupted = true; break; }
         this.healthTracker?.recordMessageStart(this.controller.authorizationBudgetMs + ENTRY_TYPING_BUDGET_MS +
           (this.replyEngine?.requestBudgetMs ?? this.controller.requestBudgetMs) + REPLY_TIMEOUT_MS + CHECKPOINT_MARGIN_MS);
+        this.activeInboundChats.add(msg.chatId);
         try {
           if (this.hasQuarantinedInboundReply(msg.deliveryKey)) {
             this.quarantineInboundReply(msg.deliveryKey);
@@ -178,7 +227,10 @@ export class WeChatGateway {
             continue;
           }
           await this.controller.assertChatAllowed(msg.chatId);
-          this.stateManager.recordInboundContext(msg.deliveryKey, msg.chatId, msg.createdAtMs, Boolean(msg.contextToken?.trim()), msg.contextToken);
+          const fresh = this.stateManager.recordInboundContext(msg.deliveryKey, msg.chatId, msg.createdAtMs, Boolean(msg.contextToken?.trim()), msg.contextToken);
+          const retryingAdmission = this.stateManager.contextBudgets[msg.chatId]?.lastInboundKey === msg.deliveryKey &&
+            !this.stateManager.isMessageProcessed(msg.deliveryKey);
+          if ((fresh || retryingAdmission) && msg.contextToken?.trim()) this.resultDispatcher?.noteInbound(msg.chatId, msg.deliveryKey);
           if (this.stateManager.outbox[msg.deliveryKey]) {
             this.stateManager.recordProcessedMessageKey(msg.deliveryKey, { preserveReplyEvidence: true });
             processedCount++;
@@ -238,7 +290,7 @@ export class WeChatGateway {
             continue;
           }
           throw err;
-        }
+        } finally { this.activeInboundChats.delete(msg.chatId); }
       }
 
       if (interrupted) this.healthTracker?.recordProcessingEnd();
@@ -258,6 +310,11 @@ export class WeChatGateway {
       this.healthTracker?.recordPollError(err);
       throw err;
     }
+  }
+
+  private isReplyPending(chatId: string): boolean {
+    return this.activeInboundChats.has(chatId) || Object.values(this.stateManager.outbox).some(item =>
+      item.kind === "reply" && item.chatId === chatId && item.status === "pending");
   }
 
   private async deliverReply(item: DeliveryOutboxItem, reply: ControllerMessageResponse): Promise<void> {
@@ -391,6 +448,7 @@ export class WeChatGateway {
     const deliver = async (): Promise<void> => {
       try { await this.deliverNotificationsOnce(); }
       catch (err) {
+        if (this.stopped || this.notificationAbort.signal.aborted) return;
         const error = err instanceof Error ? err : new Error("Notification delivery failed");
         if (error instanceof NotificationDiagnosticError) { notificationFailure = error; this.stop(); return; }
         try {

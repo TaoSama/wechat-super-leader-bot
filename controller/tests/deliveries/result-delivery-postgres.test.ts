@@ -87,6 +87,17 @@ it.skipIf(!databaseUrl)("persists artifacts and cached summaries across process 
     expect((await repository.get(timeout.id, now))?.status).toBe("uncertain");
     const oldPreparing = (await repository.listMaintenance(["allowed"], now, undefined, 100)).find(item => item.status === "preparing");
     expect(oldPreparing).toBeDefined();
+    for (const reason of ["not_submitted", "artifact_unavailable", "reply_pending", "attempt_expired"]) {
+      const retryable = await service.prepareResult({ ...result, key: randomUUID(), text: `known unsubmitted ${reason}` });
+      const oldAttempt = randomUUID(), freshAttempt = randomUUID();
+      await repository.claim(retryable.id, oldAttempt, now);
+      expect(await repository.defer(retryable.id, oldAttempt, reason, now, 1)).toMatchObject({ status: "ready", submittedMessages: 1 });
+      expect((await repository.claim(retryable.id, freshAttempt, now))?.status).toBe("claimed");
+      expect(await repository.defer(retryable.id, oldAttempt, reason, now, 1)).toMatchObject({ status: "claimed", attemptId: freshAttempt });
+      await repository.recordReceipt(retryable.id, "uncertain", freshAttempt);
+      expect(await repository.defer(retryable.id, freshAttempt, reason, now, 1)).toBeNull();
+      expect((await repository.get(retryable.id, now))?.status).toBe("uncertain");
+    }
   } finally {
     await pool.end();
     try { await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); }

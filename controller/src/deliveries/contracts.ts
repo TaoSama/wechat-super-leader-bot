@@ -7,6 +7,7 @@ export const SIGNED_DOWNLOAD_TTL_MS = 15 * 60_000;
 export const DELIVERY_ATTEMPT_MS = 30 * 60_000;
 export const MAX_CATCHUP_SOURCES = 8;
 export const MAX_CATCHUP_ARTIFACT_BYTES = 32 * 1024 * 1024;
+const RETRYABLE_DEFER_REASONS = new Set(["not_submitted", "artifact_unavailable", "reply_pending", "attempt_expired"]);
 
 export interface ResultInput {
   id?: string;
@@ -101,7 +102,8 @@ export function deferDelivery(plan: DeliveryPlan, attemptId: string, reason: str
   if (plan.lastDeferredAttemptId === attemptId) return plan.lastDeferReason === reason ? plan : null;
   if (plan.status !== "claimed" || plan.attemptId !== attemptId || (plan.attemptExpiresAt ?? 0) <= now) return null;
   const { attemptId: _attempt, attemptedAt: _at, attemptExpiresAt: _expires, ...rest } = plan;
-  return { ...rest, status: "waiting_for_user", deferReason: reason, submittedMessages: Math.max(plan.submittedMessages ?? 0, submittedMessages),
+  return { ...rest, status: RETRYABLE_DEFER_REASONS.has(reason) ? "ready" : "waiting_for_user", deferReason: reason,
+    submittedMessages: Math.max(plan.submittedMessages ?? 0, submittedMessages),
     lastDeferredAttemptId: attemptId, lastDeferReason: reason, lastDeferredAt: now };
 }
 

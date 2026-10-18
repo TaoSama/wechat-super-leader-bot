@@ -33,14 +33,14 @@ if (!values.run || values.help) {
 async function listen(server) {
   server.listen(0, '127.0.0.1'); await once(server, 'listening'); return server.address().port;
 }
-const closeServer = async server => {
+async function closeServer(server) {
   if (server?.listening) await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-};
-const jsonBody = async request => {
+}
+async function jsonBody(request) {
   const chunks = []; for await (const chunk of request) chunks.push(chunk);
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
-};
-const respond = (response, body) => { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify(body)); };
+}
+function respond(response, body) { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify(body)); }
 
 export async function verifyResultGateway() {
   const env = verificationEnvironment(), token = randomUUID(), logs = [], errors = [];
@@ -60,7 +60,7 @@ export async function verifyResultGateway() {
         assert.equal(request.url, '/v1/responses');
         const payload = await jsonBody(request);
         const summary = payload.input[0]?.content?.includes('真实执行成果');
-        assert.equal(payload.tools?.length ?? 0, summary ? 0 : payload.tools?.length ?? 0);
+        if (summary) assert.equal(payload.tools?.length ?? 0, 0, 'Summary model was granted tools');
         modelRequests.push({ summary });
         respond(response, { status: 'completed', output: [{ type: 'message', role: 'assistant', status: 'completed',
           content: [{ type: 'output_text', text: summary ? SUMMARY : REPLY }] }] });
@@ -135,13 +135,15 @@ export async function verifyResultGateway() {
     // The production CDN hostname stays hard-validated by the application. Only
     // this isolated child preload maps its final fetch onto the HTTPS fixture.
     await writeFile(preloadPath, `const realFetch = globalThis.fetch;
-globalThis.fetch = (input, init) => {
+globalThis.fetch = async (input, init) => {
   const url = new URL(String(input));
   if (url.origin === 'https://novac2c.cdn.weixin.qq.com' && url.pathname === '/c2c/upload') {
     return realFetch(${JSON.stringify(wechatOrigin)} + url.pathname + url.search, init);
   }
   if (![${JSON.stringify(wechatOrigin)}, ${JSON.stringify(controller.base)}].includes(url.origin)) throw new Error('Fixture blocked external fetch');
-  return realFetch(input, init);
+  const response = await realFetch(input, init);
+  if (!response.ok && url.origin === ${JSON.stringify(controller.base)}) console.error('Synthetic Controller rejection', url.pathname, response.status, await response.clone().text());
+  return response;
 };\n`, { mode: 0o600 });
     const runGateway = async (mode = '--poll-once', { allowFailure = false, budget = 10 } = {}) => {
       healthy(); let output = '', stderr = '';
@@ -160,6 +162,14 @@ globalThis.fetch = (input, init) => {
       return { exit, signal, output, stderr };
     };
     const state = async () => JSON.parse(await readFile(statePath, 'utf8'));
+    const elapseDispatchInterval = async () => {
+      const outboxPath = `${statePath}.results.json`;
+      const persisted = JSON.parse(await readFile(outboxPath, 'utf8'));
+      // Fixture time passage between independent scenarios; keep all delivery,
+      // account, budget and attempt evidence unchanged.
+      persisted.dispatchTimes[CHAT] = Date.now() - 60_001;
+      await writeFile(outboxPath, JSON.stringify(persisted), { mode: 0o600 });
+    };
     const patchBudget = async patch => {
       const persisted = await state();
       assert(persisted.context_budgets?.[CHAT], 'True inbound did not create persistent context budget');
@@ -204,6 +214,10 @@ globalThis.fetch = (input, init) => {
     await input('刷新窗口');
     const fileText = '乙'.repeat(11401), file = await prepare(fileText), beforeFile = sent.length;
     await runGateway();
+    assert.equal((await getPlan(file.id)).status, 'ready');
+    assert.equal(sent.length, beforeFile, 'Result dispatch interval was bypassed by CLI restart');
+    await elapseDispatchInterval();
+    await runGateway();
     assert.equal((await getPlan(file.id)).status, 'accepted');
     assert.equal(textOf(sent[beforeFile]), SUMMARY); assert.equal(sent[beforeFile + 1].item_list[0].type, 4);
     const uploaded = [...uploads.values()].at(-1);
@@ -221,6 +235,7 @@ globalThis.fetch = (input, init) => {
     incoming.push(original); await runGateway();
     assert.deepEqual((await state()).context_budgets[CHAT], beforeReplayBudget, 'Historical input refreshed exhausted budget');
     assert.equal(sent.length, countBeforeBlocked);
+    await elapseDispatchInterval();
     await input('续期并取结果');
     assert.equal(textOf(sent[countBeforeBlocked]), REPLY, 'Pending result preempted current user reply');
     assert.equal(textOf(sent[countBeforeBlocked + 1]), 'budget-blocked-result');
@@ -230,10 +245,12 @@ globalThis.fetch = (input, init) => {
     await patchBudget({ refreshedAt: Date.now() - WINDOW_MS - 1 });
     const expired = await prepare('window-expired-result'), beforeExpired = sent.length;
     await runGateway(); assert.equal(sent.length, beforeExpired); assert.equal((await getPlan(expired.id)).status, 'waiting_for_user');
+    await elapseDispatchInterval();
     await input('重新打开窗口'); assert.equal((await getPlan(expired.id)).status, 'accepted');
     console.log('PASS expired reply window saves waiting result; new inbound resumes without rerunning scheduled task');
 
     const unknown = await prepare('unknown-send-result'), beforeUnknown = sent.length;
+    await elapseDispatchInterval();
     dropNext = true; await runGateway('--poll-once', { allowFailure: true });
     assert.equal(sent.length, beforeUnknown + 1);
     await runGateway('--poll-once', { allowFailure: true });
@@ -241,6 +258,7 @@ globalThis.fetch = (input, init) => {
     assert.equal(sent.length, beforeUnknown + 1, 'Lost send response was resent after process restart');
 
     const crashed = await prepare('crash-after-send-result'), beforeCrash = sent.length;
+    await elapseDispatchInterval();
     crashNext = true; const crash = await runGateway('--poll-once', { allowFailure: true });
     assert.equal(crash.signal, 'SIGKILL'); assert.equal(sent.length, beforeCrash + 1);
     await runGateway('--poll-once', { allowFailure: true });

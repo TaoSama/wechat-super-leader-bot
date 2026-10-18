@@ -345,7 +345,11 @@ test("closed real stderr pipe exits CLI with code 2 after uncertainty, without r
   const source = `
     import { runCli } from ${JSON.stringify(moduleUrl)};
     import fs from "node:fs";
-    let item = ${JSON.stringify(notification())}, sends = 0, polls = 0, restarting = false;
+    const old = ${JSON.stringify(notification())};
+    let item = { id: old.id, key: old.id, source: old.source, chatId: old.chatId, kind: old.kind,
+      status: "ready", mode: "text", messages: [old.text], createdAt: old.createdAt, expiresAt: old.expiresAt,
+      retainedUntil: old.expiresAt, artifact: { id: old.id, chatId: old.chatId, name: "result.md", size: 1,
+        sha256: "a".repeat(64), expiresAt: old.expiresAt } }, sends = 0, polls = 0, restarting = false;
     const json = value => new Response(JSON.stringify(value));
     globalThis.fetch = async (url, init) => {
       const pathname = new URL(String(url)).pathname;
@@ -355,14 +359,18 @@ test("closed real stderr pipe exits CLI with code 2 after uncertainty, without r
         return json({ ret: 0, msgs: [], get_updates_buf: "original-cursor" });
       }
       if (pathname.endsWith("sendmessage")) { sends++; throw new TypeError("private token/context/text/chatId"); }
-      const body = JSON.parse(init.body);
-      if (pathname.endsWith("pending")) return json({ items: item.status === "pending" ? [item] : [] });
+      if (pathname === "/v1/chats/notification-interest") return json({ chatIds: [item.chatId], interested: [] });
+      const body = JSON.parse(init.body || "{}");
+      if (pathname.endsWith("pending")) return json({ items: item.status === "ready" ? [item] : [] });
       if (pathname.endsWith("claim")) {
         const attemptedAt = Date.now();
         item = { ...item, status: "claimed", attemptId: body.attemptId, attemptedAt, attemptExpiresAt: attemptedAt + 60000 };
-        return json({ notification: item });
+        return json({ delivery: item });
       }
-      if (pathname.endsWith("receipt")) { item = { ...item, status: body.status }; return json({ notification: item }); }
+      if (pathname.endsWith("materialize")) return json({ delivery: { ...item,
+        artifact: { ...item.artifact, downloadUrl: "http://127.0.0.1:8790/v1/result-artifacts/" + item.id + "/download?expires=" + item.expiresAt + "&signature=" + "b".repeat(64) } } });
+      if (pathname.endsWith("receipt")) { item = { ...item, status: body.status }; return json({ delivery: item }); }
+      if (pathname === "/v1/deliveries/" + item.id) return json({ delivery: item });
       throw new Error("unexpected fixture request");
     };
     await new Promise(resolve => process.stdin.once("data", resolve));
@@ -385,7 +393,7 @@ test("closed real stderr pipe exits CLI with code 2 after uncertainty, without r
     child.once("error", reject);
     child.once("close", (code, signal) => resolve({ code, signal }));
   });
-  assert.deepEqual(result, { code: NOTIFICATION_DIAGNOSTIC_EXIT_CODE, signal: null });
+  assert.deepEqual(result, { code: NOTIFICATION_DIAGNOSTIC_EXIT_CODE, signal: null }, output);
   const lines = output.trim().split("\n").map(line => JSON.parse(line));
   assert.equal(lines.length, 2);
   assert.deepEqual({ ...lines[0], polls: undefined },
@@ -550,14 +558,15 @@ test("CLI poll-once processes notifications only after a successful inbound cycl
       if (failPoll) throw new Error("inbound failed");
       return new Response(JSON.stringify({ ret: 0, msgs: [], get_updates_buf: "new-cursor" }));
     }
-    assert.equal(path, "/v1/notifications/pending");
+    if (path === "/v1/chats/notification-interest") return new Response(JSON.stringify({ chatIds: ["chat"], interested: [] }));
+    assert.equal(path, "/v1/deliveries/pending");
     assert.deepEqual(JSON.parse(init?.body as string), { chatIds: ["chat"] });
     return new Response(JSON.stringify({ items: [] }));
   };
   t.after(() => { globalThis.fetch = original; });
   const args = ["--poll-once", "--notifications", "--credentials-path", f.accountPath, "--state-path", f.statePath];
   assert.equal(await runCli(args, { CONTROLLER_TOKEN: "synthetic" }), 0);
-  assert.deepEqual(calls, ["/ilink/bot/getupdates", "/v1/notifications/pending"]);
+  assert.deepEqual(calls, ["/ilink/bot/getupdates", "/v1/chats/notification-interest", "/v1/deliveries/pending"]);
   calls.length = 0; failPoll = true;
   await assert.rejects(runCli(args, { CONTROLLER_TOKEN: "synthetic" }), /inbound failed/);
   assert.deepEqual(calls, ["/ilink/bot/getupdates"]);

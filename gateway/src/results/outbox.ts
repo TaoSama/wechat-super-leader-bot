@@ -7,7 +7,7 @@ export const RESULT_OUTBOX_LIMIT = 1000;
 const RESULT_OUTBOX_BYTES = 4 * 1024 * 1024;
 export interface ResultReference {
   id: string; chatId: string; identity: string;
-  status: "pending" | "claiming" | "claimed" | "defer" | "receipt";
+  status: "pending" | "claiming" | "claimed" | "defer" | "waiting" | "receipt";
   attemptId?: string; receiptStatus?: "accepted" | "uncertain"; deferReason?: string; submittedMessages?: number;
 }
 export interface ResultOutboxStore {
@@ -30,7 +30,7 @@ function validReference(raw: unknown): ResultReference {
   const item = resultObject(raw, ["id", "chatId", "identity", "status", "attemptId", "receiptStatus", "deferReason", "submittedMessages"]);
   resultUuid(item.id);
   if (typeof item.chatId !== "string" || !item.chatId.trim() || item.chatId.length > 512 || typeof item.identity !== "string" || !/^[a-f\d]{64}$/.test(item.identity) ||
-    !["pending", "claiming", "claimed", "defer", "receipt"].includes(String(item.status)) ||
+    !["pending", "claiming", "claimed", "defer", "waiting", "receipt"].includes(String(item.status)) ||
     item.submittedMessages !== undefined && (!Number.isSafeInteger(item.submittedMessages) || (item.submittedMessages as number) < 0 || (item.submittedMessages as number) > 3)) {
     throw new Error("Invalid result outbox reference");
   }

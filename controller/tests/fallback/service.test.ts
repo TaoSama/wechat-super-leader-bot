@@ -161,4 +161,42 @@ describe("durable fallback delivery", () => {
     expect(fetcher).not.toHaveBeenCalled();
     expect(await repository.get(record!.id)).toMatchObject({ status: "failed", resultStatus: "completed", outcome: "expired_before_submission" });
   });
+  it.each(["wechat_accepted", "result_superseded", "catchup_claimed", "result_expired", "chat_not_allowed"])("skips stale queued work with stable %s reason", async (skip) => {
+    const repository = new MemoryFallbackRepository();
+    const fetcher = vi.fn(async () => new Response());
+    const service = new FallbackService(repository, { endpoints: new Map([[input.chatId, "https://example.test/webhook"]]),
+      fetch: fetcher as typeof fetch, materialize: async () => ({ skip, url: "invalid obsolete link" }) });
+    const record = await service.enqueue(input);
+    expect(await service.drain()).toBe(1);
+    expect(await repository.get(record!.id)).toMatchObject({ status: "failed", outcome: `skipped_${skip}`, attempts: 1 });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(await service.drain()).toBe(0);
+  });
+  it("rechecks eligibility after a 429 retry and persists a terminal skip without another request", async () => {
+    const repository = new MemoryFallbackRepository();
+    let now = 1_000;
+    let acceptedInWechat = false;
+    const fetcher = vi.fn(async () => new Response(null, { status: 429 }));
+    const service = new FallbackService(repository, { endpoints: new Map([[input.chatId, "https://example.test/webhook"]]),
+      now: () => now, fetch: fetcher as typeof fetch,
+      materialize: async () => acceptedInWechat ? { skip: "wechat_accepted" } : {} });
+    const record = await service.enqueue(input);
+    expect(await service.drain()).toBe(1);
+    expect(await repository.get(record!.id)).toMatchObject({ status: "pending", outcome: "endpoint_rate_limited_http_429" });
+    acceptedInWechat = true;
+    now += 30_000;
+    expect(await service.drain()).toBe(1);
+    expect(await repository.get(record!.id)).toMatchObject({ status: "failed", outcome: "skipped_wechat_accepted", attempts: 2 });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    now += 1_000_000;
+    expect(await service.drain()).toBe(0);
+  });
+  it("does not retry or persist arbitrary skip text", async () => {
+    const repository = new MemoryFallbackRepository();
+    const service = new FallbackService(repository, { endpoints: new Map([[input.chatId, "https://example.test/webhook"]]),
+      materialize: async () => ({ skip: "userinfo/token=secret" }) });
+    const record = await service.enqueue(input);
+    await service.drain();
+    expect(await repository.get(record!.id)).toMatchObject({ status: "failed", outcome: "skipped_invalid_reason" });
+  });
 });

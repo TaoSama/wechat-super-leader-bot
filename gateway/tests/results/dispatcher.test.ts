@@ -175,3 +175,40 @@ test("genuine inbound resume intent survives restart and waits until the ordinar
   assert.equal(f.store.pendingResumes().length, 0);
   assert.equal(f.sends, 1);
 });
+
+test("partly accepted results pin shared evidence across capacity eviction and resume with only the file", async t => {
+  const f = harness(t);
+  f.records.set(f.id, { ...f.records.get(f.id)!, mode: "attachment", messages: ["summary"] });
+  f.state.setReplyEvidenceProtection(key => f.store.protectsDeliveryKey(key));
+  let failUpload = true, textSends = 0, fileSends = 0;
+  const accept = (key: string, text: string) => {
+    const before = f.state.prepareReplyDelivery(key, createHash("sha256").update(text).digest("hex"), 1);
+    if (before.acknowledgedChunks) return;
+    f.state.beginReplyChunk(key, 0); f.state.confirmReplyChunk(key, 0);
+  };
+  const runner = new ResultDeliveryRunner({ state: f.state, now: () => f.now, contextFingerprint: () => "context",
+    budget: () => ({ allowed: true, remaining: 10 }), isReplyPending: () => false,
+    downloadArtifact: async () => Buffer.from("artifact"), transport: {
+      sendText: async (_chat, text, options) => { accept(options.deliveryKey, text); textSends++; },
+      sendFile: async (_chat, _artifact, _bytes, options) => {
+        if (failUpload) throw new Error("upload not submitted");
+        accept(options.deliveryKey, "file"); fileSends++;
+      },
+    } });
+  await f.dispatcher(f.store, { runner }).deliverOnce(["chat"]);
+  assert.equal(f.records.get(f.id)?.status, "waiting_for_user");
+  assert.equal(f.store.references()[0].status, "waiting");
+  assert.equal(f.store.references()[0].submittedMessages, 1);
+  const stepKey = `result:${f.id}:step:0`;
+  assert.equal(f.state.replyDeliveries[stepKey].acknowledgedChunks, 1);
+  await f.restart().deliverOnce(["chat"]);
+  assert.equal(f.store.references()[0].status, "waiting", "restart preserves the dormant pin");
+  for (let index = 0; index < 1001; index++) accept(`unrelated:${index}`, `text ${index}`);
+  assert.equal(Object.keys(f.state.replyDeliveries).length, 1000);
+  assert.equal(f.state.replyDeliveries[stepKey].acknowledgedChunks, 1, "capacity cleanup cannot erase the acknowledged summary");
+  failUpload = false; f.now += 60_000;
+  await f.controller.resumeDeliveries("chat");
+  assert.deepEqual(await f.dispatcher(f.store, { runner }).deliverOnce(["chat"]), { accepted: 1, uncertain: 0, skipped: 0 });
+  assert.equal(textSends, 1); assert.equal(fileSends, 1);
+  assert.equal(f.store.references().length, 0);
+});

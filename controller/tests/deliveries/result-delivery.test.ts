@@ -210,6 +210,22 @@ it("marks unsent ready results waiting without taking a transport attempt or dis
   expect(await repository.markChatWaiting("forbidden", "no_context", now())).toBe(0);
 });
 
+it.each(["not_submitted", "artifact_unavailable", "reply_pending", "attempt_expired"])
+  ("safely retries known-unsubmitted %s outcomes while preserving partial prefixes and permanent unknown evidence", async reason => {
+    const { service, repository, now } = fixture();
+    const plan = await service.prepareResult(input("a result whose remaining steps were not submitted"));
+    const attemptId = randomUUID(), retryAttempt = randomUUID();
+    await repository.claim(plan.id, attemptId, now());
+    expect(await repository.defer(plan.id, attemptId, reason, now(), 1)).toMatchObject({ status: "ready", submittedMessages: 1, lastDeferredAttemptId: attemptId });
+    expect((await repository.defer(plan.id, attemptId, reason, now(), 1))?.status).toBe("ready");
+    expect((await repository.claim(plan.id, retryAttempt, now()))?.status).toBe("claimed");
+    expect(await repository.defer(plan.id, attemptId, reason, now(), 1)).toMatchObject({ status: "claimed", attemptId: retryAttempt });
+    await repository.recordReceipt(plan.id, "uncertain", retryAttempt);
+    expect(await repository.defer(plan.id, retryAttempt, reason, now(), 1)).toBeNull();
+    expect((await repository.defer(plan.id, attemptId, reason, now(), 1))?.status).toBe("uncertain");
+    expect(await repository.claim(plan.id, randomUUID(), now())).toBeNull();
+  });
+
 it("generates expiring links at actual materialization and preserves oversized complete results for download", async () => {
   const { service, advance } = fixture({ fileMaxBytes: 100, model: { complete: async () => ({ content: "完成摘要", toolCalls: [] }) } });
   const plan = await service.prepareResult(input("x".repeat(11401)));
@@ -255,6 +271,15 @@ it("serves actual HTTP result views and signed byte-exact downloads with per-cha
   expect(download.status).toBe(200);
   expect(await download.text()).toBe("# 完整结果\n\n😀 data");
   expect(download.headers.get("content-disposition")).toContain("attachment;");
+  const deferPath = `/v1/deliveries/${plan.id}/defer`;
+  expect((await (await post(deferPath, { attemptId, reason: "artifact_unavailable", submittedMessages: 1 })).json()).delivery)
+    .toMatchObject({ status: "ready", submittedMessages: 1 });
+  const retryAttempt = randomUUID();
+  expect((await post(`/v1/deliveries/${plan.id}/claim`, { attemptId: retryAttempt })).status).toBe(200);
+  expect((await (await post(deferPath, { attemptId, reason: "artifact_unavailable", submittedMessages: 1 })).json()).delivery)
+    .toMatchObject({ status: "claimed", attemptId: retryAttempt });
+  expect((await post(`/v1/deliveries/${plan.id}/receipt`, { attemptId: retryAttempt, status: "uncertain" })).status).toBe(200);
+  expect((await post(deferPath, { attemptId: retryAttempt, reason: "artifact_unavailable", submittedMessages: 1 })).status).toBe(409);
   expect((await fetch(base + downloadPath.replace("signature=", "signature=a"))).status).toBe(403);
   allowed.delete("allowed");
   expect((await fetch(base + `/v1/deliveries/${plan.id}/full`)).status).toBe(404);

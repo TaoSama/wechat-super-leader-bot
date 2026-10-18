@@ -1,7 +1,7 @@
 import pg from "pg";
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
-import { PostgresFallbackRepository } from "../../src/fallback/index.js";
+import { describe, expect, it, vi } from "vitest";
+import { FallbackService, PostgresFallbackRepository } from "../../src/fallback/index.js";
 
 // Opt-in synthetic database only; ordinary unit runs never access a user's database.
 const databaseUrl = process.env.FALLBACK_TEST_DATABASE_URL;
@@ -44,6 +44,33 @@ describe.skipIf(!databaseUrl)("fallback PostgreSQL persistence", () => {
       expect(await resumed.claim(66_000)).toBeUndefined();
       expect(await repository.get(polled.id)).toMatchObject({ status: "unknown", outcome: "submission_lease_expired" });
       expect(await resumed.list(input.chatId)).toHaveLength(4);
+    } finally {
+      await pool.end();
+    }
+  });
+  it("persists eligibility skip after a queued 429 without submitting again", async () => {
+    const pool = new pg.Pool({ connectionString: databaseUrl });
+    const repository = new PostgresFallbackRepository(pool);
+    let now = 100_000;
+    let superseded = false;
+    const chatId = `synthetic-${randomUUID()}`;
+    const fetcher = vi.fn(async () => new Response(null, { status: 429 }));
+    try {
+      await repository.init(now);
+      const service = new FallbackService(repository, { endpoints: new Map([[chatId, "https://example.test/webhook"]]),
+        now: () => now, fetch: fetcher as typeof fetch,
+        materialize: async () => superseded ? { skip: "result_superseded" } : {} });
+      const record = await service.enqueue({ key: "old-result", chatId, kind: "completed", title: "Synthetic", text: "Stale result" });
+      await service.drain();
+      expect(await repository.get(record!.id)).toMatchObject({ status: "pending", outcome: "endpoint_rate_limited_http_429" });
+      superseded = true;
+      now += 30_000;
+      await service.drain();
+      const resumed = new PostgresFallbackRepository(pool);
+      await resumed.init(now);
+      expect(await resumed.get(record!.id)).toMatchObject({ status: "failed", outcome: "skipped_result_superseded", attempts: 2 });
+      expect(await resumed.claim(now + 1_000_000)).toBeUndefined();
+      expect(fetcher).toHaveBeenCalledTimes(1);
     } finally {
       await pool.end();
     }

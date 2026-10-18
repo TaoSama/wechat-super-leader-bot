@@ -12,6 +12,8 @@ const MAX_PAYLOAD_TEXT_CHARS = 500;
 const PRE_SUBMISSION_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ERR_TLS_CERT_ALTNAME_INVALID", "CERT_HAS_EXPIRED", "DEPTH_ZERO_SELF_SIGNED_CERT"]);
 
 export interface FallbackMaterialized {
+  /** A stable snake_case reason marks obsolete or ineligible queued work as terminal without HTTP submission. */
+  skip?: string;
   /** A separately scoped, authenticated result URL. Never use a controller or WeChat token. */
   url?: string;
   resultStatus?: string;
@@ -73,6 +75,15 @@ export class FallbackService {
     let materialized: FallbackMaterialized;
     try {
       materialized = await this.options.materialize?.(record) ?? {};
+    } catch {
+      return this.retry(record, "materialize_failed_before_submission");
+    }
+    if (materialized.skip !== undefined) {
+      const reason = typeof materialized.skip === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(materialized.skip)
+        ? materialized.skip : "invalid_reason";
+      return { status: "failed", outcome: `skipped_${reason}` };
+    }
+    try {
       if (materialized.url) validateFallbackEndpoint(materialized.url);
     } catch {
       return this.retry(record, "materialize_failed_before_submission");

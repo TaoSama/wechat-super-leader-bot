@@ -5,8 +5,10 @@ import { DEFAULT_MESSAGE_MAX_CHARS, unicodeSafeBoundary } from "./markdown.js";
 import { DEFAULT_POLL_TIMEOUT_MS, MAX_POLL_TIMEOUT_MS, POLL_NETWORK_MARGIN_MS, MAX_POLL_ATTEMPTS, SEND_REQUEST_TIMEOUT_MS, REPLY_TIMEOUT_MS, NOTIFICATION_REPLY_TIMEOUT_MS } from "../runtime/budgets.js";
 import { ILinkSendReceiptError, parseILinkJson, validateSendReceipt } from "./send-receipt.js";
 import { TypingIndicator } from "./typing.js";
-import { ImageUploader, type UploadedImageItem } from "./media-upload.js";
+import { ImageUploader, type UploadedImageItem, type UploadRequest } from "./media-upload.js";
 import { sendImageReply as deliverImages, validateImageAttachments, type ImageAttachment } from "./media-delivery.js";
+import { FileUploader, type FileUploadMetadata, type UploadedFileItem } from "./file-upload.js";
+import { deliverFileReply, type FileReplyOptions } from "./file-delivery.js";
 import { beforeAbort } from "../runtime/abort.js";
 import { CHANNEL_VERSION } from "./protocol.js";
 export { CHANNEL_VERSION } from "./protocol.js";
@@ -73,12 +75,14 @@ export class ILinkClient {
   private readonly typing: TypingIndicator;
   private readonly chatSends = new Map<string, Promise<void>>();
   private readonly imageUploader: ImageUploader;
+  private readonly fileUploader: FileUploader;
 
   constructor(options: {
     stateManager: StateManager;
     configuredBaseUrl?: string;
     pollTimeoutMs?: number;
     fetchImpl?: FetchLike;
+    maxFileBytes?: number;
   }) {
     this.stateManager = options.stateManager;
     this.pollTimeoutMs = options.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS;
@@ -96,13 +100,14 @@ export class ILinkClient {
       } : null,
       getContextToken: chatId => this.stateManager.contextTokens[chatId],
     });
-    this.imageUploader = new ImageUploader({
-      fetchImpl: this.fetchImpl,
-      request: (endpoint, payload, timeoutMs, signal) => {
-        const token = this.stateManager.account?.token;
-        if (!token) throw new Error("WeChat is not logged in");
-        return this.request(endpoint, { ...payload, base_info: { channel_version: CHANNEL_VERSION } }, token, timeoutMs, signal);
-      },
+    const uploadRequest: UploadRequest = (endpoint, payload, timeoutMs, signal) => {
+      const token = this.stateManager.account?.token;
+      if (!token) throw new Error("WeChat is not logged in");
+      return this.request(endpoint, { ...payload, base_info: { channel_version: CHANNEL_VERSION } }, token, timeoutMs, signal);
+    };
+    this.imageUploader = new ImageUploader({ fetchImpl: this.fetchImpl, request: uploadRequest });
+    this.fileUploader = new FileUploader({
+      fetchImpl: this.fetchImpl, request: uploadRequest, maxFileBytes: options.maxFileBytes,
     });
   }
 
@@ -295,7 +300,7 @@ export class ILinkClient {
     await this.sendMessageItem(chatId, { type: ITEM_TYPE_TEXT, text_item: { text: formattedText } }, clientIdOverride, signal);
   }
 
-  private async sendMessageItem(chatId: string, item: Record<string, unknown> | UploadedImageItem,
+  private async sendMessageItem(chatId: string, item: Record<string, unknown> | UploadedImageItem | UploadedFileItem,
     clientIdOverride?: string, signal?: AbortSignal): Promise<void> {
     const account = this.stateManager.account;
     if (!account || !account.token) {
@@ -368,6 +373,17 @@ export class ILinkClient {
       clearTimeout(timer);
       controller.abort();
     }
+  }
+
+  public async sendFileReply(chatId: string, bytes: Buffer, metadata: FileUploadMetadata,
+    options: FileReplyOptions): Promise<number> {
+    return deliverFileReply({
+      ...options, chatId, bytes, metadata, state: this.stateManager,
+      upload: (input, attachment, signal) => this.fileUploader.upload(chatId, input, attachment, signal),
+      withChatSend: (send, signal) => this.withChatSend(chatId, send, signal),
+      consumeBudget: () => this.stateManager.consumeSendBudget(chatId, options.kind ?? "final"),
+      send: (item, clientId, signal) => this.sendMessageItem(chatId, item, clientId, signal),
+    });
   }
 
   public async sendMarkdownReply(

@@ -21,7 +21,7 @@ export class NotificationDiagnosticError extends Error {
   constructor() { super("Notification diagnostic write failed"); }
 }
 
-function reportNotificationSendFailure(notificationId: string, attemptId: string, errorType: string): void {
+export function reportNotificationSendFailure(notificationId: string, attemptId: string, errorType: string): void {
   try {
     const line = JSON.stringify({ event: "notification_send_failed", notificationId, attemptId, errorType }) + "\n";
     if (fs.writeSync(STDERR_FD, line) !== Buffer.byteLength(line)) throw new NotificationDiagnosticError();

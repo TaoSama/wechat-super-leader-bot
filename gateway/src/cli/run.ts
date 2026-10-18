@@ -1,3 +1,5 @@
+import { ResultClient } from "../controller/result-client.js";
+import { FileResultOutbox } from "../results/outbox.js";
 import { StateManager } from "../runtime/state.js";
 import { ILinkClient } from "../wechat/client.js";
 import { ControllerClient, validateControllerUrl } from "../controller/client.js";
@@ -39,6 +41,7 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
     stateManager,
     configuredBaseUrl: opts.wechatBaseUrl,
     pollTimeoutMs: opts.pollTimeoutMs,
+    maxFileBytes: opts.resultFileMaxBytes,
   });
 
   if (opts.mode === "check") {
@@ -94,6 +97,12 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
     healthTracker,
     notifications: opts.notifications,
     replyEngine,
+    ...(opts.notifications ? {
+      resultClient: new ResultClient({ controllerUrl: validatedControllerUrl, controllerToken: opts.controllerToken,
+        allowInsecureController: opts.allowInsecureController, artifactPublicOrigin: opts.resultPublicOrigin,
+        maxFileBytes: opts.resultFileMaxBytes }),
+      resultOutbox: new FileResultOutbox(`${stateManager.statePath}.results.json`, () => stateManager.getLoginFingerprint()),
+    } : {}),
   });
 
   if (opts.mode === "establish-baseline") {

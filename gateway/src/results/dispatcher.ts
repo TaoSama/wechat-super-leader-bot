@@ -1,3 +1,4 @@
+import { reportNotificationSendFailure } from "../runtime/notification-outbox.js";
 import { randomUUID } from "node:crypto";
 import type { ResultClient } from "../controller/result-client.js";
 import type { ResultDelivery, MaterializedResultDelivery } from "./contracts.js";
@@ -127,7 +128,12 @@ export class ResultDispatcher {
     if (!ref.attemptId || !ref.deferReason) throw new Error("Missing result defer intent");
     const item = await this.options.controller.deferDelivery(ref.id, ref.attemptId, ref.deferReason, ref.submittedMessages ?? 0, this.options.signal);
     this.verify(ref, item);
-    this.options.store.remove(ref.id);
+    this.finishDefer(ref);
+  }
+  private finishDefer(ref: ResultReference): void {
+    // Partial acceptance must keep its shared transport evidence pinned while waiting for a new window.
+    if ((ref.submittedMessages ?? 0) > 0) this.options.store.update(ref.id, { status: "waiting" });
+    else this.options.store.remove(ref.id);
   }
   private persistReceipt(ref: ResultReference, status: "accepted" | "uncertain"): ResultReference {
     this.options.store.update(ref.id, { status: "receipt", receiptStatus: status });
@@ -146,12 +152,22 @@ export class ResultDispatcher {
     }
     if (ref.status === "defer") {
       if (["waiting_for_user", "ready"].includes(item.status) && item.lastDeferredAttemptId === ref.attemptId && item.lastDeferReason === ref.deferReason &&
-        (item.submittedMessages ?? 0) >= (ref.submittedMessages ?? 0)) { this.options.store.remove(ref.id); return false; }
+        (item.submittedMessages ?? 0) >= (ref.submittedMessages ?? 0)) { this.finishDefer(ref); return false; }
       if (item.status === "claimed" && item.attemptId === ref.attemptId) { await this.defer(ref); return false; }
       throw new Error("Controller result defer recovery attempt mismatch");
     }
-    if (["uncertain", "superseded", "waiting_for_user"].includes(item.status) || item.expiresAt <= this.now() || item.retainedUntil <= this.now()) {
+    if (["uncertain", "superseded"].includes(item.status) || item.expiresAt <= this.now() || item.retainedUntil <= this.now()) {
       this.options.store.remove(ref.id); summary.skipped++; return false;
+    }
+    if (item.status === "waiting_for_user") {
+      if ((ref.submittedMessages ?? 0) > 0) this.options.store.update(ref.id, { status: "waiting" });
+      else this.options.store.remove(ref.id);
+      summary.skipped++; return false;
+    }
+    if (ref.status === "waiting") {
+      if (item.status !== "ready") { summary.skipped++; return false; }
+      this.options.store.update(ref.id, { status: "pending", attemptId: undefined, deferReason: undefined });
+      ref = { ...ref, status: "pending", attemptId: undefined, deferReason: undefined };
     }
     if (item.status === "ready") {
       if (!this.maySend(item)) { summary.skipped++; return false; }
@@ -189,7 +205,10 @@ export class ResultDispatcher {
       this.options.store.update(ref.id, { status: "defer", deferReason: outcome.reason ?? "not_submitted", submittedMessages: outcome.acknowledgedSteps });
       await this.defer({ ...ref, status: "defer", deferReason: outcome.reason ?? "not_submitted", submittedMessages: outcome.acknowledgedSteps });
       summary.skipped++;
-    } else await this.receipt(this.persistReceipt(ref, outcome.status), summary);
+    } else {
+      await this.receipt(this.persistReceipt(ref, outcome.status), summary);
+      if (outcome.status === "uncertain") reportNotificationSendFailure(item.id, ref.attemptId!, "UncertainSend");
+    }
     return true;
   }
 }

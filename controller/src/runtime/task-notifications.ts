@@ -56,8 +56,15 @@ export class TaskNotifications {
     this.fallback = new FallbackService(this.fallbackRepository, {
       endpoints: parseFallbackEndpoints(config.taskNotifications?.fallbackEndpointsJson), now,
       materialize: async record => {
-        const plan = record.resultId ? await this.results.materialize(record.resultId) : null;
-        return plan ? { url: plan.artifact.downloadUrl, resultStatus: plan.kind } : {};
+        if (!config.allowedChatIds.has(record.chatId)) return { skip: "chat_no_longer_allowed" };
+        if (!record.resultId) return {};
+        const plan = await this.results.materialize(record.resultId);
+        const current = await this.results.repository.get(record.resultId, now());
+        if (!plan || !current || current.chatId !== record.chatId) return { skip: "result_unavailable" };
+        if (current.expiresAt <= now() || current.retainedUntil <= now()) return { skip: "result_expired" };
+        if (current.catchupId) return { skip: "catchup_reserved" };
+        if (current.status !== "waiting_for_user") return { skip: `wechat_${current.status}` };
+        return { url: plan.artifact.downloadUrl, resultStatus: plan.kind };
       },
     });
     this.collector = new NotificationResultCollector(store, this.results);
@@ -129,7 +136,7 @@ export class TaskNotifications {
     const plans = await this.results.repository.listMaintenance([...this.config.allowedChatIds], this.now(), this.maintenanceCursor || undefined);
     this.maintenanceCursor = plans.length === 20 ? plans.at(-1)!.id : "";
     for (const plan of plans) {
-      if (plan.status !== "waiting_for_user" || plan.kind === "progress" || plan.expiresAt <= this.now()) continue;
+      if (plan.status !== "waiting_for_user" || plan.kind === "progress" || plan.catchupId || plan.expiresAt <= this.now()) continue;
       try {
         await this.fallback.enqueue({ key: `result:${plan.id}`, chatId: plan.chatId,
           kind: plan.kind === "failed" || plan.kind === "blocked" || plan.kind === "expired" ? plan.kind : "completed",

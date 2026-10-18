@@ -30,6 +30,44 @@ function fixture(model?: LeaderModel, fallback = false) {
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe("independent task notification workers", () => {
+  it("suppresses an already queued fallback after WeChat accepts the result", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(START);
+    const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
+    const { runtime } = fixture(undefined, true);
+    await runtime.initialize();
+    const plan = await runtime.results.prepareResult({ key: "accepted", chatId: CHAT, text: "已保存的完整成果",
+      source: { type: "task", id: "accepted" }, kind: "completed", createdAt: START, expiresAt: START + 600_000 });
+    await runtime.results.repository.markChatWaiting(CHAT, "window_expired", START);
+    const fallback = await runtime.fallback.enqueue({ key: "fallback-before-resume", chatId: CHAT, kind: "completed",
+      title: "任务完成", text: "成果已保存", resultId: plan.id });
+    await runtime.results.resumeChat(CHAT, "new-message");
+    const attemptId = "9e5a2d54-450a-4a4b-86c4-7c8596a8e357";
+    await runtime.results.repository.claim(plan.id, attemptId, START);
+    await runtime.results.repository.recordReceipt(plan.id, "accepted", attemptId);
+    await runtime.fallback.drain();
+    expect(fetch).not.toHaveBeenCalled();
+    expect((await runtime.snapshot()).fallbackDeliveries.find(item => item.id === fallback!.id))
+      .toMatchObject({ status: "failed", outcome: "skipped_wechat_accepted" });
+    await runtime.stop();
+  });
+
+  it("does not enqueue reserved catch-up sources on the fallback channel while their summary is preparing", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(START);
+    const { runtime } = fixture({ complete: async () => { throw new Error("model temporarily unavailable"); } }, true);
+    await runtime.initialize();
+    for (const id of ["first", "second"]) await runtime.results.prepareResult({
+      key: id, chatId: CHAT, text: id.repeat(1_300), source: { type: "task", id }, kind: "completed",
+      createdAt: START, expiresAt: START + 600_000,
+    });
+    await runtime.results.repository.markChatWaiting(CHAT, "window_expired", START);
+    await runtime.results.resumeChat(CHAT, "fresh-inbound");
+    const enqueue = vi.spyOn(runtime.fallback, "enqueue");
+    await runtime.tick();
+    expect(enqueue).not.toHaveBeenCalled();
+    expect((await runtime.results.repository.list([CHAT])).filter(plan => plan.catchupId)).toHaveLength(2);
+    await runtime.stop();
+  });
+
   it("executes due reminders while summary and webhook are blocked, never overlaps workers, and drains both before closing the pool", async () => {
     vi.useFakeTimers(); vi.setSystemTime(START);
     const summary = deferred<ModelReply>();

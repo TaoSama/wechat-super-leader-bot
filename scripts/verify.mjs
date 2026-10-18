@@ -53,6 +53,7 @@ export function verificationPlan(suite = 'all') {
     step('task-notifications-postgres', process.execPath, ['tests/integration/leader/task-notifications.mjs', '--run', '--postgres']),
     step('scheduled-sessions-memory', process.execPath, ['tests/integration/leader/scheduled-sessions.mjs', '--run']),
     step('scheduled-sessions-postgres', process.execPath, ['tests/integration/leader/scheduled-sessions.mjs', '--run', '--postgres']),
+    step('result-gateway-cli', process.execPath, ['tests/integration/leader/result-gateway.mjs', '--run']),
   ];
   return suite === 'unit' ? unit : suite === 'integration' ? [...builds, ...integration] : [...unit, ...integration];
 }
