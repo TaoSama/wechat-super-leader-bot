@@ -35,6 +35,8 @@ const PROGRESS = 'SYNTHETIC_PROGRESS_ONLY：正在统计，尚未完成';
 const FINAL = '**验收最终结果**：共 17 条记录，其中 3 条需要复核。';
 const FINAL_DISPLAY = '验收最终结果：共 17 条记录，其中 3 条需要复核。';
 const RESULT_SUMMARY = '模型摘要：完整成果已生成，请查看附件。';
+const PENDING_ACKNOWLEDGEMENT = '本次指令已保存，接收执行待后续核查。';
+const RECEIPT_RACE_OUTPUT = 'SYNTHETIC_LOCAL_OUTPUT_BEFORE_RECEIPT：本地输出不能提升尚未接收的持久回执。';
 const HTTP_MS = 5_000;
 const PROCESS_MS = 30_000;
 const HEARTBEAT_MS = 500;
@@ -89,6 +91,7 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
   const preloadPath = join(dir, 'synthetic-cdn.mjs');
   const sent = [], incoming = [], inputs = [], deliveries = [], acknowledgements = [], modelCalls = [], errors = [], logs = [];
   const recordedResults = [], historyReads = [], confirmationCalls = [];
+  const receiptRace = { armed: true, verified: false, held: undefined };
   const wireEvents = [], notificationClientIds = new Set(), fault = { remaining: 0, mode: null };
   const uploads = new Map();
   const fingerprint = createHash('sha256').update(JSON.stringify(['synthetic-account', 'synthetic-wechat-token'])).digest('hex');
@@ -140,7 +143,7 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
         if (body.input[0]?.content?.startsWith('你负责根据刚刚核查的真实执行记录')) {
           assert.deepEqual(body.tools, [], 'Confirmation model received mutation tools');
           const evidence = JSON.parse(last.content);
-          const observations = evidence.targets.map((target, index) => {
+          const observations = await Promise.all(evidence.targets.map(async (target, index) => {
             assert.equal(target.nodeId, NODE); assert.equal(target.sessionId, SESSION);
             if (!target.exactReceipt) {
               assert.equal(target.historyError, '尚无本次派发指令，未声称会话已经接收或执行');
@@ -157,6 +160,32 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
             assert(read, 'Confirmation model ran before a fresh session history response');
             read.confirmed = true;
             assert(read.eventIndex < wireEvents.length - 1, 'History response did not precede confirmation model');
+            assert.equal(target.readError, undefined, 'Confirmation could not validate its exact receipt');
+            const persisted = (await controller.request('/v1/commands/' + target.exactReceipt.commandId)).body;
+            assert.equal(persisted.commandId, target.exactReceipt.commandId);
+            assert.equal(persisted.nodeId, target.nodeId); assert.equal(persisted.sessionId, target.sessionId);
+            assert.equal(persisted.action, 'send');
+            assert.equal(persisted.prompt, evidence.durableState.steps[index].prompt);
+            assert.equal(persisted.requestId, 'leader_exec_' + createHash('sha256')
+              .update(JSON.stringify([CHAT, evidence.durableState.planId, index + 1])).digest('hex'),
+            'Confirmation command did not belong to the exact persisted plan step');
+            if (['queued', 'pending'].includes(target.exactReceipt.status)) {
+              const successors = target.exactReceipt.status === 'queued'
+                ? ['queued', 'pending', 'accepted', 'completed'] : ['pending', 'accepted', 'completed'];
+              assert(successors.includes(persisted.status), 'Receipt snapshot has no legal persisted state transition');
+              assert.equal(target.exactReceipt.turnId, undefined, 'Unaccepted receipt manufactured a turn binding');
+              assert.equal(target.exactReceipt.recordedOutput, undefined, 'Unaccepted receipt manufactured completed output');
+              assert.deepEqual(target.exactTurnHistory, [], 'Unaccepted receipt promoted local history to exact execution');
+              if (receiptRace.held?.commandId === target.exactReceipt.commandId) {
+                assert.equal(target.exactReceipt.status, 'pending');
+                assert.equal(persisted.status, 'pending'); assert.equal(persisted.turnId, undefined);
+                assert(read.history.items.some(item => item.id === persisted.commandId && item.text === RECEIPT_RACE_OUTPUT),
+                  'Deterministic pending race did not supply newer local execution history');
+                assert.equal(target.excludedUnrelatedItems, read.history.items.length);
+                receiptRace.verified = true;
+              }
+              return PENDING_ACKNOWLEDGEMENT;
+            }
             const command = deliveries.find(item => item.commandId === target.exactReceipt?.commandId);
             assert(command, 'Confirmation referenced a command that was never delivered');
             assert.equal(target.exactReceipt.turnId, 'synthetic-turn-' + command.commandId);
@@ -173,7 +202,7 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
             }
             assert.equal(target.exactReceipt.status, 'completed');
             return '本次指令已完成。';
-          });
+          }));
           confirmationCalls.push(evidence);
           output = [{ type: 'message', role: 'assistant', status: 'completed',
             content: [{ type: 'output_text', text: observations.join('\n') }] }];
@@ -203,6 +232,14 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
             content: [{ type: 'output_text', text: '当前尚未执行；等待你的明确确认。' }] }];
         }
         respond(response, { status: 'completed', output });
+        if (receiptRace.held && receiptRace.verified) {
+          const held = receiptRace.held;
+          receiptRace.held = undefined;
+          for (let index = recordedResults.length - 1; index >= 0; index--) {
+            if (recordedResults[index].commandId === held.commandId) recordedResults.splice(index, 1);
+          }
+          sendFrame(held);
+        }
       } catch (error) { errors.push(error); respond(response, { error: 'Synthetic model protocol failure' }, 500); }
     });
     const modelPort = await listen(model);
@@ -266,8 +303,16 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
           assert.equal(message.sessionId, SESSION);
           assert.equal(message.action, 'send');
           deliveries.push(message);
-          sendFrame({ type: 'result', commandId: message.commandId, status: 'accepted',
-            turnId: 'synthetic-turn-' + message.commandId, output: PROGRESS });
+          const accepted = { type: 'result', commandId: message.commandId, status: 'accepted',
+            turnId: 'synthetic-turn-' + message.commandId, output: PROGRESS };
+          if (receiptRace.armed) {
+            receiptRace.armed = false;
+            receiptRace.held = accepted;
+            // The node has local output while its receipt is withheld. Controller's
+            // exact command must remain pending until the confirmation model checks it.
+            recordedResults.push({ ...accepted, nodeId: NODE },
+              { ...accepted, nodeId: NODE, status: 'completed', output: RECEIPT_RACE_OUTPUT });
+          } else sendFrame(accepted);
         } else if (message.type === 'result_ack') acknowledgements.push(message);
       } catch (error) { errors.push(error); }
     });
@@ -286,6 +331,23 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
       sendFrame(frame('heartbeat'));
       await waitFor(async () => (await controller.request('/v1/status')).body.sessions.some(session =>
         session.id === SESSION && session.status === status), 'Synthetic session status ' + status);
+    };
+    const waitForAccepted = async command => {
+      let persisted;
+      const turnId = 'synthetic-turn-' + command.commandId;
+      await waitFor(async () => {
+        healthy();
+        const response = await controller.request('/v1/commands/' + command.commandId);
+        assert.equal(response.status, 200);
+        persisted = response.body;
+        assert.equal(persisted.commandId, command.commandId);
+        assert.equal(persisted.nodeId, command.nodeId); assert.equal(persisted.sessionId, command.sessionId);
+        assert(['queued', 'pending', 'accepted'].includes(persisted.status),
+          'Synthetic completion lost its live accepted command');
+        return persisted.status === 'accepted' && persisted.turnId === turnId && acknowledgements.some(item =>
+          item.commandId === command.commandId && item.status === 'accepted' && item.turnId === turnId);
+      }, 'Exact command accepted and persisted before synthetic completion');
+      return persisted;
     };
     await connectDaemon();
 
@@ -453,9 +515,12 @@ globalThis.fetch = async (input, init) => {
       await verifyWechatBudget({ controller, input, runGateway, pending, sent, incoming, deliveries, sendFrame,
         statePath, wireEvents, evidence, healthy, chatId: CHAT, contextToken: CONTEXT, directTask: DIRECT_TASK,
         query: QUERY, clientId, controllerRequests, validContexts, restartController, setSessionStatus, databaseUrl,
-        getDelivery, fullResult, artifactText, elapseDispatchInterval, resultClientId });
+        getDelivery, fullResult, artifactText, elapseDispatchInterval, resultClientId, waitForAccepted });
       healthy();
       assert(confirmationCalls.length > 0, 'Budget interaction did not exercise model-generated confirmation');
+      assert(receiptRace.verified, 'Budget interaction did not exercise the pending confirmation race');
+      evidence('pending-budget-confirmation', { exactReceiptStatus: 'pending', newerLocalHistoryExcluded: true,
+        confirmationChars: PENDING_ACKNOWLEDGEMENT.length, sharedQuotaParts: 9 });
       return;
     }
     await input(PROPOSAL);
@@ -472,12 +537,20 @@ globalThis.fetch = async (input, init) => {
     await delay(TICK_OBSERVATION_MS);
     assert.equal(deliveries.length, 0, 'Query or background tick dispatched the preview');
     const confirmation = await input('执行');
-    await waitFor(() => { healthy(); return deliveries.length === 1 && acknowledgements.some(item => item.status === 'accepted'); },
+    await waitFor(() => { healthy(); return deliveries.length === 1 && acknowledgements.some(item =>
+      item.status === 'accepted' && item.commandId === deliveries[0].commandId &&
+      item.turnId === 'synthetic-turn-' + deliveries[0].commandId); },
       'One accepted command after short confirmation');
     const command = deliveries[0];
+    await waitForAccepted(command);
     const commandPath = '/v1/commands/' + command.commandId;
     const accepted = await controller.request(commandPath);
+    assert(receiptRace.verified, 'Pending receipt/history race was not exercised deterministically');
+    assert.equal(confirmation.replies.map(message => message.item_list[0].text_item.text).join(''), PENDING_ACKNOWLEDGEMENT);
+    evidence('pending-receipt-history-race', { exactCommandPersistedPending: true, receiptTurnAbsent: true,
+      newerLocalHistoryExcluded: true, modelClaimedAcceptedOrCompleted: false, acceptedReleasedAfterModelCheck: true });
     assert.equal(accepted.body.status, 'accepted');
+    assert.equal(accepted.body.turnId, 'synthetic-turn-' + command.commandId);
     assert.equal(accepted.body.output, PROGRESS);
     assert.equal((await pending()).length, 0, 'Accepted progress created a completion notification');
     const sameInput = await input('执行', confirmation.messageId);
@@ -556,6 +629,7 @@ globalThis.fetch = async (input, init) => {
         item.commandId === deliveries[1].commandId && item.status === 'accepted');
     }, 'Explicit task dispatches once in its original message without confirmation');
     const directCommand = deliveries[1];
+    await waitForAccepted(directCommand);
     assert.notEqual(directCommand.commandId, command.commandId);
     assert.equal(directCommand.prompt, DIRECT_PROMPT);
     const directCommandPath = '/v1/commands/' + directCommand.commandId;
@@ -633,7 +707,7 @@ globalThis.fetch = async (input, init) => {
       sendFrame, statePath, fault, wireEvents, evidence, healthy, chatId: CHAT, contextToken: CONTEXT,
       directTask: DIRECT_TASK, nodeId: NODE, sessionId: SESSION, clientId,
       restartController, setSessionStatus, databaseUrl, query: QUERY,
-      getDelivery, fullResult, artifactText, elapseDispatchInterval, resultClientId });
+      getDelivery, fullResult, artifactText, elapseDispatchInterval, resultClientId, waitForAccepted });
     healthy();
     assert(confirmationCalls.length > 0, 'Interaction did not exercise model-generated confirmation');
     evidence('PASS', { realControllerProcess: true, realGatewayCli: true, disposablePostgres: true,

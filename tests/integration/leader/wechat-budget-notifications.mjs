@@ -5,6 +5,7 @@ import { RAW_REPLY } from './reliable-delivery.mjs';
 
 const SEND_BUDGET = 10;
 const ACKNOWLEDGEMENT = '本次指令已接收，执行情况待后续核查。';
+const PENDING_ACKNOWLEDGEMENT = '本次指令已保存，接收执行待后续核查。';
 const ACKNOWLEDGEMENT_CHARS = 2;
 const ACKNOWLEDGEMENT_PARTS = ACKNOWLEDGEMENT.length / ACKNOWLEDGEMENT_CHARS;
 const EMPTY_RESTART_POLLS = 2;
@@ -15,7 +16,7 @@ const text = message => message.item_list[0].text_item?.text;
 export async function verifyBudgetNotifications(harness) {
   const { runGateway, pending, sent, deliveries, sendFrame, statePath, evidence, healthy,
     chatId, directTask, resultClientId, refreshContext, getDelivery, fullResult,
-    elapseDispatchInterval, artifactText } = harness;
+    elapseDispatchInterval, artifactText, waitForAccepted } = harness;
   const state = async () => JSON.parse(await readFile(statePath, 'utf8'));
   assert.equal((await pending()).length, 0, 'Budget fixture starts with pending results');
   assert.equal(Object.keys((await state()).delivery_outbox).length, 0,
@@ -28,11 +29,14 @@ export async function verifyBudgetNotifications(harness) {
     'Budget result task reaches the exact native session');
   assert.equal(ordinary.summary.processedCount, 1);
   assert.equal(ordinary.replies.length, ACKNOWLEDGEMENT_PARTS);
-  assert.equal(ordinary.replies.map(text).join(''), ACKNOWLEDGEMENT);
+  assert.equal(PENDING_ACKNOWLEDGEMENT.length, ACKNOWLEDGEMENT.length);
+  assert([ACKNOWLEDGEMENT, PENDING_ACKNOWLEDGEMENT].includes(ordinary.replies.map(text).join('')),
+    'Budget confirmation did not reflect a validated accepted or pending receipt');
   assert.equal(sent.length - ordinaryStart, ACKNOWLEDGEMENT_PARTS,
     'Model confirmation did not consume the real shared send budget');
   assert.equal((await state()).context_budgets[chatId].remaining, SEND_BUDGET - ACKNOWLEDGEMENT_PARTS);
   const command = deliveries.at(-1);
+  await waitForAccepted(command);
   sendFrame({ type: 'result', commandId: command.commandId,
     turnId: 'synthetic-turn-' + command.commandId, status: 'completed', output: THREE_PART_OUTPUT });
   let plan;
@@ -128,6 +132,7 @@ export async function verifyBudgetNotifications(harness) {
   assert.equal((await state()).context_budgets[chatId].remaining, SEND_BUDGET - 1);
   await waitFor(() => { healthy(); return deliveries.length === longCommandStart + 1; }, 'Long budget task accepted');
   const longCommand = deliveries.at(-1);
+  await waitForAccepted(longCommand);
   sendFrame({ type: 'result', commandId: longCommand.commandId,
     turnId: 'synthetic-turn-' + longCommand.commandId, status: 'completed', output: RAW_REPLY });
   let attachment;

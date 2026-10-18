@@ -24,18 +24,21 @@ export async function verifyReliableDelivery(harness) {
   const { controller, input, runGateway, pending, sent, incoming, deliveries, sendFrame, statePath,
     fault, wireEvents, evidence, healthy, chatId, contextToken, directTask, nodeId, sessionId,
     restartController, setSessionStatus, fullResult, artifactText, resultClientId, getDelivery,
-    elapseDispatchInterval } = harness;
+    elapseDispatchInterval, waitForAccepted } = harness;
   assert(Buffer.byteLength(RAW_REPLY, 'utf8') > 128 * 1_024, 'Large-result fixture must exceed 128KiB');
   assert(RESUMABLE_REPLY.length <= 4_500 && RESUMABLE_DISPLAY.length > 3_800 && RESUMABLE_DISPLAY.length <= 7_600,
     'Ordinary report must fit model raw limit and require multiple displayed chunks');
-  const complete = (command, output = RAW_REPLY) => sendFrame({ type: 'result', commandId: command.commandId,
-    turnId: 'synthetic-turn-' + command.commandId, status: 'completed', output });
+  const complete = async (command, output = RAW_REPLY) => {
+    await waitForAccepted(command);
+    sendFrame({ type: 'result', commandId: command.commandId,
+      turnId: 'synthetic-turn-' + command.commandId, status: 'completed', output });
+  };
   const launch = async () => {
     const count = deliveries.length;
     await input(directTask);
     await waitFor(() => { healthy(); return deliveries.length === count + 1; }, 'Large-result task accepted');
     const command = deliveries.at(-1);
-    complete(command);
+    await complete(command);
     await waitFor(async () => { healthy(); return (await pending()).some(item => item.kind === 'completed'); },
       'Large complete result becomes a durable notification');
     const notification = (await pending()).find(item => item.kind === 'completed');
@@ -151,7 +154,7 @@ export async function verifyReliableDelivery(harness) {
     assert.equal(deliveries.at(-1).commandId, expected.commandId, 'Queue changed order across process restart');
     await delay(OBSERVATION_MS);
     assert.equal(deliveries.length, queueStart + index + 1, 'Next-turn command bypassed an accepted active command');
-    complete(deliveries.at(-1));
+    await complete(deliveries.at(-1));
   }
   await delay(OBSERVATION_MS);
   assert.equal(deliveries.length, queueStart + 3, 'Cancelled queued command was dispatched');
@@ -260,17 +263,17 @@ async function verifyProgressDelivery(harness, complete) {
     assert.equal(sent.length, unchanged, 'Unchanged exact receipt caused repetitive progress');
     assert.equal((await progressRows(source)).length, 1);
     for (let sequence = 2; sequence <= 3; sequence++) {
-      complete(deliveries.at(-1), `**精确步骤结果 ${sequence - 1}**`);
+      await complete(deliveries.at(-1), `**精确步骤结果 ${sequence - 1}**`);
       await waitFor(() => { healthy(); return deliveries.length === start + sequence; }, 'Next progress action accepted');
       await deliver(await waitNotification('progress', sequence));
       await ageProgress(source);
     }
-    complete(deliveries.at(-1), '**精确步骤结果 3**');
+    await complete(deliveries.at(-1), '**精确步骤结果 3**');
     await waitFor(() => { healthy(); return deliveries.length === start + 4; }, 'Fourth progress fact accepted');
     await delay(OBSERVATION_MS);
     assert.equal((await progressRows(source)).length, 3, 'A fourth progress slot was created');
     assert.equal((await pending()).length, 0, 'Progress limit failed after a new receipt');
-    complete(deliveries.at(-1), '**精确步骤结果 4**');
+    await complete(deliveries.at(-1), '**精确步骤结果 4**');
     const terminal = await waitNotification('completed');
     const terminalRaw = '### 已完成\n\n**任务**：合成进度任务 1\n\n' +
       Array.from({ length: 4 }, (_, index) => `**${index + 1}. 合成进度任务 ${index + 1}**\n\n**精确步骤结果 ${index + 1}**`).join('\n\n');
@@ -286,7 +289,7 @@ async function verifyProgressDelivery(harness, complete) {
     const racingSource = await activeSource();
     await ageSource(racingSource);
     const stale = await waitNotification('progress', 1);
-    complete(deliveries.at(-1), '**终态必须优先**');
+    await complete(deliveries.at(-1), '**终态必须优先**');
     const preferred = await waitNotification('completed');
     assert.deepEqual((await pending()).map(item => item.id), [preferred.id]);
     assert.equal((await getDelivery(stale.id)).status, 'superseded', 'Terminal did not retire unsent same-task progress');
