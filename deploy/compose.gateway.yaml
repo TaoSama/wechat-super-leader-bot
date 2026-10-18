@@ -9,11 +9,14 @@ services:
     user: "1000:1000"
     read_only: true
     cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    mem_limit: 256m
-    cpus: 0.25
-    pids_limit: 128
-    stop_grace_period: 600s
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./deploy/security/codex-seccomp.json
+      - apparmor=super-leader-codex
+    mem_limit: 1g
+    cpus: 1
+    pids_limit: 256
+    stop_grace_period: 1200s
     init: true
     restart: unless-stopped
     logging:
@@ -33,6 +36,11 @@ services:
       GATEWAY_SEND_BUDGET: ${GATEWAY_SEND_BUDGET:-10}
       GATEWAY_OUTBOX_LIMIT: ${GATEWAY_OUTBOX_LIMIT:-1000}
       GATEWAY_POLL_TIMEOUT_MS: ${GATEWAY_POLL_TIMEOUT_MS:-35000}
+      GATEWAY_LEADER_MODE: ${GATEWAY_LEADER_MODE:-codex}
+      GATEWAY_LEADER_ROOT: /var/lib/super-leader-gateway/leader
+      GATEWAY_LEADER_MODEL: ${GATEWAY_LEADER_MODEL:-gpt-6.1-sol}
+      GATEWAY_LEADER_BASE_URL: ${GATEWAY_LEADER_BASE_URL:-${LEADER_MODEL_BASE_URL:-}}
+      GATEWAY_LEADER_API_KEY: ${GATEWAY_LEADER_API_KEY:-${LEADER_MODEL_API_KEY:-}}
     volumes:
       - type: bind
         source: ${WECHAT_ACCOUNT_FILE:-.runtime/wechat/account.json}
@@ -45,7 +53,7 @@ services:
         target: /var/lib/super-leader-gateway
         bind:
           create_host_path: false
-    tmpfs: ["/tmp:size=16m,mode=1777"]
+    tmpfs: ["/tmp:size=64m,mode=1777"]
     healthcheck:
       test: [CMD, node, dist/index.js, --healthcheck]
       interval: 30s

@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright The Moby Authors
+# SPDX-License-Identifier: Apache-2.0
+# Derived from https://github.com/moby/profiles/blob/4b8214fc4971e06172938a1f1554ccff6647ee80/apparmor/template.go
+# Preserve Docker default protections; only mount/pivot_root policy is expanded.
+# Companion codex-seccomp.json is the default at the same commit plus five rules:
+# clone exact flags 939655185 or 2013397009 (network-isolated filesystem helper);
+# unshare NEWUSER only; mount/pivot_root; umount2 MNT_DETACH.
+# Codex source: https://github.com/openai/codex/tree/rust-v0.163.0/codex-rs/linux-sandbox
+# Targets Codex 0.163.0, unrestricted networking, isolated PID namespace, UID 1000.
+# Revalidate policy if upgrading Codex, Docker, kernel or changing network/PID mode.
+# Install to /etc/apparmor.d/super-leader-codex so the AppArmor service restores it on boot.
+# Load with: apparmor_parser -Kr /etc/apparmor.d/super-leader-codex
+# Verify only in an ephemeral credential-free container before changing production.
+abi <abi/3.0>,
+#include <tunables/global>
+
+profile super-leader-codex flags=(attach_disconnected,mediate_deleted) {
+
+  #include <abstractions/base>
+
+  network,
+  # Disallow obsolete socket families removed from the Linux kernel.
+  # AF_DECnet has no AppArmor family name, so it cannot be denied here.
+  deny network ax25,
+  deny network ipx,
+  deny network appletalk,
+  deny network netrom,
+  deny network rose,
+  deny network econet,
+  deny network atmsvc,
+  deny network irda,
+  deny network wanpipe,
+  deny network isdn,
+  deny network caif,
+  # Disallow AF_ALG (Linux kernel crypto API); see https://copy.fail/
+  deny network alg,
+  # Disallow AF_VSOCK to prevent host/guest communication.
+  deny network vsock,
+  capability,
+  file,
+  umount,
+  # Host (privileged) processes may send signals to container processes.
+  signal (receive) peer=unconfined,
+  # runc may send signals to container processes (for "docker stop").
+  signal (receive) peer=runc,
+  # crun may send signals to container processes (for "docker stop" when used with crun OCI runtime).
+  signal (receive) peer=crun,
+  # dockerd may send signals to container processes (for "docker kill").
+  signal (receive) peer=unconfined,
+  # Container processes may send signals amongst themselves.
+  signal (send,receive) peer=super-leader-codex,
+
+  deny @{PROC}/* w,   # deny write for all files directly in /proc (not in a subdir)
+  # deny write to files not in /proc/<number>/** or /proc/sys/**
+  deny @{PROC}/{[^1-9/],[^1-9/][^0-9/],[^1-9s/][^0-9y/][^0-9s/],[^1-9/][^0-9/][^0-9/][^0-9/]*}/** w,
+  deny @{PROC}/sys/[^k]** w,  # deny /proc/sys except /proc/sys/k* (effectively /proc/sys/kernel)
+  deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w,  # deny everything except shm* in /proc/sys/kernel/
+  deny @{PROC}/sysrq-trigger rwklx,
+  deny @{PROC}/kcore rwklx,
+
+  # bubblewrap mounts and pivots only after creating its own user/mount namespaces.
+  # The kernel still denies mounts in the container parent namespace (no CAP_SYS_ADMIN).
+  mount,
+  pivot_root,
+
+  deny /sys/[^f]*/** wklx,
+  deny /sys/f[^s]*/** wklx,
+  deny /sys/fs/[^c]*/** wklx,
+  deny /sys/fs/c[^g]*/** wklx,
+  deny /sys/fs/cg[^r]*/** wklx,
+  deny /sys/firmware/** rwklx,
+  deny /sys/devices/virtual/powercap/** rwklx,
+  deny /sys/kernel/security/** rwklx,
+
+  # allow processes within the container to trace each other,
+  # provided all other LSM and yama setting allow it.
+  ptrace (trace,tracedby,read,readby) peer=super-leader-codex,
+}

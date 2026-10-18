@@ -22,8 +22,14 @@ export interface GatewaySyncState {
   delivery_outbox?: Record<string, DeliveryOutboxItem>;
 }
 
+export type DeliveryOutboxSource = "controller" | "engine" | "codex-conflict";
+
 export interface DeliveryOutboxItem {
   kind: "reply" | "notification";
+  /** Absent in legacy persisted references, which belong to Controller. */
+  source?: DeliveryOutboxSource;
+  /** Persisted after the originating engine accepts the terminal delivery receipt. */
+  engineAcked?: boolean;
   deliveryKey: string;
   chatId: string;
   messageId: string;

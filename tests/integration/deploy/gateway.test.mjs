@@ -70,13 +70,14 @@ test('with --profile wechat, gateway is configured with exact production constra
   assert.equal(gateway.user, '1000:1000');
   assert.equal(gateway.read_only, true);
   assert.deepEqual(gateway.cap_drop, ['ALL']);
-  assert.deepEqual(gateway.security_opt, ['no-new-privileges:true']);
+  assert.deepEqual(gateway.security_opt, ['no-new-privileges:true',
+    'seccomp=./deploy/security/codex-seccomp.json', 'apparmor=super-leader-codex']);
 
   // Resource limits
-  assert.equal(gateway.mem_limit, '268435456'); // 256m in bytes
-  assert.equal(gateway.cpus, 0.25);
-  assert.equal(gateway.pids_limit, 128);
-  assert.equal(gateway.stop_grace_period, '10m0s');
+  assert.equal(gateway.mem_limit, '1073741824'); // 1g in bytes
+  assert.equal(gateway.cpus, 1);
+  assert.equal(gateway.pids_limit, 256);
+  assert.equal(gateway.stop_grace_period, '20m0s');
   assert.equal(gateway.init, true);
   assert.equal(gateway.restart, 'unless-stopped');
 
@@ -88,7 +89,7 @@ test('with --profile wechat, gateway is configured with exact production constra
   // No published ports
   assert.equal(gateway.ports, undefined, 'gateway must not publish any host ports');
 
-  // Environment variables: only controller token & urls/paths, no DB/node tokens
+  // Reply engine configuration is scoped to Gateway; no DB/node credentials.
   assert.equal(gateway.environment.CONTROLLER_URL, 'https://leader.example.com');
   assert.equal(gateway.environment.CONTROLLER_TOKEN, 'synthetic-controller-token');
   assert.equal(gateway.environment.WECHAT_CREDENTIALS_PATH, '/etc/super-leader/wechat-account.json');
@@ -100,6 +101,9 @@ test('with --profile wechat, gateway is configured with exact production constra
   assert.equal(gateway.environment.GATEWAY_SEND_BUDGET, '10');
   assert.equal(gateway.environment.GATEWAY_OUTBOX_LIMIT, '1000');
   assert.equal(gateway.environment.GATEWAY_POLL_TIMEOUT_MS, '35000');
+  assert.equal(gateway.environment.GATEWAY_LEADER_MODE, 'codex');
+  assert.equal(gateway.environment.GATEWAY_LEADER_ROOT, '/var/lib/super-leader-gateway/leader');
+  assert.equal(gateway.environment.GATEWAY_LEADER_MODEL, 'gpt-6.1-sol');
   assert.equal(gateway.environment.GATEWAY_PLAN_NOTIFICATIONS, undefined);
   assert.equal(gateway.environment.POSTGRES_PASSWORD, undefined);
   assert.equal(gateway.environment.NODE_TOKENS, undefined);
@@ -125,7 +129,7 @@ test('with --profile wechat, gateway is configured with exact production constra
   assert.match(gatewaySource, /target: \/var\/lib\/super-leader-gateway\r?\n\s+bind:\r?\n\s+create_host_path: false(?:\r?\n|$)/);
 
   // tmpfs
-  assert.deepEqual(gateway.tmpfs, ['/tmp:size=16m,mode=1777']);
+  assert.deepEqual(gateway.tmpfs, ['/tmp:size=64m,mode=1777']);
 
   // Healthcheck
   assert.deepEqual(gateway.healthcheck?.test, ['CMD', 'node', 'dist/index.js', '--healthcheck']);
@@ -183,6 +187,26 @@ test('local WeChat policy overrides reach only Gateway', () => {
   }
 });
 
+test('Codex replies inherit private model credentials and permit an explicit Gateway override', () => {
+  const render = env => JSON.parse(execCompose([
+    '--env-file', '/dev/null', '--profile', 'wechat',
+    '-f', composeYamlPath, '-f', composeProdPath, '-f', composeGatewayPath,
+    'config', '--format', 'json',
+  ], { encoding: 'utf8', timeout: 10000, env: { ...fakeEnv, ...env } })).services.gateway.environment;
+  const inherited = render({ LEADER_MODEL_API_KEY: 'synthetic-shared-key',
+    LEADER_MODEL_BASE_URL: 'https://shared.invalid/v1' });
+  assert.equal(inherited.GATEWAY_LEADER_API_KEY, 'synthetic-shared-key');
+  assert.equal(inherited.GATEWAY_LEADER_BASE_URL, 'https://shared.invalid/v1');
+  const overridden = render({ LEADER_MODEL_API_KEY: 'synthetic-shared-key',
+    LEADER_MODEL_BASE_URL: 'https://shared.invalid/v1', GATEWAY_LEADER_API_KEY: 'synthetic-gateway-key',
+    GATEWAY_LEADER_BASE_URL: 'https://gateway.invalid/v1', GATEWAY_LEADER_MODEL: 'synthetic-model',
+    GATEWAY_LEADER_MODE: 'controller' });
+  assert.equal(overridden.GATEWAY_LEADER_API_KEY, 'synthetic-gateway-key');
+  assert.equal(overridden.GATEWAY_LEADER_BASE_URL, 'https://gateway.invalid/v1');
+  assert.equal(overridden.GATEWAY_LEADER_MODEL, 'synthetic-model');
+  assert.equal(overridden.GATEWAY_LEADER_MODE, 'controller');
+});
+
 test('Dockerfile.gateway defines valid non-root UID 1000 and standard ENTRYPOINT/CMD', () => {
   const dockerfilePath = fileURLToPath(new URL('../../../deploy/Dockerfile.gateway', import.meta.url));
   assert.ok(existsSync(dockerfilePath), 'Dockerfile.gateway must exist');
@@ -191,6 +215,12 @@ test('Dockerfile.gateway defines valid non-root UID 1000 and standard ENTRYPOINT
   assert.match(content, /FROM --platform=\$BUILDPLATFORM node:24-bookworm-slim AS toolchain/);
   assert.match(content, /RUN npm install --global pnpm@11.8.0/);
   assert.match(content, /pnpm install --frozen-lockfile/);
+  assert.match(content, /FROM toolchain AS runtime-dependencies/);
+  assert.match(content, /ARG TARGETARCH/);
+  assert.match(content, /supportedArchitectures/);
+  assert.match(content, /pnpm install --prod --frozen-lockfile/);
+  assert.match(content, /COPY --from=runtime-dependencies --chown=node:node \/work\/gateway\/node_modules/);
+  assert.match(content, /LABEL org\.opencontainers\.image\.revision=\$VCS_REF/);
   assert.match(content, /USER node/);
   assert.match(content, /ENTRYPOINT \["node", "dist\/index\.js"\]/);
   assert.match(content, /CMD \["--run"\]/);

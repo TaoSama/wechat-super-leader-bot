@@ -84,7 +84,7 @@ export class StateManager extends DeliveryState {
       }
       this.account = {
         token: parsed.token,
-        accountId: String(parsed.accountId || ""),
+        accountId: typeof parsed.accountId === "string" ? parsed.accountId : "",
         baseUrl: typeof parsed.baseUrl === "string" ? parsed.baseUrl : undefined,
         userId: typeof parsed.userId === "string" ? parsed.userId : undefined,
         savedAt: typeof parsed.savedAt === "string" ? parsed.savedAt : undefined,

@@ -32,6 +32,9 @@ export interface ParsedCliOptions {
   sendBudget: number;
   outboxLimit: number;
   notifications: boolean;
+  leaderMode: "controller" | "codex";
+  leaderRoot: string;
+  leaderModel: string;
 }
 
 export function getHelpText(): string {
@@ -46,6 +49,12 @@ export function getHelpText(): string {
     "      --poll-once                Execute a single active iLink poll -> Controller forward -> reply cycle",
     "  -r, --run                      Start continuous iLink polling loop (or env: GATEWAY_RUN_POLL=true)",
     "      --healthcheck              Check daemon health without loading credentials (exit 0 if healthy)",
+    "",
+    "Codex Agent:",
+    "      --leader-mode <mode>      Reply engine: controller or codex (env: GATEWAY_LEADER_MODE)",
+    "      --leader-root <path>      Persistent per-chat Codex workspaces (env: GATEWAY_LEADER_ROOT)",
+    "      --leader-model <model>    Codex model (env: GATEWAY_LEADER_MODEL, default: gpt-6.1-sol)",
+    "      Codex API credentials: GATEWAY_LEADER_API_KEY and optional GATEWAY_LEADER_BASE_URL.",
     "",
     "Options:",
     "  -h, --help                     Show this help message",
@@ -94,6 +103,9 @@ export function parseGatewayCli(args: string[], env: NodeJS.ProcessEnv = process
       "send-budget": { type: "string" },
       "outbox-limit": { type: "string" },
       notifications: { type: "boolean" },
+      "leader-mode": { type: "string" },
+      "leader-root": { type: "string" },
+      "leader-model": { type: "string" },
     },
   });
 
@@ -165,7 +177,14 @@ export function parseGatewayCli(args: string[], env: NodeJS.ProcessEnv = process
     outboxLimit: Number(values["outbox-limit"] ?? env.GATEWAY_OUTBOX_LIMIT ?? DEFAULT_CONTEXT_POLICY.outboxLimit),
   });
 
+  const leaderMode = values["leader-mode"] ?? env.GATEWAY_LEADER_MODE ?? "controller";
+  if (leaderMode !== "controller" && leaderMode !== "codex") throw new Error("Invalid leader-mode: use controller or codex");
+  const leaderRoot = resolvePath(values["leader-root"] ?? env.GATEWAY_LEADER_ROOT ?? "~/.super-leader/leader");
+  const leaderModel = (values["leader-model"] ?? env.GATEWAY_LEADER_MODEL ?? "gpt-6.1-sol").trim();
+  if (!leaderModel) throw new Error("Invalid leader-model: must not be empty");
+
   return {
+    leaderMode, leaderRoot, leaderModel,
     help: Boolean(values.help),
     mode,
     check: mode === "check",
