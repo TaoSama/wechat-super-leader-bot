@@ -1,15 +1,31 @@
-import type { DeliveryOutboxItem, GatewaySyncState } from "../types.js";
+import type { DeliveryOutboxItem, DeliveryOutboxSource, GatewaySyncState } from "../types.js";
 import { canSend, consumeSend, validateContextPolicy, MAX_SEND_BUDGET, type ContextBudgetState, type ContextPolicy, type SendKind } from "./context-policy.js";
 
 const MAX_SAME_TIMESTAMP_KEYS = 256;
 export const MAX_INBOUND_CLOCK_SKEW_MS = 30_000;
 const OUTBOX_STATUSES = new Set(["pending", "claiming", "claimed", "defer", "receipt", "uncertain", "expired"]);
+const OUTBOX_SOURCES = new Set<DeliveryOutboxSource>(["controller", "engine", "codex-conflict"]);
+
+function outboxSource(source: unknown): DeliveryOutboxSource {
+  if (source === undefined) return "controller";
+  if (typeof source !== "string" || !OUTBOX_SOURCES.has(source as DeliveryOutboxSource)) {
+    throw new Error("Invalid delivery outbox source");
+  }
+  return source as DeliveryOutboxSource;
+}
+
+function validateEngineAcknowledgement(item: DeliveryOutboxItem): void {
+  if (item.engineAcked !== undefined && typeof item.engineAcked !== "boolean" ||
+      item.engineAcked === true && outboxSource(item.source) !== "engine") {
+    throw new Error("Invalid delivery outbox engine acknowledgement");
+  }
+}
 
 export class OutboxBackpressureError extends Error {
   constructor() { super("Gateway durable outbox capacity exhausted; inbound cursor retained"); this.name = "OutboxBackpressureError"; }
 }
 
-/** Small references only: full replies remain in Controller's immutable message store. */
+/** Small references only: full replies remain in the originating reply store. */
 export abstract class DeliveryState {
   public readonly policy: ContextPolicy;
   public contextBudgets: Record<string, ContextBudgetState> = {};
@@ -47,6 +63,8 @@ export abstract class DeliveryState {
           typeof item.chatId !== "string" || !item.chatId || typeof item.messageId !== "string" || !item.messageId ||
           !Number.isSafeInteger(item.splitMaxChars) || item.splitMaxChars <= 0 || typeof item.splitMultiPart !== "boolean" ||
           !OUTBOX_STATUSES.has(item.status)) throw new Error("Invalid delivery outbox reference");
+      item.source = outboxSource(item.source);
+      validateEngineAcknowledgement(item);
     }
     this.contextBudgets = budgets;
     this.inboundWatermarks = watermarks;
@@ -91,15 +109,18 @@ export abstract class DeliveryState {
   }
 
   public putOutbox(item: DeliveryOutboxItem): void {
+    const source = outboxSource(item.source);
+    validateEngineAcknowledgement(item);
     const previous = this.outbox[item.deliveryKey];
     if (previous) {
-      if (previous.chatId !== item.chatId || previous.messageId !== item.messageId || previous.kind !== item.kind) {
+      if (previous.chatId !== item.chatId || previous.messageId !== item.messageId || previous.kind !== item.kind ||
+          outboxSource(previous.source) !== source) {
         throw new Error("Outbox reference identity changed");
       }
       return;
     }
     this.assertOutboxCapacity(item.deliveryKey);
-    this.outbox[item.deliveryKey] = { ...item };
+    this.outbox[item.deliveryKey] = { ...item, source };
     try { this.saveState(); } catch (error) { delete this.outbox[item.deliveryKey]; throw error; }
   }
 
@@ -109,8 +130,13 @@ export abstract class DeliveryState {
     if (patch.deliveryKey !== undefined && patch.deliveryKey !== deliveryKey ||
         patch.chatId !== undefined && patch.chatId !== previous.chatId ||
         patch.messageId !== undefined && patch.messageId !== previous.messageId ||
-        patch.kind !== undefined && patch.kind !== previous.kind) throw new Error("Outbox reference identity changed");
-    this.outbox[deliveryKey] = { ...previous, ...patch };
+        patch.kind !== undefined && patch.kind !== previous.kind ||
+        Object.hasOwn(patch, "source") && outboxSource(patch.source) !== outboxSource(previous.source)) {
+      throw new Error("Outbox reference identity changed");
+    }
+    const updated = { ...previous, ...patch, source: outboxSource(previous.source) };
+    validateEngineAcknowledgement(updated);
+    this.outbox[deliveryKey] = updated;
     try { this.saveState(); } catch (error) { this.outbox[deliveryKey] = previous; throw error; }
   }
 

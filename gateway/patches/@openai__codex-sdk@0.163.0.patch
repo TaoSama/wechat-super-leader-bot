@@ -1,0 +1,92 @@
+diff --git a/dist/index.js b/dist/index.js
+index 04492aee5c59991ef0d40b0752a62d4b93a21338..70f616f7e5b06d8852d517e9307595ca20a5183b 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -269,52 +269,58 @@ var CodexExec = class {
+       signal: args.signal
+     });
+     let spawnError = null;
+-    child.once("error", (err) => spawnError = err);
+-    if (!child.stdin) {
+-      child.kill();
+-      throw new Error("Child process has no stdin");
+-    }
+-    child.stdin.write(args.input);
+-    child.stdin.end();
+-    if (!child.stdout) {
+-      child.kill();
+-      throw new Error("Child process has no stdout");
+-    }
++    const onError = (err) => spawnError ??= err;
++    child.on("error", onError);
++    let closed = false;
++    const closePromise = new Promise((resolve) => {
++      child.once("close", (code, signal) => {
++        closed = true;
++        resolve({ code, signal });
++      });
++    });
++    const terminationGraceMs = 1000;
++    let killTimer;
++    const terminate = () => {
++      if (closed) return;
++      if (!child.killed) child.kill();
++      killTimer ??= setTimeout(() => {
++        if (!closed) child.kill("SIGKILL");
++      }, terminationGraceMs);
++    };
++    args.signal?.addEventListener("abort", terminate, { once: true });
++    if (args.signal?.aborted) terminate();
+     const stderrChunks = [];
+     if (child.stderr) {
+       child.stderr.on("data", (data) => {
+         stderrChunks.push(data);
+       });
+     }
+-    const exitPromise = new Promise(
+-      (resolve) => {
+-        child.once("exit", (code, signal) => {
+-          resolve({ code, signal });
+-        });
+-      }
+-    );
+-    const rl = readline.createInterface({
+-      input: child.stdout,
+-      crlfDelay: Infinity
+-    });
++    let rl;
+     try {
++      if (!child.stdin) throw new Error("Child process has no stdin");
++      if (!child.stdout) throw new Error("Child process has no stdout");
++      child.stdin.on("error", onError);
++      child.stdin.write(args.input);
++      child.stdin.end();
++      rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+       for await (const line of rl) {
+         yield line;
+       }
+       if (spawnError) throw spawnError;
+-      const { code, signal } = await exitPromise;
++      const { code, signal } = await closePromise;
+       if (code !== 0 || signal) {
+         const stderrBuffer = Buffer.concat(stderrChunks);
+         const detail = signal ? `signal ${signal}` : `code ${code ?? 1}`;
+         throw new Error(`Codex Exec exited with ${detail}: ${stderrBuffer.toString("utf8")}`);
+       }
+     } finally {
+-      rl.close();
+-      child.removeAllListeners();
+-      try {
+-        if (!child.killed) child.kill();
+-      } catch {
+-      }
++      rl?.close();
++      terminate();
++      await closePromise;
++      clearTimeout(killTimer);
++      args.signal?.removeEventListener("abort", terminate);
++      child.stdin?.removeListener("error", onError);
++      child.removeListener("error", onError);
+     }
+   }
+ };

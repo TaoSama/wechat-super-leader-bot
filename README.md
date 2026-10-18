@@ -8,6 +8,8 @@
 ```mermaid
 flowchart TB
   WX["微信"] --> GW["独立 Gateway · TypeScript"]
+  GW --> CA["持久 Codex Agent · 每聊天独立记忆"]
+  CA -->|本轮控制工具| C
   GW --> C["Controller / Super Leader · TypeScript"]
   W["Web 工作台 · React"] -->|HTTPS + Cookie| C
   C --> M["Responses API · 模型决策"]
@@ -18,7 +20,8 @@ flowchart TB
 ```
 
 Controller 是唯一编排权威：模型提出决策，Controller 校验授权、冻结输入、持久化和派发。
-Gateway 独立维护微信登录与同步状态，负责轮询、转发和回复，不调用模型或另建任务。
+Gateway 独立维护微信登录与同步状态；Codex 回复模式为每个账户和聊天维护独立 Codex 会话与文件记忆。
+查询或控制外部项目时，Agent 通过本轮绑定原始用户消息的工具调用 Controller，由 Controller 校验和派发。
 Daemon 原生运行在 Mac/Linux 宿主机，连接已有会话；用户仍可在原客户端操作这些会话。
 
 香港 Docker 运行 Controller、Web、PostgreSQL 和独立 Gateway；宿主机主动连接 WSS，
@@ -40,7 +43,7 @@ app-server 按原 ID 恢复后发送，不创建替代会话。已有 writer 冲
 controller/src/ commands/、http/、leader/、nodes/、notifications/、sessions/、skills/、store/
 daemon/cmd/     super-leader-daemon CLI 入口
 daemon/pkg/     client/、codex/{appserver,desktop,rollout}/、protocol/、service/
-gateway/src/    cli/、controller/、runtime/、wechat/
+gateway/src/    cli/、controller/、leader/、runtime/、wechat/
 web/src/        api/、auth/、features/{leader,sessions,status}/
 scripts/        local.mjs、verify.mjs、lib/、ops/
 tests/          跨组件集成测试、CLI 与部署测试
@@ -188,6 +191,48 @@ docker compose --env-file .runtime/controller.env \
 生产镜像先在开发机或 CI 按目标架构构建并验证，再加载和切换。
 更新前全量核查在途命令、claim、计划和目标，并排空唯一 Gateway、冻结写入口；
 状态页只展示近期记录，不能作为排空依据。沿用原数据库、节点 journal 与微信 checkpoint。
+
+生产 Gateway 默认启用 `GATEWAY_LEADER_MODE=codex`，模型默认为 `gpt-6.1-sol`。
+凭证只通过私有环境提供：`GATEWAY_LEADER_API_KEY`、可选的 `GATEWAY_LEADER_BASE_URL`；
+Compose 未单独配置时沿用 `LEADER_MODEL_API_KEY`、`LEADER_MODEL_BASE_URL`。
+`GATEWAY_LEADER_MODE=controller` 可显式选择原 Controller 回复入口。
+Codex SDK 与原生 CLI 固定在 `0.163.0`；镜像安装时显式选择目标架构的 CLI 包，不能直接复制开发机原生 CLI。
+香港生产主机为 `linux/amd64`，开发机为 ARM 时构建需显式指定 `--platform linux/amd64`。
+
+Codex 记忆根目录为 `GATEWAY_LEADER_ROOT=/var/lib/super-leader-gateway/leader`，
+位于已有 `WECHAT_STATE_DIR` 持久挂载中。账户和聊天按摘要分目录，每个目录保存
+`task.md`（目标、进度和证据）、`memory.md`（长期事实）、`preference.md`（用户明确偏好），
+以及独立 `.codex` 会话数据、会话 ID 和回复防重日志。每轮注入磁盘中的记忆快照，
+Agent 可通过原生文件工具读取完整内容，并在回复前维护相关文件；续聊恢复原 Codex 会话。
+现存 `profile.md` 在首次打开工作目录时迁移到 `preference.md`，保留原内容；有冲突时合并。
+记忆提供上下文，不能新增执行授权，执行状态仍须查询 Controller 回执。
+未来工具与技能继续使用 Codex 原生发现机制，不另维护静态工具清单。
+
+延期回复按来源读取冻结结果，不重新调用模型或执行控制；发送完成凭证先持久保存，再确认和清理回复记录。
+每个聊天保留最多 128 条待交付或结果不明的记录，另保留最近 64 条已关闭记录，总日志上限 16 MiB。
+待交付记录不会被滚动淘汰；容量不足时先尝试发送旧回复，仍不足则保留入站游标，等待恢复。
+同一个记忆根目录必须由单个 Gateway 进程独占，不支持多进程共享；升级必须先确认旧进程完全退出。
+
+容器以非 root 用户运行，根文件系统只读；仅持久状态目录和 `/tmp` 可写。
+Codex 的文件权限依赖内层 Linux sandbox，宿主需允许非特权 user namespace。
+生产 Compose 使用 `deploy/security/codex-seccomp.json` 和独立 AppArmor profile
+`super-leader-codex`，保留 Docker 默认规则，仅开放 pinned CLI 创建内层 sandbox 所需调用。
+上线前在宿主安装并加载专属策略：
+
+```sh
+install -m0644 deploy/security/codex-apparmor /etc/apparmor.d/super-leader-codex
+apparmor_parser -Kr /etc/apparmor.d/super-leader-codex
+systemctl is-enabled apparmor.service
+systemctl is-active apparmor.service
+```
+
+持久安装保证宿主重启后 AppArmor 服务能重新加载该 profile，随后 Docker 才能启动 Gateway。
+不支持 AppArmor 或 user namespace 的主机应先完成等效隔离验证，不能直接关闭 sandbox 或放开容器权限。
+CLI、Docker、内核版本或网络模式变化后需重新验证这些策略；在目标原生架构的合成容器中
+确认三份记忆可写、其他聊天和微信凭据不可读，再切换正式 Gateway。
+首次启用需确认已有状态目录对 UID/GID `1000:1000` 可写。升级保留整个状态目录，
+不要只复制微信 `state.json` 或删除 `.codex` 数据。停止 Gateway 使用 Compose 的
+1200 秒宽限期，让正在处理的消息退出；确认容器已停止后再切换，避免两个轮询器并行。
 
 同一微信账号只能有一个 Gateway 轮询。`ALLOWED_CHAT_IDS` 授权操作者，登录凭证不能代替授权。
 新账号首次运行前执行 `--establish-baseline`，读取到原始空页，只记录上下文、去重和游标，

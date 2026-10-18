@@ -6,6 +6,7 @@ import { checkGatewayHealth, HealthTracker, resolveHealthPath, sanitizeErrorType
 import { getHelpText, parseGatewayCli } from "./options.js";
 
 export const NOTIFICATION_DIAGNOSTIC_EXIT_CODE = 2;
+const MAX_CODEX_ACCOUNT_ID_BYTES = 4096;
 
 export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS.ProcessEnv = process.env): Promise<number> {
   const opts = parseGatewayCli(args, env);
@@ -31,6 +32,9 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
   const stateManager = new StateManager(opts.credentialsPath, opts.statePath, {
     contextWindowMs: opts.contextWindowMs, sendBudget: opts.sendBudget, outboxLimit: opts.outboxLimit,
   });
+  const accountId = stateManager.account?.accountId;
+  const hasValidAccountId = typeof accountId === "string" && Boolean(accountId.trim()) &&
+    Buffer.byteLength(accountId, "utf8") <= MAX_CODEX_ACCOUNT_ID_BYTES;
   const ilink = new ILinkClient({
     stateManager,
     configuredBaseUrl: opts.wechatBaseUrl,
@@ -39,7 +43,8 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
 
   if (opts.mode === "check") {
     const summary = {
-      ok: Boolean(stateManager.account?.token && opts.controllerToken.trim()),
+      ok: Boolean(stateManager.account?.token && opts.controllerToken.trim() &&
+        (opts.leaderMode !== "codex" || hasValidAccountId && env.GATEWAY_LEADER_API_KEY?.trim())),
       mode: "check",
       controllerUrl: validatedControllerUrl,
       hasControllerToken: Boolean(opts.controllerToken.trim()),
@@ -47,15 +52,23 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
       statePath: stateManager.statePath,
       healthPath: resolvedHealthPath,
       hasWeChatAccount: Boolean(stateManager.account?.token),
+      hasValidAccountId,
       wechatBaseUrl: ilink.baseUrl,
       processedKeysCount: stateManager.processedMessageKeys.length,
       baselineEstablished: stateManager.baselineEstablished,
       baselineInProgress: stateManager.baselineInProgress,
       baselineEstablishedAt: stateManager.baselineEstablishedAt || null,
       notifications: opts.notifications,
+      leaderMode: opts.leaderMode,
+      leaderModel: opts.leaderModel,
+      hasLeaderApiKey: Boolean(env.GATEWAY_LEADER_API_KEY?.trim()),
     };
     process.stdout.write(JSON.stringify(summary, null, 2) + "\n");
     return summary.ok ? 0 : 1;
+  }
+
+  if (opts.leaderMode === "codex" && !hasValidAccountId) {
+    throw new Error(`Invalid WeChat accountId for Codex reply engine; a non-empty account ID of at most ${MAX_CODEX_ACCOUNT_ID_BYTES} UTF-8 bytes is required`);
   }
 
   const controller = new ControllerClient({
@@ -64,6 +77,14 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
     allowInsecureController: opts.allowInsecureController,
   });
 
+  let replyEngine;
+  if (opts.leaderMode === "codex" && opts.mode !== "establish-baseline") {
+    if (!env.GATEWAY_LEADER_API_KEY?.trim()) throw new Error("Missing GATEWAY_LEADER_API_KEY for Codex reply engine");
+    const { CodexReplyEngine } = await import("../leader/codex.js");
+    replyEngine = new CodexReplyEngine({ root: opts.leaderRoot, model: opts.leaderModel,
+      baseUrl: env.GATEWAY_LEADER_BASE_URL || undefined, apiKey: env.GATEWAY_LEADER_API_KEY,
+      codexPath: env.GATEWAY_CODEX_PATH || undefined });
+  }
   const healthTracker = new HealthTracker(resolvedHealthPath);
   const gateway = new WeChatGateway({
     stateManager,
@@ -72,6 +93,7 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
     splitMaxChars: opts.maxChars,
     healthTracker,
     notifications: opts.notifications,
+    replyEngine,
   });
 
   if (opts.mode === "establish-baseline") {

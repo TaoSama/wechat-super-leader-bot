@@ -5,20 +5,39 @@ FROM toolchain AS build
 WORKDIR /work/gateway
 COPY scripts/clean-build.mjs /work/scripts/clean-build.mjs
 COPY gateway/package.json gateway/pnpm-lock.yaml gateway/pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile
+COPY gateway/patches ./patches
+RUN pnpm install --frozen-lockfile --fetch-timeout=1200000
 COPY gateway/tsconfig.json ./
 COPY gateway/src ./src
-RUN pnpm run build && pnpm prune --prod
+RUN pnpm run build
 RUN mkdir -p /runtime/etc/super-leader /runtime/var/lib/super-leader-gateway
 
+FROM toolchain AS runtime-dependencies
+ARG TARGETARCH
+WORKDIR /work/gateway
+COPY gateway/package.json gateway/pnpm-lock.yaml gateway/pnpm-workspace.yaml ./
+COPY gateway/patches ./patches
+# Select the target CLI package without running the installer under CPU emulation.
+RUN case "$TARGETARCH" in amd64) CODEX_CPU=x64 ;; arm64) CODEX_CPU=arm64 ;; *) exit 1 ;; esac \
+    && printf '\nsupportedArchitectures:\n  os: [linux]\n  cpu: [%s]\n  libc: [glibc]\n' "$CODEX_CPU" >> pnpm-workspace.yaml \
+    && pnpm install --prod --frozen-lockfile --fetch-timeout=1200000
+
+FROM toolchain AS runtime-certificates
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 FROM node:24-bookworm-slim
-ENV NODE_ENV=production
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.revision=$VCS_REF
+ENV NODE_ENV=production SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 WORKDIR /app
 COPY --from=build --chown=node:node /work/gateway/package.json ./package.json
-COPY --from=build --chown=node:node /work/gateway/node_modules ./node_modules
+COPY --from=runtime-dependencies --chown=node:node /work/gateway/node_modules ./node_modules
 COPY --from=build --chown=node:node /work/gateway/dist ./dist
 COPY --from=build --chown=node:node /runtime/etc/super-leader /etc/super-leader
 COPY --from=build --chown=node:node /runtime/var/lib/super-leader-gateway /var/lib/super-leader-gateway
+COPY --from=runtime-certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 USER node
 
