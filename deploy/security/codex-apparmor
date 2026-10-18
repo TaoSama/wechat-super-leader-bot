@@ -7,7 +7,8 @@
 # Codex source: https://github.com/openai/codex/tree/rust-v0.163.0/codex-rs/linux-sandbox
 # Targets Codex 0.163.0, unrestricted networking, isolated PID namespace, UID 1000.
 # Revalidate policy if upgrading Codex, Docker, kernel or changing network/PID mode.
-# Load this independent profile with: apparmor_parser -Kr deploy/security/codex-apparmor
+# Install to /etc/apparmor.d/super-leader-codex so the AppArmor service restores it on boot.
+# Load with: apparmor_parser -Kr /etc/apparmor.d/super-leader-codex
 # Verify only in an ephemeral credential-free container before changing production.
 abi <abi/3.0>,
 #include <tunables/global>

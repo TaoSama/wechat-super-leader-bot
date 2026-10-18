@@ -212,8 +212,17 @@ Agent 可通过原生文件工具读取完整内容，并在回复前维护相�
 Codex 的文件权限依赖内层 Linux sandbox，宿主需允许非特权 user namespace。
 生产 Compose 使用 `deploy/security/codex-seccomp.json` 和独立 AppArmor profile
 `super-leader-codex`，保留 Docker 默认规则，仅开放 pinned CLI 创建内层 sandbox 所需调用。
-上线前在宿主加载 `apparmor_parser -Kr deploy/security/codex-apparmor`；不支持 AppArmor
-或 user namespace 的主机应先完成等效隔离验证，不能直接关闭 sandbox 或放开容器权限。
+上线前在宿主安装并加载专属策略：
+
+```sh
+install -m0644 deploy/security/codex-apparmor /etc/apparmor.d/super-leader-codex
+apparmor_parser -Kr /etc/apparmor.d/super-leader-codex
+systemctl is-enabled apparmor.service
+systemctl is-active apparmor.service
+```
+
+持久安装保证宿主重启后 AppArmor 服务能重新加载该 profile，随后 Docker 才能启动 Gateway。
+不支持 AppArmor 或 user namespace 的主机应先完成等效隔离验证，不能直接关闭 sandbox 或放开容器权限。
 CLI、Docker、内核版本或网络模式变化后需重新验证这些策略；在目标原生架构的合成容器中
 确认三份记忆可写、其他聊天和微信凭据不可读，再切换正式 Gateway。
 首次启用需确认已有状态目录对 UID/GID `1000:1000` 可写。升级保留整个状态目录，
