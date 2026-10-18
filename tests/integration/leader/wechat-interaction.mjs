@@ -20,7 +20,11 @@ const CHAT = 'synthetic-wechat-interaction-chat';
 const NODE = 'synthetic-wechat-interaction-node';
 const SESSION = 'synthetic-wechat-interaction-session';
 const CONTEXT = 'synthetic-wechat-context';
-const PROPOSAL = '请给合成会话制定一个统计记录的单步计划';
+const PROPOSAL = '请先给合成会话制定一个统计记录的单步计划，暂不执行';
+const DIRECT_TASK = '请直接统计合成会话中的待办记录，并把最终结果告诉我';
+const DIRECT_PROMPT = '统计合成待办记录并报告最终数量';
+const DIRECT_FINAL = '**直接执行最终结果**：共 23 条待办，其中 5 条已完成。';
+const DIRECT_FINAL_PLAIN = '直接执行最终结果：共 23 条待办，其中 5 条已完成。';
 const QUERY = '开始执行了吗？';
 const NEGATIVE = '暂时不要执行';
 const PROGRESS = 'SYNTHETIC_PROGRESS_ONLY：正在统计，尚未完成';
@@ -97,6 +101,11 @@ async function main() {
           output = [{ type: 'function_call', call_id: 'synthetic-proposal-' + modelCalls.length, name: 'propose_plan',
             arguments: JSON.stringify({ actions: [{ nodeId: NODE, sessionId: SESSION,
               prompt: '统计合成记录并报告最终数量', dependsOn: [] }] }) }];
+        } else if (last.content === DIRECT_TASK) {
+          assert(body.tools.some(tool => tool.name === 'execute_plan'), 'Model was not offered the direct execution tool');
+          output = [{ type: 'function_call', call_id: 'synthetic-execution-' + modelCalls.length, name: 'execute_plan',
+            arguments: JSON.stringify({ actions: [{ nodeId: NODE, sessionId: SESSION,
+              prompt: DIRECT_PROMPT, dependsOn: [] }] }) }];
         } else {
           assert([QUERY, NEGATIVE].includes(last.content), 'Unexpected model input: ' + JSON.stringify(last));
           output = [{ type: 'message', role: 'assistant', status: 'completed',
@@ -273,11 +282,84 @@ async function main() {
     assert.equal(deliveries.length, 1, 'Receipt/poll replay caused a second command');
     const persisted = await controller.request('/v1/notifications/' + notification.id);
     assert.equal(persisted.body.notification.status, 'accepted');
+
+    const directInput = await input(DIRECT_TASK);
+    await waitFor(() => {
+      healthy();
+      return deliveries.length === 2 && acknowledgements.some(item =>
+        item.commandId === deliveries[1].commandId && item.status === 'accepted');
+    }, 'Explicit task dispatches once in its original message without confirmation');
+    const directCommand = deliveries[1];
+    assert.notEqual(directCommand.commandId, command.commandId);
+    assert.equal(directCommand.prompt, DIRECT_PROMPT);
+    const directCommandPath = '/v1/commands/' + directCommand.commandId;
+    const directAccepted = await controller.request(directCommandPath);
+    assert.equal(directAccepted.body.status, 'accepted');
+    assert.equal(directAccepted.body.output, PROGRESS);
+    assert.equal((await pending()).length, 0, 'Direct accepted progress created a completion notification');
+    const directModelCallCount = modelCalls.filter(call => call.content === DIRECT_TASK).length;
+    assert.equal(directModelCallCount, 1, 'Direct task required another model turn');
+    assert(directInput.replies.length > 0, 'Direct task did not acknowledge its dispatch');
+
+    const directReplay = await input(DIRECT_TASK, directInput.messageId);
+    assert.equal(directReplay.summary.processedCount, 0, 'Repeated direct input was processed twice');
+    assert.equal(directReplay.replies.length, 0, 'Repeated direct input sent another reply');
+    const directControllerReplay = await controller.request('/v1/messages', {
+      chatId: CHAT, messageId: directInput.messageId, text: DIRECT_TASK,
+    });
+    assert.equal(directControllerReplay.status, 200);
+    const directSentBeforePoll = sent.length;
+    await runGateway('--poll-once');
+    await runGateway('--poll-once');
+    assert.equal(sent.length, directSentBeforePoll, 'Direct message replay or empty poll sent another message');
+    assert.equal(deliveries.length, 2, 'Direct message replay or empty poll dispatched another command');
+    assert.equal(modelCalls.filter(call => call.content === DIRECT_TASK).length, directModelCallCount,
+      'Direct message replay called the model again');
+
+    const directReceipt = () => sendFrame({ type: 'result', commandId: directCommand.commandId,
+      turnId: 'synthetic-turn-' + directCommand.commandId, status: 'completed', output: DIRECT_FINAL });
+    directReceipt();
+    await waitFor(async () => { healthy(); return (await pending()).length === 1; },
+      'Direct task completion creates its durable notification without a confirmation message');
+    const directComplete = await controller.request(directCommandPath);
+    assert.equal(directComplete.body.status, 'completed');
+    assert.equal(directComplete.body.output, DIRECT_FINAL);
+    const directNotification = (await pending())[0];
+    assert.equal(directNotification.kind, 'completed');
+    assert(directNotification.text.includes('23 条待办'), 'Direct task notification omitted the actual result');
+    assert(!directNotification.text.includes(PROGRESS), 'Direct task notification contains accepted progress');
+    const directSummary = await runGateway('--poll-once');
+    assert.equal(directSummary.notifications.accepted, 1);
+    assert.equal(notificationMessages().length, 2, 'Direct task did not send exactly one completion notification');
+    const directActual = notificationMessages()[1].item_list[0].text_item.text;
+    assert(directActual.includes(DIRECT_FINAL_PLAIN), 'Direct WeChat send omitted its result: ' + directActual);
+    assert(!directActual.includes('**') && !directActual.includes('###'), 'Direct notification contains raw Markdown');
+    assert(!directActual.includes(PROGRESS), 'Direct notification sent accepted progress instead of the result');
+    evidence('direct-execution-completion', { commandStatus: directComplete.body.status,
+      daemonOutput: directComplete.body.output, confirmationMessages: 0, daemonCommands: 1,
+      notificationKind: directNotification.kind, actualWeChatText: directActual, completionNotifications: 1 });
+
+    const directSentAfterCompletion = sent.length;
+    directReceipt();
+    await delay(TICK_OBSERVATION_MS);
+    await runGateway('--poll-once');
+    await runGateway('--poll-once');
+    assert.equal((await pending()).length, 0);
+    assert.equal(sent.length, directSentAfterCompletion, 'Repeated direct completion/poll sent another message');
+    assert.equal(notificationMessages().length, 2, 'Repeated direct completion/poll resent its notification');
+    assert.equal(deliveries.length, 2, 'Repeated direct completion/poll dispatched another command');
+    const directPersisted = await controller.request('/v1/notifications/' + directNotification.id);
+    assert.equal(directPersisted.body.notification.status, 'accepted');
     healthy();
     evidence('PASS', { realControllerProcess: true, realGatewayCli: true, disposablePostgres: true,
       daemonCommands: deliveries.length, completionNotifications: notificationMessages().length,
+      confirmedPlan: { daemonCommands: 1, completionNotifications: 1 },
+      directTask: { daemonCommands: 1, completionNotifications: 1, confirmationMessages: 0 },
       probes: ['query/negative zero dispatch', 'cancellation clears pending', 'short confirmation after query',
-        'duplicate confirmation and input', 'wrong turn ignored', 'accepted progress is not completion', 'duplicate completion and poll'] });
+        'duplicate confirmation and input', 'wrong turn ignored', 'accepted progress is not completion',
+        'duplicate completion and poll', 'direct task executes in original message without confirmation',
+        'direct messageId replay and empty polls do not dispatch or send', 'direct accepted-to-completed automatic notification',
+        'duplicate direct completion and poll'] });
   }, [
     { label: 'gateway child', cleanup: () => stopTestProcess(gatewayChild) },
     { label: 'heartbeat', cleanup: () => { clearInterval(heartbeat); } },
