@@ -305,6 +305,7 @@ export class WeChatGateway {
     try {
       // Retry terminal journal acknowledgements after a prior journal save failure.
       for (const item of Object.values(this.stateManager.outbox)) {
+        if (this.activeReplyDeliveries.has(item.deliveryKey)) continue;
         if (item.kind === "reply" && item.source === "engine" && item.status === "receipt" && item.receiptStatus === "accepted") {
           try {
             await this.ackEngineReply(item, "accepted");
@@ -360,9 +361,10 @@ export class WeChatGateway {
   }
 
   private async ackEngineReply(item: DeliveryOutboxItem, status: "accepted" | "uncertain" | "expired"): Promise<void> {
-    if (item.source !== "engine") return;
+    if (item.source !== "engine" || this.stateManager.outbox[item.deliveryKey]?.engineAcked) return;
     if (!this.replyEngine) throw new ReplyEngineUnavailableError();
     await this.replyEngine.ackReply(this.stateManager.account!.accountId, item.chatId, item.messageId, status);
+    this.stateManager.updateOutbox(item.deliveryKey, { engineAcked: true });
   }
 
   private hasQuarantinedInboundReply(deliveryKey: string): boolean {

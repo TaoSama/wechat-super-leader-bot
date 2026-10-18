@@ -255,3 +255,26 @@ test("accepted empty reply receipt survives journal pruning and restart without 
   assert.deepEqual(f.sends, []);
   assert.deepEqual(f.counts, { models: 0, controllerPosts: 0, controllerGets: 0 });
 });
+
+for (const status of ["expired", "uncertain"] as const) {
+  test(`${status} engine receipt persists acknowledgement once and never repeats journal I/O after restart`, async t => {
+    const f = fixture(t);
+    f.start.putOutbox({ kind: "reply", source: "engine", deliveryKey: f.key, chatId: CHAT,
+      messageId: MESSAGE, status, splitMaxChars: 3, splitMultiPart: true });
+    const engine = f.engine();
+    const ack = engine.ackReply.bind(engine);
+    let acknowledgements = 0;
+    t.mock.method(engine, "ackReply", async (...args: Parameters<typeof ack>) => { acknowledgements++; await ack(...args); });
+    const gateway = f.gateway(f.start, engine);
+    await gateway.flushRepliesOnce();
+    await gateway.flushRepliesOnce();
+    assert.equal(acknowledgements, 1);
+    const restarted = f.state();
+    assert.equal(restarted.outbox[f.key].engineAcked, true);
+    const replacement = f.engine();
+    t.mock.method(replacement, "ackReply", async () => assert.fail("terminal engine receipt was already acknowledged"));
+    await f.gateway(restarted, replacement).flushRepliesOnce();
+    assert.deepEqual(f.sends, []);
+    assert.deepEqual(f.counts, { models: 0, controllerPosts: 0, controllerGets: 0 });
+  });
+}

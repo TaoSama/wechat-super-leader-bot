@@ -138,17 +138,13 @@ export class CodexReplyEngine implements GatewayReplyEngine {
     if (!["accepted", "uncertain", "expired"].includes(status)) throw new Error("Invalid Codex delivery status");
     await this.withChatLock(accountId, chatId, async () => {
       const workspace = await this.store.findChat(accountId, chatId);
-      if (!workspace) {
-        if (status === "accepted") return;
-        throw new ReplyEngineUnavailableError();
-      }
+      // A terminal receipt can outlive its pruned journal entry. Repeating it
+      // must not recreate workspaces or prevent Gateway from draining outbox.
+      if (!workspace) return;
       const journal = workspace.getReplyJournal();
       const key = hash(messageId);
       const entry = journal[key];
-      if (!entry) {
-        if (status === "accepted") return;
-        throw new ReplyEngineUnavailableError();
-      }
+      if (!entry) return;
       if ((entry.delivery ?? "pending") !== "pending") return; // First terminal receipt wins.
       delete journal[key];
       journal[key] = { ...entry, delivery: status };

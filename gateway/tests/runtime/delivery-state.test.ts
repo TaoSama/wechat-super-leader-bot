@@ -403,3 +403,51 @@ test("the same outbox identity cannot switch reply stores through put or update"
     assert.equal(reload().outbox[key].source, original);
   }
 });
+
+test("engine acknowledgement marker persists and legacy references remain unacknowledged", t => {
+  const { state, reload } = fixture(t);
+  state.putOutbox(reference("legacy"));
+  assert.equal(reload().outbox.legacy.engineAcked, undefined);
+  state.putOutbox(reference("engine", { source: "engine", status: "expired" }));
+  state.updateOutbox("engine", { engineAcked: true });
+  assert.equal(reload().outbox.engine.engineAcked, true);
+  state.putOutbox(reference("false-controller", { engineAcked: false }));
+  assert.equal(reload().outbox["false-controller"].engineAcked, false);
+});
+
+test("engine acknowledgement rejects malformed markers and acknowledgement of non-engine sources", t => {
+  const { state, reload, statePath } = fixture(t);
+  state.putOutbox(reference("engine", { source: "engine" }));
+  state.putOutbox(reference("controller"));
+  state.putOutbox(reference("conflict", { source: "codex-conflict" }));
+  const expected = structuredClone(state.outbox);
+  for (const engineAcked of [null, "true", 1, {}, []]) {
+    const invalid = { engineAcked } as Partial<DeliveryOutboxItem>;
+    assert.throws(() => state.putOutbox(reference("invalid", { source: "engine", ...invalid })), /Invalid delivery outbox engine acknowledgement/);
+    assert.throws(() => state.updateOutbox("engine", invalid), /Invalid delivery outbox engine acknowledgement/);
+    assert.deepEqual(state.outbox, expected);
+  }
+  for (const source of [undefined, "controller", "codex-conflict"] as const) {
+    assert.throws(() => state.putOutbox(reference("invalid", { source, engineAcked: true })), /Invalid delivery outbox engine acknowledgement/);
+  }
+  for (const key of ["controller", "conflict"]) {
+    assert.throws(() => state.updateOutbox(key, { engineAcked: true }), /Invalid delivery outbox engine acknowledgement/);
+  }
+  const disk = JSON.parse(fs.readFileSync(statePath, "utf8")) as { delivery_outbox: Record<string, Record<string, unknown>> };
+  for (const [key, marker] of [["engine", "true"], ["engine", null], ["controller", true], ["conflict", true]] as const) {
+    const corrupt = structuredClone(disk);
+    corrupt.delivery_outbox[key].engineAcked = marker;
+    fs.writeFileSync(statePath, JSON.stringify(corrupt));
+    assert.throws(() => reload(), /Failed to load gateway state/);
+  }
+});
+
+test("a failed engine acknowledgement checkpoint rolls back the in-memory marker", t => {
+  const { state, reload } = fixture(t);
+  state.putOutbox(reference("engine", { source: "engine", status: "uncertain" }));
+  const failure = new Error("synthetic acknowledgement checkpoint failure");
+  t.mock.method(state, "saveState", () => { throw failure; });
+  assert.throws(() => state.updateOutbox("engine", { engineAcked: true }), error => error === failure);
+  assert.equal(state.outbox.engine.engineAcked, undefined);
+  assert.equal(reload().outbox.engine.engineAcked, undefined);
+});

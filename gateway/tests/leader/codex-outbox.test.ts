@@ -112,6 +112,8 @@ test("closing a 65th reply evicts only the oldest closed entry and preserves sta
   for (const id of ["started", "uncertain"]) assert.deepEqual(persisted[messageKey(id)], journal[messageKey(id)]);
   assert.equal(Object.keys(persisted).length, MAX_CLOSED_REPLY_ENTRIES + 2);
   assert.equal(persisted[messageKey("closing-now")].delivery, "accepted");
+  await engine.ackReply(ACCOUNT, CHAT, "closed-0", "expired");
+  assert.deepEqual(workspace.getReplyJournal(), persisted, "repeated receipt for pruned expired work is a no-op");
   await engine.ackReply(ACCOUNT, CHAT, "uncertain", "accepted");
   assert.equal(workspace.getReplyJournal()[messageKey("uncertain")].delivery, "uncertain", "first terminal receipt wins");
   assert.equal(sdk.calls(), 0);
@@ -178,19 +180,17 @@ test("missing, uncertain and expired replies never GET or create a workspace; ac
   assert.equal(sdk.calls(), 0);
 });
 
-test("missing accepted receipts are idempotent no-ops while other missing receipts are unavailable", async t => {
+test("all missing terminal receipts are idempotent no-ops without workspace or journal creation", async t => {
   const { root, temporary, store } = fixture(t);
   const sdk = fakeSdk();
   const engine = new CodexReplyEngine(options(root, sdk.sdkFactory));
-  for (let repeat = 0; repeat < 2; repeat++) await engine.ackReply(ACCOUNT, CHAT, "missing", "accepted");
-  for (const status of ["uncertain", "expired"] as const) {
-    await assert.rejects(engine.ackReply(ACCOUNT, CHAT, "missing", status), ReplyEngineUnavailableError);
+  for (const status of ["accepted", "uncertain", "expired"] as const) {
+    for (let repeat = 0; repeat < 2; repeat++) await engine.ackReply(ACCOUNT, CHAT, "missing", status);
   }
   assert.deepEqual(fs.readdirSync(temporary), []);
   const workspace = await store.forChat(ACCOUNT, CHAT);
-  await engine.ackReply(ACCOUNT, CHAT, "missing", "accepted");
-  for (const status of ["uncertain", "expired"] as const) {
-    await assert.rejects(engine.ackReply(ACCOUNT, CHAT, "missing", status), ReplyEngineUnavailableError);
+  for (const status of ["accepted", "uncertain", "expired"] as const) {
+    for (let repeat = 0; repeat < 2; repeat++) await engine.ackReply(ACCOUNT, CHAT, "missing", status);
   }
   assert.equal(fs.existsSync(path.join(workspace.workspacePath, ".replies.json")), false);
   assert.equal(sdk.calls(), 0);

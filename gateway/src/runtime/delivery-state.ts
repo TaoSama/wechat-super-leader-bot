@@ -14,6 +14,13 @@ function outboxSource(source: unknown): DeliveryOutboxSource {
   return source as DeliveryOutboxSource;
 }
 
+function validateEngineAcknowledgement(item: DeliveryOutboxItem): void {
+  if (item.engineAcked !== undefined && typeof item.engineAcked !== "boolean" ||
+      item.engineAcked === true && outboxSource(item.source) !== "engine") {
+    throw new Error("Invalid delivery outbox engine acknowledgement");
+  }
+}
+
 export class OutboxBackpressureError extends Error {
   constructor() { super("Gateway durable outbox capacity exhausted; inbound cursor retained"); this.name = "OutboxBackpressureError"; }
 }
@@ -57,6 +64,7 @@ export abstract class DeliveryState {
           !Number.isSafeInteger(item.splitMaxChars) || item.splitMaxChars <= 0 || typeof item.splitMultiPart !== "boolean" ||
           !OUTBOX_STATUSES.has(item.status)) throw new Error("Invalid delivery outbox reference");
       item.source = outboxSource(item.source);
+      validateEngineAcknowledgement(item);
     }
     this.contextBudgets = budgets;
     this.inboundWatermarks = watermarks;
@@ -102,6 +110,7 @@ export abstract class DeliveryState {
 
   public putOutbox(item: DeliveryOutboxItem): void {
     const source = outboxSource(item.source);
+    validateEngineAcknowledgement(item);
     const previous = this.outbox[item.deliveryKey];
     if (previous) {
       if (previous.chatId !== item.chatId || previous.messageId !== item.messageId || previous.kind !== item.kind ||
@@ -125,7 +134,9 @@ export abstract class DeliveryState {
         Object.hasOwn(patch, "source") && outboxSource(patch.source) !== outboxSource(previous.source)) {
       throw new Error("Outbox reference identity changed");
     }
-    this.outbox[deliveryKey] = { ...previous, ...patch, source: outboxSource(previous.source) };
+    const updated = { ...previous, ...patch, source: outboxSource(previous.source) };
+    validateEngineAcknowledgement(updated);
+    this.outbox[deliveryKey] = updated;
     try { this.saveState(); } catch (error) { this.outbox[deliveryKey] = previous; throw error; }
   }
 
