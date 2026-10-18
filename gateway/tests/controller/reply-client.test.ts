@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 import { ControllerClient } from "../../src/controller/client.js";
-import { MESSAGE_REPLY_TIMEOUT_MS } from "../../src/controller/reply-client.js";
+import { MESSAGE_REPLY_TIMEOUT_MS, PermanentReplyUnavailableError } from "../../src/controller/reply-client.js";
 import type { FetchLike } from "../../src/wechat/client.js";
 
 const BASE_URL = "http://127.0.0.1:8790/prefix";
@@ -53,6 +53,37 @@ test("reply lookup rejects HTTP failures and malformed projections without repla
       return true;
     });
     assert.equal(calls, 1);
+  }
+});
+
+test("immutable reply 403 and 404 expose permanent typed reasons without reading the body", async t => {
+  for (const [status, reason] of [[403, "Revoked"], [404, "Unavailable"]] as const) {
+    let bodyReads = 0;
+    const instance = client(async () => {
+      const response = new Response("sensitive_body", { status });
+      t.mock.method(response, "json", async () => { bodyReads++; throw new Error("sensitive_body"); });
+      return response;
+    });
+    await assert.rejects(instance.getMessageReply("chat", "message"), error => {
+      assert.ok(error instanceof PermanentReplyUnavailableError);
+      assert.equal(error.reason, reason);
+      assert.ok(!error.message.includes("sensitive_body"));
+      return true;
+    });
+    assert.equal(bodyReads, 0);
+  }
+});
+
+test("temporary HTTP and network failures do not become permanent unavailable errors", async () => {
+  for (const failure of [
+    async () => new Response("sensitive_body", { status: 503 }),
+    async () => { throw new TypeError("network unavailable"); },
+  ]) {
+    await assert.rejects(client(failure).getMessageReply("chat", "message"), error => {
+      assert.ok(error instanceof Error);
+      assert.equal(error instanceof PermanentReplyUnavailableError, false);
+      return true;
+    });
   }
 });
 

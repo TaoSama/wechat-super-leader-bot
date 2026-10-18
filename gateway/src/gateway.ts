@@ -2,6 +2,7 @@ import { StateManager } from "./runtime/state.js";
 import { ILinkClient } from "./wechat/client.js";
 import { ControllerClient, ChatNotAllowedError } from "./controller/client.js";
 import { PermanentImageDownloadError } from "./controller/image-client.js";
+import { PermanentReplyUnavailableError } from "./controller/reply-client.js";
 import { DEFAULT_MESSAGE_MAX_CHARS } from "./wechat/markdown.js";
 import { HealthTracker } from "./runtime/health.js";
 import { CHECKPOINT_MARGIN_MS, ENTRY_TYPING_BUDGET_MS, REPLY_TIMEOUT_MS } from "./runtime/budgets.js";
@@ -297,7 +298,15 @@ export class WeChatGateway {
         if (!this.stateManager.canSendToChat(item.chatId)) continue;
         this.replyOutboxCursor = (items.indexOf(item) + 1) % items.length;
         try { await this.deliverReply(item, await this.controller.getMessageReply(item.chatId, item.messageId)); }
-        catch (error) { firstError ??= error; }
+        catch (error) {
+          if (error instanceof PermanentReplyUnavailableError) {
+            this.stateManager.updateOutbox(item.deliveryKey, {
+              status: this.hasQuarantinedInboundReply(item.deliveryKey) ? "uncertain" : "expired",
+            });
+            break;
+          }
+          firstError ??= error;
+        }
         // One resumed reply per turn keeps getupdates and independent chats moving.
         break;
       }

@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { StateManager } from "../../src/runtime/state.js";
-import { OutboxBackpressureError } from "../../src/runtime/delivery-state.js";
+import { MAX_INBOUND_CLOCK_SKEW_MS, OutboxBackpressureError } from "../../src/runtime/delivery-state.js";
 import { LocalSendDeferredError, type ContextPolicy } from "../../src/runtime/context-policy.js";
 import type { DeliveryOutboxItem } from "../../src/types.js";
 
@@ -200,6 +200,49 @@ test("timestamp watermarks prevent replay across restart and isolate chats", t =
   assert.deepEqual(restarted.inboundWatermarks[CHAT_ID], { createdAtMs: createdAt, keys: ["first"] });
   restarted.recordInboundContext("new-chat", "second-chat", createdAt - 1);
   assert.equal(restarted.contextBudgets["second-chat"].remaining, state.policy.sendBudget);
+});
+
+test("small server clock skew grants a usable window while preserving its original timestamp for replay detection", t => {
+  const now = 1_800_000_000_000;
+  t.mock.timers.enable({ apis: ["Date"], now });
+  for (const skew of [1, MAX_INBOUND_CLOCK_SKEW_MS]) {
+    const { state, reload } = fixture(t);
+    const serverTime = now + skew;
+    assert.equal(state.recordInboundContext("skewed", CHAT_ID, serverTime, true, "synthetic-context"), true);
+    assert.equal(state.canSendToChat(CHAT_ID), true);
+    assert.equal(state.contextBudgets[CHAT_ID].refreshedAt, now);
+    assert.deepEqual(reload().inboundWatermarks[CHAT_ID], { createdAtMs: serverTime, keys: ["skewed"] });
+    state.consumeSendBudget(CHAT_ID);
+    const restarted = reload();
+    assert.equal(restarted.recordInboundContext("skewed", CHAT_ID, serverTime, true, "replayed-context"), false);
+    assert.equal(restarted.contextBudgets[CHAT_ID].remaining, state.policy.sendBudget - 1);
+    assert.equal(restarted.contextTokens[CHAT_ID], "synthetic-context");
+    assert.equal(restarted.recordInboundContext("beyond-tolerance", CHAT_ID, now + MAX_INBOUND_CLOCK_SKEW_MS + 1), false);
+    assert.equal(restarted.contextBudgets[CHAT_ID].remaining, state.policy.sendBudget - 1);
+  }
+});
+
+test("clock rollback and later replay never refill or extend a window granted from a skewed timestamp", t => {
+  const now = 1_800_000_000_000;
+  t.mock.timers.enable({ apis: ["Date"], now });
+  const { state, reload } = fixture(t);
+  const serverTime = now + MAX_INBOUND_CLOCK_SKEW_MS;
+  state.recordInboundContext("skewed", CHAT_ID, serverTime, true, "synthetic-context");
+  state.consumeSendBudget(CHAT_ID);
+  const original = structuredClone(state.contextBudgets[CHAT_ID]);
+  t.mock.timers.setTime(now - 1);
+  const restarted = reload();
+  assert.equal(restarted.recordInboundContext("skewed", CHAT_ID, serverTime), false);
+  assert.deepEqual(restarted.contextBudgets[CHAT_ID], original);
+  assert.equal(restarted.canSendToChat(CHAT_ID), false);
+  t.mock.timers.setTime(serverTime);
+  assert.equal(restarted.recordInboundContext("skewed", CHAT_ID, serverTime), false);
+  assert.deepEqual(restarted.contextBudgets[CHAT_ID], original);
+  t.mock.timers.setTime(now + state.policy.contextWindowMs - 1);
+  assert.equal(restarted.canSendToChat(CHAT_ID), true);
+  t.mock.timers.setTime(now + state.policy.contextWindowMs);
+  assert.equal(restarted.canSendToChat(CHAT_ID), false);
+  assert.equal(reload().contextBudgets[CHAT_ID].refreshedAt, now);
 });
 
 test("baseline inbound checkpoints tokens and watermarks without granting quota or accepting stale tokens", t => {

@@ -5,6 +5,13 @@ import { beforeAbort } from "../runtime/abort.js";
 
 export const MESSAGE_REPLY_TIMEOUT_MS = 10_000;
 
+export class PermanentReplyUnavailableError extends Error {
+  constructor(public readonly reason: "Unavailable" | "Revoked") {
+    super(`Controller message reply permanently unavailable (${reason})`);
+    this.name = "PermanentReplyUnavailableError";
+  }
+}
+
 export function parseControllerReply(data: unknown, endpoint: string): ControllerMessageResponse {
   if (typeof data !== "object" || data === null || typeof (data as Record<string, unknown>).text !== "string") {
     throw new Error(`Controller ${endpoint} returned invalid response schema (missing string text field)`);
@@ -34,6 +41,8 @@ export async function getControllerMessageReply(options: {
       method: "GET", headers: { Authorization: `Bearer ${options.token}` }, redirect: "error", signal: abort.signal,
     }), abort.signal);
     abort.signal.throwIfAborted();
+    if (response.status === 404) throw new PermanentReplyUnavailableError("Unavailable");
+    if (response.status === 403) throw new PermanentReplyUnavailableError("Revoked");
     if (!response.ok) throw new Error(`Controller message reply returned HTTP ${response.status}`);
     let value: unknown;
     try { value = await beforeAbort(response.json(), abort.signal); }

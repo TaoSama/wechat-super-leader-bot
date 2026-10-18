@@ -2,6 +2,7 @@ import type { DeliveryOutboxItem, GatewaySyncState } from "../types.js";
 import { canSend, consumeSend, validateContextPolicy, MAX_SEND_BUDGET, type ContextBudgetState, type ContextPolicy, type SendKind } from "./context-policy.js";
 
 const MAX_SAME_TIMESTAMP_KEYS = 256;
+export const MAX_INBOUND_CLOCK_SKEW_MS = 30_000;
 const OUTBOX_STATUSES = new Set(["pending", "claiming", "claimed", "defer", "receipt", "uncertain", "expired"]);
 
 export class OutboxBackpressureError extends Error {
@@ -55,11 +56,11 @@ export abstract class DeliveryState {
   public recordInboundContext(deliveryKey: string, chatId: string, createdAtMs?: number, grantBudget = true, contextToken?: string): boolean {
     const now = Date.now(), watermark = this.inboundWatermarks[chatId];
     if (!deliveryKey || !chatId || createdAtMs === undefined || !Number.isSafeInteger(createdAtMs) ||
-        createdAtMs < 0 || createdAtMs > now || watermark && (createdAtMs < watermark.createdAtMs ||
+        createdAtMs < 0 || createdAtMs - now > MAX_INBOUND_CLOCK_SKEW_MS || watermark && (createdAtMs < watermark.createdAtMs ||
           createdAtMs === watermark.createdAtMs && (watermark.keys.includes(deliveryKey) || watermark.keys.length >= MAX_SAME_TIMESTAMP_KEYS))) return false;
     const previous = this.contextBudgets[chatId], previousToken = this.contextTokens[chatId];
     this.inboundWatermarks[chatId] = { createdAtMs, keys: watermark?.createdAtMs === createdAtMs ? [...watermark.keys, deliveryKey] : [deliveryKey] };
-    if (grantBudget) this.contextBudgets[chatId] = { refreshedAt: createdAtMs, remaining: this.policy.sendBudget,
+    if (grantBudget) this.contextBudgets[chatId] = { refreshedAt: Math.min(createdAtMs, now), remaining: this.policy.sendBudget,
       grantedBudget: this.policy.sendBudget, progressSent: 0, lastInboundKey: deliveryKey };
     if (contextToken) this.contextTokens[chatId] = contextToken;
     try { this.saveState(); }

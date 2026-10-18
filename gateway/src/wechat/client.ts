@@ -220,9 +220,12 @@ export class ILinkClient {
 
       const contextToken = typeof msg.context_token === "string" && msg.context_token ? msg.context_token : undefined;
 
-      const clientId = typeof msg.client_id === "string" || typeof msg.client_id === "number"
-        ? String(msg.client_id)
-        : "";
+      const clientId = typeof msg.client_id === "string" && msg.client_id.trim() ||
+        typeof msg.client_id === "number" && Number.isSafeInteger(msg.client_id) && msg.client_id >= 0
+        ? String(msg.client_id) : "";
+      const serverMessageId = typeof msg.message_id === "string" && /^\d+$/.test(msg.message_id)
+        ? `server:${msg.message_id}` : "";
+      const stableId = clientId || serverMessageId;
       const createTimeMs = typeof msg.create_time_ms === "string" || typeof msg.create_time_ms === "number"
         ? String(msg.create_time_ms)
         : "";
@@ -233,9 +236,9 @@ export class ILinkClient {
       // Deterministic messageId and deliveryKey across poll retries
       let messageId: string;
       let deliveryKey: string;
-      if (clientId) {
-        messageId = clientId;
-        deliveryKey = this.stateManager.computeDeliveryKey(sender, clientId);
+      if (stableId) {
+        messageId = stableId;
+        deliveryKey = this.stateManager.computeDeliveryKey(sender, stableId);
       } else {
         // Compute deterministic hash without randomUUID so retry has stable messageId & deliveryKey
         const rawDigest = crypto.createHash("sha256")

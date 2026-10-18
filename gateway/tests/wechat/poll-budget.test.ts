@@ -4,7 +4,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ILinkClient } from "../../src/wechat/client.js";
-import type { StateManager } from "../../src/runtime/state.js";
+import { StateManager } from "../../src/runtime/state.js";
+import { ControllerClient } from "../../src/controller/client.js";
+import { WeChatGateway } from "../../src/gateway.js";
 import { HealthTracker, checkGatewayHealth } from "../../src/runtime/health.js";
 import { CHECKPOINT_MARGIN_MS, DEFAULT_POLL_TIMEOUT_MS, MAX_POLL_TIMEOUT_MS,
   POLL_NETWORK_MARGIN_MS } from "../../src/runtime/budgets.js";
@@ -108,3 +110,69 @@ for (const raw of ["", " \n\t "]) {
     await assert.rejects(client.sendSingleText("chat", "body"), { reason: "EmptyResponse" });
   });
 }
+
+test("inbound identity preserves client IDs and distinguishes adjacent lossless uint64 server IDs", async () => {
+  const sm = state();
+  sm.computeDeliveryKey = (chat, id) => `${chat}:${id}`;
+  sm.isMessageProcessed = () => false;
+  const serverIds = ["18446744073709551614", "18446744073709551615"];
+  const messages = serverIds.map(id => `{"message_type":1,"message_id":${id},"from_user_id":"chat",` +
+    '"item_list":[{"type":1,"text_item":{"text":"body"}}]}');
+  messages.push('{"message_type":1,"message_id":18446744073709551615,"client_id":"existing-client",' +
+    '"from_user_id":"chat","item_list":[{"type":1,"text_item":{"text":"body"}}]}');
+  const client = new ILinkClient({ stateManager: sm,
+    fetchImpl: async () => new Response(`{"ret":0,"msgs":[${messages.join(",")}]}`) });
+  const batch = await client.pollBatch();
+  assert.deepEqual(batch.messages.map(message => message.messageId), [...serverIds.map(id => `server:${id}`), "existing-client"]);
+  assert.equal(new Set(batch.messages.map(message => message.deliveryKey)).size, 3);
+});
+
+test("server-only inbound replay across cursor, index and restart never forwards or replenishes budget twice", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-server-id-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const accountPath = path.join(directory, "account.json"), statePath = path.join(directory, "state.json");
+  fs.writeFileSync(accountPath, JSON.stringify({ token: "synthetic-token", accountId: "fixture" }));
+  let pollCount = 0, forwardCount = 0, sends = 0;
+  const cursors: string[] = [];
+  const inbound = { message_type: 1, message_id: "18446744073709551615", from_user_id: "chat",
+    create_time_ms: Date.now() - 1000, context_token: "synthetic-context",
+    item_list: [{ type: 1, text_item: { text: "same original text" } }] };
+  const fetchImpl: typeof fetch = async (url, init) => {
+    if (String(url).endsWith("getupdates")) {
+      cursors.push(JSON.parse(String(init?.body)).get_updates_buf);
+      pollCount++;
+      return Response.json({ ret: 0, get_updates_buf: `cursor-${pollCount}`,
+        msgs: pollCount === 1 ? [inbound] : [{ message_type: 2 }, inbound] });
+    }
+    if (String(url).endsWith("getconfig")) return Response.json({ ret: 0, typing_ticket: "synthetic-ticket" });
+    if (String(url).endsWith("sendtyping")) return Response.json({ ret: 0 });
+    assert.ok(String(url).endsWith("sendmessage"));
+    sends++;
+    return Response.json({ ret: 0 });
+  };
+  const controller = new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic",
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/v1/chats/authorize")) return Response.json({ allowed: true });
+      assert.equal(init?.method, "POST");
+      assert.ok(String(url).endsWith("/v1/messages"));
+      assert.equal(JSON.parse(String(init?.body)).messageId, `server:${inbound.message_id}`);
+      forwardCount++;
+      return Response.json({ text: "reply" });
+    } });
+  const original = new StateManager(accountPath, statePath);
+  original.markBaselineEstablished();
+  original.commitCursor("cursor-initial");
+  const makeGateway = (sm: StateManager) => new WeChatGateway({ stateManager: sm, controller,
+    ilink: new ILinkClient({ stateManager: sm, fetchImpl }) });
+  assert.equal((await makeGateway(original).pollOnce()).processedCount, 1);
+  assert.equal(original.contextBudgets.chat.remaining, 9);
+  original.consumeSendBudget("chat");
+  const reloaded = new StateManager(accountPath, statePath);
+  assert.equal((await makeGateway(reloaded).pollOnce()).polledCount, 0);
+  assert.deepEqual(cursors, ["cursor-initial", "cursor-1"]);
+  assert.equal(forwardCount, 1);
+  assert.equal(sends, 1);
+  assert.equal(reloaded.contextBudgets.chat.remaining, 8);
+  assert.equal(reloaded.inboundWatermarks.chat.keys.length, 1);
+  assert.equal(reloaded.syncBuf, "cursor-2");
+});
