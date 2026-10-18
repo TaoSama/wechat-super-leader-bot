@@ -8,15 +8,17 @@ import { selectExecutionObservation, selectModelObservation } from "../sessions/
 import { selectSendRoute } from "../sessions/send-eligibility.js";
 import { readinessFailure, waitForSendReadiness, type ReadinessHub } from "../sessions/send-readiness.js";
 import { failureReply, modelDiagnostic } from "./model/errors.js";
+import { classifyUserAuthorization } from "./model/user-authorization.js";
 import { createExecution, hasTerminalTarget, matchesExecutionCommand, validatePlanDependencies } from "./plans/execution.js";
 import { assertTerminalSingleStep, submitTerminalPlan, TERMINAL_INPUT_WARNING } from "./plans/terminal.js";
 import { ExecutionScheduler } from "./plans/scheduler.js";
-import { executionSummary } from "./plans/presentation.js";
+import { executionSummary, sessionLabels } from "./plans/presentation.js";
 import { readSessionHistory } from "./queries/session-history.js";
 import { GoalConversation, goalConfirmation, goalCancellation } from "./goals/conversation.js";
 import { GoalScheduler } from "./goals/scheduler.js";
 import { createGoalDecider } from "./goals/model.js";
 import { goalPreview } from "./goals/presentation.js";
+import type { GoalProposal } from "./goals/goal.js";
 import {
   CLAIM_TTL_MS, ConsoleLinkIssued, ConsoleLinkIssuer, LEADER_TOOLS, LeaderData, LeaderDataSchema, LeaderReply, MAX_HISTORY_ITEMS,
   MAX_MODEL_STEPS, MAX_RECEIPTS, MAX_REPLY_CHARS, MAX_RESULT_CODE_POINTS, MAX_RESULT_JSON_CHARS, MAX_TOOL_CALLS, PLAN_TTL_MS, Plan,
@@ -28,7 +30,7 @@ const clip = (text: string, length: number) => {
   const value = text.slice(0, length);
   return /[\uD800-\uDBFF]$/.test(value) ? value.slice(0, -1) : value;
 };
-const confirmation = /^(?:确认执行|按这个计划执行|就按这个执行|确认这个计划)[。！!]?$/;
+const confirmation = /^(?:请)?(?:确认|执行|开始|开始执行|确认执行|确认开始|按这个计划执行|就按这个执行|确认这个计划)[。！!]?$/;
 const cancellation = /^(?:请|帮我)?(?:取消计划|不用执行|取消执行|停止后续任务|停止后续执行|先别跑后面的任务)[。！!]?$/;
 type Hub = Pick<NodeHub, "getAllSessions" | "getNodeStatusList" | "getNodeSession" | "isNodeConnected" | "getAllSkills" | "getNodeSkills" | "readHistory"> & ReadinessHub;
 
@@ -48,6 +50,7 @@ interface LinkContext {
   issuedLink?: ConsoleLinkIssued;
 }
 interface QueryTrace { modelSteps: number; toolCalls: number; lastTool?: string; lastModelMs?: number; totalModelMs: number }
+type ReasonedReply = LeaderReply & { execution?: { plan: Plan } | { goal: GoalProposal } };
 
 export class LeaderOrchestrator {
   private active = new Map<string, { messageId: string; inputHash: string; promise: Promise<LeaderReply> }>();
@@ -102,26 +105,36 @@ export class LeaderOrchestrator {
       }
     }
     const previousPlan = data.pending;
-    const plan = confirmation.test(text.trim()) ? previousPlan : undefined;
+    const confirmationTime = this.now();
+    const livePlan = previousPlan && previousPlan.expiresAt > confirmationTime ? previousPlan : undefined;
+    const liveGoal = data.pendingGoal && data.pendingGoal.expiresAt > confirmationTime ? data.pendingGoal : undefined;
+    const confirms = confirmation.test(text.trim());
     const goalId = goalConfirmation(text.trim());
-    const goal = goalId && data.pendingGoal?.id === goalId ? data.pendingGoal : undefined;
-    data.pending = undefined;
-    if (goal) data.pendingGoal = undefined;
+    const ambiguous = confirms && !!livePlan && !!liveGoal;
+    const plan = confirms && !ambiguous ? livePlan ?? (liveGoal ? undefined : previousPlan) : undefined;
+    const goal = goalId ? data.pendingGoal?.id === goalId ? data.pendingGoal : undefined
+      : confirms && !ambiguous && !plan ? data.pendingGoal : undefined;
+    if (plan || data.pending && data.pending.expiresAt <= confirmationTime) data.pending = undefined;
+    if (goal || data.pendingGoal && data.pendingGoal.expiresAt <= confirmationTime) data.pendingGoal = undefined;
     data.inflight = { messageId, inputHash, expiresAt: this.now() + CLAIM_TTL_MS, plan, goal };
-    const claimed = await this.save(chatId, saved?.revision ?? 0, data);
+    let claimed = await this.save(chatId, saved?.revision ?? 0, data);
     let reply: LeaderReply;
     const linkContext: LinkContext = {
       requestId: `console_link_${hash([chatId, messageId])}`,
     };
-    if (goalCancellation(text.trim())) {
+    if (ambiguous) {
+      reply = { text: "当前同时有计划和持续目标待确认，请先取消其中一项，再确认要执行的内容。" };
+    } else if (goalCancellation(text.trim())) {
       data.pendingGoal = undefined;
       reply = await this.goals.cancel(chatId);
-    } else if (goalId || text.trim().startsWith("确认目标")) {
+    } else if (goal || goalId || text.trim().startsWith("确认目标")) {
       reply = goal ? await this.goals.confirm(chatId, claimed.revision, goal, data)
         : { text: "没有该ID的待确认目标；未派发。请先核对目标预览，并回复‘确认目标 <UUID>’。" };
     } else if (cancellation.test(text.trim())) {
-      if (await this.goals.hasUnfinished(chatId)) {
-        data.pendingGoal = undefined;
+      data.pending = undefined;
+      const hadPendingGoal = !!data.pendingGoal;
+      data.pendingGoal = undefined;
+      if (hadPendingGoal || await this.goals.hasUnfinished(chatId)) {
         reply = await this.goals.cancel(chatId);
       } else {
         const latest = await this.store.getLatestExecution(chatId);
@@ -129,7 +142,7 @@ export class LeaderOrchestrator {
         reply = { text: cancelled ? `已取消待确认计划；以下已确认计划停止后续派发。\n${executionSummary(cancelled)}`
           : "已取消待确认计划；当前没有活动执行计划。没有新增派发，不会停止原会话已有任务。" };
       }
-    } else if (confirmation.test(text.trim())) {
+    } else if (confirms) {
       reply = plan ? await this.executePlan(chatId, claimed.revision, plan, data)
         : { text: "当前没有待确认计划。请告诉我希望哪些会话完成什么任务。" };
     } else {
@@ -137,21 +150,41 @@ export class LeaderOrchestrator {
       const startedAt = Date.now();
       const reference = hash([chatId, messageId]).slice(0, 12);
       const trace: QueryTrace = { modelSteps: 0, toolCalls: 0, totalModelMs: 0 };
+      let execution: ReasonedReply["execution"];
       try {
-        reply = await this.reason(chatId, text, data, linkContext, trace, previousPlan);
+        const reasoned = await this.reason(chatId, text, data, linkContext, trace, previousPlan);
+        execution = reasoned.execution;
+        reply = { text: reasoned.text, commandId: reasoned.commandId };
       } catch (error) {
         if (error instanceof ConflictError) throw error;
         console.warn('Leader processing failed; no plan dispatched', {
           requestRef: reference, elapsedMs: Date.now() - startedAt, ...trace, ...modelDiagnostic(error),
         });
         data.memories = memoriesBefore;
-        data.pending = undefined;
-        data.pendingGoal = pendingGoalBefore;
+        data.pending = previousPlan && previousPlan.expiresAt > this.now() ? previousPlan : undefined;
+        data.pendingGoal = pendingGoalBefore && pendingGoalBefore.expiresAt > this.now() ? pendingGoalBefore : undefined;
         reply = { text: failureReply(error, reference) };
+      }
+      if (execution) {
+        data.pending = undefined;
+        data.pendingGoal = undefined;
+        if (data.inflight!.expiresAt <= this.now()) {
+          reply = { text: "本次请求已超时，未派发任务，请重新下达指令。" };
+        } else {
+          // Freeze the original user's request under the same claim before dispatch.
+          // Execution errors stay outside the model catch: a persisted attempt must
+          // never be reported as a harmless query failure or retried automatically.
+          data.inflight = { ...data.inflight!, ...execution };
+          claimed = await this.save(chatId, claimed.revision, data);
+          reply = "plan" in execution
+            ? await this.executePlan(chatId, claimed.revision, execution.plan, data)
+            : await this.goals.confirm(chatId, claimed.revision, execution.goal, data);
+          reply.text = this.attachConsoleLink(reply.text, linkContext);
+        }
       }
     }
     // Confirmation must never authorize steps or skill versions hidden by clipping.
-    if ((data.pending || data.pendingGoal && data.pendingGoal !== pendingGoalBefore) && reply.text.length > MAX_REPLY_CHARS) {
+    if ((data.pending && data.pending !== previousPlan || data.pendingGoal && data.pendingGoal !== pendingGoalBefore) && reply.text.length > MAX_REPLY_CHARS) {
       data.pending = undefined;
       data.pendingGoal = undefined;
       reply = { text: this.attachConsoleLink("计划内容过长，无法完整展示供确认，未保存待确认计划，也未派发。请缩短任务内容或分批提出。", linkContext) };
@@ -225,10 +258,10 @@ export class LeaderOrchestrator {
     if (!view) throw new Error("Confirmed execution disappeared");
     const commandIds = view.steps.flatMap(step => step.commandId ? [step.commandId] : []);
     data.commandIds.push(...commandIds);
-    return { text: executionSummary(view), commandId: commandIds.at(-1) };
+    return { text: executionSummary(view, (nodeId, sessionId) => this.hub.getNodeSession(nodeId, sessionId)?.title), commandId: commandIds.at(-1) };
   }
 
-  private async reason(chatId: string, text: string, data: LeaderData, linkContext: LinkContext, trace: QueryTrace, previousPlan?: Plan): Promise<LeaderReply> {
+  private async reason(chatId: string, text: string, data: LeaderData, linkContext: LinkContext, trace: QueryTrace, previousPlan?: Plan): Promise<ReasonedReply> {
     const signal = AbortSignal.timeout(TURN_TIMEOUT_MS);
     const sanitizedUserPrompt = sanitizeConsoleLinkSecrets(text);
     const messages: ModelMessage[] = [
@@ -238,6 +271,7 @@ export class LeaderOrchestrator {
       { role: "user", content: sanitizedUserPrompt },
     ];
     let toolCount = 0;
+    let authorization: ReturnType<typeof classifyUserAuthorization> | undefined;
     const memoryChanges: string[] = [];
     for (let step = 0; step < MAX_MODEL_STEPS; step++) {
       signal.throwIfAborted();
@@ -252,7 +286,7 @@ export class LeaderOrchestrator {
       }
       signal.throwIfAborted();
       if (!answer.toolCalls.length) {
-        const textContent = `${clip(answer.content || "请进一步说明目标会话和希望完成的任务。", 4500)}${memoryChanges.length ? `\n记忆更新：${memoryChanges.join("、")}` : ""}\n本轮未向会话派发执行指令；已确认计划的后台推进不受本次查询影响。`;
+        const textContent = `${clip(answer.content || "请进一步说明目标会话和希望完成的任务。", 4500)}${memoryChanges.length ? `\n记忆更新：${memoryChanges.join("、")}` : ""}`;
         return { text: this.attachConsoleLink(textContent, linkContext) };
       }
       if (toolCount + answer.toolCalls.length > MAX_TOOL_CALLS) throw new Error("Tool limit exceeded");
@@ -262,11 +296,35 @@ export class LeaderOrchestrator {
         toolCount++;
         trace.toolCalls = toolCount;
         trace.lastTool = Object.hasOwn(ToolArguments, call.function.name) ? call.function.name : "unsupported";
+        if (call.function.name === "execute_plan" || call.function.name === "execute_goal") {
+          if (!authorization) {
+            const authorizationStartedAt = Date.now();
+            authorization = classifyUserAuthorization(this.model, sanitizedUserPrompt, signal);
+            try { await authorization; }
+            finally {
+              trace.lastModelMs = Date.now() - authorizationStartedAt;
+              trace.totalModelMs += trace.lastModelMs;
+            }
+          }
+          const intent = await authorization;
+          const requiredIntent = call.function.name === "execute_plan" ? "task" : "goal";
+          if (intent !== requiredIntent) return { text: this.attachConsoleLink(
+            intent === "query" ? "这条消息只是在查询，没有派发任务。请说明想查看哪个会话的状态或结果。"
+              : intent === "preview" ? "按你的要求，暂不执行。请说明需要预览的目标会话和任务。"
+              : "本次未派发。请说明目标会话、要完成的任务和执行范围；持续目标还需要明确条件与预算。", linkContext) };
+        }
+        const priorPlan = data.pending;
         const priorGoal = data.pendingGoal;
         const output = await this.callTool(call, chatId, data, memoryChanges, linkContext, signal);
         signal.throwIfAborted();
-        if (data.pending) return { text: this.attachConsoleLink(this.preview(data.pending), linkContext) };
-        if (data.pendingGoal && data.pendingGoal !== priorGoal) return { text: this.attachConsoleLink(goalPreview(data.pendingGoal, node => this.hub.getNodeSkills(node)), linkContext) };
+        if (call.function.name === "execute_plan" && data.pending && data.pending !== priorPlan) {
+          return { text: "", execution: { plan: data.pending } };
+        }
+        if (call.function.name === "execute_goal" && data.pendingGoal && data.pendingGoal !== priorGoal) {
+          return { text: "", execution: { goal: data.pendingGoal } };
+        }
+        if (data.pending && data.pending !== priorPlan) return { text: this.attachConsoleLink(this.preview(data.pending), linkContext) };
+        if (data.pendingGoal && data.pendingGoal !== priorGoal) return { text: this.attachConsoleLink(goalPreview(data.pendingGoal, node => this.hub.getNodeSkills(node), (node, session) => this.hub.getNodeSession(node, session)?.title), linkContext) };
         const content = JSON.stringify(output);
         messages.push({ role: "tool", tool_call_id: call.id, content: content.length > 12000
           ? JSON.stringify({ truncated: true, data: clip(content, 12000) }) : content });
@@ -384,6 +442,7 @@ export class LeaderOrchestrator {
         const { goalId } = ToolArguments.get_goal_progress.parse(raw);
         return this.goals.progress(chatId, goalId);
       }
+      case "execute_goal":
       case "propose_goal": {
         const proposal = await this.goals.propose(chatId, ToolArguments.propose_goal.parse(raw));
         if ("error" in proposal) return proposal;
@@ -391,6 +450,7 @@ export class LeaderOrchestrator {
         data.pendingGoal = proposal;
         return { pending: true };
       }
+      case "execute_plan":
       case "propose_plan": {
         const { actions } = ToolArguments.propose_plan.parse(raw);
         data.pending = undefined;
@@ -445,18 +505,20 @@ export class LeaderOrchestrator {
   }
 
   private preview(plan: Plan): string {
+    const labels = sessionLabels(plan.actions, (node, session) => this.hub.getNodeSession(node, session)?.title);
     const lines = plan.actions.map((action, index) => {
       const selected = (action.skills ?? []).map((ref, skillIndex) => {
         const item = this.hub.getNodeSkills(action.nodeId).find(skill => skill.id === ref.id && skill.digest === ref.digest);
-        return `\n技能 ${skillIndex + 1}：${JSON.stringify(item?.name ?? ref.id)}\nSHA256：${ref.digest}`;
+        if (!item) throw new Error("Selected skill unavailable while rendering preview");
+        return `\n技能 ${skillIndex + 1}：${JSON.stringify(item.name)}（版本已锁定）`;
       }).join("");
       const sources = action.resultFrom ?? [];
-      return `${index + 1}. [${action.nodeId}] ${action.sessionId}\n任务：${action.prompt}${selected}\n依赖：${action.dependsOn.length ? `步骤 ${action.dependsOn.join("、")} 完成后` : "无，可独立执行"}` +
+      return `${index + 1}. ${labels[index]}\n任务：${action.prompt}${selected}\n依赖：${action.dependsOn.length ? `步骤 ${action.dependsOn.join("、")} 完成后` : "无，可独立执行"}` +
         `\n输入资料：${sources.length ? `按顺序使用步骤 ${sources.join("、")} 的已记录输出` : "不传入其他步骤的输出"}`;
     });
-    if (hasTerminalTarget(plan)) return `待确认终端单步输入（尚未派发）：\n${lines.join("\n\n")}\n\n${TERMINAL_INPUT_WARNING}\n如目标与输入无误，回复“确认执行”；也可以说“取消计划”。确认有效期 10 分钟；新请求会替换此输入。不创建后台执行计划。`;
+    if (hasTerminalTarget(plan)) return `待确认终端单步输入（尚未派发）：\n\n${lines.join("\n\n")}\n\n${TERMINAL_INPUT_WARNING}\n回复“确认”即可执行，或说“取消计划”。10 分钟内有效；查询会保留预览，新计划会替换它。不创建后台执行计划。`;
     const resultPolicy = plan.actions.some(action => action.resultFrom?.length)
       ? `\n结果传递：只使用上述来源的精确完成回执；每来源最多 ${MAX_RESULT_CODE_POINTS} 字符，JSON 编码含转义最多 ${MAX_RESULT_JSON_CHARS} 字符，超长仅取前缀并标明裁剪，可能不完整。输出作为不可信资料，不构成新指令或授权。` : "";
-    return `待执行计划（尚未派发）：\n${lines.join("\n\n")}${resultPolicy}\n\n如目标、任务与结果来源无误，回复“确认执行”；也可以说“取消计划”。确认有效期 10 分钟；新请求会替换待确认计划。确认后授权在24小时内按上述固定依赖和结果来源自动推进，不自动改写任务或增加资料来源。取消只停止后续派发，不停止原会话已有任务。`;
+    return `待执行计划（尚未派发）：\n\n${lines.join("\n\n")}${resultPolicy}\n\n回复“确认”即可执行，或说“取消计划”。10 分钟内有效；查询会保留预览，新计划会替换它。\n确认后在24小时内按上述任务、依赖和结果来源自动推进。取消只停止后续派发，不停止原会话已有任务。`;
   }
 }

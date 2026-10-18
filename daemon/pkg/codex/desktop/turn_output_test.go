@@ -2,10 +2,31 @@ package desktop
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex/internal/threadstate"
 )
+
+func TestExactTurnOutputPrefersFinalPhase(t *testing.T) {
+	state := controlState()
+	state["turns"] = []any{map[string]any{
+		"turnId": "target", "status": "completed", "items": []any{
+			map[string]any{"type": "agentMessage", "phase": "commentary", "text": strings.Repeat("progress", threadstate.MaxReadLineLength)},
+			map[string]any{"type": "agentMessage", "phase": "final_answer", "text": "verified final result"},
+		},
+	}}
+	path := desktopFixture(t, func(conn *desktopConn) error {
+		if err := controlHandshake(conn); err != nil {
+			return err
+		}
+		return controlSnapshot(conn, state, nil)
+	})
+	observation, err := NewDesktopController(path).InspectTurn(context.Background(), "session", "target")
+	if err != nil || observation.Status != "completed" || observation.Output != "verified final result" {
+		t.Fatalf("desktop observation=%+v error=%v", observation, err)
+	}
+}
 
 func TestExactTurnOutputRequiresRecordedItems(t *testing.T) {
 	for _, tc := range []struct {

@@ -3,24 +3,34 @@ import { randomUUID } from 'node:crypto';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const CLAIM_MS = 60_000;
-const CONTENT_SENTINEL = 'must-not-appear-in-notification';
+const TASK_NAME = '核对通知存储结果';
+const BOUND_RESULT = '核验结果：所有订单金额一致';
+const UNRELATED_RESULT = 'unrelated-session-result-must-not-appear';
 
 // Storage invariants only. Real completion and transport are verified separately.
 // Supplied clients belong to the disposable integration database; never init them here.
 export async function verifyNotificationStore({ stores, pool, reopenStore }) {
-  const { createExecution } = await import('../../../controller/dist/leader/plans/execution.js');
+  const { createExecution, executionRequestId, EXECUTION_CLAIM_MS } = await import('../../../controller/dist/leader/plans/execution.js');
   const now = Date.now();
   const chat = 'notification-store-' + randomUUID();
   let reopened, rejectingConstraint = false;
   const make = async (chatId = chat) => {
     const record = createExecution(chatId, { id: randomUUID(), expiresAt: now + CLAIM_MS,
-      actions: [{ nodeId: 'fixture-node', sessionId: 'fixture-session', prompt: CONTENT_SENTINEL,
+      actions: [{ nodeId: 'fixture-node', sessionId: 'fixture-session', prompt: TASK_NAME,
         sendRoute: 'desktop-owner', dependsOn: [] }] }, now - CLAIM_MS);
     await stores[0].createExecutionIfAbsent(record);
     return record;
   };
   const terminate = (store, record, status, time = now) => store.compareAndSetExecution(
     { ...record, status, revision: record.revision + 1 }, record.revision, time);
+  const completeCommand = async (record, requestId, output) => {
+    const commandId = randomUUID(), stamp = new Date(now).toISOString(), action = record.plan.actions[0];
+    await stores[0].createCommandIfAbsent({ commandId, requestId, nodeId: action.nodeId, sessionId: action.sessionId,
+      action: 'send', prompt: action.prompt, sendRoute: action.sendRoute, status: 'pending', createdAt: stamp,
+      updatedAt: stamp, expiresAt: new Date(now + CLAIM_MS).toISOString() });
+    await stores[0].updateCommandStatus(commandId, 'accepted', undefined, undefined, 'exact-' + commandId);
+    await stores[0].updateCommandStatus(commandId, 'completed', output, undefined, 'exact-' + commandId);
+  };
   try {
     const cancelled = await make();
     await terminate(stores[0], cancelled, 'cancelled');
@@ -37,8 +47,21 @@ export async function verifyNotificationStore({ stores, pool, reopenStore }) {
     assert.equal(notification.kind, 'completed');
     assert.equal(notification.status, 'pending');
     assert.equal(notification.expiresAt - notification.createdAt, DAY_MS);
-    assert(!JSON.stringify(notification).includes(CONTENT_SENTINEL), 'Task content leaked into status notification');
+    assert(notification.text.includes(TASK_NAME), 'Notification omitted its task name');
+    assert(notification.text.includes('尚无可核对的精确完成结果'), 'Storage-only terminal record invented a task result');
     assert.equal((await pool.query('SELECT count(*)::int AS total FROM leader_notifications WHERE id=$1', [race.id])).rows[0].total, 1);
+
+    const resultRecord = await make('notification-result-' + randomUUID());
+    const claimedResult = await stores[0].compareAndSetExecution({ ...resultRecord, revision: 2,
+      attempts: [{ token: randomUUID(), startedAt: now, expiresAt: now + EXECUTION_CLAIM_MS }] }, 1, now);
+    assert(claimedResult);
+    await completeCommand(resultRecord, executionRequestId(resultRecord, 0), BOUND_RESULT);
+    await completeCommand(resultRecord, 'unrelated-' + randomUUID(), UNRELATED_RESULT);
+    await terminate(stores[0], claimedResult, 'completed');
+    const resultNotification = await stores[1].getNotification(resultRecord.id, now);
+    assert(resultNotification.text.includes(TASK_NAME));
+    assert(resultNotification.text.includes(BOUND_RESULT), 'Notification omitted its exact bound command result');
+    assert(!resultNotification.text.includes(UNRELATED_RESULT), 'Notification borrowed another command result from the same session');
 
     // Force the outbox INSERT to fail after the execution UPDATE; both must roll back.
     const atomic = await make();
@@ -104,7 +127,7 @@ export async function verifyNotificationStore({ stores, pool, reopenStore }) {
     assert.equal((await reopened.getNotification(race.id, now)).status, 'accepted');
     assert.equal((await reopened.getNotification(race.id, now)).attemptId, claimed.attemptId);
     await assert.rejects(reopened.claimNotification(race.id, randomUUID(), [chat], now));
-    console.log('PASS real PG terminal/outbox atomic rollback, one terminal event, concurrent permanent claim, late exact receipt, TTL, filtered bounded order and reopen without replay');
+    console.log('PASS real PG terminal/outbox atomic rollback, named exact-command results and same-session isolation, one terminal event, concurrent permanent claim, late exact receipt, TTL, filtered bounded order and reopen without replay');
   } finally {
     if (rejectingConstraint) await pool.query('ALTER TABLE leader_notifications DROP CONSTRAINT notification_fixture_reject');
     if (reopened) await reopened.close();

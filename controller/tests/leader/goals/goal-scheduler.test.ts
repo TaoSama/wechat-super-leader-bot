@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GOAL_LEASE_MS, GOAL_SEND_CLAIM_MS, type GoalDecision } from "../../../src/leader/goals/goal.js";
 import { schedulers, fixture, deferred, lease, nextDecision } from "../../fixtures/goals.js";
-import { goalNotificationText } from "../../../src/notifications/contracts.js";
 
 afterEach(async () => {
   await Promise.all(schedulers.splice(0).map(s => s.stop()));
@@ -37,8 +36,9 @@ describe("durable continuous goal scheduler", () => {
     expect(f.errors).not.toHaveBeenCalled();
     const notification = (await f.store.getNotification(f.goal.id, f.now()))!;
     expect(notification).toMatchObject({ source: { type: "goal", id: f.goal.id }, kind: "completed", status: "pending" });
-    expect(notification.text).toBe(goalNotificationText(f.goal.id, "completed"));
-    expect(notification.text).not.toContain("泄漏秘密");
+    expect(notification.text).toContain(`**任务**：${f.goal.proposal.objective}`);
+    expect(notification.text).toContain("> 交叉核验通过");
+    expect(notification.text).toContain("> 调查结果😀");
     await f.create().advance(f.goal.id);
     expect(await f.store.listPendingNotifications(["chat"], f.now())).toEqual([notification]);
   });

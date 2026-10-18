@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -11,44 +12,53 @@ import { ILinkClient, DEFAULT_ILINK_BASE_URL } from "../../gateway/dist/wechat/c
 import { WeChatGateway } from "../../gateway/dist/gateway.js";
 import { ControllerClient } from "../../gateway/dist/controller/client.js";
 
-const { values } = parseArgs({
-  options: {
-    help: { type: "boolean", short: "h" },
-    session: { type: "string" },
-    chat: { type: "string", default: "synthetic-live-test" },
-    node: { type: "string", default: "macair" },
-    url: { type: "string", default: "http://127.0.0.1:8790" },
-    marker: { type: "string" },
-    timeout: { type: "string", default: "90000" },
-  },
-});
+export function findConfirmedTargetCommand(beforeCommandIds, afterCommandIds) {
+  const previous = new Set(beforeCommandIds);
+  const added = afterCommandIds.filter(commandId => !previous.has(commandId));
+  assert.equal(added.length, 1, 'Confirmation must create exactly one send command for the exact target');
+  return added[0];
+}
 
-if (values.help) {
-  console.log(`Usage: node tests/live/wechat-model.mjs --session ID [--chat CHAT_ID] [--node macair] [--url URL] [--marker MARKER] [--timeout MS]
+async function runCli() {
+  const { values } = parseArgs({
+    options: {
+      help: { type: "boolean", short: "h" },
+      session: { type: "string" },
+      chat: { type: "string", default: "synthetic-live-test" },
+      node: { type: "string", default: "macair" },
+      url: { type: "string", default: "http://127.0.0.1:8790" },
+      marker: { type: "string" },
+      timeout: { type: "string", default: "90000" },
+    },
+  });
+
+  if (values.help) {
+    console.log(`Usage: node tests/live/wechat-model.mjs --session ID [--chat CHAT_ID] [--node macair] [--url URL] [--marker MARKER] [--timeout MS]
 
 Synthetic WeChat acceptance simulator for Control Plane.
 Validates:
 1. Pure fake iLink mock (zero external requests, no real WeChat tokens read or used).
 2. Controller natural-language routing & Leader plan proposal.
-3. Plan execution confirmation ("确认执行").
+3. Plan execution confirmation ("执行").
 4. Precise turn completion polling with exact marker output matching.
 5. Inbound message deduplication (replayed message does not trigger duplicate dispatch).
 6. Result inquiry verification via simulated chat.
 `);
-  process.exit(0);
+    process.exit(0);
+  }
+
+  if (!values.session) {
+    console.error("Error: --session <sessionId> is required");
+    process.exit(1);
+  }
+
+  await main(values).catch((err) => {
+    console.error(err instanceof Error ? err.stack || err.message : String(err));
+    process.exit(1);
+  });
 }
 
-if (!values.session) {
-  console.error("Error: --session <sessionId> is required");
-  process.exit(1);
-}
-
-await main().catch((err) => {
-  console.error(err instanceof Error ? err.stack || err.message : String(err));
-  process.exit(1);
-});
-
-async function main() {
+async function main(values) {
   const sessionId = values.session.trim();
   const chatId = values.chat.trim();
   const nodeId = values.node.trim();
@@ -213,20 +223,18 @@ async function main() {
 
     const hasPlan = reply1.includes("待执行计划") || reply1.includes("确认执行");
     assert(hasPlan, `Step 1 reply should propose a plan or require confirmation. Got: ${reply1}`);
-    assert(reply1.includes(sessionId) && reply1.includes(nodeId) && reply1.includes(uniqueMarker), 'Plan must identify the exact target and marker');
+    assert(reply1.includes(uniqueMarker), 'Plan must include the requested marker');
     assert.deepEqual(await targetSendIds(), sendsBeforePlan, 'Planning must not dispatch a send');
 
-    console.log("-> Step 2: Confirming plan execution with '确认执行'...");
-    const step2 = await simulateUserMessage("确认执行");
+    console.log("-> Step 2: Confirming plan execution with '执行'...");
+    const step2 = await simulateUserMessage("执行");
     assert(step2.newReplies.length > 0, "Expected gateway to send an outbound reply for step 2");
     const reply2 = step2.newReplies.map((r) => r.text).join("\n");
     console.log(`<- Step 2 Reply: \n${reply2}\n`);
 
-    const cmdMatch = reply2.match(/cmd_[a-f0-9\-]+/i);
-    const commandId = cmdMatch ? cmdMatch[0] : null;
-    assert(commandId, 'Confirmation did not produce a command ID');
+    const commandId = findConfirmedTargetCommand(sendsBeforePlan, await targetSendIds());
 
-    console.log(`-> Step 3: Polling command for turn completion (commandId: ${commandId || "discovering"})...`);
+    console.log(`-> Step 3: Polling command for turn completion (commandId: ${commandId})...`);
     const deadline = Date.now() + timeoutMs;
     let finalCommand = null;
 
@@ -285,7 +293,7 @@ async function main() {
 
     console.log(`<- Step 4 Dedupe replies count: ${afterDupReplies.length}`);
     assert.equal(afterDupReplies.length, 0, "Duplicate inbound message with same deliveryKey should not trigger new reply");
-    const replay = await controllerClient.forwardMessage({ chatId, messageId: step2.messageId, text: '确认执行' });
+    const replay = await controllerClient.forwardMessage({ chatId, messageId: step2.messageId, text: '执行' });
     assert.equal(replay.commandId, commandId, 'Confirmation replay must return the same command');
     assert.deepEqual(await targetSendIds(), sendsBeforeReplay, 'Confirmation replay must not dispatch a new send');
 
@@ -308,3 +316,5 @@ async function main() {
     await rm(tempDir, { recursive: true, force: true });
   }
 }
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) await runCli();
