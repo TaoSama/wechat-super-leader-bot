@@ -4,6 +4,7 @@ import test from 'node:test';
 
 const BASE_IMAGE = 'node:24-bookworm-slim';
 const NATIVE_TOOLCHAIN = `FROM --platform=$BUILDPLATFORM ${BASE_IMAGE} AS toolchain`;
+const CONTROLLER_RUNTIME_INSTALL = 'RUN npm install --global @openai/codex@0.163.0 && mkdir -p /var/lib/super-leader-background /var/lib/super-leader-artifacts && chown node:node /var/lib/super-leader-background /var/lib/super-leader-artifacts';
 const controllerDockerfile = readFileSync(new URL('../../../deploy/Dockerfile.controller', import.meta.url), 'utf8');
 const gatewayDockerfile = readFileSync(new URL('../../../deploy/Dockerfile.gateway', import.meta.url), 'utf8');
 
@@ -24,7 +25,7 @@ function stages(source) {
 function assertImageContract(source, component) {
   const parsed = stages(source);
   const buildNames = component === 'controller' ? ['controller-build', 'web-build'] : ['build', 'runtime-dependencies', 'runtime-certificates'];
-  assert.equal(parsed.length, buildNames.length + 2);
+  assert.equal(parsed.length, buildNames.length + (component === 'controller' ? 3 : 2));
   assert.equal(parsed[0][0], NATIVE_TOOLCHAIN, 'toolchain must execute on the build architecture');
   assert.ok(parsed[0].includes('RUN npm install --global pnpm@11.8.0'));
   for (const [index, name] of buildNames.entries()) {
@@ -60,14 +61,23 @@ function assertImageContract(source, component) {
   const runtime = parsed.at(-1);
   // An unqualified final FROM uses the requested target platform, not BUILDPLATFORM.
   assert.equal(runtime[0], `FROM ${BASE_IMAGE}`);
-  assert.ok(!runtime.some(line => /^RUN\s/i.test(line)), 'runtime must not execute emulated target binaries');
+  assert.deepEqual(runtime.filter(line => /^RUN\s/i.test(line)).map(line => line.replace(/\s+/g, ' ')),
+    component === 'controller' ? [CONTROLLER_RUNTIME_INSTALL] : [],
+    'only the pinned target-platform CLI installation and writable directory initialization may execute in the runtime');
   assert.ok(runtime.includes('USER node'));
   assert.ok(runtime.includes('WORKDIR /app'));
   const sourceStage = buildNames[0];
   const allowedCopies = ['package.json', 'node_modules', 'dist'].map(artifact =>
     `COPY --from=${component === 'gateway' && artifact === 'node_modules' ? 'runtime-dependencies' : sourceStage} --chown=node:node /work/${component}/${artifact} ./${artifact}`);
   if (component === 'controller') {
+    const certificates = parsed.at(-2);
+    assert.equal(certificates[0], 'FROM toolchain AS runtime-certificates');
+    assert.deepEqual(certificates.slice(1).map(line => line.replace(/\s+/g, ' ')), [
+      'RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*',
+    ], 'certificates must come from the native toolchain, without adding other runtime artifacts');
+    allowedCopies.unshift('COPY --from=runtime-certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt');
     allowedCopies.push('COPY --from=web-build --chown=node:node /web/dist ./web');
+    assert.ok(runtime.some(line => /^ENV\s/.test(line) && line.includes('SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt')));
     assert.ok(runtime.includes('CMD ["node", "dist/index.js"]'));
   } else {
     assert.ok(parsed[1].includes('RUN mkdir -p /runtime/etc/super-leader /runtime/var/lib/super-leader-gateway'));
@@ -82,7 +92,7 @@ function assertImageContract(source, component) {
     'only reviewed runtime artifacts may cross architectures');
 }
 
-test('Controller and Gateway compile natively without executing target-platform RUN instructions', () => {
+test('Controller and Gateway compile natively with only the pinned Controller CLI installed for the target platform', () => {
   assertImageContract(controllerDockerfile, 'controller');
   assertImageContract(gatewayDockerfile, 'gateway');
 });
@@ -98,6 +108,10 @@ test('image contracts reject emulated toolchains, unpruned dependencies and leak
   }
   assert.throws(() => assertImageContract(controllerDockerfile.replace('/web/dist ./web', '/web/node_modules ./web'), 'controller'));
   assert.throws(() => assertImageContract(controllerDockerfile.replace('FROM toolchain AS web-build', `FROM ${BASE_IMAGE} AS web-build`), 'controller'));
+  assert.throws(() => assertImageContract(controllerDockerfile.replace('@openai/codex@0.163.0', '@openai/codex@latest'), 'controller'));
+  assert.throws(() => assertImageContract(controllerDockerfile.replace('chown node:node /var/lib/super-leader-background', 'chmod 777 /var/lib/super-leader-background'), 'controller'));
+  assert.throws(() => assertImageContract(controllerDockerfile.replace('FROM toolchain AS runtime-certificates', `FROM ${BASE_IMAGE} AS runtime-certificates`), 'controller'));
+  assert.throws(() => assertImageContract(controllerDockerfile.replace('ca-certificates \\', 'ca-certificates curl \\'), 'controller'));
   assert.throws(() => assertImageContract(gatewayDockerfile.replace('--chown=node:node /runtime/etc/super-leader', '/runtime/etc/super-leader'), 'gateway'));
   assert.throws(() => assertImageContract(gatewayDockerfile.replace('amd64) CODEX_CPU=x64', 'amd64) CODEX_CPU=arm64'), 'gateway'));
   assert.throws(() => assertImageContract(gatewayDockerfile.replace('FROM toolchain AS runtime-dependencies', `FROM ${BASE_IMAGE} AS runtime-dependencies`), 'gateway'));

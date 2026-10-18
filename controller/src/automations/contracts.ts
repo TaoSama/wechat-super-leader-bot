@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { PostCommandRequestSchema, type SendRoute } from "../types.js";
+import { BackgroundSpecSchema } from "../background/contracts.js";
 
 export const DEFAULT_BUSINESS_TTL_MS = 24 * 60 * 60 * 1000;
 export const CLAIM_LEASE_MS = 60_000;
@@ -20,6 +21,7 @@ export const CreateScheduleSchema = z.discriminatedUnion("kind", [
   z.object({ ...base, kind: z.literal("session"), prompt: PostCommandRequestSchema.shape.prompt.unwrap().trim().min(1),
     nodeId: PostCommandRequestSchema.shape.nodeId, sessionId: PostCommandRequestSchema.shape.sessionId,
     monitor: z.boolean().default(false) }).strict(),
+  z.object({ ...base, kind: z.literal("background"), background: BackgroundSpecSchema }).strict(),
 ]);
 export type CreateSchedule = z.infer<typeof CreateScheduleSchema>;
 export type FrozenTarget = { nodeId: string; sessionId: string; sendRoute: SendRoute };
@@ -44,6 +46,7 @@ export interface AutomationOutbox {
   text: string; createdAt: number; expiresAt: number;
   status: "pending" | "published" | "superseded" | "expired";
   bodyClearedAt?: number;
+  supplement?: { invocationId: string; fingerprint: string };
 }
 export type RunnerOutcome =
   | { status: "running"; commandId?: string; error?: string }
@@ -54,6 +57,10 @@ export interface AutomationRunner {
   start(run: AutomationRun, schedule: Schedule): Promise<RunnerOutcome>;
   inspect(run: AutomationRun, schedule: Schedule): Promise<RunnerOutcome>;
 }
+export interface AutomationSupplement {
+  runId: string; scheduleId: string; chatId: string; invocationId: string;
+  text: string; kind: AutomationOutbox["kind"]; createdAt: number; expiresAt: number;
+}
 export interface AutomationRepository {
   create(schedule: Schedule): Promise<Schedule>;
   get(id: string, chatId: string): Promise<Schedule | null>;
@@ -63,6 +70,7 @@ export interface AutomationRepository {
   claimDue(now: number, owner: string, limit: number): Promise<{ schedule: Schedule; run: AutomationRun }[]>;
   claimRunning(now: number, owner: string, limit: number): Promise<{ schedule: Schedule; run: AutomationRun }[]>;
   finish(runId: string, owner: string, outcome: RunnerOutcome, now: number): Promise<boolean>;
+  publishSupplement(input: AutomationSupplement): Promise<AutomationOutbox>;
   pendingOutbox(now: number, limit?: number, excludeIds?: readonly string[]): Promise<AutomationOutbox[]>;
   markPublished(id: string): Promise<void>;
   cleanupBodies(now: number, retentionMs: number): Promise<{ runs: number; outbox: number }>;

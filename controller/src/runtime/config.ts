@@ -1,4 +1,5 @@
 import dotenv from "dotenv";
+import { loadBackgroundConfig, type BackgroundConfig } from "./background-config.js";
 
 if (process.env.SUPER_LEADER_NO_DOTENV !== "1") {
   dotenv.config();
@@ -18,6 +19,7 @@ export interface Config {
   leader?: { baseUrl: string; apiKey: string; model: string };
   consolePublicUrl?: string;
   taskNotifications?: { fileMaxBytes: number; retentionMs: number; tickMs: number; fallbackEndpointsJson?: string };
+  background?: BackgroundConfig;
 }
 
 function parseStrictInt(value: string | undefined, name: string, min: number, max: number, defaultValue: number): number {
@@ -167,6 +169,7 @@ export function loadConfig(): Config {
     webDistDir: process.env.WEB_DIST_DIR,
     leader,
     consolePublicUrl,
+    background: loadBackgroundConfig(process.env, leader),
     taskNotifications: {
       fileMaxBytes: parseStrictInt(process.env.RESULT_FILE_MAX_BYTES, "RESULT_FILE_MAX_BYTES", 1, 512 * 1024 * 1024, 50 * 1024 * 1024),
       retentionMs: parseStrictInt(process.env.RESULT_RETENTION_HOURS, "RESULT_RETENTION_HOURS", 1, 8760, 168) * 60 * 60_000,

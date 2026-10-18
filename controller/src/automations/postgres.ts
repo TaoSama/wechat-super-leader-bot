@@ -1,7 +1,8 @@
 import type pg from "pg";
-import { CLAIM_LEASE_MS, type AutomationOutbox, type AutomationRepository, type AutomationRun, type RunnerOutcome, type Schedule } from "./contracts.js";
+import { CLAIM_LEASE_MS, type AutomationOutbox, type AutomationRepository, type AutomationRun, type AutomationSupplement, type RunnerOutcome, type Schedule } from "./contracts.js";
 import { assertSameCreation } from "./identity.js";
 import { finishRun, newRun } from "./state.js";
+import { supplementOutbox, assertSameSupplement } from "./supplements.js";
 import { dueOccurrence } from "./timing.js";
 import { validateBodyRetention } from "./retention.js";
 import { AutomationConflictError } from "./errors.js";
@@ -128,11 +129,25 @@ export class PostgresAutomationRepository implements AutomationRepository {
       await saveSchedule(client, schedule);
       if (item && schedule.status !== "cancelled") {
         if (schedule.retention === "latest") await client.query(`UPDATE automation_outbox SET state='superseded',
-          data=jsonb_set(data,'{status}','"superseded"') WHERE schedule_id=$1 AND state='pending'`, [schedule.id]);
+          data=jsonb_set(data,'{status}','"superseded"') WHERE schedule_id=$1 AND state='pending' AND NOT (data ? 'supplement')`, [schedule.id]);
         await client.query(`INSERT INTO automation_outbox(id,schedule_id,state,expires_at,created_at,data) VALUES($1,$2,$3,$4,$5,$6)
           ON CONFLICT(id) DO NOTHING`, [item.id, item.scheduleId, item.status, item.expiresAt, item.createdAt, item]);
       }
       return true;
+    });
+  }
+  async publishSupplement(input: AutomationSupplement): Promise<AutomationOutbox> {
+    return this.transaction(async client => {
+      const selected = await client.query<{ data: Schedule }>("SELECT data FROM automation_schedules WHERE id=$1 FOR UPDATE", [input.scheduleId]);
+      const schedule = selected.rows[0]?.data;
+      const runs = await client.query<{ data: AutomationRun }>("SELECT data FROM automation_runs WHERE id=$1", [input.runId]);
+      const incoming = supplementOutbox(input, schedule, runs.rows[0]?.data);
+      const existing = await client.query<{ data: AutomationOutbox }>("SELECT data FROM automation_outbox WHERE id=$1", [incoming.id]);
+      if (existing.rows[0]) { assertSameSupplement(existing.rows[0].data, incoming); return existing.rows[0].data; }
+      if (schedule!.status === "cancelled") throw new Error("Cancelled background schedule cannot publish new supplements");
+      await client.query(`INSERT INTO automation_outbox(id,schedule_id,state,expires_at,created_at,data) VALUES($1,$2,$3,$4,$5,$6)`,
+        [incoming.id, incoming.scheduleId, incoming.status, incoming.expiresAt, incoming.createdAt, incoming]);
+      return incoming;
     });
   }
   async pendingOutbox(now: number, limit = 100, excludeIds: readonly string[] = []): Promise<AutomationOutbox[]> {
@@ -156,12 +171,12 @@ export class PostgresAutomationRepository implements AutomationRepository {
         WHERE r.state IN ('completed','failed','expired','skipped') AND NOT (r.data ? 'bodyClearedAt')
           AND (r.data->>'updatedAt')::bigint <= $2
           AND NOT EXISTS (SELECT 1 FROM automation_schedules s WHERE s.id=r.schedule_id AND s.active_run_id=r.id)
-          AND NOT EXISTS (SELECT 1 FROM automation_outbox o WHERE o.id=r.id AND o.state='pending')`, [now, now - retentionMs]);
+          AND NOT EXISTS (SELECT 1 FROM automation_outbox o WHERE o.data->>'runId'=r.id AND o.state='pending')`, [now, now - retentionMs]);
       const outbox = await client.query(`UPDATE automation_outbox o SET data = jsonb_set(
         jsonb_set(o.data,'{text}','""'),'{bodyClearedAt}',to_jsonb($1::bigint))
         WHERE o.state IN ('published','superseded','expired') AND NOT (o.data ? 'bodyClearedAt') AND o.created_at <= $2
-          AND NOT EXISTS (SELECT 1 FROM automation_runs r WHERE r.id=o.id AND r.state IN ('dispatching','running','unknown'))
-          AND NOT EXISTS (SELECT 1 FROM automation_schedules s WHERE s.id=o.schedule_id AND s.active_run_id=o.id)`, [now, now - retentionMs]);
+          AND NOT EXISTS (SELECT 1 FROM automation_runs r WHERE r.id=o.data->>'runId' AND r.state IN ('dispatching','running','unknown'))
+          AND NOT EXISTS (SELECT 1 FROM automation_schedules s WHERE s.id=o.schedule_id AND s.active_run_id=o.data->>'runId')`, [now, now - retentionMs]);
       return { runs: runs.rowCount ?? 0, outbox: outbox.rowCount ?? 0 };
     });
   }

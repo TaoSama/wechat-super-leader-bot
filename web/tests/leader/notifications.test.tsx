@@ -70,6 +70,17 @@ describe("task notification console", () => {
     expect(screen.getByText("已启用")).toBeInTheDocument();
   });
 
+  it("accepts and displays isolated background schedules without treating them as source session tasks", () => {
+    const background = { ...schedule(), kind: "background" as const, title: "跨机日报汇总", activeRunId: "run-1" };
+    const items = parseAutomations({ items: [background] });
+    expect(items).toEqual([background]);
+    render(<AutomationsSection items={items} />);
+    expect(screen.getByText(/后台任务 · 定期执行/)).toBeInTheDocument();
+    expect(screen.getByText(/每轮独立执行；会话默认保留 24 小时/)).toBeInTheDocument();
+    expect(screen.getByText("本轮正在执行")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "暂停" })).toBeEnabled();
+  });
+
   it("treats expired notification freshness independently of saved artifact retention", () => {
     const stale = { ...delivery("stale", "waiting_for_user"), expiresAt: NOW - 1 };
     render(<DeliveriesSection items={[stale]} />);
@@ -84,6 +95,7 @@ describe("task notification console", () => {
     expect(parseAutomations({ items: [schedule()] })).toEqual([schedule()]);
     expect(parseDeliveries([delivery("valid", "accepted")])[0].status).toBe("accepted");
     expect(() => parseAutomations({ items: [{ ...schedule(), status: "maybe" }] })).toThrow();
+    expect(() => parseAutomations({ items: [{ ...schedule(), kind: "unrecognized" }] })).toThrow();
     expect(() => parseDeliveries({ items: [{ ...delivery("x", "ready"), status: "delivered" }] })).toThrow();
   });
 });

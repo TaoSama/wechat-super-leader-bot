@@ -1,7 +1,8 @@
-import type { AutomationOutbox, AutomationRepository, AutomationRun, RunnerOutcome, Schedule } from "./contracts.js";
+import type { AutomationOutbox, AutomationRepository, AutomationRun, AutomationSupplement, RunnerOutcome, Schedule } from "./contracts.js";
 import { CLAIM_LEASE_MS } from "./contracts.js";
 import { assertSameCreation } from "./identity.js";
 import { finishRun, newRun } from "./state.js";
+import { supplementOutbox, assertSameSupplement } from "./supplements.js";
 import { dueOccurrence } from "./timing.js";
 import { clearRunBody, validateBodyRetention } from "./retention.js";
 import { AutomationConflictError } from "./errors.js";
@@ -69,10 +70,19 @@ export class MemoryAutomationRepository implements AutomationRepository {
     const schedule = this.schedules.get(run.scheduleId)!;
     const item = finishRun(schedule, run, outcome, now);
     if (item && schedule.status !== "cancelled") {
-      if (schedule.retention === "latest") for (const old of this.outbox.values()) if (old.scheduleId === schedule.id && old.status === "pending") old.status = "superseded";
+      if (schedule.retention === "latest") for (const old of this.outbox.values()) if (old.scheduleId === schedule.id && old.status === "pending" && !old.supplement) old.status = "superseded";
       this.outbox.set(item.id, item);
     }
     return true;
+  }
+  async publishSupplement(input: AutomationSupplement): Promise<AutomationOutbox> {
+    const schedule = this.schedules.get(input.scheduleId);
+    const incoming = supplementOutbox(input, schedule, this.runs.get(input.runId));
+    const prior = this.outbox.get(incoming.id);
+    if (prior) { assertSameSupplement(prior, incoming); return copy(prior); }
+    if (schedule!.status === "cancelled") throw new Error("Cancelled background schedule cannot publish new supplements");
+    this.outbox.set(incoming.id, copy(incoming));
+    return copy(incoming);
   }
   async pendingOutbox(now: number, limit = 100, excludeIds: readonly string[] = []): Promise<AutomationOutbox[]> {
     for (const item of this.outbox.values()) if (item.status === "pending" && item.expiresAt <= now) item.status = "expired";

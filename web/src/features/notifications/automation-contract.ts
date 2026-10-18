@@ -3,7 +3,7 @@ export interface ConsoleAutomation {
   id: string;
   chatId: string;
   title: string;
-  kind: "reminder" | "session";
+  kind: "reminder" | "session" | "background";
   timing: { type: "at"; at: string } | { type: "cron"; expression: string };
   timezone: string;
   status: AutomationStatus;
@@ -21,7 +21,7 @@ export function parseAutomation(raw: unknown): ConsoleAutomation {
   const item = raw as Record<string, unknown>;
   if (typeof item.id !== "string" || !item.id.trim() || typeof item.chatId !== "string" || !item.chatId.trim() ||
       typeof item.title !== "string" || !item.title.trim() || !STATUSES.has(String(item.status)) ||
-      (item.kind !== "reminder" && item.kind !== "session") || typeof item.timezone !== "string" || !item.timezone.trim() ||
+      (item.kind !== "reminder" && item.kind !== "session" && item.kind !== "background") || typeof item.timezone !== "string" || !item.timezone.trim() ||
       (item.nextAt !== null && (typeof item.nextAt !== "number" || !Number.isSafeInteger(item.nextAt) || item.nextAt < 0 || item.nextAt > MAX_DATE_MS))) return fail();
   if (!item.timing || typeof item.timing !== "object" || Array.isArray(item.timing)) return fail();
   const timing = item.timing as Record<string, unknown>;

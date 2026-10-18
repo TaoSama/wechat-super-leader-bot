@@ -28,6 +28,10 @@ import { readGoalView } from "./goals/view.js";
 import type { AutomationService } from "../automations/service.js";
 import { AUTOMATION_TOOLS, AUTOMATION_TOOL_NAMES, executeAutomationTool } from "../automations/tools.js";
 import { classifyAutomationAuthorization, type AutomationOperation } from "./model/automation-authorization.js";
+import { BackgroundSpecSchema } from "../background/contracts.js";
+import { classifyBackgroundAuthorization } from "./model/background-authorization.js";
+import { assertBackgroundSourcesDiscovered, BACKGROUND_INSTRUCTIONS, BACKGROUND_TOOLS, BACKGROUND_TOOL_NAMES,
+  confirmBackgroundMutations, executeBackgroundTool, recoverBackgroundFollowups, type BackgroundToolAuthority, type BackgroundToolService, type BackgroundTurn } from "./background-tools.js";
 import {
   CLAIM_TTL_MS, ConsoleLinkIssued, ConsoleLinkIssuer, LEADER_TOOLS, LeaderData, LeaderDataSchema, LeaderReply, MAX_HISTORY_ITEMS,
   MAX_MODEL_STEPS, MAX_RECEIPTS, MAX_REPLY_CHARS, MAX_RESULT_CODE_POINTS, MAX_RESULT_JSON_CHARS, MAX_TOOL_CALLS, PLAN_TTL_MS, Plan,
@@ -35,13 +39,16 @@ import {
 } from "./contracts.js";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const MAX_BACKGROUND_TOOL_ARGUMENT_CHARS = 160_000;
+const MAX_STANDARD_TOOL_ARGUMENT_CHARS = 8_000;
 const clip = (text: string, length: number) => {
   const value = text.slice(0, length);
   return /[\uD800-\uDBFF]$/.test(value) ? value.slice(0, -1) : value;
 };
 const confirmation = /^(?:请)?(?:确认|执行|开始|开始执行|确认执行|确认开始|按这个计划执行|就按这个执行|确认这个计划)[。！!]?$/;
 const cancellation = /^(?:请|帮我)?(?:取消计划|不用执行|取消执行|停止后续任务|停止后续执行|先别跑后面的任务)[。！!]?$/;
-type Hub = Pick<NodeHub, "getAllSessions" | "getNodeStatusList" | "getNodeSession" | "isNodeConnected" | "getAllSkills" | "getNodeSkills" | "readHistory"> & ReadinessHub & Partial<MediaHub>;
+type Hub = Pick<NodeHub, "getAllSessions" | "getNodeStatusList" | "getNodeSession" | "isNodeConnected" | "getAllSkills" | "getNodeSkills" | "readHistory"> & ReadinessHub & Partial<MediaHub>
+  & Partial<Pick<NodeHub, "listAutomations" | "inspectAutomation">>;
 
 
 const sanitizeConsoleLinkSecrets = (text: string, issuedUrl?: string): string => {
@@ -67,7 +74,8 @@ export class LeaderOrchestrator {
   private goals: GoalConversation;
   constructor(private store: IStore, private hub: Hub, private commands: Pick<CommandService, "submit">,
     private model: LeaderModel, private now: () => number = Date.now, private consoleLinkIssuer?: ConsoleLinkIssuer,
-    executions?: ExecutionScheduler, goals?: GoalScheduler, private automations?: AutomationService) {
+    executions?: ExecutionScheduler, goals?: GoalScheduler, private automations?: AutomationService,
+    private background?: BackgroundToolService) {
     this.executions = executions ?? new ExecutionScheduler(store, commands, { now });
     this.goals = new GoalConversation(store, hub, goals ?? new GoalScheduler(store, commands, createGoalDecider(model), { now }), now);
   }
@@ -110,9 +118,16 @@ export class LeaderOrchestrator {
           })).text;
         } catch { automationRecovery = "定时任务持久记录暂不可读，提交情况尚待核查，不自动重建。"; }
       }
-      const recoveryText = `上次对话处理被中断，未自动重试原指令。${automationRecovery ?? (prior.goal ? await this.goals.recovery(chatId, prior.goal.id) : recovered
+      let backgroundRecovery: string | undefined;
+      if (this.background && !prior.plan && !prior.goal) {
+        try { backgroundRecovery = await recoverBackgroundFollowups(this.background, chatId, prior.messageId); }
+        catch { backgroundRecovery = "后台操作持久记录暂不可读，提交情况尚待核查，不自动重复提交。"; }
+      }
+      const mutationRecovery = [automationRecovery, backgroundRecovery].filter(Boolean).join("\n");
+      const recoveryText = `上次对话处理被中断，未自动重试原指令。${mutationRecovery || (prior.goal ? await this.goals.recovery(chatId, prior.goal.id) : recovered
         ? `已确认计划仍按持久记录核查与推进：\n${executionSummary(recovered)}`
-        : "尚无可确认的持久执行记录，不自动创建或派发。请先核查会话状态。")}`;
+        : this.background ? "尚未核对到本轮追问回执；后台任务及延期情况请查询任务记录，不自动重试。"
+          : "尚无可确认的持久执行记录，不自动创建或派发。请先核查会话状态。")}`;
       data.receipts.push({ messageId: prior.messageId, inputHash: prior.inputHash, text: recoveryText });
       data.inflight = undefined;
       data.pending = undefined;
@@ -169,21 +184,22 @@ export class LeaderOrchestrator {
       const reference = hash([chatId, messageId]).slice(0, 12);
       const trace: QueryTrace = { modelSteps: 0, toolCalls: 0, totalModelMs: 0 };
       const automationTurn: AutomationTurn = { attempted: false, ids: new Set(), errors: [] };
+      const backgroundTurn: BackgroundTurn = { mutations: [], errors: [] };
       let execution: ReasonedReply["execution"];
       try {
-        const reasoned = await this.reason(chatId, text, data, linkContext, trace, previousPlan, automationTurn, claimed.revision);
+        const reasoned = await this.reason(chatId, text, data, linkContext, trace, previousPlan, automationTurn, claimed.revision, backgroundTurn);
         execution = reasoned.execution;
         reply = { text: reasoned.text, commandId: reasoned.commandId, ...(reasoned.images ? { images: reasoned.images } : {}) };
       } catch (error) {
         if (error instanceof ConflictError) throw error;
-        console.warn(automationTurn.attempted ? 'Leader processing failed after an automation operation; checking persisted receipts' : 'Leader processing failed; no plan dispatched', {
+        console.warn(automationTurn.attempted || backgroundTurn.mutations.length ? 'Leader processing failed after a background or automation operation; checking persisted receipts' : 'Leader processing failed; no plan dispatched', {
           requestRef: reference, elapsedMs: Date.now() - startedAt, ...trace, ...modelDiagnostic(error),
         });
         data.memories = memoriesBefore;
         data.pending = previousPlan && previousPlan.expiresAt > this.now() ? previousPlan : undefined;
         data.pendingGoal = pendingGoalBefore && pendingGoalBefore.expiresAt > this.now() ? pendingGoalBefore : undefined;
-        reply = automationTurn.attempted
-          ? await this.confirmAutomations(chatId, messageId, automationTurn)
+        reply = automationTurn.attempted || backgroundTurn.mutations.length
+          ? await this.confirmMutations(chatId, messageId, automationTurn, backgroundTurn)
           : { text: failureReply(error, reference) };
       }
       if (execution) {
@@ -330,12 +346,33 @@ export class LeaderOrchestrator {
     return generateAutomationAcknowledgement(this.model, this.store, this.hub, this.automations!, chatId, messageId, turn);
   }
 
+  private async confirmMutations(chatId: string, messageId: string, automationTurn: AutomationTurn, backgroundTurn: BackgroundTurn): Promise<LeaderReply> {
+    const notices: string[] = [];
+    if (automationTurn.attempted) notices.push((await this.confirmAutomations(chatId, messageId, automationTurn)).text);
+    if (backgroundTurn.mutations.length && this.background) notices.push(await confirmBackgroundMutations(this.background, chatId, backgroundTurn));
+    return { text: notices.join("\n\n") };
+  }
+
   private async reason(chatId: string, text: string, data: LeaderData, linkContext: LinkContext, trace: QueryTrace, previousPlan?: Plan,
-    automationTurn: AutomationTurn = { attempted: false, ids: new Set(), errors: [] }, claimRevision?: number): Promise<ReasonedReply> {
+    automationTurn: AutomationTurn = { attempted: false, ids: new Set(), errors: [] }, claimRevision?: number,
+    backgroundTurn: BackgroundTurn = { mutations: [], errors: [] }): Promise<ReasonedReply> {
     const signal = AbortSignal.timeout(TURN_TIMEOUT_MS);
     const sanitizedUserPrompt = sanitizeConsoleLinkSecrets(text);
+    const assertCurrentAuthority = async () => {
+      signal.throwIfAborted();
+      const current = await this.store.getLeaderState(chatId);
+      const inflight = current && LeaderDataSchema.parse(current.data).inflight;
+      if (current?.revision !== claimRevision || !inflight || inflight.expiresAt <= this.now() ||
+          inflight.messageId !== data.inflight?.messageId || inflight.inputHash !== data.inflight?.inputHash) {
+        throw new CommandError(409, "后台或定时操作的本轮处理授权已失效，未继续提交。");
+      }
+    };
+    const backgroundAuthority: BackgroundToolAuthority = { chatId, currentMessageId: data.inflight!.messageId,
+      operations: new Set(), discoveredRunIds: new Set(), discoveredSources: new Map(), assertCurrentAuthority,
+      onMutationAttempt: mutation => { backgroundTurn.mutations.push(mutation); } };
     const messages: ModelMessage[] = [
       { role: "system", content: this.automations ? `${SYSTEM_PROMPT}\n定时任务工具已配置。当前时间：${formatDisplayTime(this.now())}；默认时区Asia/Shanghai，用户明确指定时区时使用该时区。仅用户本轮明确要求才创建、暂停、恢复或取消定时任务；查询使用list_automations/automation_runs。时间、会话或意图含糊时先澄清，已有提醒不能因查询而重建。创建成功仅表示已保存等待调度，未来触发不等于已启动会话；不要对同一请求反复创建。开始默认静默，监控无变化不通知。` : SYSTEM_PROMPT },
+      ...(this.background ? [{ role: "system" as const, content: `${BACKGROUND_INSTRUCTIONS}\nkind=background 的任务参数放入 background 对象。立即后台执行使用 timing.type=at 和当前时间，不转换为向源会话派发的计划。` }] : []),
       ...data.history,
       ...(previousPlan ? [{ role: "assistant" as const, content: JSON.stringify({ previousUnconfirmedPlan: previousPlan }) }] : []),
       { role: "user", content: sanitizedUserPrompt },
@@ -343,6 +380,7 @@ export class LeaderOrchestrator {
     let toolCount = 0;
     let authorization: ReturnType<typeof classifyUserAuthorization> | undefined;
     let automationAuthorization: ReturnType<typeof classifyAutomationAuthorization> | undefined;
+    let backgroundAuthorization: ReturnType<typeof classifyBackgroundAuthorization> | undefined;
     const memoryChanges: string[] = [];
     for (let step = 0; step < MAX_MODEL_STEPS; step++) {
       signal.throwIfAborted();
@@ -350,7 +388,8 @@ export class LeaderOrchestrator {
       const modelStartedAt = Date.now();
       let answer;
       try {
-        answer = await this.model.complete(messages, this.automations ? [...LEADER_TOOLS, ...AUTOMATION_TOOLS] : LEADER_TOOLS, signal);
+        answer = await this.model.complete(messages, [...LEADER_TOOLS, ...(this.automations ? AUTOMATION_TOOLS : []),
+          ...(this.background ? BACKGROUND_TOOLS : [])], signal);
       } finally {
         trace.lastModelMs = Date.now() - modelStartedAt;
         trace.totalModelMs += trace.lastModelMs;
@@ -367,17 +406,69 @@ export class LeaderOrchestrator {
         toolCount++;
         trace.toolCalls = toolCount;
         trace.lastTool = Object.hasOwn(ToolArguments, call.function.name) ? call.function.name : "unsupported";
+        if (this.background && BACKGROUND_TOOL_NAMES.has(call.function.name)) {
+          trace.lastTool = call.function.name;
+          const mutating = call.function.name === "follow_up_background_task" || call.function.name === "extend_background_task";
+          if (mutating && !backgroundAuthorization) backgroundAuthorization = classifyBackgroundAuthorization(this.model, sanitizedUserPrompt, signal);
+          if (mutating) backgroundAuthority.operations = await backgroundAuthorization!;
+          const required = call.function.name === "follow_up_background_task" ? "follow_up" : "extend";
+          if (mutating && !backgroundAuthority.operations.has(required) && !backgroundTurn.mutations.length && !automationTurn.attempted) {
+            return { text: "当前用户消息没有明确授权该后台追问或延期操作；未执行此操作。" };
+          }
+          let output: unknown;
+          try {
+            if (call.function.arguments.length > MAX_BACKGROUND_TOOL_ARGUMENT_CHARS) throw new Error("Background tool arguments exceed budget");
+            const raw: unknown = JSON.parse(call.function.arguments);
+            // A missing source reader must fail closed while independent background execution remains usable.
+            const sourceHub = { getNodeStatusList: () => this.hub.getNodeStatusList(),
+              listAutomations: (nodeId: string, readSignal?: AbortSignal) => {
+                if (!this.hub.listAutomations) throw new Error("Source automation discovery is unavailable");
+                return this.hub.listAutomations(nodeId, readSignal);
+              },
+              inspectAutomation: (nodeId: string, options: Parameters<NodeHub["inspectAutomation"]>[1], readSignal?: AbortSignal) => {
+                if (!this.hub.inspectAutomation) throw new Error("Source automation inspection is unavailable");
+                return this.hub.inspectAutomation(nodeId, options, readSignal);
+              } };
+            output = await executeBackgroundTool(this.background, sourceHub, call.function.name, raw, backgroundAuthority, signal);
+          } catch (error) {
+            const notice = error instanceof CommandError ? "本轮后台操作授权已失效，未继续提交。"
+              : mutating ? "后台操作未取得确认，请核查归属、保留期及本轮明确授权；不自动重试。"
+              : "后台任务查询失败，未取得可信记录；请核对发现的任务和精确时间范围。";
+            if (mutating && backgroundTurn.mutations.length) backgroundTurn.errors.push(notice);
+            output = { error: notice };
+          }
+          const content = JSON.stringify(output);
+          messages.push({ role: "tool", tool_call_id: call.id, content: content.length > 12000
+            ? JSON.stringify({ truncated: true, data: clip(content, 12000) }) : content });
+          continue;
+        }
         if (this.automations && AUTOMATION_TOOL_NAMES.has(call.function.name)) {
           trace.lastTool = call.function.name;
           let raw: unknown;
-          try { raw = call.function.arguments.length <= 8000 ? JSON.parse(call.function.arguments) : undefined; }
+          try {
+            raw = call.function.arguments.length <= MAX_BACKGROUND_TOOL_ARGUMENT_CHARS ? JSON.parse(call.function.arguments) : undefined;
+            const backgroundInput = raw !== null && typeof raw === "object" && "kind" in raw && raw.kind === "background";
+            if (!backgroundInput && call.function.arguments.length > MAX_STANDARD_TOOL_ARGUMENT_CHARS) raw = undefined;
+          }
           catch { raw = undefined; }
           const mutating = call.function.name === "create_automation" || call.function.name === "update_automation";
+          const backgroundCreation = call.function.name === "create_automation" && raw !== null && typeof raw === "object" && "kind" in raw && raw.kind === "background";
+          const sessionCreation = call.function.name === "create_automation" && raw !== null && typeof raw === "object" && "kind" in raw && raw.kind === "session";
+          if (this.background && sessionCreation) {
+            if (!backgroundAuthorization) backgroundAuthorization = classifyBackgroundAuthorization(this.model, sanitizedUserPrompt, signal);
+            if ((await backgroundAuthorization).size) {
+              messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error:
+                "本轮要求隔离后台执行或读取已有任务结果；不得新建向源会话发送指令的session定时任务。请使用kind=background及已发现的sources。" }) });
+              continue;
+            }
+          }
           const status = raw && typeof raw === "object" && "status" in raw ? raw.status : undefined;
           const required: AutomationOperation | undefined = call.function.name === "create_automation" ? "create"
             : status === "paused" ? "pause" : status === "active" ? "resume" : status === "cancelled" ? "cancel" : undefined;
-          if (mutating && !automationAuthorization) automationAuthorization = classifyAutomationAuthorization(this.model, sanitizedUserPrompt, signal);
-          const authorized = !mutating || required !== undefined && (await automationAuthorization!).has(required);
+          if (backgroundCreation && !backgroundAuthorization) backgroundAuthorization = classifyBackgroundAuthorization(this.model, sanitizedUserPrompt, signal);
+          if (mutating && !backgroundCreation && !automationAuthorization) automationAuthorization = classifyAutomationAuthorization(this.model, sanitizedUserPrompt, signal);
+          const authorized = backgroundCreation ? !!this.background && (await backgroundAuthorization!).has("create")
+            : !mutating || required !== undefined && (await automationAuthorization!).has(required);
           let output: unknown;
           if (!authorized) {
             const error = "当前用户消息没有明确授权该定时操作；未执行此操作。";
@@ -386,15 +477,15 @@ export class LeaderOrchestrator {
             output = { error };
           }
           else {
-            const assertCurrentAuthority = async () => {
-              signal.throwIfAborted();
-              const current = await this.store.getLeaderState(chatId);
-              const inflight = current && LeaderDataSchema.parse(current.data).inflight;
-              if (current?.revision !== claimRevision || !inflight || inflight.expiresAt <= this.now() ||
-                  inflight.messageId !== data.inflight?.messageId || inflight.inputHash !== data.inflight?.inputHash) {
-                throw new CommandError(409, "定时操作的本轮处理授权已失效，未继续提交。");
+            if (backgroundCreation) {
+              try {
+                const spec = BackgroundSpecSchema.parse(raw && typeof raw === "object" && "background" in raw ? raw.background : undefined);
+                assertBackgroundSourcesDiscovered(backgroundAuthority, spec.sources);
+              } catch {
+                messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: "后台任务参数或来源未获验证；先发现每台机器上的原生定时任务，再创建监控。" }) });
+                continue;
               }
-            };
+            }
             if (mutating) {
               await assertCurrentAuthority();
               // Once a write may have reached storage, every later failure must
@@ -420,9 +511,17 @@ export class LeaderOrchestrator {
             ? JSON.stringify({ truncated: true, data: clip(content, 12000) }) : content });
           continue;
         }
-        if (automationTurn.attempted && ["execute_plan", "execute_goal", "propose_plan", "propose_goal", "send_session_images"].includes(call.function.name)) {
+        if ((automationTurn.attempted || backgroundTurn.mutations.length) && ["execute_plan", "execute_goal", "propose_plan", "propose_goal", "send_session_images"].includes(call.function.name)) {
           messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: "本轮已提交定时操作；即时派发未执行，请先核查定时操作回执。" }) });
           continue;
+        }
+        if (this.background && ["execute_plan", "execute_goal", "propose_plan", "propose_goal"].includes(call.function.name)) {
+          if (!backgroundAuthorization) backgroundAuthorization = classifyBackgroundAuthorization(this.model, sanitizedUserPrompt, signal);
+          if ((await backgroundAuthorization).size) {
+            messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error:
+              "用户本轮要求隔离后台执行、跟踪或追问；不得转换为向源会话派发计划或持续目标。新任务请使用create_automation(kind=background)，既有任务请查询后使用后台追问或延期工具。" }) });
+            continue;
+          }
         }
         if (call.function.name === "send_session_images") {
           let args: unknown;
@@ -469,7 +568,7 @@ export class LeaderOrchestrator {
         messages.push({ role: "tool", tool_call_id: call.id, content: content.length > 12000
           ? JSON.stringify({ truncated: true, data: clip(content, 12000) }) : content });
       }
-      if (automationTurn.attempted) return this.confirmAutomations(chatId, data.inflight!.messageId, automationTurn);
+      if (automationTurn.attempted || backgroundTurn.mutations.length) return this.confirmMutations(chatId, data.inflight!.messageId, automationTurn, backgroundTurn);
     }
     return { text: "本轮查询已达到上限，未向会话发送指令。请缩小目标范围或继续查询。" };
   }
