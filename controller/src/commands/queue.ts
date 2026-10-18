@@ -31,6 +31,8 @@ export function sameAuthority(a: CommandAuthority | undefined, b: CommandAuthori
   switch (left.type) {
     case "admin": return true;
     case "chat": return right.type === "chat" && left.chatId === right.chatId;
+    case "automation": return right.type === "automation" && left.chatId === right.chatId &&
+      left.scheduleId === right.scheduleId && left.runId === right.runId;
     case "console": return right.type === "console" && left.tokenHash === right.tokenHash && left.expiresAt === right.expiresAt;
     case "plan": case "goal": return (right.type === "plan" || right.type === "goal") && left.id === right.id && left.chatId === right.chatId;
   }

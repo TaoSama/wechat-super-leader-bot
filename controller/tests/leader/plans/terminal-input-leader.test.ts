@@ -1,3 +1,4 @@
+import { acknowledgementFixture } from "../acknowledgement-fixture.js";
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { LeaderOrchestrator } from "../../../src/leader/orchestrator.js";
@@ -23,7 +24,7 @@ function fixture(actions: unknown[] = [{ nodeId: "node", sessionId, prompt: "syn
   const hub = { getAllSkills: () => [], getNodeSkills: () => [], getAllSessions: async () => [session], getNodeStatusList: () => [],
     getNodeSession: (node: string, id: string) => node === "node" && id === sessionId ? session : null, isNodeConnected: () => true };
   const replies = [tool(actions), { content: "终端多步不能派发", toolCalls: [] } satisfies ModelReply];
-  const model: LeaderModel = { complete: vi.fn(async () => { const next = replies.shift(); if (!next) throw new Error("No synthetic reply"); return next; }) };
+  const model: LeaderModel = { complete: vi.fn(async messages => { const acknowledgement = acknowledgementFixture(messages); if (acknowledgement) return acknowledgement; const next = replies.shift(); if (!next) throw new Error("No synthetic reply"); return next; }) };
   const dispatched = vi.fn();
   const commands = { submit: vi.fn(async (request: PostCommandRequest, _wait?: number, guard?: () => Promise<void>, sendRoute?: SendRoute) => {
     await guard?.();

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { closeTestWebSocket, withTestCleanup } from '../../support/cleanup.mjs';
+import { fixtureHistory } from './confirmation-fixture.mjs';
 
 export const GOAL_NODE = 'goal-fixture-node';
 export const GOAL_CHAT = 'goal-fixture-chat';
@@ -48,10 +49,12 @@ export function goalModelCall(last, tools = []) {
 export async function verifyGoals({ WebSocket, base, request, nodeToken, store, restart, waitFor }) {
   const { goalRequestId } = await import('../../../controller/dist/leader/goals/goal.js');
   const delivered = [], errors = [], acknowledgements = [], goalIds = [];
+  const recordedResults = [];
   let socket, heartbeat, probe, sessionStatus = 'idle';
   const healthy = () => { if (errors.length) throw errors[0]; };
   const write = frame => {
     assert(socket?.readyState === WebSocket.OPEN, 'Goal fixture socket is not open');
+    if (frame.type === 'result') recordedResults.push({ ...frame, nodeId: GOAL_NODE });
     socket.send(JSON.stringify(frame), error => { if (error) errors.push(error); });
   };
   const frame = type => ({ type, ...(type === 'hello' ? { version: 1, nodeId: GOAL_NODE } : {}), skills: [],
@@ -69,7 +72,11 @@ export async function verifyGoals({ WebSocket, base, request, nodeToken, store, 
     socket.on('message', raw => {
       try {
         const item = JSON.parse(raw.toString());
-        if (item.type === 'command') {
+        if (item.type === 'read_history') {
+          const session = frame('heartbeat').sessions.find(session => session.id === item.sessionId);
+          assert(session, 'History requested from an unknown goal session');
+          write(fixtureHistory(item, session, delivered, recordedResults));
+        } else if (item.type === 'command') {
           assert.equal(item.nodeId, GOAL_NODE); assert.equal(item.sessionId, SESSION); assert.equal(item.action, 'send');
           assert.equal(item.sendRoute, 'control-socket');
           for (const key of ['sourceActions', 'authorization', 'lease', 'target']) assert(!Object.hasOwn(item, key));

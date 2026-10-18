@@ -49,6 +49,12 @@ export function verificationPlan(suite = 'all') {
     step('synthetic-integration', process.execPath, ['tests/integration/run.mjs']),
     step('console-auth-integration', process.execPath, ['tests/integration/console-auth.mjs', '--run']),
     step('wechat-interaction', process.execPath, ['tests/integration/leader/wechat-interaction.mjs', '--run']),
+    step('task-notifications-memory', process.execPath, ['tests/integration/leader/task-notifications.mjs', '--run']),
+    step('task-notifications-postgres', process.execPath, ['tests/integration/leader/task-notifications.mjs', '--run', '--postgres']),
+    step('scheduled-sessions-memory', process.execPath, ['tests/integration/leader/scheduled-sessions.mjs', '--run']),
+    step('scheduled-sessions-postgres', process.execPath, ['tests/integration/leader/scheduled-sessions.mjs', '--run', '--postgres']),
+    step('result-gateway-cli', process.execPath, ['tests/integration/leader/result-gateway.mjs', '--run']),
+    step('sdk-result-gateway-cli', process.execPath, ['tests/integration/leader/sdk-result-gateway.mjs', '--run']),
   ];
   return suite === 'unit' ? unit : suite === 'integration' ? [...builds, ...integration] : [...unit, ...integration];
 }

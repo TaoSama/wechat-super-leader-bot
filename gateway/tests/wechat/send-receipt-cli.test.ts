@@ -10,8 +10,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { StateManager, writePrivateJsonSync } from "../../src/runtime/state.js";
-import type { Notification } from "../../src/controller/notification-contract.js";
-import { claimed, notification } from "../fixtures/notification-fixtures.js";
+import type { ResultDelivery } from "../../src/results/contracts.js";
 
 const WAIT_MS = 5_000;
 const TEST_MS = 20_000;
@@ -94,9 +93,16 @@ async function fixture(t: TestContext, options: Options = {}) {
   const config = path.join(directory, "openssl.cnf");
   const children: Running[] = [], servers: http.Server[] = [], errors: unknown[] = [];
   const sends: Record<string, unknown>[] = [], forwards: Record<string, unknown>[] = [];
-  const item = { ...notification(1, CHAT), text: NOTICE_TEXT };
-  const records = new Map<string, Notification>([[item.id, item]]);
-  let polls = 0, claims = 0, receipts = 0, pendingRequests = 0;
+  const createdAt = Date.now() - 1_000;
+  const item: ResultDelivery = {
+    id: "00000000-0000-4000-8000-000000000001", key: "synthetic-result", chatId: CHAT,
+    source: { type: "task", id: "synthetic-task" }, kind: "completed", status: "ready", mode: "text", messages: [NOTICE_TEXT],
+    artifact: { id: "00000000-0000-4000-8000-000000000002", chatId: CHAT, name: "result.md",
+      size: Buffer.byteLength(NOTICE_TEXT), sha256: createHash("sha256").update(NOTICE_TEXT).digest("hex"), expiresAt: createdAt + 120_000 },
+    createdAt, expiresAt: createdAt + 60_000, retainedUntil: createdAt + 120_000,
+  };
+  const records = new Map<string, ResultDelivery>([[item.id, item]]);
+  let polls = 0, claims = 0, receipts = 0, defers = 0, pendingRequests = 0;
 
   async function stop(running: Running): Promise<void> {
     if (running.child.exitCode === null && running.child.signalCode === null) {
@@ -131,7 +137,7 @@ async function fixture(t: TestContext, options: Options = {}) {
   const state = new StateManager(accountPath, statePath);
   state.markBaselineEstablished(); state.setContextToken(CHAT, CONTEXT);
   const inboundCreatedAtMs = Date.now() - 1000;
-  state.recordInboundContext("synthetic-prior-inbound-key", CHAT, inboundCreatedAtMs);
+  state.recordInboundContext("synthetic-prior-inbound-key", CHAT, inboundCreatedAtMs - 1, true, CONTEXT);
   state.commitCursor("synthetic-old-cursor"); state.saveState();
 
   function handle(handler: (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>) {
@@ -173,7 +179,7 @@ async function fixture(t: TestContext, options: Options = {}) {
     assert.ok(text === NOTICE_TEXT || text === REPLY_TEXT);
     if (text === NOTICE_TEXT) {
       const digest = createHash("sha256").update(JSON.stringify([
-        state.getLoginFingerprint(), CHAT, `notification:${item.id}`, 0,
+        state.getLoginFingerprint(), CHAT, `result:${item.id}:step:0`, 0,
       ])).digest("hex").slice(0, 24);
       assert.equal(msg.client_id, `super-leader:${digest}`);
     }
@@ -182,7 +188,18 @@ async function fixture(t: TestContext, options: Options = {}) {
   }));
   servers.push(wechat);
   const controller = http.createServer(handle(async (req, res) => {
-    assert.equal(req.headers.authorization, `Bearer ${CONTROLLER_TOKEN}`); assert.equal(req.method, "POST");
+    assert.equal(req.headers.authorization, `Bearer ${CONTROLLER_TOKEN}`);
+    if (req.url === "/v1/chats/notification-interest") {
+      assert.equal(req.method, "GET");
+      json(res, { chatIds: [CHAT], interested: [CHAT] });
+      return;
+    }
+    if (req.url === `/v1/deliveries/${item.id}`) {
+      assert.equal(req.method, "GET");
+      json(res, { delivery: records.get(item.id) });
+      return;
+    }
+    assert.equal(req.method, "POST");
     const body = await readBody(req);
     if (req.url === "/v1/chats/authorize") {
       assert.deepEqual(body, { chatId: CHAT });
@@ -195,23 +212,43 @@ async function fixture(t: TestContext, options: Options = {}) {
       json(res, { text: REPLY_TEXT, errmsg: UPSTREAM_ERROR }, options.controllerError?.endpoint === "messages" ? options.controllerError.status : 200);
       return;
     }
-    if (req.url === "/v1/notifications/pending") {
+    if (req.url === "/v1/deliveries/resume") {
+      assert.equal(body.chatId, CHAT);
+      assert.equal(typeof body.generation, "string");
+      json(res, { resumed: 0 });
+      return;
+    }
+    if (req.url === "/v1/deliveries/pending") {
       pendingRequests++; assert.deepEqual(body, { chatIds: [CHAT] });
       if (options.controllerError?.endpoint === "pending") json(res, { errmsg: UPSTREAM_ERROR }, options.controllerError.status);
-      else json(res, { items: [...records.values()].filter(record => record.status === "pending") });
+      else json(res, { items: [...records.values()].filter(record => record.status === "ready") });
       return;
     }
     const current = records.get(item.id)!;
-    if (req.url === `/v1/notifications/${item.id}/claim`) {
-      claims++; assert.equal(current.status, "pending");
-      records.set(item.id, claimed(current, body.attemptId as string));
+    if (req.url === `/v1/deliveries/${item.id}/claim`) {
+      claims++; assert.equal(current.status, "ready");
+      records.set(item.id, { ...current, status: "claimed", attemptId: body.attemptId as string,
+        attemptedAt: Date.now(), attemptExpiresAt: Date.now() + 30_000 });
+    } else if (req.url === `/v1/deliveries/${item.id}/materialize`) {
+      assert.equal(current.status, "claimed");
+      assert.equal(body.attemptId, current.attemptId);
+      json(res, { delivery: { ...current, artifact: { ...current.artifact,
+        downloadUrl: `http://127.0.0.1:${controllerPort}/v1/result-artifacts/${current.artifact.id}/download?expires=${current.expiresAt}&signature=${"a".repeat(64)}` } } });
+      return;
+    } else if (req.url === `/v1/deliveries/${item.id}/defer`) {
+      defers++; assert.equal(body.attemptId, current.attemptId);
+      assert.equal(body.reason, "rejected");
+      assert.equal(body.submittedMessages, 0);
+      const { attemptId: _attemptId, attemptedAt: _attemptedAt, attemptExpiresAt: _attemptExpiresAt, ...rest } = current;
+      records.set(item.id, { ...rest, status: "waiting_for_user", submittedMessages: 0,
+        lastDeferredAttemptId: body.attemptId as string, lastDeferReason: "rejected", lastDeferredAt: Date.now() });
     } else {
-      assert.equal(req.url, `/v1/notifications/${item.id}/receipt`);
+      assert.equal(req.url, `/v1/deliveries/${item.id}/receipt`);
       receipts++; assert.equal(body.attemptId, current.attemptId);
       assert.ok(body.status === "accepted" || body.status === "uncertain");
       records.set(item.id, { ...current, status: body.status as "accepted" | "uncertain" });
     }
-    json(res, { notification: records.get(item.id) });
+    json(res, { delivery: records.get(item.id) });
   }));
   servers.push(controller);
   const wechatPort = await listen(wechat), controllerPort = await listen(controller);
@@ -250,14 +287,14 @@ async function fixture(t: TestContext, options: Options = {}) {
     assert.deepEqual(errors, []);
   }
   return { start, stop, waitFor, assertPrivate, records, item, sends, forwards, statePath, accountPath, healthPath,
-    counts: () => ({ polls, claims, receipts, pendingRequests }) };
+    counts: () => ({ polls, claims, receipts, defers, pendingRequests }) };
 }
 
 for (const sendBody of [{}, { errmsg: "" }, { ret: 0 }, { message_id: "18446744073709551615" }]) {
-  test(`real CLI accepts ${JSON.stringify(sendBody)} and persists inbound/notification dedup across restart`, { timeout: TEST_MS }, async t => {
+  test(`real CLI accepts ${JSON.stringify(sendBody)} and persists inbound/result dedup across restart`, { timeout: TEST_MS }, async t => {
     const f = await fixture(t, { sendBody, inbound: true });
     const first = f.start();
-    await f.waitFor(first, () => f.counts().polls >= 3 && f.sends.length === 2);
+    await f.waitFor(first, () => f.counts().polls >= 3 && f.sends.length === 2 && f.counts().receipts === 1);
     await f.stop(first); f.assertPrivate(first);
     assert.equal(f.records.get(f.item.id)!.status, "accepted");
     assert.deepEqual([f.counts().claims, f.counts().receipts, f.sends.length, f.forwards.length], [1, 1, 2, 1]);
@@ -281,20 +318,26 @@ const failures = [
   ...[401, 403].map(sendStatus => ({ sendBody: { errmsg: UPSTREAM_ERROR }, sendStatus, errorType: `ILinkHttp${sendStatus}` })),
 ];
 for (const failure of failures) {
-  test(`real CLI records ${failure.errorType} as permanent uncertainty without diagnostic leaks`, { timeout: TEST_MS }, async t => {
+  const rejected = failure.errorType === "ILinkSendRejectedRet" || failure.errorType === "ILinkSendRejectedErrcode";
+  test(`real CLI records ${failure.errorType} as ${rejected ? "waiting for user" : "permanent uncertainty"} without diagnostic leaks`, { timeout: TEST_MS }, async t => {
     const f = await fixture(t, failure), first = f.start();
-    await f.waitFor(first, () => f.counts().polls >= 3 && f.counts().receipts === 1);
+    await f.waitFor(first, () => f.counts().polls >= 3 && f.counts().receipts + f.counts().defers === 1);
     await f.stop(first); f.assertPrivate(first);
     const item = f.records.get(f.item.id)!;
-    assert.equal(item.status, "uncertain");
-    const diagnostics = first.output.stderr.trim().split("\n").map(line => JSON.parse(line));
-    assert.deepEqual(diagnostics, [{ event: "notification_send_failed", notificationId: item.id,
-      attemptId: item.attemptId, errorType: failure.errorType }]);
+    assert.equal(item.status, rejected ? "waiting_for_user" : "uncertain");
+    const evidence = new StateManager(f.accountPath, f.statePath).replyDeliveries[`result:${item.id}:step:0`];
+    assert.equal(evidence.acknowledgedChunks, 0);
+    assert.equal(Boolean(evidence.inFlight), !rejected);
+    const diagnostics = first.output.stderr.trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
+    assert.deepEqual(diagnostics, rejected ? [] : [{ event: "notification_send_failed", notificationId: item.id,
+      attemptId: item.attemptId, errorType: "UncertainSend" }]);
+    if (rejected) assert.equal(item.lastDeferReason, "rejected");
     const initialPolls = f.counts().polls, second = f.start();
     await f.waitFor(second, () => f.counts().polls >= initialPolls + 3);
     await f.stop(second); f.assertPrivate(second);
     assert.equal(second.output.stderr, "");
-    assert.deepEqual([f.counts().claims, f.counts().receipts, f.sends.length, f.forwards.length], [1, 1, 1, 0]);
+    assert.deepEqual([f.counts().claims, f.counts().receipts, f.counts().defers, f.sends.length, f.forwards.length],
+      rejected ? [1, 0, 1, 1, 0] : [1, 1, 0, 1, 0]);
   });
 }
 

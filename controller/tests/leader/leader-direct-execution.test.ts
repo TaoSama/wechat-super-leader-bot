@@ -1,3 +1,4 @@
+import { acknowledgementFixture } from "./acknowledgement-fixture.js";
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { CLAIM_TTL_MS, type GoalRequest } from "../../src/leader/contracts.js";
@@ -34,6 +35,8 @@ class ScriptedModel implements LeaderModel {
       return this.authorizationReply ? this.authorizationReply()
         : tool(AUTHORIZATION_TOOL_NAME, { intent: this.authorizationIntent ?? this.executionIntent });
     }
+    const acknowledgement = acknowledgementFixture(messages);
+    if (acknowledgement) return acknowledgement;
     this.calls.push(structuredClone(messages));
     this.plannerSignals.push(signal);
     const reply = this.replies.shift();
@@ -80,6 +83,8 @@ function deferredModel() {
   let intent: "task" | "goal" = "task";
   const plannerCalls = vi.fn(), authorizationCalls = vi.fn();
   const model: LeaderModel = { complete: vi.fn(async (_messages, tools) => {
+    const acknowledgement = acknowledgementFixture(_messages);
+    if (acknowledgement) return acknowledgement;
     if (tools.length === 1 && tools[0].function.name === AUTHORIZATION_TOOL_NAME) {
       authorizationCalls();
       return tool(AUTHORIZATION_TOOL_NAME, { intent });

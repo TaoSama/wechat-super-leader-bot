@@ -95,8 +95,8 @@ test("WeChatGateway end-to-end pollOnce, deduplication across chats, and cursor 
   assert.equal(sm.syncBuf, "cursor-after-batch-1");
   assert.equal(forwardedToController.length, 2);
   assert.equal(sentToWeChat.length, 2);
-  assert.equal(sentToWeChat[0].text, "**Reply** to chat-a");
-  assert.equal(sentToWeChat[1].text, "**Reply** to chat-b");
+  assert.equal(sentToWeChat[0].text, "Reply to chat-a");
+  assert.equal(sentToWeChat[1].text, "Reply to chat-b");
   for (const chatId of ["chat-a", "chat-b"]) {
     assert.ok(order.indexOf(`authorize:${chatId}`) < order.indexOf(`typing:${chatId}`));
     assert.ok(order.indexOf(`typing:${chatId}`) < order.indexOf(`forward:${chatId}`));

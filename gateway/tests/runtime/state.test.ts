@@ -249,3 +249,29 @@ test("corrupt permanent failure state fails closed", t => {
     assert.throws(() => new StateManager(credentials, statePath), /Failed to load gateway state/);
   }
 });
+
+
+test("active external delivery evidence is retained until its owner releases it", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-external-evidence-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const state = new StateManager(path.join(directory, "absent.json"), path.join(directory, "state.json"));
+  for (let index = 0; index < MAX_REPLY_DELIVERIES; index++) state.replyDeliveries[`result:${index}`] = {
+    digest: "c".repeat(64), totalChunks: 1, acknowledgedChunks: 1, inFlight: false,
+  };
+  state.setReplyEvidenceProtection(key => key.startsWith("result:"));
+  assert.throws(() => state.prepareReplyDelivery("ordinary", "d".repeat(64), 1), /capacity exhausted/);
+  state.setReplyEvidenceProtection(key => key !== "result:0");
+  state.prepareReplyDelivery("ordinary", "d".repeat(64), 1);
+  assert.equal(state.replyDeliveries["result:0"], undefined);
+  assert.ok(state.replyDeliveries["result:1"]);
+});
+
+test("reported remaining budget honors a lowered policy and expired window", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-effective-budget-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const state = new StateManager(path.join(directory, "absent.json"), path.join(directory, "state.json"), { sendBudget: 4 });
+  state.contextBudgets.chat = { refreshedAt: Date.now(), grantedBudget: 10, remaining: 7, progressSent: 0, lastInboundKey: "inbound" };
+  assert.equal(state.remainingSendBudget("chat"), 1);
+  state.contextBudgets.chat.refreshedAt -= state.policy.contextWindowMs;
+  assert.equal(state.remainingSendBudget("chat"), 0);
+});

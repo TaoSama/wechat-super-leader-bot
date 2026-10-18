@@ -18,11 +18,13 @@ export type DeliveryMode = z.infer<typeof DeliveryModeSchema>;
 export type CommandAuthority =
   | { type: "admin" }
   | { type: "chat"; chatId: string }
+  | { type: "automation"; chatId: string; scheduleId: string; runId: string }
   | { type: "console"; tokenHash: string; expiresAt: string }
   | { type: "plan" | "goal"; id: string; chatId: string };
 export const CommandAuthoritySchema = z.union([
   z.object({type:z.literal("admin")}).strict(),
   z.object({type:z.literal("chat"),chatId:z.string().min(1).max(64)}).strict(),
+  z.object({type:z.literal("automation"),chatId:z.string().min(1).max(64),scheduleId:z.string().uuid(),runId:z.string().uuid()}).strict(),
   z.object({type:z.literal("console"),tokenHash:z.string().regex(/^[a-f0-9]{64}$/),expiresAt:z.string().datetime({offset:true})}).strict(),
   z.object({type:z.enum(["plan","goal"]),id:z.string().uuid(),chatId:z.string().min(1).max(64)}).strict(),
 ]);

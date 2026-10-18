@@ -8,10 +8,11 @@ import { nextCommandState, inspectionLimit, validateStoredCommandInput } from ".
 import { validateNodeSessionInventory, withNodeSessionsLock } from "./node-sessions.js";
 import type { CreateExecutionResult, ExecutionRecord } from "../leader/plans/execution.js";
 import type { ExecutionConfirmationAuthority } from "../leader/plans/confirmation.js";
-import type { Notification, NotificationReceiptStatus, NotificationDeferReason } from "../notifications/contracts.js";
+import type { Notification, StoredNotification, NotificationReceiptStatus, NotificationDeferReason } from "../notifications/contracts.js";
 import type { GoalRecord, GoalConfirmationAuthority, CreateGoalResult } from "../leader/goals/goal.js";
 import { pgConfirmGoal, pgGetGoal, pgGetLatestGoal, pgCompareAndSetGoal, pgListRunnableGoals, pgListRecentGoals } from "./goal-postgres.js";
 import { pgListPendingNotifications, pgGetNotification, pgClaimNotification, pgRecordNotificationReceipt, pgDeferNotification } from "./notification-postgres.js";
+import { initNotificationCandidateState, pgListNotificationCandidates, pgGetNotificationParts, pgMarkNotificationPrepared } from "./notification-candidates-postgres.js";
 import { pgCreateExecutionIfAbsent, pgGetExecution, pgGetLatestExecution,
   pgCompareAndSetExecution, pgListActiveExecutions, pgConfirmExecution, pgListRecentExecutions, pgCreateLockedExecution } from "./execution-postgres.js";
 import {
@@ -36,7 +37,7 @@ import { initializeDatabase } from "./migrations.js";
 import { recordMessageImages, getMessageImage } from "./message-images-postgres.js";
 import type { StoredMessageImage } from "../sessions/message-images.js";
 import { ReplyImagesSchema } from "../sessions/media-contracts.js";
-import { pgListQueuedCommands, pgClaimQueuedCommand, pgCancelQueuedCommand } from "./command-queue-postgres.js";
+import { pgListQueuedCommands, pgClaimQueuedCommand, pgRequeueClaimedCommand, pgCancelQueuedCommand } from "./command-queue-postgres.js";
 import { sameAuthority, sameCommandPayload } from "../commands/queue.js";
 import type { CommandAuthority, SendRoute } from "../types.js";
 import { pgEnqueueProgressNotification } from "./notification-progress-postgres.js";
@@ -59,6 +60,7 @@ export class PostgresStore implements IStore {
 
   async init(): Promise<void> {
     await initializeDatabase(this.pool);
+    await initNotificationCandidateState(this.pool);
   }
 
   async close(): Promise<void> {
@@ -206,6 +208,9 @@ export class PostgresStore implements IStore {
   }
   cancelQueuedCommand(id: string, authority?: CommandAuthority): Promise<CommandRecord | null> {
     return pgCancelQueuedCommand(this.pool,row=>this.mapCommandRow(row),id,authority);
+  }
+  requeueClaimedCommand(id: string): Promise<CommandRecord | null> {
+    return pgRequeueClaimedCommand(this.pool, row=>this.mapCommandRow(row), id);
   }
 
   async listRecentCommands(limit = 50): Promise<CommandRecord[]> {
@@ -418,6 +423,15 @@ export class PostgresStore implements IStore {
 
   async listPendingNotifications(chatIds: readonly string[], now: number): Promise<Notification[]> {
     return pgListPendingNotifications(this.pool, chatIds, now);
+  }
+  listNotificationCandidates(chatIds: readonly string[], now: number, afterId?: string, limit?: number): Promise<StoredNotification[]> {
+    return pgListNotificationCandidates(this.pool, chatIds, now, afterId, limit);
+  }
+  getNotificationParts(source: NotificationSource): Promise<StoredNotification[]> {
+    return pgGetNotificationParts(this.pool, source);
+  }
+  markNotificationPrepared(id: string, resultId: string): Promise<void> {
+    return pgMarkNotificationPrepared(this.pool, id, resultId);
   }
   enqueueProgressNotification(source: NotificationSource, now = Date.now()): Promise<Notification | null> {
     return pgEnqueueProgressNotification(this.pool,source,client=>this.notificationCommandReader(client,true),now);

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { formatDisplayTime } from "../display-time.js";
 import { CommandError, CommandService } from "../commands/service.js";
 import { NodeHub } from "../nodes/hub.js";
 import { ConflictError, IStore } from "../store/interface.js";
@@ -21,7 +22,12 @@ import { GoalConversation, goalConfirmation, goalCancellation } from "./goals/co
 import { GoalScheduler } from "./goals/scheduler.js";
 import { createGoalDecider } from "./goals/model.js";
 import { goalPreview } from "./goals/presentation.js";
+import { generateAcknowledgement, generateAutomationAcknowledgement, type AutomationTurn } from "./acknowledgement.js";
 import type { GoalProposal } from "./goals/goal.js";
+import { readGoalView } from "./goals/view.js";
+import type { AutomationService } from "../automations/service.js";
+import { AUTOMATION_TOOLS, AUTOMATION_TOOL_NAMES, executeAutomationTool } from "../automations/tools.js";
+import { classifyAutomationAuthorization, type AutomationOperation } from "./model/automation-authorization.js";
 import {
   CLAIM_TTL_MS, ConsoleLinkIssued, ConsoleLinkIssuer, LEADER_TOOLS, LeaderData, LeaderDataSchema, LeaderReply, MAX_HISTORY_ITEMS,
   MAX_MODEL_STEPS, MAX_RECEIPTS, MAX_REPLY_CHARS, MAX_RESULT_CODE_POINTS, MAX_RESULT_JSON_CHARS, MAX_TOOL_CALLS, PLAN_TTL_MS, Plan,
@@ -61,7 +67,7 @@ export class LeaderOrchestrator {
   private goals: GoalConversation;
   constructor(private store: IStore, private hub: Hub, private commands: Pick<CommandService, "submit">,
     private model: LeaderModel, private now: () => number = Date.now, private consoleLinkIssuer?: ConsoleLinkIssuer,
-    executions?: ExecutionScheduler, goals?: GoalScheduler) {
+    executions?: ExecutionScheduler, goals?: GoalScheduler, private automations?: AutomationService) {
     this.executions = executions ?? new ExecutionScheduler(store, commands, { now });
     this.goals = new GoalConversation(store, hub, goals ?? new GoalScheduler(store, commands, createGoalDecider(model), { now }), now);
   }
@@ -95,9 +101,18 @@ export class LeaderOrchestrator {
       const prior = data.inflight;
       const recovered = prior.plan ? await this.executions.view(prior.plan.id, chatId) : null;
       for (const step of recovered?.steps ?? []) if (step.commandId) data.commandIds.push(step.commandId);
-      const recoveryText = `上次对话处理被中断，未自动重试原指令。${prior.goal ? await this.goals.recovery(chatId, prior.goal.id) : recovered
+      let automationRecovery: string | undefined;
+      if (this.automations && !prior.plan && !prior.goal) {
+        try {
+          const schedules = (await this.automations.repository.list(chatId)).filter(schedule => schedule.authorizedMessageId === prior.messageId);
+          if (schedules.length) automationRecovery = (await this.confirmAutomations(chatId, prior.messageId, {
+            attempted: true, ids: new Set(schedules.map(schedule => schedule.id)), errors: [],
+          })).text;
+        } catch { automationRecovery = "定时任务持久记录暂不可读，提交情况尚待核查，不自动重建。"; }
+      }
+      const recoveryText = `上次对话处理被中断，未自动重试原指令。${automationRecovery ?? (prior.goal ? await this.goals.recovery(chatId, prior.goal.id) : recovered
         ? `已确认计划仍按持久记录核查与推进：\n${executionSummary(recovered)}`
-        : "尚无可确认的持久执行记录，不自动创建或派发。请先核查会话状态。"}`;
+        : "尚无可确认的持久执行记录，不自动创建或派发。请先核查会话状态。")}`;
       data.receipts.push({ messageId: prior.messageId, inputHash: prior.inputHash, text: recoveryText });
       data.inflight = undefined;
       data.pending = undefined;
@@ -131,7 +146,7 @@ export class LeaderOrchestrator {
       data.pendingGoal = undefined;
       reply = await this.goals.cancel(chatId);
     } else if (goal || goalId || text.trim().startsWith("确认目标")) {
-      reply = goal ? await this.goals.confirm(chatId, claimed.revision, goal, data)
+      reply = goal ? await this.confirmGoal(chatId, claimed.revision, goal, data)
         : { text: "没有该ID的待确认目标；未派发。请先核对目标预览，并回复‘确认目标 <UUID>’。" };
     } else if (cancellation.test(text.trim())) {
       data.pending = undefined;
@@ -153,20 +168,23 @@ export class LeaderOrchestrator {
       const startedAt = Date.now();
       const reference = hash([chatId, messageId]).slice(0, 12);
       const trace: QueryTrace = { modelSteps: 0, toolCalls: 0, totalModelMs: 0 };
+      const automationTurn: AutomationTurn = { attempted: false, ids: new Set(), errors: [] };
       let execution: ReasonedReply["execution"];
       try {
-        const reasoned = await this.reason(chatId, text, data, linkContext, trace, previousPlan);
+        const reasoned = await this.reason(chatId, text, data, linkContext, trace, previousPlan, automationTurn, claimed.revision);
         execution = reasoned.execution;
         reply = { text: reasoned.text, commandId: reasoned.commandId, ...(reasoned.images ? { images: reasoned.images } : {}) };
       } catch (error) {
         if (error instanceof ConflictError) throw error;
-        console.warn('Leader processing failed; no plan dispatched', {
+        console.warn(automationTurn.attempted ? 'Leader processing failed after an automation operation; checking persisted receipts' : 'Leader processing failed; no plan dispatched', {
           requestRef: reference, elapsedMs: Date.now() - startedAt, ...trace, ...modelDiagnostic(error),
         });
         data.memories = memoriesBefore;
         data.pending = previousPlan && previousPlan.expiresAt > this.now() ? previousPlan : undefined;
         data.pendingGoal = pendingGoalBefore && pendingGoalBefore.expiresAt > this.now() ? pendingGoalBefore : undefined;
-        reply = { text: failureReply(error, reference) };
+        reply = automationTurn.attempted
+          ? await this.confirmAutomations(chatId, messageId, automationTurn)
+          : { text: failureReply(error, reference) };
       }
       if (execution) {
         data.pending = undefined;
@@ -181,7 +199,7 @@ export class LeaderOrchestrator {
           claimed = await this.save(chatId, claimed.revision, data);
           reply = "plan" in execution
             ? await this.executePlan(chatId, claimed.revision, execution.plan, data)
-            : await this.goals.confirm(chatId, claimed.revision, execution.goal, data);
+            : await this.confirmGoal(chatId, claimed.revision, execution.goal, data);
           reply.text = this.attachConsoleLink(reply.text, linkContext);
         }
       }
@@ -249,7 +267,11 @@ export class LeaderOrchestrator {
         }
       },action.sendRoute,{type:"chat",chatId});
       data.commandIds.push(command.commandId);
-      return {text:command.status === "accepted" ? "补充已由原会话当前轮受理，完成后继续同步结果。" : `当前轮补充${command.status === "queued" ? "已保存，等待核对原轮次" : "结果待核查"}；不会改成新任务或重复发送。`,commandId:command.commandId};
+      const fallbackText = command.status === "accepted" ? "补充已由原会话当前轮受理，执行情况尚待核查。" : `当前轮补充${command.status === "queued" ? "已保存，等待核对原轮次" : "结果待核查"}；不会改成新任务或重复发送。`;
+      return { text: await generateAcknowledgement(this.model, this.store, this.hub, {
+        mode: "steer", durableState: { planId: plan.id, status: "submitted" },
+        targets: [{ ...action, commandId: command.commandId }], fallbackText,
+      }), commandId: command.commandId };
     }
     if (hasTerminalTarget(plan)) {
       if (await this.goals.hasUnfinished(chatId)) return { text: "已有active/blocked持续目标，未派发终端计划；请先查询或取消目标。" };
@@ -258,7 +280,12 @@ export class LeaderOrchestrator {
           if (await this.goals.hasUnfinished(chatId)) throw new CommandError(409, "持续目标仍占用当前聊天授权");
           await guard?.();
         }, route) };
-      return submitTerminalPlan(this.store, guardedCommands, chatId, revision, plan, data, this.now);
+      const submitted = await submitTerminalPlan(this.store, guardedCommands, chatId, revision, plan, data, this.now);
+      if (!submitted.commandId) return submitted;
+      return { ...submitted, text: await generateAcknowledgement(this.model, this.store, this.hub, {
+        mode: "terminal", durableState: { planId: plan.id, executionConfirmed: false, atomic: false },
+        targets: [{ ...plan.actions[0], commandId: submitted.commandId }], fallbackText: submitted.text,
+      }) };
     }
     try {
       await this.store.confirmExecution(createExecution(chatId, plan, this.now()), {
@@ -274,20 +301,48 @@ export class LeaderOrchestrator {
     if (!view) throw new Error("Confirmed execution disappeared");
     const commandIds = view.steps.flatMap(step => step.commandId ? [step.commandId] : []);
     data.commandIds.push(...commandIds);
-    return { text: executionSummary(view, (nodeId, sessionId) => this.hub.getNodeSession(nodeId, sessionId)?.title), commandId: commandIds.at(-1) };
+    return { text: await generateAcknowledgement(this.model, this.store, this.hub, {
+      mode: "plan", durableState: { planId: view.id, status: view.status,
+        steps: view.steps.map(({ step, nodeId, sessionId, prompt, status, dependsOn }) => ({ step, nodeId, sessionId, prompt, status, dependsOn })) },
+      targets: view.steps.map(({ nodeId, sessionId, commandId }) => ({ nodeId, sessionId, commandId })),
+      fallbackText: executionSummary(view, (nodeId, sessionId) => this.hub.getNodeSession(nodeId, sessionId)?.title),
+    }), commandId: commandIds.at(-1) };
   }
 
-  private async reason(chatId: string, text: string, data: LeaderData, linkContext: LinkContext, trace: QueryTrace, previousPlan?: Plan): Promise<ReasonedReply> {
+  private async confirmGoal(chatId: string, revision: number, proposal: GoalProposal, data: LeaderData): Promise<LeaderReply> {
+    const reply = await this.goals.confirm(chatId, revision, proposal, data);
+    const goal = await this.store.getGoal(proposal.id);
+    if (!goal || goal.chatId !== chatId) return reply;
+    const view = await readGoalView(this.store, goal, this.now());
+    const commands = await Promise.all(view.actions.filter(action => action.commandId).map(action => this.store.getCommand(action.commandId!)));
+    return { ...reply, text: await generateAcknowledgement(this.model, this.store, this.hub, {
+      mode: "goal", durableState: { goalId: goal.id, status: goal.status, objective: proposal.objective,
+        actionCount: goal.actions.length, decisionAttempts: goal.decisionAttempts,
+        maxActions: proposal.maxActions, maxDecisions: proposal.maxDecisions,
+        actions: view.actions.map(({ index, target, status, commandId }) => ({ index, target, status, commandId })) },
+      targets: proposal.targets.map(target => ({ ...target,
+        commandId: commands.filter(command => command?.nodeId === target.nodeId && command.sessionId === target.sessionId).at(-1)?.commandId })),
+      fallbackText: reply.text,
+    }) };
+  }
+
+  private confirmAutomations(chatId: string, messageId: string, turn: AutomationTurn): Promise<LeaderReply> {
+    return generateAutomationAcknowledgement(this.model, this.store, this.hub, this.automations!, chatId, messageId, turn);
+  }
+
+  private async reason(chatId: string, text: string, data: LeaderData, linkContext: LinkContext, trace: QueryTrace, previousPlan?: Plan,
+    automationTurn: AutomationTurn = { attempted: false, ids: new Set(), errors: [] }, claimRevision?: number): Promise<ReasonedReply> {
     const signal = AbortSignal.timeout(TURN_TIMEOUT_MS);
     const sanitizedUserPrompt = sanitizeConsoleLinkSecrets(text);
     const messages: ModelMessage[] = [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: this.automations ? `${SYSTEM_PROMPT}\n定时任务工具已配置。当前时间：${formatDisplayTime(this.now())}；默认时区Asia/Shanghai，用户明确指定时区时使用该时区。仅用户本轮明确要求才创建、暂停、恢复或取消定时任务；查询使用list_automations/automation_runs。时间、会话或意图含糊时先澄清，已有提醒不能因查询而重建。创建成功仅表示已保存等待调度，未来触发不等于已启动会话；不要对同一请求反复创建。开始默认静默，监控无变化不通知。` : SYSTEM_PROMPT },
       ...data.history,
       ...(previousPlan ? [{ role: "assistant" as const, content: JSON.stringify({ previousUnconfirmedPlan: previousPlan }) }] : []),
       { role: "user", content: sanitizedUserPrompt },
     ];
     let toolCount = 0;
     let authorization: ReturnType<typeof classifyUserAuthorization> | undefined;
+    let automationAuthorization: ReturnType<typeof classifyAutomationAuthorization> | undefined;
     const memoryChanges: string[] = [];
     for (let step = 0; step < MAX_MODEL_STEPS; step++) {
       signal.throwIfAborted();
@@ -295,7 +350,7 @@ export class LeaderOrchestrator {
       const modelStartedAt = Date.now();
       let answer;
       try {
-        answer = await this.model.complete(messages, LEADER_TOOLS, signal);
+        answer = await this.model.complete(messages, this.automations ? [...LEADER_TOOLS, ...AUTOMATION_TOOLS] : LEADER_TOOLS, signal);
       } finally {
         trace.lastModelMs = Date.now() - modelStartedAt;
         trace.totalModelMs += trace.lastModelMs;
@@ -312,6 +367,63 @@ export class LeaderOrchestrator {
         toolCount++;
         trace.toolCalls = toolCount;
         trace.lastTool = Object.hasOwn(ToolArguments, call.function.name) ? call.function.name : "unsupported";
+        if (this.automations && AUTOMATION_TOOL_NAMES.has(call.function.name)) {
+          trace.lastTool = call.function.name;
+          let raw: unknown;
+          try { raw = call.function.arguments.length <= 8000 ? JSON.parse(call.function.arguments) : undefined; }
+          catch { raw = undefined; }
+          const mutating = call.function.name === "create_automation" || call.function.name === "update_automation";
+          const status = raw && typeof raw === "object" && "status" in raw ? raw.status : undefined;
+          const required: AutomationOperation | undefined = call.function.name === "create_automation" ? "create"
+            : status === "paused" ? "pause" : status === "active" ? "resume" : status === "cancelled" ? "cancel" : undefined;
+          if (mutating && !automationAuthorization) automationAuthorization = classifyAutomationAuthorization(this.model, sanitizedUserPrompt, signal);
+          const authorized = !mutating || required !== undefined && (await automationAuthorization!).has(required);
+          let output: unknown;
+          if (!authorized) {
+            const error = "当前用户消息没有明确授权该定时操作；未执行此操作。";
+            if (!automationTurn.attempted) return { text: error };
+            automationTurn.errors.push(error);
+            output = { error };
+          }
+          else {
+            const assertCurrentAuthority = async () => {
+              signal.throwIfAborted();
+              const current = await this.store.getLeaderState(chatId);
+              const inflight = current && LeaderDataSchema.parse(current.data).inflight;
+              if (current?.revision !== claimRevision || !inflight || inflight.expiresAt <= this.now() ||
+                  inflight.messageId !== data.inflight?.messageId || inflight.inputHash !== data.inflight?.inputHash) {
+                throw new CommandError(409, "定时操作的本轮处理授权已失效，未继续提交。");
+              }
+            };
+            if (mutating) {
+              await assertCurrentAuthority();
+              // Once a write may have reached storage, every later failure must
+              // report its persisted outcome rather than claiming no task exists.
+              automationTurn.attempted = true;
+              if (raw && typeof raw === "object" && "id" in raw && typeof raw.id === "string") automationTurn.ids.add(raw.id);
+            }
+            try {
+              output = await executeAutomationTool(this.automations, call.function.name, raw, {
+                chatId, currentMessageId: data.inflight!.messageId, explicitCurrentTurnAuthorization: authorized, assertCurrentAuthority,
+              }, this.now());
+              if (mutating && output && typeof output === "object" && "id" in output && typeof output.id === "string") automationTurn.ids.add(output.id);
+              if (mutating && output === null) automationTurn.errors.push("未找到归属于当前聊天的该定时任务，未修改。");
+            } catch (error) {
+              const notice = error instanceof CommandError ? "本轮操作授权已失效，没有继续提交该定时操作。"
+                : mutating ? "定时操作返回异常，需核查持久记录；不自动重建。" : "定时任务查询失败，未取得可信记录。";
+              if (mutating) automationTurn.errors.push(notice);
+              output = { error: notice };
+            }
+          }
+          const content = JSON.stringify(output);
+          messages.push({ role: "tool", tool_call_id: call.id, content: content.length > 12000
+            ? JSON.stringify({ truncated: true, data: clip(content, 12000) }) : content });
+          continue;
+        }
+        if (automationTurn.attempted && ["execute_plan", "execute_goal", "propose_plan", "propose_goal", "send_session_images"].includes(call.function.name)) {
+          messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: "本轮已提交定时操作；即时派发未执行，请先核查定时操作回执。" }) });
+          continue;
+        }
         if (call.function.name === "send_session_images") {
           let args: unknown;
           try { args = call.function.arguments.length <= 8000 ? JSON.parse(call.function.arguments) : undefined; }
@@ -357,6 +469,7 @@ export class LeaderOrchestrator {
         messages.push({ role: "tool", tool_call_id: call.id, content: content.length > 12000
           ? JSON.stringify({ truncated: true, data: clip(content, 12000) }) : content });
       }
+      if (automationTurn.attempted) return this.confirmAutomations(chatId, data.inflight!.messageId, automationTurn);
     }
     return { text: "本轮查询已达到上限，未向会话发送指令。请缩小目标范围或继续查询。" };
   }

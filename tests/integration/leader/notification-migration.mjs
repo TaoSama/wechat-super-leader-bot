@@ -68,7 +68,7 @@ export async function verifyNotificationMigration({ databaseUrl, Pool, PostgresS
       const { executionId, ...unchanged } = before;
       const after = migrated.find(row => row.id === before.id);
       assert.deepEqual(after.data, { ...unchanged, source: { type: 'plan', id: executionId } });
-      assert.deepEqual(after, { ...legacyRows.find(row => row.id === before.id), goal_id: null, data: after.data });
+      assert.deepEqual(after, { ...legacyRows.find(row => row.id === before.id), goal_id: null, result_delivery_id: null, data: after.data });
       assert.equal(after.execution_id, executionId); assert.equal(after.goal_id, null);
       assert.equal(after.status, before.status); assert.equal(Number(after.created_at), now); assert.equal(Number(after.expires_at), now + DAY_MS);
       const persisted = await store.getNotification(before.id, now + 2);

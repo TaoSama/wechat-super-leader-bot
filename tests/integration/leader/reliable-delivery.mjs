@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -7,48 +7,70 @@ import { waitFor } from '../../support/control-plane-fixture.mjs';
 
 export const RAW_REPLY_TASK = '请输出完整合成 Markdown 报告以验证明确拒绝后的续传';
 export const PROGRESS_TASK = '请直接执行四个合成进度任务并逐项报告真实进度';
-export const RAW_REPLY = '# 原始报告 😀\n\n| 项目 | 数量 |\n| --- | --- |\n| 中文😀 | 17 |\n\n' +
-  '```typescript\nconst 结果 = "中文😀";\n  console.log(结果);\n```\n\n' +
+const REPORT_HEADER = '# 原始报告 😀\n\n| 项目 | 数量 |\n| --- | --- |\n| 中文😀 | 17 |\n\n' +
+  '```typescript\nconst 结果 = "中文😀";\n  console.log(结果);\n```\n\n';
+export const RAW_REPLY = REPORT_HEADER +
   Array.from({ length: 3_000 }, (_, index) => `第 ${index + 1} 行：中文😀，保留 **Markdown**、空格与换行。\n`).join('') + '\n完整报告终段。';
-export const RESUMABLE_REPLY = RAW_REPLY.slice(0, RAW_REPLY.indexOf('\n', 4_100)).trim();
+export const RESUMABLE_REPLY = REPORT_HEADER + '中文😀'.repeat(1_000) + '\n**完整段落结尾**';
+const RESUMABLE_DISPLAY = '原始报告 😀\n\n| 项目 | 数量 |\n| --- | --- |\n| 中文😀 | 17 |\n\n' +
+  'const 结果 = "中文😀";\n  console.log(结果);\n\n\n' + '中文😀'.repeat(1_000) + '\n完整段落结尾';
 const OBSERVATION_MS = 2_200;
 const TEXT_TYPE = 1;
+const FILE_TYPE = 4;
+const sha256 = value => createHash('sha256').update(value).digest('hex');
 const text = message => message.item_list[0].text_item.text;
 
 export async function verifyReliableDelivery(harness) {
   const { controller, input, runGateway, pending, sent, incoming, deliveries, sendFrame, statePath,
-    fault, wireEvents, evidence, healthy, chatId, contextToken, directTask, nodeId, sessionId, clientId,
-    restartController, setSessionStatus } = harness;
+    fault, wireEvents, evidence, healthy, chatId, contextToken, directTask, nodeId, sessionId,
+    restartController, setSessionStatus, fullResult, artifactText, resultClientId, getDelivery,
+    elapseDispatchInterval, waitForAccepted } = harness;
   assert(Buffer.byteLength(RAW_REPLY, 'utf8') > 128 * 1_024, 'Large-result fixture must exceed 128KiB');
-  const complete = (command, output = RAW_REPLY) => sendFrame({ type: 'result', commandId: command.commandId,
-    turnId: 'synthetic-turn-' + command.commandId, status: 'completed', output });
+  assert(RESUMABLE_REPLY.length <= 4_500 && RESUMABLE_DISPLAY.length > 3_800 && RESUMABLE_DISPLAY.length <= 7_600,
+    'Ordinary report must fit model raw limit and require multiple displayed chunks');
+  const complete = async (command, output = RAW_REPLY) => {
+    await waitForAccepted(command);
+    sendFrame({ type: 'result', commandId: command.commandId,
+      turnId: 'synthetic-turn-' + command.commandId, status: 'completed', output });
+  };
   const launch = async () => {
     const count = deliveries.length;
     await input(directTask);
     await waitFor(() => { healthy(); return deliveries.length === count + 1; }, 'Large-result task accepted');
     const command = deliveries.at(-1);
-    complete(command);
+    await complete(command);
     await waitFor(async () => { healthy(); return (await pending()).some(item => item.kind === 'completed'); },
       'Large complete result becomes a durable notification');
     const notification = (await pending()).find(item => item.kind === 'completed');
-    assert(notification.text.includes(RAW_REPLY), 'Notification changed the original Markdown result');
-    return { command, notification };
+    assert.equal(notification.mode, 'attachment', 'Large result must use summary and complete attachment');
+    assert.equal(notification.messages.length, 1, 'Large result must have one model-generated summary');
+    const full = await fullResult(notification.id);
+    assert.equal(full.slice(full.indexOf(RAW_REPLY)), RAW_REPLY, 'Full result changed the original Markdown body');
+    assert.equal(sha256(full), notification.artifact.sha256, 'Full result differs from stored artifact digest');
+    await elapseDispatchInterval();
+    return { command, notification, full };
   };
 
-  const { notification } = await launch();
+  const { notification, full } = await launch();
   const start = sent.length, eventStart = wireEvents.length;
   const result = await runGateway('--poll-once');
   assert.equal(result.notifications.accepted, 1);
   const parts = sent.slice(start);
-  assert(parts.length > 2, 'Large Markdown report was not split');
-  assert.equal(parts.map(text).join(''), notification.text, 'Parts did not reconstruct every original character');
+  assert.equal(parts.length, 2, 'Large Markdown report must send exactly a summary and a file');
+  assert.equal(parts[0].item_list[0].type, TEXT_TYPE);
+  assert.equal(text(parts[0]), notification.messages[0]);
+  assert.equal(parts[1].item_list[0].type, FILE_TYPE);
+  assert.equal(parts[0].client_id, resultClientId(notification.id, 0));
+  assert.equal(parts[1].client_id, resultClientId(notification.id, 1, 'file'));
+  assert.equal(await artifactText(parts[1]), full, 'Decrypted uploaded file changed the full raw Markdown');
+  assert.equal(sha256(await artifactText(parts[1])), notification.artifact.sha256);
   assert.equal(wireEvents[eventStart].kind, 'typing', 'Long notification did not begin with typing');
-  assert(parts.every((part, index) => part.client_id === clientId('notification:' + notification.id, index)));
-  assert(parts.every(part => !/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/u.test(text(part))), 'Split broke a Unicode surrogate pair');
+  assert(!/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/u.test(text(parts[0])), 'Summary broke a Unicode surrogate pair');
   const sentAfter = sent.length;
   await runGateway('--poll-once');
   assert.equal(sent.length, sentAfter, 'Restart replayed confirmed notification parts');
   evidence('large-markdown-delivery', { originalBytes: Buffer.byteLength(RAW_REPLY), parts: parts.length,
+    summaryMessages: 1, completeRawAttachments: 1, fullResultSha256: notification.artifact.sha256,
     exactReconstruction: true, markdownTableAndCode: true, typingBeforeSend: true, restartResends: 0 });
 
   const rawMessageId = randomUUID(), rawKey = JSON.stringify(['synthetic-account', chatId, rawMessageId]);
@@ -57,6 +79,7 @@ export async function verifyReliableDelivery(harness) {
   fault.remaining = 2; fault.mode = 'reject';
   enqueueRaw();
   const rawStart = sent.length;
+  const rawModelStart = wireEvents.filter(event => event.kind === 'model').length;
   const rejected = await runGateway('--poll-once', { expectedExit: 1 });
   assert.match(rejected.stderr, /RejectedRet|ILinkSendReceiptError/);
   const state = JSON.parse(await readFile(statePath, 'utf8'));
@@ -69,8 +92,10 @@ export async function verifyReliableDelivery(harness) {
   const rawParts = sent.slice(rawStart);
   assert.equal(rawParts.filter(part => part.client_id === confirmedId).length, 1, 'Restart resent a confirmed part');
   assert.equal(rawParts.filter(part => part.client_id === rejectedId).length, 2, 'Explicitly rejected part was not resumed');
-  assert.equal([rawParts[0], ...rawParts.slice(2)].map(text).join(''), RESUMABLE_REPLY,
-    'Resumed reply lost or duplicated original Markdown');
+  assert.equal([rawParts[0], ...rawParts.slice(2)].map(text).join(''), RESUMABLE_DISPLAY,
+    'Resumed reply lost or duplicated formatted report text');
+  assert.equal(wireEvents.filter(event => event.kind === 'model').length, rawModelStart + 1,
+    'Explicitly rejected reply re-ran the original model after restart');
   evidence('confirmed-part-restart', { acknowledgedBeforeRestart: 1, confirmedPartResends: 0,
     rejectedPartAttempts: 2, exactReconstruction: true });
   await verifyUnknownOrdinaryReply(harness);
@@ -82,18 +107,27 @@ export async function verifyReliableDelivery(harness) {
   assert.equal(disconnected.notifications.uncertain, 1);
   assert.equal(sent.length - uncertainStart, 2, 'Unknown delivery continued to later parts');
   const uncertainState = JSON.parse(await readFile(statePath, 'utf8'));
-  assert.equal(uncertainState.reply_deliveries['notification:' + uncertain.notification.id].acknowledgedChunks, 1);
-  assert.equal(uncertainState.reply_deliveries['notification:' + uncertain.notification.id].inFlight, true);
+  const summaryState = uncertainState.reply_deliveries[`result:${uncertain.notification.id}:step:0`];
+  const fileState = uncertainState.reply_deliveries[`result:${uncertain.notification.id}:step:1`];
+  assert.equal(summaryState.acknowledgedChunks, 1);
+  assert.equal(summaryState.inFlight, false);
+  assert.equal(fileState.acknowledgedChunks, 0);
+  assert.equal(fileState.inFlight, true);
+  assert.equal(sent[uncertainStart + 1].item_list[0].type, FILE_TYPE);
+  assert.equal(await artifactText(sent[uncertainStart + 1]), uncertain.full);
+  const modelsBeforeRestart = wireEvents.filter(event => event.kind === 'model').length;
   fault.mode = null;
   const beforeRestart = sent.length;
   await restartController();
   await runGateway('--poll-once');
   await runGateway('--poll-once');
   assert.equal(sent.length, beforeRestart, 'Unknown second segment was resent after both processes restarted');
-  const receipt = await controller.request('/v1/notifications/' + uncertain.notification.id);
-  assert.equal(receipt.body.notification.status, 'uncertain');
+  const receipt = await getDelivery(uncertain.notification.id);
+  assert.equal(receipt.status, 'uncertain');
+  assert.equal(wireEvents.filter(event => event.kind === 'model').length, modelsBeforeRestart,
+    'Unknown result recovery re-ran the original task or summary');
   evidence('unknown-second-part', { attemptedParts: 2, confirmedParts: 1, inFlight: true,
-    controllerAndGatewayRestarted: true, resendCount: 0, receipt: receipt.body.notification.status });
+    controllerAndGatewayRestarted: true, resendCount: 0, receipt: receipt.status });
 
   await setSessionStatus('busy');
   const queueStart = deliveries.length;
@@ -120,7 +154,7 @@ export async function verifyReliableDelivery(harness) {
     assert.equal(deliveries.at(-1).commandId, expected.commandId, 'Queue changed order across process restart');
     await delay(OBSERVATION_MS);
     assert.equal(deliveries.length, queueStart + index + 1, 'Next-turn command bypassed an accepted active command');
-    complete(deliveries.at(-1));
+    await complete(deliveries.at(-1));
   }
   await delay(OBSERVATION_MS);
   assert.equal(deliveries.length, queueStart + 3, 'Cancelled queued command was dispatched');
@@ -133,18 +167,29 @@ export async function verifyReliableDelivery(harness) {
 }
 
 async function verifyUnknownOrdinaryReply(harness) {
-  const { incoming, chatId, contextToken, query, runGateway, sent, statePath, fault, wireEvents, evidence } = harness;
+  const { incoming, chatId, contextToken, query, runGateway, sent, statePath, fault, wireEvents, evidence, clientId } = harness;
   const messageId = randomUUID(), key = JSON.stringify(['synthetic-account', chatId, messageId]);
+  const queryId = randomUUID(), queryKey = JSON.stringify(['synthetic-account', chatId, queryId]);
   const message = (text, clientId) => ({ message_type: TEXT_TYPE, from_user_id: chatId, client_id: clientId,
     create_time_ms: Date.now(), context_token: contextToken, item_list: [{ type: TEXT_TYPE, text_item: { text } }] });
   const previous = JSON.parse(await readFile(statePath, 'utf8'));
   const start = sent.length;
   fault.remaining = 2; fault.mode = 'disconnect';
-  incoming.push(message(RAW_REPLY_TASK, messageId), message(query, randomUUID()));
+  incoming.push(message(RAW_REPLY_TASK, messageId), message(query, queryId));
   const result = await runGateway('--poll-once');
   assert.equal(result.skippedCount, 0, 'Durably admitted replies should not be reported as skipped inputs');
   assert.equal(result.processedCount, 2, 'Unknown delivery blocked the next message in the batch');
   assert.equal(sent.length - start, 3, 'Unknown delivery retried or blocked the later reply');
+  assert.deepEqual(sent.slice(start).map(part => part.client_id),
+    [clientId(key, 0), clientId(key, 1), clientId(queryKey, 0)],
+    'Unknown report continued beyond its second part or replaced the later query reply');
+  assert.equal(text(sent[start + 2]), '当前尚未执行；等待你的明确确认。',
+    'Later batch query did not receive its own expected reply');
+  const submittedPrefix = sent.slice(start, start + 2).map(text).join('');
+  assert(RESUMABLE_DISPLAY.startsWith(submittedPrefix) && submittedPrefix.length < RESUMABLE_DISPLAY.length,
+    'Ambiguous ordinary delivery changed the formatted prefix or continued beyond its unknown part');
+  assert(sent.slice(start, start + 2).every(part => !/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/u.test(text(part))),
+    'Ordinary reply split broke a Unicode surrogate pair');
   const state = JSON.parse(await readFile(statePath, 'utf8'));
   assert.equal(state.reply_deliveries[key].acknowledgedChunks, 1);
   assert.equal(state.reply_deliveries[key].inFlight, true);
@@ -158,11 +203,13 @@ async function verifyUnknownOrdinaryReply(harness) {
   assert.equal(sent.length, sentAfter, 'Restart resent an ambiguous ordinary reply');
   assert.equal(wireEvents.filter(event => event.kind === 'model').length, modelCalls, 'Restart forwarded an isolated message again');
   evidence('ordinary-unknown-isolated', { confirmedParts: 1, inFlight: true, isolated: 1,
-    laterBatchMessageProcessed: 1, cursorAdvanced: true, restartResends: 0, repeatedModelCalls: 0 });
+    laterBatchMessageProcessed: 1, laterBatchReplyIdentityVerified: true,
+    cursorAdvanced: true, restartResends: 0, repeatedModelCalls: 0 });
 }
 
 async function verifyProgressDelivery(harness, complete) {
-  const { input, runGateway, pending, sent, deliveries, wireEvents, healthy, evidence, databaseUrl, chatId, directTask } = harness;
+  const { input, runGateway, pending, sent, deliveries, wireEvents, healthy, evidence, databaseUrl, chatId,
+    directTask, fullResult, getDelivery, elapseDispatchInterval } = harness;
   const require = createRequire(new URL('../../../controller/package.json', import.meta.url));
   const { Pool } = require('pg');
   const pool = new Pool({ connectionString: databaseUrl });
@@ -194,9 +241,12 @@ async function verifyProgressDelivery(harness, complete) {
       return match;
     };
     const deliver = async notification => {
+      await elapseDispatchInterval();
       const start = sent.length, eventStart = wireEvents.length;
       assert.equal((await runGateway('--poll-once')).notifications.accepted, 1);
-      assert.equal(sent.slice(start).map(text).join(''), notification.text);
+      assert.equal(notification.mode, 'text');
+      assert.deepEqual(sent.slice(start).map(text), notification.messages,
+        'Actual progress/final messages differ from their frozen display plan');
       assert.equal(wireEvents[eventStart].kind, 'typing', 'Progress/final send did not begin with typing');
       return sent.length - start;
     };
@@ -213,19 +263,23 @@ async function verifyProgressDelivery(harness, complete) {
     assert.equal(sent.length, unchanged, 'Unchanged exact receipt caused repetitive progress');
     assert.equal((await progressRows(source)).length, 1);
     for (let sequence = 2; sequence <= 3; sequence++) {
-      complete(deliveries.at(-1), `**精确步骤结果 ${sequence - 1}**`);
+      await complete(deliveries.at(-1), `**精确步骤结果 ${sequence - 1}**`);
       await waitFor(() => { healthy(); return deliveries.length === start + sequence; }, 'Next progress action accepted');
       await deliver(await waitNotification('progress', sequence));
       await ageProgress(source);
     }
-    complete(deliveries.at(-1), '**精确步骤结果 3**');
+    await complete(deliveries.at(-1), '**精确步骤结果 3**');
     await waitFor(() => { healthy(); return deliveries.length === start + 4; }, 'Fourth progress fact accepted');
     await delay(OBSERVATION_MS);
     assert.equal((await progressRows(source)).length, 3, 'A fourth progress slot was created');
     assert.equal((await pending()).length, 0, 'Progress limit failed after a new receipt');
-    complete(deliveries.at(-1), '**精确步骤结果 4**');
+    await complete(deliveries.at(-1), '**精确步骤结果 4**');
     const terminal = await waitNotification('completed');
-    for (let index = 1; index <= 4; index++) assert(terminal.text.includes(`**精确步骤结果 ${index}**`));
+    const terminalRaw = '### 已完成\n\n**任务**：合成进度任务 1\n\n' +
+      Array.from({ length: 4 }, (_, index) => `**${index + 1}. 合成进度任务 ${index + 1}**\n\n**精确步骤结果 ${index + 1}**`).join('\n\n');
+    assert.equal(await fullResult(terminal.id), terminalRaw, 'Full multi-step result changed recorded Markdown');
+    assert.equal(sha256(terminalRaw), terminal.artifact.sha256);
+    for (let index = 1; index <= 4; index++) assert(terminal.text.includes(`精确步骤结果 ${index}`));
     await deliver(terminal);
 
     // Leave a genuine progress notification pending, then finish before Gateway polls it.
@@ -235,9 +289,10 @@ async function verifyProgressDelivery(harness, complete) {
     const racingSource = await activeSource();
     await ageSource(racingSource);
     const stale = await waitNotification('progress', 1);
-    complete(deliveries.at(-1), '**终态必须优先**');
+    await complete(deliveries.at(-1), '**终态必须优先**');
     const preferred = await waitNotification('completed');
     assert.deepEqual((await pending()).map(item => item.id), [preferred.id]);
+    assert.equal((await getDelivery(stale.id)).status, 'superseded', 'Terminal did not retire unsent same-task progress');
     const beforeTerminal = sent.length;
     await deliver(preferred);
     assert(!sent.slice(beforeTerminal).some(message => text(message) === stale.text), 'Stale progress preceded terminal result');

@@ -33,6 +33,10 @@ import { createMediaRouter } from "../sessions/media-routes.js";
 import { createMessageReplyRouter } from "../sessions/message-reply-routes.js";
 import { createReadResponseCompression } from "./response-compression.js";
 
+import { TaskNotifications } from "../runtime/task-notifications.js";
+import { createAutomationRouter } from "../automations/routes.js";
+import { createResultArtifactRouter, createResultDeliveryRouter } from "../deliveries/routes.js";
+
 function makeMessageRequestId(chatId: string, messageId: string): string {
   // Use sha256 of JSON tuple to guarantee zero collision even if chatId or messageId contains delimiter characters
   const raw = JSON.stringify([chatId, messageId]);
@@ -54,6 +58,7 @@ export class ControllerServer {
   private consoleAuth: ConsoleAuthService;
   private now: () => number;
   private statusEvents: StatusEvents<Awaited<ReturnType<ControllerServer["statusSnapshot"]>>>;
+  private taskNotifications: TaskNotifications;
 
   // Chat context cache: chatId -> { nodeId, sessionId }
   private chatContexts = new Map<string, { nodeId: string; sessionId: string }>();
@@ -63,10 +68,12 @@ export class ControllerServer {
     this.store = store;
     this.now = now;
     this.hub = new NodeHub(store, config.tokenToNode, () => this.statusEvents?.changed());
-    this.commands = new CommandService(store, this.hub, config.commandTtlSeconds, () => this.statusEvents?.changed(),chatId=>config.allowedChatIds.has(chatId));
+    this.commands = new CommandService(store, this.hub, config.commandTtlSeconds, () => this.statusEvents?.changed(),chatId=>config.allowedChatIds.has(chatId),
+      (authority, command) => this.taskNotifications.authorizeCommand(authority, command));
     this.consoleAuth = new ConsoleAuthService(store, config.consolePublicUrl, config.controllerToken, now,
       token => this.statusEvents?.revoke(token));
     const leaderModel = model ?? (config.leader ? new HttpLeaderModel(config.leader) : undefined);
+    this.taskNotifications = new TaskNotifications(config, store, this.hub, this.commands, leaderModel, now, () => this.statusEvents?.changed());
     if (leaderModel) {
       this.executions = new ExecutionScheduler(store, this.commands, { now,
         isChatAllowed: chatId => this.config.allowedChatIds.has(chatId),
@@ -85,7 +92,7 @@ export class ControllerServer {
         onChanged: () => this.statusEvents?.changed(),
       });
       this.leader = new LeaderOrchestrator(store, this.hub, this.commands, leaderModel, now,
-        requestId => this.consoleAuth.issueLink(requestId), this.executions, this.goals);
+        requestId => this.consoleAuth.issueLink(requestId), this.executions, this.goals, this.taskNotifications.automations);
     }
     this.resolver = new NaturalLanguageResolver();
     this.statusEvents = new StatusEvents(() => this.statusSnapshot());
@@ -165,7 +172,7 @@ export class ControllerServer {
     const commands = await this.store.listRecentCommandSummaries(50);
     const executions = await readConsoleExecutions(this.store, [...this.config.allowedChatIds], this.now(), true);
     const goals = await readConsoleGoals(this.store, [...this.config.allowedChatIds], this.now(), true);
-    return { nodes, sessions, commands, executions, goals, skills: this.hub.getAllSkills(),
+    return { nodes, sessions, commands, executions, goals, ...await this.taskNotifications.snapshot(), skills: this.hub.getAllSkills(),
       leaderMode: this.leader ? "model" : "rules", leaderModel: this.config.leader?.model };
   }
 
@@ -178,6 +185,7 @@ export class ControllerServer {
     this.app.use(createReadResponseCompression());
     this.app.use(express.json({ limit: "1mb" }));
     this.app.use("/auth", createConsoleAuthRouter(this.consoleAuth));
+    this.app.use("/v1/result-artifacts", createResultArtifactRouter(this.taskNotifications.results, () => this.config.allowedChatIds, this.now));
 
     // Public liveness endpoint
     this.app.get("/health", (req: Request, res: Response) => {
@@ -193,7 +201,15 @@ export class ControllerServer {
     apiRouter.use(createMediaRouter(this.store, () => this.config.allowedChatIds, this.now));
     apiRouter.use(createMessageReplyRouter(this.store, () => this.config.allowedChatIds));
     apiRouter.use("/notifications", createNotificationRouter(this.store, () => this.config.allowedChatIds, this.now));
+    apiRouter.use("/deliveries", createResultDeliveryRouter(this.taskNotifications.results, () => this.config.allowedChatIds));
+    apiRouter.use("/automations", createAutomationRouter(this.taskNotifications.automations, {
+      allowed: () => this.config.allowedChatIds, now: this.now,
+      authority: async (req, chatId) => ({ chatId, currentMessageId: String(req.headers["idempotency-key"] || crypto.randomUUID()), explicitCurrentTurnAuthorization: true }),
+    }));
     apiRouter.use("/sessions", createSessionRouter(this.hub, this.commands));
+    apiRouter.get("/chats/notification-interest", async (_req: Request, res: Response) => {
+      res.json({ chatIds: [...this.config.allowedChatIds], interested: await this.taskNotifications.notificationInterest() });
+    });
     apiRouter.post("/chats/authorize", (req: Request,res: Response) => {
       if (!req.is("application/json") || !req.body || Object.keys(req.body).length !== 1 || typeof req.body.chatId !== "string") {
         res.status(400).json({error:"Invalid chat authorization request"}); return;
@@ -426,6 +442,7 @@ export class ControllerServer {
 
   async start(): Promise<void> {
     await this.store.init();
+    await this.taskNotifications.initialize();
     await new Promise<void>((resolve) => {
       this.server.listen(this.config.port, this.config.host, () => {
         console.log(`Controller server listening on ${this.config.host}:${this.config.port}`);
@@ -435,10 +452,11 @@ export class ControllerServer {
     this.executions?.start();
     this.goals?.start();
     this.commands.start();
+    this.taskNotifications.start();
   }
 
   async stop(): Promise<void> {
-    await Promise.all([this.executions?.stop(), this.goals?.stop(),this.commands.stop()]);
+    await Promise.all([this.taskNotifications.stop(), this.executions?.stop(), this.goals?.stop(),this.commands.stop()]);
     this.statusEvents.stop();
     // Proactively close all active node websocket connections first
     await this.hub.closeAll();

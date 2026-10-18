@@ -1,3 +1,4 @@
+import { acknowledgementFixture } from "../leader/acknowledgement-fixture.js";
 import { describe, expect, it, vi } from "vitest";
 import { LeaderOrchestrator } from "../../src/leader/orchestrator.js";
 import { MemoryStore } from "../../src/store/memory.js";
@@ -14,6 +15,8 @@ class ScriptedModel implements LeaderModel {
   calls: ModelMessage[][] = [];
   constructor(private replies: (ModelReply | (() => never))[]) {}
   async complete(messages: ModelMessage[]) {
+    const acknowledgement = acknowledgementFixture(messages);
+    if (acknowledgement) return acknowledgement;
     this.calls.push(structuredClone(messages));
     const next = this.replies.shift();
     if (!next) throw new Error("No scripted response");

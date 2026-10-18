@@ -5,6 +5,7 @@ FROM toolchain AS controller-build
 WORKDIR /work/controller
 COPY scripts/clean-build.mjs /work/scripts/clean-build.mjs
 COPY controller/package.json controller/pnpm-lock.yaml controller/pnpm-workspace.yaml ./
+COPY packages/wechat-text /work/packages/wechat-text
 RUN pnpm install --frozen-lockfile
 COPY controller/tsconfig.json ./
 COPY controller/src ./src
