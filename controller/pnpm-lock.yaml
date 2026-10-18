@@ -200,6 +200,9 @@ importers:
       compression:
         specifier: ^1.8.2
         version: 1.8.2
+      '@super-leader/wechat-text':
+        specifier: file:../packages/wechat-text
+        version: file:../packages/wechat-text
       cron-parser:
         specifier: ^5.10.2
         version: 5.10.2
@@ -516,6 +519,9 @@ packages:
 
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
+
+  '@super-leader/wechat-text@file:../packages/wechat-text':
+    resolution: {directory: ../packages/wechat-text, type: directory}
 
   '@types/body-parser@1.19.6':
     resolution: {integrity: sha512-HLFeCYgz89uk22N5Qg3dvGvsv46B8GLvKKo1zKG4NybA8U2DiEO3w9lqGg29t/tfLRJpJ6iQxnVw4OnB7MoM9g==}
@@ -1513,6 +1519,8 @@ snapshots:
     optional: true
 
   '@rolldown/pluginutils@1.0.1': {}
+
+  '@super-leader/wechat-text@file:../packages/wechat-text': {}
 
   '@types/body-parser@1.19.6':
     dependencies:

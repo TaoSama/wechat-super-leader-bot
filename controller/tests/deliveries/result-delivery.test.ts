@@ -36,6 +36,46 @@ it("preserves complete results through exactly three messages and retains byte-e
   expect(messages.join("")).toBe(unicode);
 });
 
+it("formats the whole result before freezing three messages and keeps the source attachment unchanged", async () => {
+  const { service, repository } = fixture();
+  const body = "正文".repeat(RESULT_MESSAGE_CHARS * 3 / 2 - 7);
+  const raw = "**结果：**\n①甲②乙\n" + body;
+  const displayed = "结果：\n① 甲\n② 乙\n" + body;
+  const plan = await service.prepareResult(input(raw));
+  expect(plan).toMatchObject({ mode: "text", status: "ready" });
+  expect(plan.messages).toHaveLength(3);
+  expect(plan.messages.every(message => message.length <= RESULT_MESSAGE_CHARS)).toBe(true);
+  expect(plan.messages.join("")).toBe(displayed);
+  expect((await repository.getArtifact(plan.artifact.id))?.bytes.toString("utf8")).toBe(raw);
+});
+
+it("chooses an attachment when readable layout pushes the entire result past three messages", async () => {
+  const complete = vi.fn(async () => ({ content: "**结果：**\n①完成②完整成果见附件", toolCalls: [] }));
+  const { service, repository } = fixture({ model: { complete } });
+  const raw = "①甲②乙\n" + "字".repeat(RESULT_MESSAGE_CHARS * 3 - 5);
+  expect(raw).toHaveLength(RESULT_MESSAGE_CHARS * 3);
+  const plan = await service.prepareResult(input(raw));
+  expect(plan).toMatchObject({ mode: "attachment", status: "ready" });
+  expect(plan.messages).toEqual(["结果：\n① 完成\n② 完整成果见附件"]);
+  expect(complete).toHaveBeenCalledTimes(1);
+  expect((await repository.getArtifact(plan.artifact.id))?.bytes.toString("utf8")).toBe(raw);
+});
+
+it("never reformats an existing frozen or unknown result on replay", async () => {
+  const f = fixture(), request = input("**已冻结原文**");
+  const current = await f.service.prepareResult(request);
+  const artifact = (await f.repository.getArtifact(current.artifact.id))!;
+  const repository = new MemoryDeliveryRepository();
+  await repository.createIfAbsent({ ...current, messages: [request.text] }, artifact, NOW);
+  const service = new ResultDeliveryService(repository, { publicUrl: "https://results.example", signingSecret: SECRET, now: () => NOW });
+  const attemptId = randomUUID();
+  await repository.claim(current.id, attemptId, NOW);
+  await repository.recordReceipt(current.id, "uncertain", attemptId);
+  const replay = await service.prepareResult(request);
+  expect(replay.messages).toEqual([request.text]);
+  expect(replay.status).toBe("uncertain");
+});
+
 it("plans the entire four-message result once, generates a model summary without tools and caches it across retries", async () => {
   const complete = vi.fn(async () => ({ content: "已完成：验证通过。完整成果见附件。", toolCalls: [] }));
   const { service, repository } = fixture({ model: { complete } });

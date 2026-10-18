@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
-    "@openai/codex-sdk": "0.163.0"
+    "@openai/codex-sdk": "0.163.0",
+    "@super-leader/wechat-text": "file:../packages/wechat-text"
   }
 }

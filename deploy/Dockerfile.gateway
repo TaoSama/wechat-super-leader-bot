@@ -6,6 +6,7 @@ WORKDIR /work/gateway
 COPY scripts/clean-build.mjs /work/scripts/clean-build.mjs
 COPY gateway/package.json gateway/pnpm-lock.yaml gateway/pnpm-workspace.yaml ./
 COPY gateway/patches ./patches
+COPY packages/wechat-text /work/packages/wechat-text
 RUN pnpm install --frozen-lockfile --fetch-timeout=1200000
 COPY gateway/tsconfig.json ./
 COPY gateway/src ./src
@@ -17,6 +18,7 @@ ARG TARGETARCH
 WORKDIR /work/gateway
 COPY gateway/package.json gateway/pnpm-lock.yaml gateway/pnpm-workspace.yaml ./
 COPY gateway/patches ./patches
+COPY packages/wechat-text /work/packages/wechat-text
 # Select the target CLI package without running the installer under CPU emulation.
 RUN case "$TARGETARCH" in amd64) CODEX_CPU=x64 ;; arm64) CODEX_CPU=arm64 ;; *) exit 1 ;; esac \
     && printf '\nsupportedArchitectures:\n  os: [linux]\n  cpu: [%s]\n  libc: [glibc]\n' "$CODEX_CPU" >> pnpm-workspace.yaml \

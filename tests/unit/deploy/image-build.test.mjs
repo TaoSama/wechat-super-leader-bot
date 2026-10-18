@@ -35,6 +35,7 @@ function assertImageContract(source, component) {
       continue;
     }
     if (name === 'runtime-dependencies') {
+      assert.ok(build.includes('COPY packages/wechat-text /work/packages/wechat-text'));
       assert.ok(build.includes('ARG TARGETARCH'));
       const install = build.find(line => line.startsWith('RUN case '));
       assert.match(install, /amd64\) CODEX_CPU=x64/);
@@ -50,6 +51,7 @@ function assertImageContract(source, component) {
     assert.ok(build.some(line => /^RUN pnpm install --frozen-lockfile(?: |$)/.test(line)));
     if (name === 'web-build') assert.ok(build.includes('RUN pnpm run build'));
     else {
+      assert.ok(build.includes('COPY packages/wechat-text /work/packages/wechat-text'));
       assert.ok(build.includes(component === 'gateway' ? 'RUN pnpm run build' : 'RUN pnpm run build && pnpm prune --prod'));
       assert.ok(build.includes(`WORKDIR /work/${component}`));
       assert.ok(build.includes('COPY scripts/clean-build.mjs /work/scripts/clean-build.mjs'));
@@ -105,6 +107,7 @@ test('runtime dependency roots allow reviewed JavaScript packages and target-sel
   const controller = JSON.parse(readFileSync(new URL('../../../controller/package.json', import.meta.url), 'utf8'));
   const gateway = JSON.parse(readFileSync(new URL('../../../gateway/package.json', import.meta.url), 'utf8'));
   assert.deepEqual(controller.dependencies, {
+    '@super-leader/wechat-text': 'file:../packages/wechat-text',
     compression: '^1.8.2', 'cron-parser': '^5.10.2', dotenv: '^18.0.6', express: '^5.2.1',
     pg: '^8.23.1', ws: '^8.22.0', zod: '^4.6.5',
   }, 'new runtime dependencies require a platform-independence review');
@@ -113,6 +116,7 @@ test('runtime dependency roots allow reviewed JavaScript packages and target-sel
     assert.deepEqual(manifest.peerDependencies ?? {}, {});
   }
   assert.deepEqual(gateway.dependencies, {
+    '@super-leader/wechat-text': 'file:../packages/wechat-text',
     '@modelcontextprotocol/sdk': '1.32.1', '@openai/codex-sdk': '0.163.0',
   }, 'new runtime dependencies require a platform and install-script review');
   const lock = readFileSync(new URL('../../../controller/pnpm-lock.yaml', import.meta.url), 'utf8');
@@ -122,6 +126,16 @@ test('runtime dependency roots allow reviewed JavaScript packages and target-sel
   for (const cpu of ['x64', 'arm64']) {
     assert.match(gatewayLock, new RegExp(`'@openai/codex@0\\.163\\.0-linux-${cpu}':\\n[\\s\\S]*?cpu: \\[${cpu}\\]\\n    os: \\[linux\\]`));
   }
+});
+
+test('shared WeChat text renderer is a self-contained portable JavaScript package', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../../../packages/wechat-text/package.json', import.meta.url), 'utf8'));
+  assert.equal(manifest.name, '@super-leader/wechat-text');
+  assert.deepEqual(manifest.dependencies ?? {}, {});
+  assert.deepEqual(manifest.optionalDependencies ?? {}, {});
+  assert.deepEqual(manifest.scripts ?? {}, {});
+  assert.equal(manifest.type, 'module');
+  assert.equal(manifest.main, './index.js');
 });
 
 test('Gateway cannot switch away from the fixed Docker and CI package manager', () => {
