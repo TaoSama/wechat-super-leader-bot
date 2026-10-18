@@ -3,7 +3,7 @@ import { isHistoryContext, isSessionHistorySource } from "../features/sessions/h
 import { normalizeSession, normalizeCommand } from "./normalizers";
 import { sessionRequest } from "./request";
 
-const HISTORY_LIMIT = 30;
+const HISTORY_LIMIT = 20;
 
 function sessionPath(nodeId: string, sessionId: string): string {
   return `/v1/sessions/${encodeURIComponent(nodeId)}/${encodeURIComponent(sessionId)}`;
@@ -23,6 +23,7 @@ export async function fetchSessionHistory(nodeId: string, sessionId: string, cur
   if (data.session && typeof data.session === "object" && "nodeId" in data.session && data.session.nodeId !== nodeId) throw new Error("历史响应与当前会话不匹配");
   const session = normalizeSession({ ...(typeof data.session === "object" ? data.session : {}), nodeId });
   if (!session || session.id !== sessionId || !Array.isArray(data.items) || typeof data.fetchedAt !== "string") throw new Error("历史响应与当前会话不匹配");
+  if (data.items.length > HISTORY_LIMIT) throw new Error("历史响应超出单页条数限制");
   if (!isSessionHistorySource(data.source, session)) throw new Error("历史响应与当前读取来源不匹配");
   if (source !== undefined && data.source !== source) throw new Error("历史响应与所选读取来源不匹配");
   const items = data.items.map((item: unknown): HistoryItem => {

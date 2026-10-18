@@ -30,16 +30,14 @@ func (a *AppServerAdapter) ReadHistory(ctx context.Context, sessionID, cursor st
 	if cursor != "" {
 		params["cursor"] = cursor
 	}
-	// Metadata, loaded state and the bounded tail are independent reads. Issue
-	// them together rather than paying a round trip for each one on every poll.
-	var loadedSet map[string]bool
+	// History carries read-only metadata. Loaded state and send authority come
+	// from session discovery, so a tail read never walks every loaded thread.
 	var metadata, page map[string]any
-	var loadedErr, metadataErr, pageErr error
+	var metadataErr, pageErr error
 	readCtx, cancelReads := context.WithCancel(ctx)
 	defer cancelReads()
 	var reads sync.WaitGroup
-	reads.Add(3)
-	go func() { defer reads.Done(); loadedSet, loadedErr = rc.getLoadedSet(readCtx, a.rpcTimeout) }()
+	reads.Add(2)
 	go func() {
 		defer reads.Done()
 		metadata, metadataErr = rc.call(readCtx, "thread/read", map[string]any{"threadId": sessionID, "includeTurns": false}, a.rpcTimeout)
@@ -55,7 +53,7 @@ func (a *AppServerAdapter) ReadHistory(ctx context.Context, sessionID, cursor st
 	if pageErr != nil {
 		return empty, errors.New(protocol.HistoryUnavailable)
 	}
-	if loadedErr != nil || metadataErr != nil {
+	if metadataErr != nil {
 		return empty, errors.New(protocol.HistoryFailed)
 	}
 	thread, ok := metadata["thread"].(map[string]any)
@@ -75,7 +73,9 @@ func (a *AppServerAdapter) ReadHistory(ctx context.Context, sessionID, cursor st
 		return empty, errors.New(protocol.HistoryFailed)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	history := protocol.SessionHistory{Session: sessionFromThread(thread, loadedSet[sessionID], now), Items: []protocol.HistoryItem{}, FetchedAt: now}
+	session := sessionFromThread(thread, false, now)
+	session.Capabilities = []protocol.ActionType{protocol.ActionRead}
+	history := protocol.SessionHistory{Session: session, Items: []protocol.HistoryItem{}, FetchedAt: now}
 	if next != "" {
 		history.NextCursor = &next
 	}

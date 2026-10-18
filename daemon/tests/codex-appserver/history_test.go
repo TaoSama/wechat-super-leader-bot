@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex/appserver"
@@ -53,8 +55,6 @@ func historyWrapper(id, kind string, text any) map[string]any {
 func TestReadHistoryReadonlyAndPublicProjection(t *testing.T) {
 	sock, cleanup := historyServer(t, func(method string, params map[string]any) map[string]any {
 		switch method {
-		case "thread/loaded/list":
-			return map[string]any{"data": []string{"session"}}
 		case "thread/read":
 			if params["threadId"] != "session" || params["includeTurns"] != false {
 				t.Error("history must read metadata only")
@@ -79,7 +79,7 @@ func TestReadHistoryReadonlyAndPublicProjection(t *testing.T) {
 	if len(history.Items) != 3 || history.Items[0].ID != "old" || history.Items[1].ID != "tool" || history.Items[2].ID != "new" || history.Items[1].Kind != "tool" || history.Items[1].Text != "visible tool result" {
 		t.Fatalf("incorrect public order: %+v", history.Items)
 	}
-	if history.Session.Model != "actual" || history.Session.ModelProvider != "provider" || history.Session.ReasoningEffort != "high" || history.Session.Loaded == nil || !*history.Session.Loaded || history.Session.UpdatedAt != "2026-10-11T00:00:00Z" {
+	if history.Session.Model != "actual" || history.Session.ModelProvider != "provider" || history.Session.ReasoningEffort != "high" || history.Session.Loaded == nil || *history.Session.Loaded || history.Session.UpdatedAt != "2026-10-11T00:00:00Z" || len(history.Session.Capabilities) != 1 || history.Session.Capabilities[0] != protocol.ActionRead {
 		t.Fatalf("incorrect native metadata: %+v", history.Session)
 	}
 	if history.NextCursor == nil || *history.NextCursor != "older" || history.Items[0].Timestamp != "2026-10-11T00:00:00Z" {
@@ -92,6 +92,47 @@ func TestReadHistoryReadonlyAndPublicProjection(t *testing.T) {
 	if strings.Contains(string(encoded), "PRIVATE") || strings.Contains(string(encoded), "do-not-export") {
 		t.Fatal("raw private objects leaked")
 	}
+}
+
+func TestHistoryFirstPageReadsOnlyOneBoundedTailAndTargetMetadata(t *testing.T) {
+	const pageSize = 20
+	var tailReads, metadataReads atomic.Int32
+	items := make([]any, pageSize)
+	for index := range items {
+		items[index] = historyWrapper("item-"+strings.Repeat("x", index), "agentMessage", strings.Repeat("历史text", 2000))
+	}
+	sock, cleanup := historyServer(t, func(method string, params map[string]any) map[string]any {
+		switch method {
+		case "thread/read":
+			metadataReads.Add(1)
+			if params["includeTurns"] != false || params["threadId"] != "session" {
+				t.Error("first page requested full history or a different target")
+			}
+			return map[string]any{"thread": map[string]any{"id": "session", "status": "idle"}}
+		case "thread/items/list":
+			tailReads.Add(1)
+			if params["limit"] != float64(pageSize) || params["sortDirection"] != "desc" || params["cursor"] != nil {
+				t.Error("first page did not request a bounded recent suffix")
+			}
+			return map[string]any{"data": items, "nextCursor": "opaque-older"}
+		default:
+			t.Errorf("first page depended on unrelated RPC: %s", method)
+			return nil
+		}
+	})
+	defer cleanup()
+	started := time.Now()
+	history, err := appserver.NewAppServerAdapter(sock).ReadHistory(context.Background(), "session", "", pageSize)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(history)
+	if err != nil || len(encoded) >= protocol.MaxHistoryResponseBytes || len(history.Items) != pageSize ||
+		history.NextCursor == nil || *history.NextCursor != "opaque-older" || tailReads.Load() != 1 || metadataReads.Load() != 1 {
+		t.Fatal("first page exceeded its read or response bounds")
+	}
+	t.Logf("fixture first_page_ms=%.2f public_items=%d response_bytes=%d tail_reads=%d metadata_reads=%d", float64(elapsed.Microseconds())/1000, len(history.Items), len(encoded), tailReads.Load(), metadataReads.Load())
 }
 
 func TestReadHistoryRejectsWrongSessionAndCursorCycle(t *testing.T) {

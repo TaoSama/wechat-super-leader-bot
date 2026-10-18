@@ -56,7 +56,8 @@ func TestHistoryPipelinesBoundedTailWithoutLoadingCompleteConversation(t *testin
 		t.Fatal(err)
 	}
 	if !adapter.PagedHistoryAvailable() || len(page.Items) != 2 || page.Items[0].ID != "old" || page.Items[1].ID != "new" ||
-		page.Session.ID != "session" || page.Session.Loaded == nil || !*page.Session.Loaded || page.NextCursor == nil || *page.NextCursor != "oldest" {
+		page.Session.ID != "session" || page.Session.Loaded == nil || *page.Session.Loaded || len(page.Session.Capabilities) != 1 ||
+		page.Session.Capabilities[0] != "read" || page.NextCursor == nil || *page.NextCursor != "oldest" {
 		t.Fatalf("invalid native bounded page: %+v", page)
 	}
 	select {
@@ -93,7 +94,7 @@ func serveHistoryPipeline(connection *websocket.Conn) error {
 	requests := make(map[string]steerRequest)
 	// Withhold all replies until all independent reads arrive. A serial reader
 	// cannot finish this fixture, regardless of CPU or network speed.
-	for range 3 {
+	for range 2 {
 		var request steerRequest
 		if err := connection.ReadJSON(&request); err != nil {
 			return err
@@ -111,10 +112,6 @@ func serveHistoryPipeline(connection *websocket.Conn) error {
 	if !ok || tail.Params["limit"] != float64(2) || tail.Params["sortDirection"] != "desc" || tail.Params["cursor"] != "older" {
 		return errors.New("history lost native bounded pagination")
 	}
-	loaded, ok := requests["thread/loaded/list"]
-	if !ok {
-		return errors.New("missing loaded-state read")
-	}
 	results := []struct {
 		request steerRequest
 		result  map[string]any
@@ -124,7 +121,6 @@ func serveHistoryPipeline(connection *websocket.Conn) error {
 			map[string]any{"turnId": "turn", "item": map[string]any{"id": "old", "type": "userMessage", "content": []any{map[string]any{"type": "text", "text": "question"}}}},
 		}, "nextCursor": "oldest"}},
 		{metadata, map[string]any{"thread": map[string]any{"id": "session", "status": map[string]any{"type": "idle"}}}},
-		{loaded, map[string]any{"data": []any{"session"}}},
 	}
 	for _, result := range results {
 		if err := connection.WriteJSON(map[string]any{"id": result.request.ID, "result": result.result}); err != nil {
