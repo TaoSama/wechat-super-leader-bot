@@ -138,12 +138,15 @@ export class WorkerStorage {
     }
     if (directory(dir, create) !== dir) throw new Error("Worker path must not contain symlinks");
     const state = this.state(dir);
-    if (!state) {
-      if (!create) throw new Error("Missing worker ownership marker");
-      writeJson(path.join(dir, "state.json"), { workerId });
-    } else if (state.workerId !== workerId) throw new Error("Invalid worker ownership marker");
+    if (!state && !create) throw new Error("Missing worker ownership marker");
+    if (state && state.workerId !== workerId) throw new Error("Invalid worker ownership marker");
     for (const subdir of ["workspace", "home", "invocations"]) {
       if (directory(path.join(dir, subdir), create && !state) !== path.join(dir, subdir)) throw new Error("Unsafe worker directory");
+    }
+    // Ownership certifies a complete layout. A process lost while creating
+    // directories leaves an unpublished initialization that create can retry.
+    if (!state && !claimJson(path.join(dir, "state.json"), { workerId })) {
+      if (this.state(dir)?.workerId !== workerId) throw new Error("Invalid worker ownership marker");
     }
     return dir;
   }

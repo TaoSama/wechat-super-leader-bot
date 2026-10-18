@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { hash, WorkerStorage } from "../../../src/background/worker/storage.js";
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
@@ -13,6 +14,58 @@ function fixture() {
  return { root, store, slot };
 }
 describe("durable global execution capacity", () => {
+ it.each(["home", "invocations"])("can retry initialization after its process exits before creating %s", subdir => {
+  const f = fixture();
+  const workerId = randomUUID();
+  const workerDir = path.join(f.store.root, "workers", workerId);
+  const interruptedPath = path.join(workerDir, subdir);
+  const script = `
+   import fs from 'node:fs';
+   import { syncBuiltinESMExports } from 'node:module';
+   import { WorkerStorage } from ${JSON.stringify(new URL("../../../src/background/worker/storage.ts", import.meta.url).href)};
+   const mkdir = fs.mkdirSync;
+   fs.mkdirSync = function(file, options) {
+    if (file === ${JSON.stringify(interruptedPath)}) process.exit(91);
+    return mkdir(file, options);
+   };
+   syncBuiltinESMExports();
+   new WorkerStorage(${JSON.stringify(f.store.root)}, ${JSON.stringify(f.store.artifacts)}).worker(${JSON.stringify(workerId)}, true);
+  `;
+  const child = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), "--input-type=module", "-e", script],
+   { encoding: "utf8", timeout: 5000 });
+  expect(child.error).toBeUndefined();
+  expect(child.status, child.stderr).toBe(91);
+  expect(fs.existsSync(path.join(workerDir, "state.json"))).toBe(false);
+  expect(fs.existsSync(path.join(workerDir, "workspace"))).toBe(true);
+  expect(fs.existsSync(interruptedPath)).toBe(false);
+  expect(() => f.store.worker(workerId)).toThrow("Missing worker ownership marker");
+  expect(fs.existsSync(interruptedPath)).toBe(false);
+  const recovered = new WorkerStorage(f.store.root, f.store.artifacts);
+  expect(recovered.worker(workerId, true)).toBe(workerDir);
+  for (const name of ["workspace", "home", "invocations"]) expect(fs.statSync(path.join(workerDir, name)).isDirectory()).toBe(true);
+  expect(recovered.state(workerDir)).toEqual({ workerId });
+  const threadId = randomUUID();
+  recovered.setThread(workerDir, threadId);
+  expect(recovered.worker(workerId, true)).toBe(workerDir);
+  expect(recovered.state(workerDir)).toEqual({ workerId, threadId });
+ });
+ it("refuses to repair an already published worker layout or publish ownership over an unsafe layout", () => {
+  const f = fixture();
+  const workerId = randomUUID();
+  const workerDir = f.store.worker(workerId, true)!;
+  fs.rmdirSync(path.join(workerDir, "home"));
+  expect(() => f.store.worker(workerId)).toThrow();
+  expect(() => f.store.worker(workerId, true)).toThrow();
+  expect(fs.existsSync(path.join(workerDir, "home"))).toBe(false);
+  const unowned = randomUUID();
+  const unownedDir = path.join(f.store.root, "workers", unowned);
+  const external = path.join(f.root, "external");
+  fs.mkdirSync(unownedDir); fs.mkdirSync(external);
+  fs.symlinkSync(external, path.join(unownedDir, "workspace"));
+  expect(() => f.store.worker(unowned, true)).toThrow("Unsafe");
+  expect(fs.existsSync(path.join(unownedDir, "state.json"))).toBe(false);
+  expect(fs.readdirSync(external)).toEqual([]);
+ });
  it("quarantines the entire damaged worker without publishing its other valid queued receipt", () => {
   const f = fixture();
   const badWorkerId = randomUUID();
