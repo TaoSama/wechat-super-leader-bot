@@ -275,6 +275,7 @@ export class NotificationOutbox {
       this.sentThisCycle = true;
       await this.options.ilink.sendMarkdownReply(item.chatId, item.text, {
         deliveryKey: ref.deliveryKey, maxCharsPerChunk: ref.splitMaxChars, splitMultiPart: ref.splitMultiPart, kind,
+        verbatim: true,
         timeoutMs, signal: this.options.signal,
         shouldContinue: () => {
           if (item.attemptExpiresAt! <= Date.now() || item.expiresAt <= Date.now()) throw new LocalSendDeferredError("window_expired");

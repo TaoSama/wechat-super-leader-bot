@@ -101,7 +101,7 @@ export class WeChatGateway {
       const deferReason = (chatId: string, kind: "final" | "progress") => getDeferReason(this.stateManager.contextBudgets[chatId], this.stateManager.policy, kind) ?? "context_changed";
       const runner = new ResultDeliveryRunner({ state: this.stateManager,
         transport: {
-          sendText: (chatId, text, sendOptions) => this.ilink.sendMarkdownReply(chatId, text, { ...sendOptions, maxCharsPerChunk: RESULT_TEXT_CHARS, splitMultiPart: false }),
+          sendText: (chatId, text, sendOptions) => this.ilink.sendMarkdownReply(chatId, text, { ...sendOptions, maxCharsPerChunk: RESULT_TEXT_CHARS, splitMultiPart: false, verbatim: true }),
           sendFile: (chatId, artifact, bytes, sendOptions) => this.ilink.sendFileReply(chatId, bytes,
             { fileName: artifact.name, byteLength: artifact.size, sha256: artifact.sha256 }, sendOptions),
         },

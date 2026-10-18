@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { formatDisplayTime } from "../display-time.js";
 import { CommandError, CommandService } from "../commands/service.js";
 import { NodeHub } from "../nodes/hub.js";
 import { ConflictError, IStore } from "../store/interface.js";
@@ -334,7 +335,7 @@ export class LeaderOrchestrator {
     const signal = AbortSignal.timeout(TURN_TIMEOUT_MS);
     const sanitizedUserPrompt = sanitizeConsoleLinkSecrets(text);
     const messages: ModelMessage[] = [
-      { role: "system", content: this.automations ? `${SYSTEM_PROMPT}\n定时任务工具已配置。当前时间：${new Date(this.now()).toISOString()}；默认时区Asia/Shanghai，用户明确指定时区时使用该时区。仅用户本轮明确要求才创建、暂停、恢复或取消定时任务；查询使用list_automations/automation_runs。时间、会话或意图含糊时先澄清，已有提醒不能因查询而重建。创建成功仅表示已保存等待调度，未来触发不等于已启动会话；不要对同一请求反复创建。开始默认静默，监控无变化不通知。` : SYSTEM_PROMPT },
+      { role: "system", content: this.automations ? `${SYSTEM_PROMPT}\n定时任务工具已配置。当前时间：${formatDisplayTime(this.now())}；默认时区Asia/Shanghai，用户明确指定时区时使用该时区。仅用户本轮明确要求才创建、暂停、恢复或取消定时任务；查询使用list_automations/automation_runs。时间、会话或意图含糊时先澄清，已有提醒不能因查询而重建。创建成功仅表示已保存等待调度，未来触发不等于已启动会话；不要对同一请求反复创建。开始默认静默，监控无变化不通知。` : SYSTEM_PROMPT },
       ...data.history,
       ...(previousPlan ? [{ role: "assistant" as const, content: JSON.stringify({ previousUnconfirmedPlan: previousPlan }) }] : []),
       { role: "user", content: sanitizedUserPrompt },

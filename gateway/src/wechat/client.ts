@@ -1,7 +1,7 @@
 import * as crypto from "node:crypto";
 import { InboundWeChatMessage } from "../types.js";
 import { StateManager } from "../runtime/state.js";
-import { DEFAULT_MESSAGE_MAX_CHARS, unicodeSafeBoundary } from "./markdown.js";
+import { DEFAULT_MESSAGE_MAX_CHARS, markdownToWeChat, unicodeSafeBoundary } from "./markdown.js";
 import { DEFAULT_POLL_TIMEOUT_MS, MAX_POLL_TIMEOUT_MS, POLL_NETWORK_MARGIN_MS, MAX_POLL_ATTEMPTS, SEND_REQUEST_TIMEOUT_MS, REPLY_TIMEOUT_MS, NOTIFICATION_REPLY_TIMEOUT_MS } from "../runtime/budgets.js";
 import { ILinkSendReceiptError, parseILinkJson, validateSendReceipt } from "./send-receipt.js";
 import { TypingIndicator } from "./typing.js";
@@ -390,20 +390,27 @@ export class ILinkClient {
     chatId: string,
     rawMarkdown: string,
     options?: { deliveryKey?: string; maxCharsPerChunk?: number; splitMultiPart?: boolean;
-      timeoutMs?: number; signal?: AbortSignal; shouldContinue?: () => boolean; kind?: "final" | "progress" }
+      timeoutMs?: number; signal?: AbortSignal; shouldContinue?: () => boolean; kind?: "final" | "progress";
+      /** Controller result messages are already split and must keep their frozen boundaries. */
+      verbatim?: boolean }
   ): Promise<number> {
     const maxChars = options?.maxCharsPerChunk ?? DEFAULT_MESSAGE_MAX_CHARS;
-    // All reply modes preserve the full original Markdown. The limit is UTF-16 units.
-    const chunks = splitWeChatReply(rawMarkdown, maxChars);
+    const deliveryKey = options?.deliveryKey || `reply:${crypto.randomUUID()}`;
+    const hash = (value: unknown) => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
+    const identity = [this.stateManager.getLoginFingerprint(), chatId, maxChars, rawMarkdown];
+    const legacyDigest = hash(identity);
+    // An existing raw plan must finish with exactly its original chunks, even after an upgrade.
+    const verbatim = options?.verbatim || this.stateManager.replyDeliveries[deliveryKey]?.digest === legacyDigest;
+    const rendered = verbatim ? rawMarkdown : markdownToWeChat(rawMarkdown, Number.MAX_SAFE_INTEGER);
+    const digest = verbatim ? legacyDigest : hash([...identity, "wechat-plain-v1", rendered]);
+    // Render the complete body before splitting so delimiters cannot straddle new chunks.
+    const chunks = splitWeChatReply(rendered, maxChars);
     if (chunks.length === 0) return 0;
     const timeoutMs = options?.timeoutMs ?? REPLY_TIMEOUT_MS;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > NOTIFICATION_REPLY_TIMEOUT_MS) {
       throw new Error("Invalid WeChat reply timeout budget");
     }
     options?.signal?.throwIfAborted();
-    const deliveryKey = options?.deliveryKey || `reply:${crypto.randomUUID()}`;
-    const digest = crypto.createHash("sha256")
-      .update(JSON.stringify([this.stateManager.getLoginFingerprint(), chatId, maxChars, rawMarkdown])).digest("hex");
     const delivery = this.stateManager.prepareReplyDelivery(deliveryKey, digest, chunks.length);
     if (delivery.acknowledgedChunks === chunks.length) return chunks.length;
     const replyController = new AbortController();
