@@ -9,6 +9,7 @@ import { WeChatGateway } from "../../src/gateway.js";
 import { parseGatewayCli } from "../../src/cli/options.js";
 import { runCli, NOTIFICATION_DIAGNOSTIC_EXIT_CODE } from "../../src/cli/run.js";
 import { HealthTracker, checkGatewayHealth } from "../../src/runtime/health.js";
+import { TRUNCATION_NOTICE } from "../../src/wechat/markdown.js";
 import { harness, notification, goalNotification } from "../fixtures/notification-fixtures.js";
 
 test("terminal notification is one plain-text send with deterministic evidence ID and no state reset", async t => {
@@ -26,6 +27,51 @@ test("terminal notification is one plain-text send with deterministic evidence I
   assert.equal(f.records.get(item.id)?.status, "accepted");
   assert.deepEqual(await f.gateway.deliverNotificationsOnce(), { accepted: 0, uncertain: 0, skipped: 0 });
   assert.equal(f.sends.length, 1);
+});
+for (const source of ["plan", "goal"] as const) test(`${source} result Markdown is rendered as one readable WeChat message`, async t => {
+  const item = source === "plan" ? notification() : goalNotification();
+  item.text = "## 执行结果\n\n**完成**：修复确认流程。\n- 已通过 `pnpm test`\n- [查看变更](https://example.com/pull/42)";
+  const f = harness(t, { items: [item] });
+  assert.deepEqual(await f.gateway.deliverNotificationsOnce(), { accepted: 1, uncertain: 0, skipped: 0 });
+  assert.equal(f.sends.length, 1);
+  assert.deepEqual(f.sends[0].item_list, [{ type: 1, text_item: {
+    text: "执行结果\n\n完成：修复确认流程。\n• 已通过 pnpm test\n• 查看变更 (https://example.com/pull/42)",
+  } }]);
+  assert.equal(f.sends[0].client_id, `super-leader:notification:${item.id}`);
+  assert.equal(f.records.get(item.id)?.text, item.text, "receipts retain the original notification identity");
+  await f.gateway.deliverNotificationsOnce();
+  assert.equal(f.sends.length, 1);
+});
+test("long notification is truncated into a single bounded message despite multipart replies being enabled", async t => {
+  const item = notification();
+  item.text = "# 执行结果\n\n- **完成**：" + "验证通过🚀".repeat(200);
+  const f = harness(t, { items: [item] }), maxChars = 96;
+  const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink,
+    notifications: true, splitMaxChars: maxChars, splitMultiPart: true });
+  assert.equal((await gateway.deliverNotificationsOnce()).accepted, 1);
+  assert.equal(f.sends.length, 1);
+  const text = (f.sends[0].item_list as { text_item: { text: string } }[])[0].text_item.text;
+  assert.ok(text.startsWith("执行结果\n\n• 完成："));
+  assert.ok(text.endsWith(TRUNCATION_NOTICE));
+  assert.ok(text.length <= maxChars);
+  assert.equal(Buffer.from(text, "utf8").toString("utf8"), text);
+  await gateway.deliverNotificationsOnce();
+  assert.equal(f.sends.length, 1);
+});
+test("failed Markdown notification is permanently uncertain without another send after restart", async t => {
+  const item = goalNotification();
+  item.text = "# 执行结果\n\n- **完成**：" + "验证通过🚀".repeat(200);
+  const f = harness(t, { items: [item] });
+  f.hooks.send = () => { throw new TypeError("response lost"); };
+  const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink,
+    notifications: true, splitMaxChars: 96, splitMultiPart: true });
+  assert.deepEqual(await gateway.deliverNotificationsOnce(), { accepted: 0, uncertain: 1, skipped: 0 });
+  const state = new StateManager(f.accountPath, f.statePath);
+  const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.ilink, notifications: true });
+  await restarted.deliverNotificationsOnce();
+  assert.equal(f.records.get(item.id)?.status, "uncertain");
+  assert.equal(f.sends.length, 1);
+  assert.equal(f.requests.filter(request => request.url.endsWith("claim")).length, 1);
 });
 for (const kind of ["completed", "blocked", "expired"] as const) test(`goal ${kind} is delivered unchanged to synthetic iLink exactly once`, async t => {
   const item = goalNotification(kind), f = harness(t, { items: [item] });

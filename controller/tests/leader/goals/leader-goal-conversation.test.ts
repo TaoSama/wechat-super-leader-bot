@@ -58,10 +58,12 @@ it("shows complete authorization and preserves its preview across ordinary queri
   value.targets[0] = { ...value.targets[0], skills: [{ id: f.skills[0].id, digest: f.skills[0].digest }] };
   const { reply, pending } = await f.propose(value);
   expect(reply.text).toContain("尚未派发");
-  for (const text of [value.objective, value.criteria[0], value.constraints, "air", "original", "control-socket",
-    f.skills[0].digest, "3 次任务", "5 轮", "30 分钟", "最多3次尝试", "在上述会话间共享", "不是下游Agent的硬隔离", `确认目标 ${pending.id}`]) {
+  for (const text of [value.objective, value.criteria[0], value.constraints, "air", "既有会话", "核查技能", "版本已锁定",
+    "3 次任务", "5 轮", "30 分钟", "最多3次尝试", "在上述会话间共享", "约束不是权限隔离", "回复“确认”即可开始"]) {
     expect(reply.text).toContain(text);
   }
+  expect(reply.text).not.toContain(pending.id);
+  expect(reply.text).not.toContain(f.skills[0].digest);
   f.responses.push(tool("get_goal_progress", {}), final("还未确认"));
   await f.leader.handle("chat", "query", "目标进度如何");
   expect((await f.store.getLeaderState("chat"))?.data.pendingGoal).toEqual(pending);
@@ -73,6 +75,100 @@ it("shows complete authorization and preserves its preview across ordinary queri
   expect(await f.create().handle("chat", "confirmation", `确认目标 ${pending.id}`)).toEqual(confirmed);
   expect((await f.leader.handle("chat", "repeat", `确认目标 ${pending.id}`)).text).toContain("没有该ID");
   expect((await f.store.listRecentGoals(["chat"], 10))).toHaveLength(1);
+});
+
+it.each(["确认", "执行", "开始"])("confirms a single pending goal on %s without another model call or duplicate authorization", async text => {
+  const f = fixture(), { pending } = await f.propose();
+  const reply = await f.create().handle("chat", "short-confirm", text);
+  expect(reply.text).toContain("后台将按授权预算持续推进");
+  expect((await f.store.getGoal(pending.id))?.status).toBe("active");
+  expect(f.model.complete).toHaveBeenCalledTimes(1);
+  expect(await f.create().handle("chat", "short-confirm", text)).toEqual(reply);
+  await f.create().handle("chat", "repeat-short", "确认");
+  expect(await f.store.listRecentGoals(["chat"], 10)).toHaveLength(1);
+});
+
+it.each(["取消计划", "不用执行", "取消执行"])("clears a pending goal on %s so a later confirmation cannot authorize it", async text => {
+  const f = fixture(), { pending } = await f.propose();
+  const cancelled = await f.leader.handle("chat", "cancel-preview", text);
+  expect(cancelled.text).toContain("已取消待确认目标");
+  expect((await f.store.getLeaderState("chat"))?.data.pendingGoal).toBeUndefined();
+  const confirmed = await f.create().handle("chat", "confirm-after-cancel", "执行");
+  expect(confirmed.text).toContain("没有待确认计划");
+  expect(await f.store.getGoal(pending.id)).toBeNull();
+  expect(await f.store.listRecentGoals(["chat"], 10)).toEqual([]);
+  expect(f.commands.submit).not.toHaveBeenCalled();
+  expect(f.decide).not.toHaveBeenCalled();
+  expect(f.model.complete).toHaveBeenCalledTimes(1);
+});
+
+it("refuses an ambiguous natural confirmation when both plan and goal previews exist", async () => {
+  const f = fixture(), { pending } = await f.propose();
+  const current = (await f.store.getLeaderState("chat"))!;
+  const plan: Plan = { id: randomUUID(), expiresAt: f.now() + PLAN_TTL_MS,
+    actions: [{ nodeId: "air", sessionId: "original", sendRoute: "control-socket", prompt: "固定任务", dependsOn: [] }] };
+  await f.store.compareAndSetLeaderState("chat", current.revision, { ...current.data, pending: plan });
+  const response = await f.create().handle("chat", "ambiguous", "开始");
+  expect(response.text).toContain("同时有计划和持续目标");
+  const state = (await f.store.getLeaderState("chat"))!.data;
+  expect(state.pending).toEqual(plan);
+  expect(state.pendingGoal).toEqual(pending);
+  expect(await f.store.getLatestGoal("chat")).toBeNull();
+  expect(await f.store.getLatestExecution("chat")).toBeNull();
+  expect(f.commands.submit).not.toHaveBeenCalled();
+});
+
+it.each([0, -1])("ignores a plan expired by %i ms when confirming a live goal", async offset => {
+  const f = fixture(), { pending } = await f.propose();
+  const current = (await f.store.getLeaderState("chat"))!;
+  const plan: Plan = { id: randomUUID(), expiresAt: f.now() + offset,
+    actions: [{ nodeId: "air", sessionId: "original", sendRoute: "control-socket", prompt: "过期计划", dependsOn: [] }] };
+  await f.store.compareAndSetLeaderState("chat", current.revision, { ...current.data, pending: plan });
+  const reply = await f.create().handle("chat", "confirm-live-goal", "执行");
+  expect(reply.text).toContain("后台将按授权预算持续推进");
+  expect((await f.store.getGoal(pending.id))?.status).toBe("active");
+  expect(await f.store.getLatestExecution("chat")).toBeNull();
+  expect((await f.store.getLeaderState("chat"))?.data.pending).toBeUndefined();
+  expect(f.commands.submit).not.toHaveBeenCalled();
+  expect(f.model.complete).toHaveBeenCalledTimes(1);
+  expect(await f.create().handle("chat", "confirm-live-goal", "执行")).toEqual(reply);
+  expect(await f.store.listRecentGoals(["chat"], 10)).toHaveLength(1);
+});
+
+it.each([0, -1])("ignores a goal expired by %i ms when confirming a live plan", async offset => {
+  const f = fixture(), { pending } = await f.propose();
+  const current = (await f.store.getLeaderState("chat"))!;
+  const plan: Plan = { id: randomUUID(), expiresAt: f.now() + PLAN_TTL_MS,
+    actions: [{ nodeId: "air", sessionId: "original", sendRoute: "control-socket", prompt: "有效计划", dependsOn: [] }] };
+  await f.store.compareAndSetLeaderState("chat", current.revision, {
+    ...current.data, pending: plan, pendingGoal: { ...pending, expiresAt: f.now() + offset },
+  });
+  const reply = await f.create().handle("chat", "confirm-live-plan", "执行");
+  expect(reply.text).toContain("自动推进中");
+  expect((await f.store.getLatestExecution("chat"))?.plan.id).toBe(plan.id);
+  expect(await f.store.getLatestGoal("chat")).toBeNull();
+  expect((await f.store.getLeaderState("chat"))?.data.pendingGoal).toBeUndefined();
+  expect(f.commands.submit).toHaveBeenCalledTimes(1);
+  expect(f.model.complete).toHaveBeenCalledTimes(1);
+  expect(await f.create().handle("chat", "confirm-live-plan", "执行")).toEqual(reply);
+  expect(f.commands.submit).toHaveBeenCalledTimes(1);
+});
+
+it("rejects short confirmation when both previews are expired", async () => {
+  const f = fixture(), { pending } = await f.propose();
+  const current = (await f.store.getLeaderState("chat"))!;
+  const plan: Plan = { id: randomUUID(), expiresAt: f.now(),
+    actions: [{ nodeId: "air", sessionId: "original", sendRoute: "control-socket", prompt: "过期计划", dependsOn: [] }] };
+  await f.store.compareAndSetLeaderState("chat", current.revision, {
+    ...current.data, pending: plan, pendingGoal: { ...pending, expiresAt: f.now() },
+  });
+  expect((await f.create().handle("chat", "expired-previews", "执行")).text).toContain("已过期");
+  const state = (await f.store.getLeaderState("chat"))!.data;
+  expect(state.pending).toBeUndefined();
+  expect(state.pendingGoal).toBeUndefined();
+  expect(await f.store.getLatestExecution("chat")).toBeNull();
+  expect(await f.store.getLatestGoal("chat")).toBeNull();
+  expect(f.commands.submit).not.toHaveBeenCalled();
 });
 
 it("confirms a frozen resume goal after its native session becomes loaded idle", async () => {
@@ -170,6 +266,7 @@ it("wrong or malformed UUID never confirms, never calls a model and leaves the p
 
 it("rejects oversized authorization rather than confirming clipped scope", async () => {
   const f = fixture(), value = request();
+  f.sessions[0].title = "授权会话".repeat(1000);
   value.objective = "目".repeat(2000); value.criteria = Array.from({ length: 8 }, () => "条".repeat(500)); value.constraints = "限".repeat(1600);
   expect(JSON.stringify(value).length).toBeLessThanOrEqual(8000);
   const { reply, pending } = await f.propose(value);

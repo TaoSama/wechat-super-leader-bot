@@ -84,7 +84,8 @@ it("previews every frozen skill in order and confirms the same combination only 
     const item = combination.find(item => item.id === ref.id)!;
     const offset = preview.text.indexOf(`技能 ${index + 1}：${JSON.stringify(item.name)}`);
     expect(offset).toBeGreaterThan(previous);
-    expect(preview.text).toContain(ref.digest);
+    expect(preview.text).toContain(`技能 ${index + 1}：${JSON.stringify(item.name)}（版本已锁定）`);
+    expect(preview.text).not.toContain(ref.digest);
     previous = offset;
   }
   expect(f.hub.sendCommand).not.toHaveBeenCalled();
@@ -130,9 +131,9 @@ it("counts an attached console link in the complete plan confirmation budget", a
   const f = fixture(replies);
   f.catalog.splice(0, f.catalog.length, ...combination.map(item => ({ ...item, name: '"'.repeat(64) })));
   const baseline = await f.leader().handle("chat", "bounded-preview", "完整计划");
-  expect(baseline.text).toContain("确认执行");
+  expect(baseline.text).toContain("回复“确认”即可执行");
   expect(baseline.text.length).toBeLessThanOrEqual(MAX_REPLY_CHARS);
-  const url = `https://console.example/${"a".repeat(500)}/#login=synthetic`;
+  const url = `https://console.example/${"a".repeat(MAX_REPLY_CHARS - baseline.text.length)}/#login=synthetic`;
   const leader = new LeaderOrchestrator(f.store, f.hub, f.commands,
     { complete: async () => { const next = replies.shift(); if (!next) throw new Error("Missing scripted reply"); return next; } },
     Date.now, async () => ({ url, expiresAt: new Date(Date.now() + 3_600_000).toISOString() }));
@@ -164,12 +165,14 @@ it("lists skill metadata as untrusted tool data, previews the version, then send
   const g = fixture([tool("list_skills", { nodeId: "demoair" }), tool("propose_plan", { actions: [{ nodeId: "demoair", sessionId: "s1", prompt: input.prompt, skills: refs }] })]);
   const preview = await g.leader().handle("chat", "p", "用技能检查代码");
   expect(preview.text).toContain(skill.name);
-  expect(preview.text).toContain(skill.digest);
+  expect(preview.text).toContain("版本已锁定");
+  expect(preview.text).not.toContain(skill.digest);
   expect(g.hub.sendCommand).not.toHaveBeenCalled();
   expect(g.calls[1].find(message => message.role === "tool")?.content).toContain("UNTRUSTED");
   expect(g.calls[1].filter(message => message.role === "system")).toHaveLength(1);
   await g.leader().handle("chat", "c", "确认执行");
   expect(g.hub.sendCommand).toHaveBeenCalledTimes(1);
+  expect(g.hub.sendCommand.mock.calls[0][0].skills).toEqual(refs);
   expect(g.hub.sendCommand.mock.calls[0][0]).not.toHaveProperty("dependsOn");
 });
 
@@ -218,7 +221,8 @@ it("finds a named skill beyond the first catalog page without scanning pages", a
   expect(result.total).toBe(1);
   expect(result.nextOffset).toBeNull();
   expect(result.skills).toEqual([{ ...skill, nodeId: "demoair", path: undefined }]);
-  expect(preview.text).toContain(skill.digest);
+  expect(preview.text).toContain(`${JSON.stringify(skill.name)}（版本已锁定）`);
+  expect(preview.text).not.toContain(skill.digest);
   expect(f.hub.sendCommand).not.toHaveBeenCalled();
   await f.leader().handle("chat", "confirm", "确认执行");
   expect(f.hub.sendCommand).toHaveBeenCalledTimes(1);

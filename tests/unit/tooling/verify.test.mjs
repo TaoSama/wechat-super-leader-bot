@@ -36,12 +36,15 @@ test('plans build prerequisites once, include all components, and never invoke l
     assert(!plan.some(step => step.args.includes('tests/live/session.mjs') || step.args.includes('tests/live/wechat-model.mjs')));
     const integration = plan.findIndex(step => step.id === 'synthetic-integration');
     const consoleAuth = plan.find(step => step.id === 'console-auth-integration');
+    const wechat = plan.find(step => step.id === 'wechat-interaction');
     if (suite === 'unit') {
       assert.equal(integration, -1);
       assert.equal(consoleAuth, undefined);
+      assert.equal(wechat, undefined);
     } else {
       for (const id of ['controller-build', 'gateway-build', 'web-build']) assert(plan.findIndex(step => step.id === id) < integration);
       assert.deepEqual(consoleAuth.args, ['tests/integration/console-auth.mjs', '--run']);
+      assert.deepEqual(wechat.args, ['tests/integration/leader/wechat-interaction.mjs', '--run']);
     }
   }
   const unit = verificationPlan('unit');

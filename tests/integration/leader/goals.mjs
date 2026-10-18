@@ -107,12 +107,13 @@ export async function verifyGoals({ WebSocket, base, request, nodeToken, store, 
     const preview = await message(PREFIX + scenario);
     assert.equal(preview.status, 200, JSON.stringify(preview.body));
     const pending = (await store.getLeaderState(GOAL_CHAT)).data.pendingGoal;
-    assert(pending && preview.body.text.includes(`确认目标 ${pending.id}`), 'Goal preview omitted its exact authorization UUID');
+    assert(pending && preview.body.text.includes('回复“确认”即可开始'), 'Goal preview omitted its confirmation instruction');
+    assert(!preview.body.text.includes(pending.id), 'Goal preview exposed its internal authorization UUID');
     assert.equal(await store.getGoal(pending.id), null, 'Preview published a schedulable goal');
     assert.equal(await store.findCommandByRequestId(goalRequestId({ id: pending.id, chatId: GOAL_CHAT }, 0)), null);
     assert.equal(delivered.length, before);
     await probe.absent(pending.id);
-    const confirmed = await message(`确认目标 ${pending.id}`);
+    const confirmed = await message('执行');
     assert.equal(confirmed.status, 200);
     const goal = await store.getGoal(pending.id);
     assert(goal && goal.status === 'active'); goalIds.push(goal.id);
