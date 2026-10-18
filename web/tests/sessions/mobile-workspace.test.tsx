@@ -56,7 +56,7 @@ describe("mobile workspace navigation and composing", () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: "history_too_large" }), { status: 413 }));
     workspace();
     fireEvent.click(screen.getByTestId("session-row-air-original"));
-    const pagedHistory = await screen.findByRole("button", { name: "使用分页历史接口" });
+    const pagedHistory = await screen.findByRole("button", { name: "重新加载会话" });
     const historyScroll = screen.getByLabelText("会话历史");
     Object.defineProperties(historyScroll, { scrollHeight: { value: 1200, configurable: true }, clientHeight: { value: 300, configurable: true } });
     historyScroll.scrollTop = 360;

@@ -1,14 +1,13 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PLAN_CHAT } from './plan-execution.mjs';
 
 const HTTP_MS = 5000;
-const MAX_DRAINS = 10;
+const MAX_DRAINS = 128;
 const ILINK_BASE = 'https://ilink.notification.invalid';
-const CLIENT_ID_PREFIX = 'super-leader:notification:';
 const TEXT_ITEM_TYPE = 1;
 const notificationPath = id => '/v1/notifications/' + id;
 
@@ -17,33 +16,56 @@ const notificationPath = id => '/v1/notifications/' + id;
 export async function verifyPlanNotifications({ base, token, request, store, restart, planIds }) {
   const { StateManager, writePrivateJsonSync } = await import('../../../gateway/dist/runtime/state.js');
   const { ControllerClient } = await import('../../../gateway/dist/controller/client.js');
-  const { ILinkClient } = await import('../../../gateway/dist/wechat/client.js');
-  const { markdownToWeChat, DEFAULT_MESSAGE_MAX_CHARS } = await import('../../../gateway/dist/wechat/markdown.js');
+  const { ILinkClient, splitWeChatReply } = await import('../../../gateway/dist/wechat/client.js');
+  const { DEFAULT_MESSAGE_MAX_CHARS } = await import('../../../gateway/dist/wechat/markdown.js');
   const { WeChatGateway } = await import('../../../gateway/dist/gateway.js');
   const { createExecution } = await import('../../../controller/dist/leader/plans/execution.js');
   const dir = await mkdtemp(join(tmpdir(), 'super-leader-notification-test-'));
   const credentials = join(dir, 'synthetic-account.json');
   const statePath = join(dir, 'synthetic-state.json');
-  const sent = [], gateways = [];
+  const sent = [], gateways = [], events = [], known = new Map();
   let providerMode = 'success', state;
-  const pending = () => request('/v1/notifications/pending', { chatIds: [PLAN_CHAT] });
+  const pending = async () => {
+    const response = await request('/v1/notifications/pending', { chatIds: [PLAN_CHAT] });
+    for (const item of response.body.items) known.set(item.id, item);
+    return response;
+  };
   const get = async id => {
     const response = await request(notificationPath(id));
     assert.equal(response.status, 200);
+    known.set(id, response.body.notification);
     return response.body.notification;
   };
   const transport = async (input, init) => {
-    assert.equal(String(input), ILINK_BASE + '/ilink/bot/sendmessage', 'Attempt to contact an unapproved external endpoint');
+    const url = new URL(String(input));
+    assert.equal(url.origin, ILINK_BASE, 'Attempt to contact an unapproved external endpoint');
     const payload = JSON.parse(init.body);
+    if (url.pathname === '/ilink/bot/getconfig') {
+      assert.equal(payload.ilink_user_id, PLAN_CHAT); assert.equal(payload.context_token, 'synthetic-context');
+      return Response.json({ ret: 0, typing_ticket: 'synthetic-typing-ticket' });
+    }
+    if (url.pathname === '/ilink/bot/sendtyping') {
+      assert.equal(payload.ilink_user_id, PLAN_CHAT); assert.equal(payload.typing_ticket, 'synthetic-typing-ticket'); assert.equal(payload.status, 1);
+      events.push('typing'); return Response.json({ ret: 0 });
+    }
+    assert.equal(url.pathname, '/ilink/bot/sendmessage', 'Unexpected synthetic provider request');
     assert.equal(payload.msg.to_user_id, PLAN_CHAT);
     assert.equal(payload.msg.context_token, 'synthetic-context');
-    assert(payload.msg.client_id.startsWith(CLIENT_ID_PREFIX));
-    const persisted = await get(payload.msg.client_id.slice(CLIENT_ID_PREFIX.length));
+    let matched;
+    for (const item of known.values()) {
+      for (const [index, text] of splitWeChatReply(item.text, DEFAULT_MESSAGE_MAX_CHARS).entries()) {
+        const clientId = 'super-leader:' + createHash('sha256').update(JSON.stringify([
+          state.getLoginFingerprint(), PLAN_CHAT, `notification:${item.id}`, index])).digest('hex').slice(0, 24);
+        if (clientId === payload.msg.client_id) matched = { id: item.id, index, text };
+      }
+    }
+    assert(matched, 'Provider send did not bind its immutable notification and chunk');
+    if (matched.index === 0) assert.equal(events.at(-1), 'typing', 'Notification text was sent before typing');
+    const persisted = await get(matched.id);
     assert.equal(persisted.status, 'claimed', 'Provider send has no durable claim');
     assert.deepEqual(payload.msg.item_list, [{ type: TEXT_ITEM_TYPE,
-      text_item: { text: markdownToWeChat(persisted.text, DEFAULT_MESSAGE_MAX_CHARS) } }],
-      'Provider text differs from the rendered persisted notification');
-    sent.push(payload.msg);
+      text_item: { text: matched.text } }], 'Provider text differs from the original Markdown part');
+    sent.push({ ...payload.msg, notificationId: matched.id, chunkIndex: matched.index }); events.push('send');
     if (providerMode === 'drop') throw new TypeError('Synthetic send response lost after submission');
     return new Response(JSON.stringify(providerMode === 'empty' ? {} : providerMode === 'rejected' ? { ret: -14 } : { ret: 0, errcode: 0 }),
       { headers: { 'content-type': 'application/json' } });
@@ -65,6 +87,7 @@ export async function verifyPlanNotifications({ base, token, request, store, res
         sendRoute: 'control-socket', dependsOn: [] }] }, now);
     await store.createExecutionIfAbsent(record);
     await store.compareAndSetExecution({ ...record, revision: 2, status: 'failed' }, 1, now);
+    await get(record.id);
     return record.id;
   };
   try {
@@ -119,7 +142,11 @@ export async function verifyPlanNotifications({ base, token, request, store, res
     assert(sent.length >= before.length);
     assert.equal(new Set(sent.map(item => item.client_id)).size, sent.length, 'Concurrent gateways sent the same notification twice');
     assert.equal((await get(planIds.completed)).status, 'accepted');
-    assert(sent.some(item => item.client_id === 'super-leader:notification:' + planIds.completed));
+    assert(sent.some(item => item.notificationId === planIds.completed));
+    for (const id of new Set(sent.map(item => item.notificationId))) {
+      assert.equal(sent.filter(item => item.notificationId === id).sort((a, b) => a.chunkIndex - b.chunkIndex)
+        .map(item => item.item_list[0].text_item.text).join(''), known.get(id).text, 'Notification Markdown was changed or truncated');
+    }
     console.log('PASS exact completed plan → durable notification → actual Gateway/HTTP → simulated WeChat; cookie denied, no-context/default-off preserved, concurrent sends unique');
 
     const lostClaim = await addFailure();

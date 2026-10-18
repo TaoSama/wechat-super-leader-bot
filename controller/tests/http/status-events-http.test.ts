@@ -6,6 +6,7 @@ import { ControllerServer } from "../../src/http/server.js";
 import { MemoryStore } from "../../src/store/memory.js";
 import type { Config } from "../../src/runtime/config.js";
 import { createExecution, executionRequestId, EXECUTION_CLAIM_MS } from "../../src/leader/plans/execution.js";
+import { createGoal, goalRequestId, renderGoalAction, GOAL_SEND_CLAIM_MS } from "../../src/leader/goals/goal.js";
 
 const ADMIN_TOKEN = "events-admin-token";
 const CONSOLE_ORIGIN = "http://127.0.0.1:8790";
@@ -218,4 +219,56 @@ it("execution receipt changes reuse the existing stream and expired Cookie canno
   expect(await stream.next()).toBe("event: auth-expired\ndata: {}");
   expect(await stream.next()).toBe("closed");
   expect((await fetch(`${baseUrl}/v1/status`, { headers: { Cookie: cookie } })).status).toBe(401);
+});
+
+it.each(["plan", "goal"] as const)("keeps the existing SSE stream open when a %s command is queued before dispatch", async kind => {
+  const stream = await eventStream();
+  await stream.next();
+  const id = "00000000-0000-4000-8000-000000000088";
+  const commandId = `queued-${kind}-command`;
+  const action = { nodeId: "queued-node", sessionId: "queued-thread", prompt: "queued task",
+    dependsOn: [], sendRoute: "control-socket" as const };
+  let requestId: string;
+  let prompt = action.prompt;
+  if (kind === "plan") {
+    const record = createExecution("plan-chat", { id, expiresAt: now + 600_000, actions: [action] }, now);
+    await store.createExecutionIfAbsent(record);
+    record.attempts[0] = { token: "00000000-0000-4000-8000-000000000099", startedAt: now,
+      expiresAt: now + EXECUTION_CLAIM_MS };
+    await store.compareAndSetExecution({ ...record, revision: 2 }, 1);
+    requestId = executionRequestId(record, 0);
+  } else {
+    const record = createGoal("plan-chat", { id, expiresAt: now + 600_000, objective: "queue fixture",
+      criteria: ["exact result"], targets: [{ nodeId: action.nodeId, sessionId: action.sessionId, sendRoute: action.sendRoute }],
+      constraints: "fixture only", maxActions: 1, maxDecisions: 2, durationMinutes: 10, shareResults: true }, now);
+    prompt = renderGoalAction(record.proposal, action.prompt, []);
+    record.actions.push({ index: 1, target: 1, prompt: action.prompt, sourceActions: [], input: { prompt, sources: [] },
+      attempt: { token: "00000000-0000-4000-8000-000000000099", startedAt: now, expiresAt: now + GOAL_SEND_CLAIM_MS } });
+    vi.spyOn(store, "listRecentGoals").mockResolvedValue([record]);
+    requestId = goalRequestId(record, 0);
+  }
+  await store.createCommandIfAbsent({ commandId, requestId, nodeId: action.nodeId, sessionId: action.sessionId,
+    action: "send", prompt, sendRoute: action.sendRoute, status: "queued", deliveryMode: "next-turn",
+    authority: { type: kind, id, chatId: "plan-chat" }, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + 600_000).toISOString() });
+  const daemon = new LocalDaemon();
+  server.getNodeHub().handleConnection(daemon as unknown as WebSocket, "demoair");
+  daemon.report("hello", "queued snapshot");
+  const queuedFrame = await stream.next();
+  expect(queuedFrame).not.toBe("closed");
+  const queued = JSON.parse(queuedFrame.split("data: ")[1]);
+  const projected = kind === "plan" ? queued.executions.items[0].steps : queued.goals.items[0].actions;
+  expect(projected[0]).toMatchObject({ commandId, status: "queued" });
+  const status = await fetch(`${baseUrl}/v1/status`, { headers: { Cookie: cookie } });
+  expect(status.status).toBe(200);
+  const http = await status.json();
+  expect(kind === "plan" ? http.executions : http.goals).toEqual(kind === "plan" ? queued.executions : queued.goals);
+  await store.claimQueuedCommand(commandId, action.sendRoute);
+  await store.updateCommandStatus(commandId, "accepted", undefined, undefined, "queued-exact-turn");
+  daemon.report("heartbeat", "accepted snapshot");
+  const acceptedFrame = await stream.next();
+  expect(acceptedFrame).not.toBe("closed");
+  const accepted = JSON.parse(acceptedFrame.split("data: ")[1]);
+  expect((kind === "plan" ? accepted.executions.items[0].steps : accepted.goals.items[0].actions)[0])
+    .toMatchObject({ commandId, status: "accepted", turnId: "queued-exact-turn" });
 });

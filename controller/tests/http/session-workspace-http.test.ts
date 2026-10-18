@@ -1,12 +1,13 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import { ControllerServer } from "../../src/http/server.js";
 import { MemoryStore } from "../../src/store/memory.js";
 import type { Config } from "../../src/runtime/config.js";
-import type { Session, SessionHistory } from "../../src/types.js";
+import type { CommandAuthority, Session, SessionHistory } from "../../src/types.js";
 import { CONSOLE_SESSION_TTL_MS } from "../../src/console/auth.js";
+import { createExecution, executionRequestId, EXECUTION_CLAIM_MS } from "../../src/leader/plans/execution.js";
 
 const CONTROLLER_TOKEN = "workspace-admin-token";
 const CONSOLE_ORIGIN = "http://127.0.0.1:8790";
@@ -233,6 +234,145 @@ describe("Session workspace HTTP boundary", () => {
     expect(mini.frames).toHaveLength(0);
   });
 
+  it.each(["idle", "busy"])("recovers the existing %s target command by its original browser request ID without writes", async status => {
+    const air = await connect("demoair", session({ status }));
+    const requestId = "recover-browser-request";
+    const submitted = await post({ prompt: "recover this exact command", requestId });
+    expect(submitted.status).toBe(202);
+    const command = await submitted.json();
+    expect(command.status).toBe(status === "idle" ? "pending" : "queued");
+    const original = await store.getCommand(command.commandId);
+    await vi.waitFor(() => expect(air.frames).toHaveLength(status === "idle" ? 1 : 0));
+    const frames = structuredClone(air.frames);
+    const send = vi.spyOn(server.getNodeHub(), "sendCommand");
+    const create = vi.spyOn(store, "createCommandIfAbsent");
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await fetch(baseUrl + MESSAGE_PATH + "/" + requestId, { headers: { Cookie: cookie } });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(command);
+    }
+
+    expect(await store.listRecentCommands()).toEqual([original]);
+    expect(create).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(air.frames).toEqual(frames);
+  });
+
+  it("hides recovery from another Cookie, another target and an unknown request without writes", async () => {
+    const air = await connect("demoair", session({ status: "busy" }));
+    const submitted = await post({ prompt: "private queued command", requestId: "private-request" });
+    expect(submitted.status).toBe(202);
+    const command = await submitted.json();
+    const original = await store.getCommand(command.commandId);
+    const otherCookie = await login();
+    const send = vi.spyOn(server.getNodeHub(), "sendCommand");
+    const create = vi.spyOn(store, "createCommandIfAbsent");
+    const cases = [
+      { path: MESSAGE_PATH + "/private-request", credential: otherCookie },
+      { path: `/v1/sessions/demomini/${SESSION_ID}/messages/private-request`, credential: cookie },
+      { path: "/v1/sessions/demoair/another-thread/messages/private-request", credential: cookie },
+      { path: MESSAGE_PATH + "/missing-request", credential: cookie },
+    ];
+    for (const { path, credential } of cases) {
+      const response = await fetch(baseUrl + path, { headers: { Cookie: credential } });
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: "Command not found for this authorization and target" });
+    }
+    expect(await store.listRecentCommands()).toEqual([original]);
+    expect(create).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(air.frames).toHaveLength(0);
+  });
+
+  it("requires a live console Cookie for recovery and refuses Bearer authority", async () => {
+    const air = await connect("demoair", session({ status: "busy" }));
+    const submitted = await post({ prompt: "protected command", requestId: "protected-request" });
+    const command = await submitted.json();
+    const original = await store.getCommand(command.commandId);
+    const path = baseUrl + MESSAGE_PATH + "/protected-request";
+    const send = vi.spyOn(server.getNodeHub(), "sendCommand");
+    const create = vi.spyOn(store, "createCommandIfAbsent");
+    expect((await fetch(path)).status).toBe(401);
+    expect((await fetch(path, { headers: { Cookie: cookie.replace(/=.*/, "=invalid") } })).status).toBe(401);
+    expect((await fetch(path, { headers: { Authorization: `Bearer ${CONTROLLER_TOKEN}` } })).status).toBe(403);
+    now += CONSOLE_SESSION_TTL_MS;
+    expect((await fetch(path, { headers: { Cookie: cookie } })).status).toBe(401);
+    expect(await store.listRecentCommands()).toEqual([original]);
+    expect(create).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(air.frames).toHaveLength(0);
+  });
+
+  it("keeps queued work visible after refresh and permits only its original Cookie to cancel it", async () => {
+    const air = await connect("demoair", session({ status: "busy" }));
+    const requestId = "refresh-and-cancel";
+    const submitted = await post({ prompt: "wait until this session is ready", requestId });
+    expect(submitted.status).toBe(202);
+    const command = await submitted.json();
+    expect(command).toMatchObject({ status: "queued" });
+    expect(command).not.toHaveProperty("authority");
+    const original = await store.getCommand(command.commandId);
+    expect(original?.authority).toMatchObject({ type: "console" });
+    const otherCookie = await login();
+    const send = vi.spyOn(server.getNodeHub(), "sendCommand");
+    const create = vi.spyOn(store, "createCommandIfAbsent");
+
+    const rejected = await post({ cancelCommandId: command.commandId }, browserHeaders({ Cookie: otherCookie }));
+    expect(rejected.status).toBe(409);
+    expect(await store.getCommand(command.commandId)).toEqual(original);
+
+    const refreshedStatus = await fetch(baseUrl + "/v1/status", { headers: { Cookie: cookie } });
+    expect(refreshedStatus.status).toBe(200);
+    expect((await refreshedStatus.json()).commands).toContainEqual(expect.objectContaining({
+      ...command, hasOutput: false, outputPreview: "", outputTruncated: false,
+    }));
+    const recovered = await fetch(baseUrl + MESSAGE_PATH + "/" + requestId, { headers: { Cookie: cookie } });
+    expect(recovered.status).toBe(200);
+    expect(await recovered.json()).toEqual(command);
+
+    const cancelled = await post({ cancelCommandId: command.commandId });
+    expect(cancelled.status).toBe(200);
+    const publicCancelled = await cancelled.json();
+    expect(publicCancelled).toMatchObject({ commandId: command.commandId, status: "cancelled" });
+    expect(publicCancelled).not.toHaveProperty("authority");
+    expect(await store.getCommand(command.commandId)).toMatchObject({ commandId: command.commandId, status: "cancelled", authority: original?.authority });
+    const afterCancellation = await fetch(baseUrl + "/v1/status", { headers: { Cookie: cookie } });
+    expect((await afterCancellation.json()).commands).toContainEqual(expect.objectContaining({ commandId: command.commandId, status: "cancelled" }));
+    expect(await store.listRecentCommands()).toHaveLength(1);
+    expect(create).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(air.frames).toHaveLength(0);
+  });
+
+  it.each(["chat", "plan"] as const)("prevents a console Cookie from cancelling %s-authorized queued work", async source => {
+    const air = await connect("demoair", session({ status: "busy" }));
+    const action = { nodeId: "demoair", sessionId: SESSION_ID, prompt: "chat-authorized task", sendRoute: "control-socket" as const, dependsOn: [] };
+    let authority: CommandAuthority = { type: "chat", chatId: "allowed-chat" };
+    let requestId = "chat-authorized-request";
+    if (source === "plan") {
+      const execution = createExecution("allowed-chat", { id: randomUUID(), expiresAt: now + 60000, actions: [action] }, now);
+      await store.createExecutionIfAbsent(execution);
+      await store.compareAndSetExecution({ ...execution, revision: execution.revision + 1,
+        attempts: [{ token: randomUUID(), startedAt: now, expiresAt: now + EXECUTION_CLAIM_MS }] }, execution.revision);
+      authority = { type: "plan", id: execution.id, chatId: execution.chatId };
+      requestId = executionRequestId(execution, 0);
+    }
+    const { command } = await store.createCommandIfAbsent({ commandId: "cmd_" + randomUUID(), requestId,
+      nodeId: action.nodeId, sessionId: action.sessionId, action: "send", prompt: action.prompt,
+      sendRoute: action.sendRoute, deliveryMode: "next-turn", status: "queued", authority,
+      createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(), expiresAt: new Date(now + 60000).toISOString() });
+    const send = vi.spyOn(server.getNodeHub(), "sendCommand");
+    const create = vi.spyOn(store, "createCommandIfAbsent");
+    const response = await post({ cancelCommandId: command.commandId });
+    expect(response.status).toBe(409);
+    expect(await store.getCommand(command.commandId)).toEqual(command);
+    expect(await store.listRecentCommands()).toEqual([command]);
+    expect(create).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(air.frames).toHaveLength(0);
+  });
+
   it.each([
     ["missing Origin", "Origin", undefined],
     ["foreign Origin", "Origin", "https://foreign.example"],
@@ -258,13 +398,32 @@ describe("Session workspace HTTP boundary", () => {
     const air = await connect();
     const headers = browserHeaders();
     delete headers["Sec-Fetch-Site"];
-    expect((await post({ prompt: "browser", requestId: "browser" }, headers)).status).toBe(202);
-    expect((await post({ prompt: "admin", requestId: "admin" }, {
+    const browserResponse = await post({ prompt: "browser", requestId: "browser" }, headers);
+    expect(browserResponse.status).toBe(202);
+    const browserCommand = await browserResponse.json();
+    expect(browserCommand).toMatchObject({ status: "pending", deliveryMode: "next-turn" });
+    expect(browserCommand).not.toHaveProperty("authority");
+    expect((await store.getCommand(browserCommand.commandId))?.authority).toMatchObject({ type: "console" });
+    const adminResponse = await post({ prompt: "admin", requestId: "admin" }, {
       Authorization: `Bearer ${CONTROLLER_TOKEN}`, "Content-Type": "application/json",
-    })).status).toBe(202);
+    });
+    expect(adminResponse.status).toBe(202);
+    const adminCommand = await adminResponse.json();
+    expect(adminCommand).toMatchObject({ status: "queued", deliveryMode: "next-turn" });
+    expect(adminCommand).not.toHaveProperty("authority");
+    expect((await store.getCommand(adminCommand.commandId))?.authority).toMatchObject({ type: "admin" });
     expect((await post({ prompt: "wrong bearer", requestId: "bad-admin" },
       browserHeaders({ Authorization: "Bearer invalid" }))).status).toBe(403);
-    await vi.waitFor(() => expect(air.frames.filter(frame => frame.type === "command")).toHaveLength(2));
+    await vi.waitFor(() => expect(air.frames.filter(frame => frame.type === "command")).toHaveLength(1));
+    expect((await store.getCommand(adminCommand.commandId))?.status).toBe("queued");
+    air.ws.send(JSON.stringify({ type: "result", commandId: browserCommand.commandId, status: "accepted", turnId: "browser-turn" }));
+    await vi.waitFor(async () => expect((await store.getCommand(browserCommand.commandId))?.status).toBe("accepted"));
+    expect((await store.getCommand(adminCommand.commandId))?.status).toBe("queued");
+    expect(air.frames.filter(frame => frame.type === "command")).toHaveLength(1);
+    air.ws.send(JSON.stringify({ type: "result", commandId: browserCommand.commandId,
+      status: "completed", turnId: "browser-turn", output: "browser task complete" }));
+    await vi.waitFor(() => expect(air.frames.filter(frame => frame.type === "command")).toHaveLength(2), { timeout: 3000 });
+    expect(air.frames.filter(frame => frame.type === "command")[1]).toMatchObject({ commandId: adminCommand.commandId, prompt: "admin" });
   });
 
   it.each<[string, Record<string, unknown>]>([
@@ -306,10 +465,23 @@ describe("Session workspace HTTP boundary", () => {
     expect(air.frames).toHaveLength(0);
   });
 
+  it.each<[string, Partial<Session>]>([
+    ["busy", { status: "busy" }],
+    ["unknown status", { status: "unknown" }],
+    ["not loaded", { loaded: false }],
+  ])("persists %s targets in the queue without dispatch", async (_label, overrides) => {
+    const air = await connect("demoair", session(overrides));
+    const response = await post();
+    expect(response.status).toBe(202);
+    const command = await response.json();
+    expect(command).toMatchObject({ status: "queued", sendRoute: "control-socket", deliveryMode: "next-turn" });
+    expect(command).not.toHaveProperty("authority");
+    expect(air.frames).toHaveLength(0);
+    expect(await store.listRecentCommands()).toEqual([expect.objectContaining({ ...command,
+      authority: { type: "console", tokenHash: expect.any(String), expiresAt: expect.any(String) } })]);
+  });
+
   it.each<[string, Partial<Session>, number]>([
-    ["busy", { status: "busy" }, 409],
-    ["unknown status", { status: "unknown" }, 409],
-    ["not loaded", { loaded: false }, 409],
     ["read-only", { capabilities: ["read"] }, 400],
     ["unknown capabilities", { capabilities: [] }, 400],
   ])("rejects %s targets without dispatch", async (_label, overrides, expectedStatus) => {
@@ -359,8 +531,8 @@ describe("Session workspace HTTP boundary", () => {
     expect(await store.listRecentCommands()).toEqual([]);
   });
 
-  it("rejects offline and missing targets without dispatch", async () => {
-    expect((await post()).status).toBe(503);
+  it("rejects unknown and missing targets without dispatch", async () => {
+    expect((await post()).status).toBe(404);
     const offlineHistory = await fetch(baseUrl + HISTORY_PATH, { headers: { Cookie: cookie } });
     expect(offlineHistory.status).toBe(503);
     expect((await offlineHistory.json()).code).toBe("history_offline");
@@ -370,6 +542,24 @@ describe("Session workspace HTTP boundary", () => {
     expect(missingHistory.status).toBe(404);
     expect((await missingHistory.json()).code).toBe("history_session_not_found");
     expect(air.frames).toHaveLength(0);
+    expect(await store.listRecentCommands()).toEqual([]);
+  });
+
+  it("queues a known disconnected target and dispatches only after its original node returns", async () => {
+    const air = await connect();
+    await vi.waitFor(async () => expect(await store.getKnownSession("demoair", SESSION_ID)).not.toBeNull());
+    air.ws.close();
+    await vi.waitFor(() => expect(server.getNodeHub().isNodeConnected("demoair")).toBe(false));
+    const response = await post();
+    expect(response.status).toBe(202);
+    const command = await response.json();
+    expect(command).toMatchObject({ nodeId: "demoair", sessionId: SESSION_ID, status: "queued", sendRoute: "control-socket" });
+    expect((await store.getCommand(command.commandId))?.status).toBe("queued");
+    expect(air.frames).toHaveLength(0);
+    const restored = await connect();
+    await vi.waitFor(() => expect(restored.frames.filter(frame => frame.type === "command")).toHaveLength(1), { timeout: 3000 });
+    expect(restored.frames[0]).toMatchObject({ commandId: command.commandId, nodeId: "demoair", sessionId: SESSION_ID });
+    expect((await store.getCommand(command.commandId))?.status).toBe("pending");
   });
 
   it.each([

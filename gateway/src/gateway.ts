@@ -1,18 +1,32 @@
 import { StateManager } from "./runtime/state.js";
 import { ILinkClient } from "./wechat/client.js";
 import { ControllerClient, ChatNotAllowedError } from "./controller/client.js";
-import { DEFAULT_MESSAGE_MAX_CHARS, markdownToWeChat } from "./wechat/markdown.js";
+import { PermanentImageDownloadError } from "./controller/image-client.js";
+import { DEFAULT_MESSAGE_MAX_CHARS } from "./wechat/markdown.js";
 import { HealthTracker, sanitizeErrorType } from "./runtime/health.js";
-import { CHECKPOINT_MARGIN_MS, REPLY_TIMEOUT_MS, SEND_REQUEST_TIMEOUT_MS } from "./runtime/budgets.js";
+import { CHECKPOINT_MARGIN_MS, ENTRY_TYPING_BUDGET_MS, REPLY_TIMEOUT_MS, NOTIFICATION_REPLY_TIMEOUT_MS } from "./runtime/budgets.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { NOTIFICATION_CHAT_LIMIT, NOTIFICATION_TIMEOUT_MS, NOTIFICATION_RECEIPT_RETRIES, NOTIFICATION_LIMIT,
   parseNotification, sameNotification, type NotificationDeliverySummary } from "./controller/notification-contract.js";
 
-const NOTIFICATION_CYCLE_BUDGET_MS = NOTIFICATION_TIMEOUT_MS + NOTIFICATION_LIMIT *
-  (NOTIFICATION_TIMEOUT_MS + SEND_REQUEST_TIMEOUT_MS + NOTIFICATION_TIMEOUT_MS * (NOTIFICATION_RECEIPT_RETRIES + 1)) + CHECKPOINT_MARGIN_MS;
+const NOTIFICATION_RECEIPT_BUDGET_MS = NOTIFICATION_TIMEOUT_MS * (NOTIFICATION_RECEIPT_RETRIES + 1);
 const NOTIFICATION_SEND_FAILED_EVENT = "notification_send_failed";
 const STDERR_FD = 2;
+const MIN_NOTIFICATION_INTERVAL_MS = 1;
+
+async function waitForNotificationPoll(intervalMs: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return;
+  await new Promise<void>(resolve => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, Math.max(MIN_NOTIFICATION_INTERVAL_MS, intervalMs));
+    signal.addEventListener("abort", finish, { once: true });
+  });
+}
 
 export class NotificationDiagnosticError extends Error {
   constructor() { super("Notification diagnostic write failed"); }
@@ -54,6 +68,7 @@ export class WeChatGateway {
   private stopped: boolean = false;
   private deliveringNotifications: boolean = false;
   private notificationChatCursor = 0;
+  private readonly notificationAbort = new AbortController();
 
   constructor(options: {
     stateManager: StateManager;
@@ -75,9 +90,10 @@ export class WeChatGateway {
 
   public stop(): void {
     this.stopped = true;
+    this.notificationAbort.abort(new Error("WeChat notification delivery stopped"));
   }
 
-  /** At most one send per claim. A deterministic client ID correlates evidence, not delivery idempotence. */
+  /** One durable multipart delivery per claim; client IDs only correlate evidence. */
   public async deliverNotificationsOnce(): Promise<NotificationDeliverySummary> {
     const summary: NotificationDeliverySummary = { accepted: 0, uncertain: 0, skipped: 0 };
     if (!this.notifications || this.stopped || this.deliveringNotifications || !this.stateManager.isReadyForActivePolling()) return summary;
@@ -85,9 +101,7 @@ export class WeChatGateway {
       typeof this.stateManager.contextTokens[chatId] === "string" && this.stateManager.contextTokens[chatId].trim()).sort();
     if (!chatIds.length || !this.stateManager.account?.token) return summary;
     this.deliveringNotifications = true;
-    let healthPhase: number | undefined;
     try {
-      healthPhase = this.healthTracker?.recordMessageStart(NOTIFICATION_CYCLE_BUDGET_MS);
       const offset = this.notificationChatCursor % chatIds.length;
       const batch = [...chatIds.slice(offset), ...chatIds.slice(0, offset)].slice(0, NOTIFICATION_CHAT_LIMIT);
       this.notificationChatCursor = (offset + batch.length) % chatIds.length;
@@ -114,9 +128,16 @@ export class WeChatGateway {
         let status: "accepted" | "uncertain" = "accepted";
         let sendErrorType: string | undefined;
         try {
-          // A claim permits one bounded message, even when ordinary replies use multiple chunks.
-          const text = markdownToWeChat(item.text, Math.min(this.splitMaxChars, DEFAULT_MESSAGE_MAX_CHARS));
-          await this.ilink.sendSingleText(item.chatId, text, `super-leader:notification:${item.id}`);
+          const timeoutMs = Math.min(NOTIFICATION_REPLY_TIMEOUT_MS,
+            claimed.attemptExpiresAt! - Date.now() - NOTIFICATION_RECEIPT_BUDGET_MS);
+          if (timeoutMs <= 0) throw new Error("WeChat notification claim has insufficient delivery budget");
+          await this.ilink.sendMarkdownReply(item.chatId, item.text, {
+            deliveryKey: `notification:${item.id}`, maxCharsPerChunk: this.splitMaxChars,
+            timeoutMs, signal: this.notificationAbort.signal,
+            shouldContinue: () => !this.stopped && this.stateManager.isReadyForActivePolling() &&
+              claimed.attemptExpiresAt! > Date.now() && item.expiresAt > Date.now() &&
+              context === this.stateManager.contextTokens[item.chatId] && fingerprint === this.stateManager.getLoginFingerprint(),
+          });
         } catch (error) {
           status = "uncertain"; // A send failure is evidence uncertainty, never a resend instruction.
           sendErrorType = sanitizeErrorType(error);
@@ -128,7 +149,6 @@ export class WeChatGateway {
       return summary;
     } finally {
       this.deliveringNotifications = false;
-      if (healthPhase !== undefined) this.healthTracker?.recordProcessingEnd(healthPhase);
     }
   }
 
@@ -199,19 +219,42 @@ export class WeChatGateway {
 
       for (const msg of batch.messages) {
         if (this.stopped) { interrupted = true; break; }
-        this.healthTracker?.recordMessageStart(this.controller.requestBudgetMs + REPLY_TIMEOUT_MS + CHECKPOINT_MARGIN_MS);
+        this.healthTracker?.recordMessageStart(this.controller.authorizationBudgetMs + ENTRY_TYPING_BUDGET_MS +
+          this.controller.requestBudgetMs + REPLY_TIMEOUT_MS + CHECKPOINT_MARGIN_MS);
         try {
+          if (this.hasQuarantinedInboundReply(msg.deliveryKey)) {
+            this.quarantineInboundReply(msg.deliveryKey);
+            skippedCount++;
+            continue;
+          }
+          await this.controller.assertChatAllowed(msg.chatId);
+          await this.ilink.sendTyping(msg.chatId);
           const controllerReply = await this.controller.forwardMessage({
             chatId: msg.chatId,
             messageId: msg.messageId,
             text: msg.text,
           });
 
-          if (controllerReply.text && controllerReply.text.trim()) {
+          const replyDeadline = Date.now() + REPLY_TIMEOUT_MS;
+          if (controllerReply.images?.length) {
+            await this.ilink.sendImageReply(msg.chatId, controllerReply.images, {
+              deliveryKey: `image-reply:${msg.deliveryKey}`,
+              timeoutMs: REPLY_TIMEOUT_MS,
+              shouldContinue: () => !this.stopped,
+              getImageBytes: (image, signal) => this.controller.downloadImage({
+                chatId: msg.chatId, messageId: msg.messageId, image,
+              }, signal),
+            });
+          }
+
+          if (controllerReply.text.length > 0) {
+            const timeoutMs = replyDeadline - Date.now();
+            if (timeoutMs <= 0) throw new Error("WeChat reply timed out before completion");
             await this.ilink.sendMarkdownReply(msg.chatId, controllerReply.text, {
               deliveryKey: msg.deliveryKey,
               maxCharsPerChunk: this.splitMaxChars,
               splitMultiPart: this.splitMultiPart,
+              timeoutMs,
             });
           }
 
@@ -221,6 +264,14 @@ export class WeChatGateway {
           processedCount++;
           this.healthTracker?.recordMessageProgress();
         } catch (err) {
+          if (err instanceof PermanentImageDownloadError) {
+            this.stateManager.recordReplyFailure(`image-reply:${msg.deliveryKey}`, err.reason);
+          }
+          if (this.hasQuarantinedInboundReply(msg.deliveryKey)) {
+            this.quarantineInboundReply(msg.deliveryKey);
+            skippedCount++;
+            continue;
+          }
           if (err instanceof ChatNotAllowedError) {
             // Poison batch protection: unauthorized chat is rejected by Controller allowlist.
             // Mark message processed so the cursor advances and subsequent messages are not starved.
@@ -253,6 +304,18 @@ export class WeChatGateway {
     }
   }
 
+  private hasQuarantinedInboundReply(deliveryKey: string): boolean {
+    return Boolean(deliveryKey) && (this.stateManager.hasUncertainReply(deliveryKey) ||
+      this.stateManager.hasUncertainReply(`image-reply:${deliveryKey}`) ||
+      this.stateManager.hasPermanentReplyFailure(`image-reply:${deliveryKey}`));
+  }
+
+  private quarantineInboundReply(deliveryKey: string): void {
+    // Isolate this inbound item while retaining its durable delivery failure evidence.
+    this.stateManager.recordProcessedMessageKey(deliveryKey, { preserveReplyEvidence: true });
+    this.healthTracker?.recordMessageProgress();
+  }
+
   public async runLoop(pollIntervalMs: number = 1000, onError?: (err: Error) => void,
     onNotificationError?: (err: Error) => void): Promise<void> {
     if (!this.stateManager.isReadyForActivePolling()) {
@@ -261,33 +324,43 @@ export class WeChatGateway {
       );
     }
 
-    while (!this.stopped) {
+    let notificationFailure: Error | undefined;
+    const deliver = async (): Promise<void> => {
       try { await this.deliverNotificationsOnce(); }
       catch (err) {
-        if (err instanceof NotificationDiagnosticError) {
-          this.stop();
-          throw err;
-        }
         const error = err instanceof Error ? err : new Error("Notification delivery failed");
-        if (onNotificationError) onNotificationError(error);
-        else if (onError) onError(error);
-        else process.stderr.write("[gateway] notification cycle error\n");
-      }
-      if (this.stopped) break;
-      try {
-        await this.pollOnce();
-      } catch (err) {
-        const error = err instanceof Error ? err : new Error(String(err));
-        if (onError) {
-          onError(error);
-        } else {
-          throw error;
+        if (error instanceof NotificationDiagnosticError) { notificationFailure = error; this.stop(); return; }
+        try {
+          if (onNotificationError) onNotificationError(error);
+          else if (onError) onError(error);
+          else process.stderr.write("[gateway] notification cycle error\n");
+        } catch (callbackError) {
+          notificationFailure = callbackError instanceof Error ? callbackError : new Error("Notification error callback failed");
+          this.stop();
         }
       }
-      if (this.stopped) break;
-      if (pollIntervalMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    };
+    const notificationTask = this.notifications ? (async () => {
+      while (!this.stopped) {
+        await deliver();
+        if (!this.stopped) await waitForNotificationPoll(pollIntervalMs, this.notificationAbort.signal);
       }
+    })() : Promise.resolve();
+    try {
+      while (!this.stopped) {
+        try { await this.pollOnce(); }
+        catch (err) {
+          const error = err instanceof Error ? err : new Error("Gateway polling failed");
+          if (onError) onError(error);
+          else throw error;
+        }
+        if (this.stopped) break;
+        if (pollIntervalMs > 0) await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+      }
+    } finally {
+      this.stop();
+      await notificationTask;
     }
+    if (notificationFailure) throw notificationFailure;
   }
 }

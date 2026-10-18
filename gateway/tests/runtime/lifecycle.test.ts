@@ -57,11 +57,14 @@ test("stop completes one message and durable key, preserves cursor, then restart
   })) };
   const ilinkFetch: typeof fetch = async (url, init) => {
     if (String(url).endsWith("getupdates")) return json(batch);
+    if (String(url).endsWith("getconfig")) return json({ ret: 0, typing_ticket: "ticket" });
+    if (String(url).endsWith("sendtyping")) return json({ ret: 0 });
     sent.push(JSON.parse(init?.body as string).msg.client_id);
     return json({ ret: 0 });
   };
   const controller = new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic",
-    fetchImpl: async (_url, init) => {
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/v1/chats/authorize")) return json({ allowed: true });
       forwarded.push(JSON.parse(init?.body as string).messageId);
       gateway.stop();
       return json({ text: "reply" });
@@ -81,7 +84,10 @@ test("stop completes one message and durable key, preserves cursor, then restart
   const resumed = new WeChatGateway({ stateManager: resumedState,
     ilink: new ILinkClient({ stateManager: resumedState, fetchImpl: ilinkFetch }),
     controller: new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic",
-      fetchImpl: async (_url, init) => { forwarded.push(JSON.parse(init?.body as string).messageId); return json({ text: "reply" }); } }),
+      fetchImpl: async (url, init) => {
+        if (String(url).endsWith("/v1/chats/authorize")) return json({ allowed: true });
+        forwarded.push(JSON.parse(init?.body as string).messageId); return json({ text: "reply" });
+      } }),
     healthTracker: f.health });
   assert.equal((await resumed.pollOnce()).processedCount, 1);
   assert.deepEqual(forwarded, ["first", "second"]);
@@ -112,7 +118,9 @@ test("multipart sending has a finite 60s budget and persists only completed chun
   const f = fixture(t);
   f.state.setContextToken("user", "synthetic-context");
   let requests = 0;
-  const ilink = new ILinkClient({ stateManager: f.state, fetchImpl: async (_url, init) => {
+  const ilink = new ILinkClient({ stateManager: f.state, fetchImpl: async (url, init) => {
+    if (String(url).endsWith("getconfig")) return json({ ret: 0, typing_ticket: "ticket" });
+    if (String(url).endsWith("sendtyping")) return json({ ret: 0 });
     requests++;
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(resolve, 14000);
@@ -122,9 +130,10 @@ test("multipart sending has a finite 60s budget and persists only completed chun
   } });
   const pending = ilink.sendMarkdownReply("user", "abcdefghij", { maxCharsPerChunk: 1, deliveryKey: "delivery" });
   const rejected = assert.rejects(pending, /timed out/);
+  for (let step = 0; step < 32; step++) await Promise.resolve();
   for (let chunk = 0; chunk < 4; chunk++) {
     t.mock.timers.tick(14000);
-    for (let step = 0; step < 12; step++) await Promise.resolve();
+    for (let step = 0; step < 32; step++) await Promise.resolve();
   }
   t.mock.timers.tick(REPLY_TIMEOUT_MS - 56000);
   await rejected;

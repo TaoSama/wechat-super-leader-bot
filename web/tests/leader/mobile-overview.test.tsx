@@ -31,6 +31,16 @@ function setup(selectedNodeId: string | null = null) {
   return { ...render(<LeaderOverview {...props} />), props };
 }
 
+it("排队、取消和过期分别展示，取消不会计入完成", () => {
+  render(<CommandsSection commands={[command("queued"), command("cancelled"), command("expired")]} selectedNodeId={null} sessions={[session]} statusFilter="ALL" onStatusFilterChange={vi.fn()} />);
+  expect(within(screen.getByRole("region", { name: "执行中" })).getByTestId("command-item-queued")).toBeVisible();
+  expect(within(screen.getByRole("region", { name: "需要处理" })).getByTestId("command-item-expired")).toBeVisible();
+  expect(screen.getByTestId("command-item-cancelled")).not.toBeVisible();
+  fireEvent.click(screen.getByText("查看已取消"));
+  expect(screen.getByTestId("command-item-cancelled")).toBeVisible();
+  expect(screen.queryByRole("region", { name: "最近完成" })).toBeNull();
+});
+
 it("keeps risks visible while secondary machine, mode and completed evidence starts folded", () => {
   const { container } = setup();
   expect(screen.getByTestId("command-item-uncertain")).toBeVisible();
@@ -39,7 +49,7 @@ it("keeps risks visible while secondary machine, mode and completed evidence sta
   expect(screen.getByTestId("command-item-completed")).not.toBeVisible();
   expect(screen.getByTestId("node-card-local")).not.toBeVisible();
   expect(screen.getByRole("region", { name: "Leader 运行模式" })).toHaveTextContent("leader-model");
-  expect(screen.getByText(/不代表模型当前可用或任务已完成/)).not.toBeVisible();
+  expect(screen.getByText(/具体任务的进展与结果/)).not.toBeVisible();
   expect(screen.getByText("回执如何解读").closest("details")).not.toHaveAttribute("open");
   expect(container.querySelector(".leader-machine-scope")!.compareDocumentPosition(container.querySelector(".leader-grid")!))
     .toBe(Node.DOCUMENT_POSITION_FOLLOWING);

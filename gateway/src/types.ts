@@ -13,9 +13,18 @@ export interface GatewaySyncState {
   processed_message_keys: string[];
   // Track chunk progression for multi-part messages: key -> count of chunks acknowledged
   sent_reply_progress?: Record<string, number>;
+  reply_deliveries?: Record<string, ReplyDeliveryState>;
   baseline_established?: boolean;
   baseline_in_progress?: boolean;
   baseline_established_at?: string;
+}
+
+export interface ReplyDeliveryState {
+  digest: string;
+  totalChunks: number;
+  acknowledgedChunks: number;
+  inFlight: boolean;
+  failureReason?: "AttachmentExpired" | "AttachmentUnavailable";
 }
 
 export interface InboundWeChatMessage {
@@ -35,6 +44,7 @@ export interface ControllerMessageRequest {
 export interface ControllerMessageResponse {
   text: string;
   commandId?: string;
+  images?: import("./wechat/media-delivery.js").ImageAttachment[];
 }
 
 export interface GatewayConfig {

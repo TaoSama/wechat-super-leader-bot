@@ -168,7 +168,7 @@ describe("terminal transcript workspace", () => {
     fireEvent.click(screen.getByTestId(`session-row-fixture-${SESSION_ID}`));
     await settle();
     expect(screen.getByLabelText("会话历史")).toHaveTextContent("可见回答");
-    expect(screen.getByText(/CLI 会话记录来自原 CLI/)).toBeInTheDocument();
+    expect(screen.getByText("终端会话记录 · 仅显示已保存的内容")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "发送消息" })).toBeDisabled();
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "加载更早的消息" })));
     expect([...screen.getByLabelText("会话历史").querySelectorAll("[data-history-id]")].map(element => element.getAttribute("data-history-id")))

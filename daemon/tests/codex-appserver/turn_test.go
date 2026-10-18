@@ -15,6 +15,7 @@ import (
 )
 
 func TestInspectExactTurn(t *testing.T) {
+	wantOutput := "\n# 完整结果\n\n```text\n" + strings.Repeat("界", 5000) + "  \n```\n\n"
 	for _, tc := range []struct {
 		name, status, threadID, targetID string
 		wantError                        bool
@@ -50,7 +51,7 @@ func TestInspectExactTurn(t *testing.T) {
 							return
 						}
 						result = map[string]any{"thread": map[string]any{"id": tc.threadID, "status": "idle", "turns": []any{
-							map[string]any{"id": tc.targetID, "status": tc.status, "error": map[string]any{"message": "secret-test-token"}, "items": []any{map[string]any{"type": "agentMessage", "text": strings.Repeat("界", 5000)}}},
+							map[string]any{"id": tc.targetID, "status": tc.status, "error": map[string]any{"message": "secret-test-token"}, "items": []any{map[string]any{"type": "agentMessage", "text": wantOutput}}},
 							map[string]any{"id": "last-other-turn", "status": "completed", "items": []any{map[string]any{"type": "agentMessage", "text": "WRONG TURN"}}},
 						}}}
 					default:
@@ -76,7 +77,7 @@ func TestInspectExactTurn(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if observation.Status != tc.status || strings.Contains(observation.Output, "WRONG TURN") || len([]rune(observation.Output)) > 4050 {
+			if observation.Status != tc.status || observation.Output != wantOutput {
 				t.Fatalf("wrong observation: status=%s outputLength=%d", observation.Status, len(observation.Output))
 			}
 			if strings.Contains(observation.Error, "secret-test-token") {

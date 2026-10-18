@@ -3,7 +3,7 @@ import { beforeEach, afterEach, it, expect } from "vitest";
 import { ControllerServer } from "../../src/http/server.js";
 import { MemoryStore } from "../../src/store/memory.js";
 import type { Config } from "../../src/runtime/config.js";
-import { createExecution } from "../../src/leader/plans/execution.js";
+import { createExecution, executionRequestId } from "../../src/leader/plans/execution.js";
 import { createGoal } from "../../src/leader/goals/goal.js";
 import { authorize, proposal } from "../fixtures/goals.js";
 import { NOTIFICATION_TTL_MS, NOTIFICATION_ATTEMPT_MS } from "../../src/notifications/contracts.js";
@@ -76,7 +76,7 @@ it("intersects requested chats with the current allowlist before LIMIT and lists
   expect((await store.getNotification(allowed, now))!.status).toBe("pending");
   expect((await call("/v1/notifications/pending", { chatIds: [] })).body.items).toEqual([]);
   const four = await call("/v1/notifications/pending", { chatIds: ["other"] });
-  expect(four.body.items.map((item: { id: string }) => item.id)).toEqual([1, 2, 3, 4].map(uuid));
+  expect(four.body.items.map((item: { id: string }) => item.id)).toEqual([1].map(uuid));
   config.allowedChatIds.delete("allowed");
   expect((await call("/v1/notifications/pending", { chatIds: ["allowed"] })).body.items).toEqual([]);
   expect((await call(`/v1/notifications/${allowed}/claim`, { attemptId: uuid(100) })).status).toBe(409);
@@ -131,6 +131,28 @@ it("expired unclaimed notifications are not delivered; unknown UUIDs return 404"
   expect((await call(`/v1/notifications/${missing}/receipt`, { attemptId: uuid(100), status: "accepted" })).status).toBe(404);
 });
 
+it("returns original Markdown beyond 128KiB identically through pending, read and claim", async () => {
+  const execution = createExecution("allowed", { id: uuid(1), expiresAt: NOW + 60_000,
+    actions: [{ nodeId: "fixture", sessionId: "session", prompt: "完整报告", dependsOn: [], sendRoute: "control-socket" }] }, NOW);
+  await store.createExecutionIfAbsent(execution);
+  const claimed = await store.compareAndSetExecution({ ...execution, revision: 2,
+    attempts: [{ token: uuid(2), startedAt: NOW, expiresAt: NOW + 15_000 }] }, 1, NOW);
+  const stamp = new Date(NOW).toISOString();
+  await store.createCommandIfAbsent({ commandId: "large-markdown", requestId: executionRequestId(execution, 0), nodeId: "fixture",
+    sessionId: "session", prompt: "完整报告", action: "send", sendRoute: "control-socket", status: "pending",
+    createdAt: stamp, updatedAt: stamp, expiresAt: new Date(NOW + 60_000).toISOString() });
+  await store.updateCommandStatus("large-markdown", "accepted", undefined, undefined, "large-turn");
+  const output = `# 报告\n\n${"原文😀 | 完整正文 |\n".repeat(12_000)}\n\`\`\`ts\nconst evidence = true;\n\`\`\`\n最终证据`;
+  expect(Buffer.byteLength(output, "utf8")).toBeGreaterThan(128 * 1024);
+  await store.updateCommandStatus("large-markdown", "completed", output, undefined, "large-turn");
+  await store.compareAndSetExecution({ ...claimed!, status: "completed", revision: 3 }, 2, NOW);
+  const pending = (await call("/v1/notifications/pending", { chatIds: ["allowed"] })).body.items[0];
+  const read = (await call(`/v1/notifications/${execution.id}`)).body.notification;
+  const sent = (await call(`/v1/notifications/${execution.id}/claim`, { attemptId: uuid(100) })).body.notification;
+  expect(pending.text).toContain(output); expect(read.text).toBe(pending.text); expect(sent.text).toBe(pending.text);
+  expect(sent.attemptExpiresAt).toBe(NOW + NOTIFICATION_ATTEMPT_MS);
+});
+
 it("goal notifications share management authorization, allowlist, claim and late receipt without exposing model prose", async () => {
   const goal = createGoal("allowed", { ...proposal(NOW), objective: "private objective" }, NOW);
   await store.confirmGoal(goal, await authorize(store, goal), () => NOW);
@@ -152,6 +174,7 @@ it("goal notifications share management authorization, allowlist, claim and late
   now = goal.expiresAt;
   const current = (await store.getGoal(goal.id))!;
   await store.compareAndSetGoal({ ...current, revision: 3, status: "expired" }, 2, () => now);
+  now = Math.max(now, NOW + NOTIFICATION_ATTEMPT_MS);
   const uncertain = await call(path); expect(uncertain.body.notification).toMatchObject({ kind: "blocked", status: "uncertain", attemptId: uuid(100) });
   expect(uncertain.body.notification.text).toBe(claimed.body.notification.text);
   config.allowedChatIds.clear();

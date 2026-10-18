@@ -88,7 +88,8 @@ export class GoalScheduler {
     if (goal.status === "blocked") return;
     if (!this.allowed(goal)) { await this.block(goal, "authorization_revoked"); return; }
     const view = await readGoalView(this.store, goal, this.now());
-    if (view.actions.some(a => ["uncertain", "failed", "input-written"].includes(a.status))) { await this.block(goal, "result_unavailable_or_failed"); return; }
+    await this.store.enqueueProgressNotification({type:"goal",id:goal.id},this.now());
+    if (view.actions.some(a => ["uncertain", "failed", "cancelled", "expired", "input-written"].includes(a.status))) { await this.block(goal, "result_unavailable_or_failed"); return; }
     const last = goal.actions.at(-1), lastView = view.actions.at(-1);
     if (last && lastView?.status !== "completed") {
       if (!last.attempt && lastView?.status === "waiting") await this.dispatch(goal, goal.actions.length - 1);
@@ -156,7 +157,7 @@ export class GoalScheduler {
           action.input.sources.some(source => JSON.stringify(view.actions[source.action - 1]?.result) !== JSON.stringify(source))) {
           throw new CommandError(409, "Goal dispatch authority unavailable");
         }
-      }, target.sendRoute);
+      }, target.sendRoute,{type:"goal",id:goal.id,chatId:goal.chatId});
     } catch (error) { this.report(error); }
   }
   private report(error: unknown): void {

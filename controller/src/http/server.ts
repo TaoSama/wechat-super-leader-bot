@@ -9,9 +9,11 @@ import { NodeHub } from "../nodes/hub.js";
 import {
   PostCommandRequestSchema,
   PostMessageRequestSchema,
+  MAX_DAEMON_RESULT_MESSAGE_BYTES,
 } from "../types.js";
 import { NaturalLanguageResolver } from "../leader/queries/resolver.js";
 import { CommandService, CommandError } from "../commands/service.js";
+import { publicCommand } from "../commands/public.js";
 import { HttpLeaderModel } from "../leader/model/client.js";
 import { LeaderModel } from "../leader/model/contracts.js";
 import { LeaderOrchestrator } from "../leader/orchestrator.js";
@@ -26,6 +28,8 @@ import { StatusEvents } from "./status-events.js";
 import { readConsoleExecutions } from "../console/executions.js";
 import { readConsoleGoals } from "../console/goals.js";
 import { createNotificationRouter } from "../notifications/routes.js";
+import { hashConsoleToken } from "../console/types.js";
+import { createMediaRouter } from "../sessions/media-routes.js";
 
 function makeMessageRequestId(chatId: string, messageId: string): string {
   // Use sha256 of JSON tuple to guarantee zero collision even if chatId or messageId contains delimiter characters
@@ -57,7 +61,7 @@ export class ControllerServer {
     this.store = store;
     this.now = now;
     this.hub = new NodeHub(store, config.tokenToNode, () => this.statusEvents?.changed());
-    this.commands = new CommandService(store, this.hub, config.commandTtlSeconds, () => this.statusEvents?.changed());
+    this.commands = new CommandService(store, this.hub, config.commandTtlSeconds, () => this.statusEvents?.changed(),chatId=>config.allowedChatIds.has(chatId));
     this.consoleAuth = new ConsoleAuthService(store, config.consolePublicUrl, config.controllerToken, now,
       token => this.statusEvents?.revoke(token));
     const leaderModel = model ?? (config.leader ? new HttpLeaderModel(config.leader) : undefined);
@@ -87,7 +91,7 @@ export class ControllerServer {
     this.app = express();
     this.server = http.createServer(this.app);
     // WS payload limit: 1MB
-    this.wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
+    this.wss = new WebSocketServer({ noServer: true, maxPayload: MAX_DAEMON_RESULT_MESSAGE_BYTES });
 
     this.setupRoutes();
     this.setupWebSocket();
@@ -107,12 +111,14 @@ export class ControllerServer {
     if (!authHeader && (isConsoleRead(req) || isConsoleMessage(req))) {
       const origin = this.consoleAuth.getPublicUrl();
       const cookie = origin ? extractSessionCookie(req, new URL(origin).protocol === "https:") : null;
-      if (cookie && await this.consoleAuth.verifySession(cookie)) {
+      const consoleSession = cookie ? await this.consoleAuth.verifySession(cookie) : null;
+      if (cookie && consoleSession) {
         if (req.path === "/events" && !checkOriginMatches(req, origin)) {
           res.status(403).json({ error: "Status stream requires a same-origin request" });
           return;
         }
         res.locals.consoleSessionToken = cookie;
+        res.locals.commandAuthority = {type:"console",tokenHash:hashConsoleToken(cookie),expiresAt:consoleSession.expiresAt};
         res.locals.verifyStatusAuth = async () => Boolean(await this.consoleAuth.verifySession(cookie));
         if (isConsoleMessage(req)) {
           if (!isSameOriginMessage(req, origin)) {
@@ -154,9 +160,9 @@ export class ControllerServer {
     await this.store.markExpiredActiveCommandsUncertain();
     const nodes = this.hub.getNodeStatusList();
     const sessions = await this.hub.getAllSessions();
-    const commands = await this.store.listRecentCommands(50);
-    const executions = await readConsoleExecutions(this.store, [...this.config.allowedChatIds], this.now());
-    const goals = await readConsoleGoals(this.store, [...this.config.allowedChatIds], this.now());
+    const commands = await this.store.listRecentCommandSummaries(50);
+    const executions = await readConsoleExecutions(this.store, [...this.config.allowedChatIds], this.now(), true);
+    const goals = await readConsoleGoals(this.store, [...this.config.allowedChatIds], this.now(), true);
     return { nodes, sessions, commands, executions, goals, skills: this.hub.getAllSkills(),
       leaderMode: this.leader ? "model" : "rules", leaderModel: this.config.leader?.model };
   }
@@ -181,8 +187,19 @@ export class ControllerServer {
     // Authenticated API router for /v1
     const apiRouter = express.Router();
     apiRouter.use(this.authMiddleware.bind(this));
+    apiRouter.use(createMediaRouter(this.store, () => this.config.allowedChatIds, this.now));
     apiRouter.use("/notifications", createNotificationRouter(this.store, () => this.config.allowedChatIds, this.now));
     apiRouter.use("/sessions", createSessionRouter(this.hub, this.commands));
+    apiRouter.post("/chats/authorize", (req: Request,res: Response) => {
+      if (!req.is("application/json") || !req.body || Object.keys(req.body).length !== 1 || typeof req.body.chatId !== "string") {
+        res.status(400).json({error:"Invalid chat authorization request"}); return;
+      }
+      if (!this.config.allowedChatIds.has(req.body.chatId)) {res.status(403).json({code:"CHAT_NOT_ALLOWED"});return;}
+      res.json({allowed:true});
+    });
+    apiRouter.post("/commands/:commandId/cancel",async(req: Request,res: Response)=>{
+      res.json(publicCommand(await this.commands.cancel(String(req.params.commandId),{type:"admin"})));
+    });
 
     apiRouter.post("/console-links", async (req: Request, res: Response) => {
       const body = req.body;
@@ -218,7 +235,7 @@ export class ControllerServer {
 
       try {
         const command = await this.commands.submit(parsed.data, parsed.data.action === "read" ? 5000 : 0);
-        res.status(command.status === "pending" ? 202 : 200).json(command);
+        res.status(["queued","pending"].includes(command.status) ? 202 : 200).json(publicCommand(command));
       } catch (error) {
         if (error instanceof CommandError || error instanceof ConflictError) {
           res.status(error instanceof ConflictError ? 409 : error.httpStatus).json({ error: error.message });
@@ -237,7 +254,7 @@ export class ControllerServer {
         res.status(404).json({ error: "Command not found" });
         return;
       }
-      res.json(cmd);
+      res.json(publicCommand(cmd));
     });
 
     // POST /v1/messages -> { text, commandId? }
@@ -266,6 +283,7 @@ export class ControllerServer {
         res.json({
           text: existingMsg.replyText,
           commandId: existingMsg.commandId,
+          ...(existingMsg.images ? { images: existingMsg.images } : {}),
         });
         return;
       }
@@ -273,7 +291,7 @@ export class ControllerServer {
       if (this.leader) {
         const reply = await this.leader.handle(chatId, messageId, text);
         await this.store.recordMessage({ chatId, messageId, text, replyText: reply.text,
-          commandId: reply.commandId, createdAt: new Date().toISOString() });
+          commandId: reply.commandId, ...(reply.images ? { images: reply.images } : {}), createdAt: new Date().toISOString() });
         res.json(reply);
         return;
       }
@@ -316,7 +334,7 @@ export class ControllerServer {
             nodeId: intent.nodeId!, sessionId: intent.sessionId!, action,
             prompt: action === "send" ? intent.prompt : undefined,
             requestId: makeMessageRequestId(chatId, messageId),
-          }, action === "read" ? 5000 : 4000);
+          }, action === "read" ? 5000 : 4000,undefined,undefined,{type:"chat",chatId});
           commandId = command.commandId;
           this.chatContexts.set(chatId, { nodeId: intent.nodeId!, sessionId: intent.sessionId! });
           replyText = action === "read" && command.status === "completed"
@@ -412,10 +430,11 @@ export class ControllerServer {
     });
     this.executions?.start();
     this.goals?.start();
+    this.commands.start();
   }
 
   async stop(): Promise<void> {
-    await Promise.all([this.executions?.stop(), this.goals?.stop()]);
+    await Promise.all([this.executions?.stop(), this.goals?.stop(),this.commands.stop()]);
     this.statusEvents.stop();
     // Proactively close all active node websocket connections first
     await this.hub.closeAll();

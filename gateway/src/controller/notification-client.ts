@@ -1,4 +1,5 @@
 import type { FetchLike } from "../wechat/client.js";
+import { beforeAbort } from "../runtime/abort.js";
 import { NOTIFICATION_LIMIT, NOTIFICATION_CHAT_LIMIT, NOTIFICATION_TIMEOUT_MS, NOTIFICATION_RESPONSE_BYTES, NOTIFICATION_RECEIPT_RETRIES,
   notificationObject, notificationUuid, parseNotification, type Notification } from "./notification-contract.js";
 
@@ -7,16 +8,6 @@ class NotificationHttpError extends Error {
 }
 class NotificationJsonError extends Error {
   constructor() { super("Controller notification response schema invalid"); }
-}
-async function beforeDeadline<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
-  signal.throwIfAborted();
-  let onAbort!: () => void;
-  const aborted = new Promise<never>((_resolve, reject) => {
-    onAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-  try { return await Promise.race([pending, aborted]); }
-  finally { signal.removeEventListener("abort", onAbort); }
 }
 export class NotificationClient {
   constructor(private readonly baseUrl: string, private readonly token: string, private readonly fetchImpl: FetchLike,
@@ -27,7 +18,7 @@ export class NotificationClient {
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), this.timeoutMs);
       try {
-        const response = await beforeDeadline(this.fetchImpl(`${this.baseUrl}/v1/notifications${path}`, {
+        const response = await beforeAbort(this.fetchImpl(`${this.baseUrl}/v1/notifications${path}`, {
           method: body ? "POST" : "GET", headers: { Authorization: `Bearer ${this.token}`, "Content-Type": "application/json" },
           ...(body ? { body: JSON.stringify(body) } : {}), redirect: "error", signal: abort.signal,
         }), abort.signal);
@@ -39,7 +30,7 @@ export class NotificationClient {
         let bytes = 0, text = "";
         try {
           for (;;) {
-            const part = await beforeDeadline(reader.read(), abort.signal);
+            const part = await beforeAbort(reader.read(), abort.signal);
             abort.signal.throwIfAborted();
             if (part.done) break;
             bytes += part.value.byteLength;

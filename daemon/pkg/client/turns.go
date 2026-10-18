@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -27,6 +28,12 @@ func (d *Daemon) handleTrackingMessage(ctx context.Context, kind string, data []
 		}
 		// One bounded read at a time per connection; never queues mutation work.
 		return send(d.InspectTurn(ctx, inspection))
+	case "inspect_command":
+		var inspection protocol.InspectCommandMessage
+		if err := json.Unmarshal(data, &inspection); err != nil {
+			return fmt.Errorf("invalid command inspection: %w", err)
+		}
+		return send(d.InspectCommand(inspection))
 	}
 	return nil
 }
@@ -58,6 +65,14 @@ func (d *Daemon) InspectTurn(ctx context.Context, msg protocol.InspectTurnMessag
 	defer cancel()
 	turn, err := inspector.InspectTurn(readCtx, msg.SessionID, msg.TurnID)
 	if err != nil {
+		if errors.Is(err, protocol.ErrTurnOutputLimit) || errors.Is(err, protocol.ErrTurnObservationLimit) {
+			res.Status = protocol.StatusFailed
+			res.Error = protocol.ErrTurnOutputLimit.Error()
+			if errors.Is(err, protocol.ErrTurnObservationLimit) {
+				res.Error = protocol.ErrTurnObservationLimit.Error()
+			}
+			return d.persistInspectedTurn(msg.SessionID, res)
+		}
 		res.Error = "Turn observation unavailable; execution state is unconfirmed"
 		return res
 	}
@@ -75,6 +90,40 @@ func (d *Daemon) InspectTurn(ctx context.Context, msg protocol.InspectTurnMessag
 	}
 	res.Output = turn.Output
 	res.OutputPresent = turn.Status == "completed" && turn.Output == ""
+	return d.persistInspectedTurn(msg.SessionID, completeResultReceipt(res))
+}
+
+func (d *Daemon) persistInspectedTurn(sessionID string, res protocol.DaemonResultMessage) protocol.DaemonResultMessage {
+	if d.journal == nil || (res.Status != protocol.StatusCompleted && res.Status != protocol.StatusFailed) {
+		return res
+	}
+	if err := d.journal.RecordTurnResult(sessionID, res); err != nil {
+		failure := journalFailure(res.CommandID)
+		failure.TurnID = res.TurnID
+		return failure
+	}
+	return res
+}
+
+// InspectCommand only looks up the exact original payload. Expired commands
+// remain inspectable; missing receipts never trigger adapter work or replay.
+func (d *Daemon) InspectCommand(msg protocol.InspectCommandMessage) protocol.DaemonResultMessage {
+	res := protocol.DaemonResultMessage{Type: "result", CommandID: msg.CommandID, Status: protocol.StatusUncertain}
+	if msg.Type != "inspect_command" || msg.NodeID != d.cfg.NodeID || msg.CommandID == "" || len(msg.CommandID) > 128 || msg.CommandID != strings.TrimSpace(msg.CommandID) || strings.TrimSpace(msg.SessionID) == "" {
+		res.Error = "Invalid command inspection identity"
+		return res
+	}
+	msg.Type = "command"
+	if d.journal != nil {
+		entry, found, err := d.journal.Lookup(msg)
+		if err != nil {
+			return journalFailure(msg.CommandID)
+		}
+		if found {
+			return entry.Result
+		}
+	}
+	res.Error = "Original command receipt unavailable; execution is unconfirmed, do not replay"
 	return res
 }
 

@@ -4,6 +4,7 @@ import { normalizeExecution, ExecutionSchema } from "../leader/plans/execution.j
 import { readExecutionView } from "../leader/plans/view.js";
 import { MAX_PLAN_ACTIONS, MAX_RESULT_CODE_POINTS } from "../leader/contracts.js";
 import { TurnIdSchema } from "../types.js";
+import { consoleCommandReader } from "./command-reader.js";
 
 export const CONSOLE_EXECUTION_LIMIT = 12;
 export const CONSOLE_PROMPT_CODE_POINTS = 512;
@@ -11,7 +12,7 @@ const timestamp = z.number().int().nonnegative().refine(Number.isSafeInteger);
 const identifier = z.string().min(1).max(64);
 const stepNumber = z.number().int().min(1).max(MAX_PLAN_ACTIONS);
 const RESULT_SOURCE_LIMIT = MAX_PLAN_ACTIONS - 1;
-const CLAIMED_SOURCE_STATUSES = new Set(["claimed", "pending", "accepted", "completed"]);
+const CLAIMED_SOURCE_STATUSES = new Set(["claimed", "queued", "pending", "accepted", "completed"]);
 const length = z.number().int().nonnegative().refine(Number.isSafeInteger);
 const ResultSourceSchema = z.object({
   step: stepNumber, commandId: identifier.refine(value => value.trim().length > 0), turnId: TurnIdSchema,
@@ -27,7 +28,7 @@ const StepSchema = z.object({
   dependsOn: z.array(z.number().int().min(1).max(MAX_PLAN_ACTIONS)).max(MAX_PLAN_ACTIONS - 1),
   resultFrom: z.array(stepNumber).max(RESULT_SOURCE_LIMIT),
   resultSources: z.array(ResultSourceSchema).min(1).max(RESULT_SOURCE_LIMIT).optional(),
-  status: z.enum(["waiting", "claimed", "pending", "accepted", "completed", "failed", "uncertain", "cancelled", "expired"]),
+  status: z.enum(["waiting", "claimed", "queued", "pending", "accepted", "completed", "failed", "uncertain", "cancelled", "expired"]),
   commandId: identifier.optional(), turnId: TurnIdSchema.optional(),
 }).strict();
 export const ConsoleExecutionsSchema = z.object({
@@ -56,7 +57,7 @@ export const ConsoleExecutionsSchema = z.object({
 export type ConsoleExecutions = z.infer<typeof ConsoleExecutionsSchema>;
 
 /** Explicit read-only boundary: authority, attempts and raw receipts never enter the DTO. */
-export async function readConsoleExecutions(store: IStore, chatIds: readonly string[], observedAt: number): Promise<ConsoleExecutions> {
+export async function readConsoleExecutions(store: IStore, chatIds: readonly string[], observedAt: number, metadataOnly = false): Promise<ConsoleExecutions> {
   timestamp.parse(observedAt);
   const recent = await store.listRecentExecutions(chatIds, CONSOLE_EXECUTION_LIMIT + 1);
   if (!Array.isArray(recent) || recent.length > CONSOLE_EXECUTION_LIMIT + 1) throw new Error("Invalid execution list");
@@ -67,7 +68,7 @@ export async function readConsoleExecutions(store: IStore, chatIds: readonly str
     return record;
   });
   const items = await Promise.all(records.slice(0, CONSOLE_EXECUTION_LIMIT).map(async record => {
-    const view = await readExecutionView(store, record, observedAt);
+    const view = await readExecutionView(metadataOnly ? consoleCommandReader(store) : store, record, observedAt, metadataOnly);
     return { id: view.id, status: view.status, createdAt: view.createdAt, expiresAt: view.expiresAt,
       steps: view.steps.map(step => {
         const prompt = Array.from(step.prompt);

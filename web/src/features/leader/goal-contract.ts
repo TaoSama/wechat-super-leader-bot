@@ -1,7 +1,7 @@
 export type GoalStatus = "active" | "blocked" | "completed" | "cancelled" | "expired";
 export interface ConsoleGoalAction {
   index: number; target: number; prompt: string; promptTruncated: boolean; sourceActions: number[];
-  status: "waiting" | "claimed" | "pending" | "accepted" | "completed" | "failed" | "uncertain" | "blocked" | "cancelled" | "expired";
+  status: "waiting" | "claimed" | "queued" | "pending" | "accepted" | "completed" | "failed" | "uncertain" | "blocked" | "cancelled" | "expired";
   commandId?: string; turnId?: string;
 }
 export interface ConsoleGoal {
@@ -13,7 +13,7 @@ export interface ConsoleGoal {
 }
 export interface ConsoleGoals { observedAt: number; limit: 12; hasMore: boolean; items: ConsoleGoal[] }
 const STATUS = new Set(["active", "blocked", "completed", "cancelled", "expired"]);
-const ACTION_STATUS = new Set(["waiting", "claimed", "pending", "accepted", "completed", "failed", "uncertain", "blocked", "cancelled", "expired"]);
+const ACTION_STATUS = new Set(["waiting", "claimed", "queued", "pending", "accepted", "completed", "failed", "uncertain", "blocked", "cancelled", "expired"]);
 const GOAL_LIMIT = 12, ACTION_LIMIT = 12, DECISION_LIMIT = 24, TEXT_LIMIT = 512;
 const MAX_DATE_MS = 8_640_000_000_000_000;
 const fail = (): never => { throw new Error("持续目标状态格式无效，无法确认目标进度"); };

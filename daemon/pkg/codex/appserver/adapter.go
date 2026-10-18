@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex/internal/threadstate"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
@@ -58,7 +59,17 @@ type rpcResponse struct {
 	err    error
 }
 
+type rpcRejectedError struct{ message string }
+
+func (e *rpcRejectedError) Error() string { return e.message }
+
+var errInvalidRPCResponse = errors.New("codex websocket response has invalid UTF-8")
+
 func (a *AppServerAdapter) connect(ctx context.Context) (*rpcConn, error) {
+	return a.connectWithReadLimit(ctx, MaxWebSocketFrameSize)
+}
+
+func (a *AppServerAdapter) connectWithReadLimit(ctx context.Context, readLimit int64) (*rpcConn, error) {
 	if a.socketPath == "" {
 		return nil, errors.New("codex app-server socket path is empty")
 	}
@@ -86,7 +97,7 @@ func (a *AppServerAdapter) connect(ctx context.Context) (*rpcConn, error) {
 		return nil, fmt.Errorf("websocket dial %s failed: %w", a.socketPath, err)
 	}
 
-	wsConn.SetReadLimit(MaxWebSocketFrameSize)
+	wsConn.SetReadLimit(readLimit)
 
 	rc := &rpcConn{
 		conn:    wsConn,
@@ -117,13 +128,14 @@ func (a *AppServerAdapter) connect(ctx context.Context) (*rpcConn, error) {
 }
 
 func (rc *rpcConn) readLoop() {
+	readFailure := errors.New("codex websocket connection closed")
 	defer func() {
 		rc.closeOnce.Do(func() {
 			close(rc.done)
 		})
 		rc.pendingMu.Lock()
 		for id, ch := range rc.pending {
-			ch <- rpcResponse{err: errors.New("codex websocket connection closed")}
+			ch <- rpcResponse{err: readFailure}
 			delete(rc.pending, id)
 		}
 		rc.pendingMu.Unlock()
@@ -132,6 +144,13 @@ func (rc *rpcConn) readLoop() {
 	for {
 		_, data, err := rc.conn.ReadMessage()
 		if err != nil {
+			if errors.Is(err, websocket.ErrReadLimit) {
+				readFailure = protocol.ErrTurnObservationLimit
+			}
+			return
+		}
+		if !utf8.Valid(data) {
+			readFailure = errInvalidRPCResponse
 			return
 		}
 		var raw map[string]any
@@ -180,9 +199,9 @@ func (rc *rpcConn) readLoop() {
 		if errObj, hasErr := raw["error"]; hasErr && errObj != nil {
 			errBytes, marshalErr := json.Marshal(errObj)
 			if marshalErr != nil {
-				ch <- rpcResponse{err: fmt.Errorf("codex rpc error: %v", errObj)}
+				ch <- rpcResponse{err: &rpcRejectedError{message: fmt.Sprintf("codex rpc error: %v", errObj)}}
 			} else {
-				ch <- rpcResponse{err: fmt.Errorf("codex rpc error: %s", string(errBytes))}
+				ch <- rpcResponse{err: &rpcRejectedError{message: fmt.Sprintf("codex rpc error: %s", string(errBytes))}}
 			}
 			continue
 		}

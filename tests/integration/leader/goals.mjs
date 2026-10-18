@@ -92,7 +92,7 @@ export async function verifyGoals({ WebSocket, base, request, nodeToken, store, 
   const waitAction = async (goal, index) => {
     let command;
     await waitFor(async () => { healthy(); command = await store.findCommandByRequestId(goalRequestId(goal, index)); return command?.status === 'accepted'; },
-      `Goal action ${index + 1} has exact acceptance`);
+      `Goal ${goal.proposal.objective} action ${index + 1} has exact acceptance`);
     assert.equal(delivered.filter(item => item.commandId === command.commandId).length, 1, 'A durable goal action was sent twice');
     return command;
   };
@@ -184,6 +184,13 @@ export async function verifyGoals({ WebSocket, base, request, nodeToken, store, 
     assert.equal((await store.getGoal(unknown.goal.id)).actions.length, 1);
     await probe.goal(unknown.goal.id, 'blocked', ['uncertain']);
     await message('取消目标'); await waitStatus(unknown.goal.id, 'cancelled');
+    // Cancelling authorization cannot declare the original native turn finished.
+    // Its late exact completion releases the target FIFO before another explicit goal.
+    await receipt(unknown.first, `${RESULT_PREFIX} branch=A; late exact completion after cancellation`);
+    assert.equal((await store.getGoal(unknown.goal.id)).status, 'cancelled');
+    assert.equal((await store.getGoal(unknown.goal.id)).actions.length, 1);
+    assert.equal(delivered.length, count, 'Late completion resumed a cancelled goal');
+    await probe.goal(unknown.goal.id, 'cancelled', ['completed']);
 
     const cancelled = await propose('cancel');
     await message('取消目标'); await waitStatus(cancelled.goal.id, 'cancelled');

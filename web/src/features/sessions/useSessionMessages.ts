@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiAuthError, ApiHttpError } from "../../api/errors";
-import { fetchCommand, sendSessionMessage } from "../../api/sessions";
+import { cancelSessionMessage, fetchCommand, fetchSessionMessage, sendSessionMessage } from "../../api/sessions";
 import { CommandRecord, POLL_INTERVAL_MS, ScopedSession } from "../../types";
 import { sessionKey } from "./useSessionHistory";
-import { sessionSendBlockReason } from "./send-availability";
+import { canQueueSession, isSessionMessageTarget, sessionSendBlockReason } from "./send-availability";
 
 const MAX_COMMAND_POLLS = 60;
+const POLLING_STATUSES = ["queued", "pending", "accepted"];
+const RESTORE_DRAFT_STATUSES = ["failed", "uncertain", "cancelled", "expired"];
 
 interface Submission {
   requestId: string;
@@ -16,6 +18,7 @@ interface Submission {
 interface MessageState {
   draft: string;
   sending: boolean;
+  cancelling?: boolean;
   error?: string;
   submission?: Submission;
   pollingStopped?: boolean;
@@ -24,8 +27,10 @@ const EMPTY: MessageState = { draft: "", sending: false };
 
 export function sendBlockReason(session: ScopedSession | null, connected: boolean, stale: boolean, now = Date.now()): string | null {
   if (!session) return "请选择一个会话";
-  if (!connected) return "机器离线，恢复连接后再发送";
+  if (!isSessionMessageTarget(session)) return "会话目标无效，暂不可发送";
   if (stale) return "会话状态待更新，请先刷新";
+  if (canQueueSession(session, connected, now)) return null;
+  if (!connected) return "机器离线且缺少有效发送能力，暂不可排队";
   return sessionSendBlockReason(session, now);
 }
 
@@ -46,7 +51,7 @@ export function useSessionMessages(session: ScopedSession | null, onAuthFailure:
       activeRef.current?.abort();
       activeRef.current = null;
       lockRef.current = false;
-      if (owner) update(owner, { sending: false });
+      if (owner) update(owner, { sending: false, cancelling: false });
     };
   }, [owner, update]);
 
@@ -54,7 +59,7 @@ export function useSessionMessages(session: ScopedSession | null, onAuthFailure:
     if (!session || lockRef.current) return;
     const prior = state.submission;
     if (recover && !prior) return;
-    if (!recover && prior && (prior.uncertain || prior.command?.status === "pending" || prior.command?.status === "accepted" || prior.command?.status === "uncertain")) return;
+    if (!recover && prior && (prior.uncertain || POLLING_STATUSES.includes(prior.command?.status ?? "") || prior.command?.status === "uncertain")) return;
     const submission: Submission = recover && prior ? prior : { requestId: crypto.randomUUID(), prompt: state.draft.trim(), uncertain: true };
     if (!submission.prompt) return;
     const target = session;
@@ -64,18 +69,19 @@ export function useSessionMessages(session: ScopedSession | null, onAuthFailure:
     lockRef.current = true;
     update(key, { sending: true, error: undefined, submission, pollingStopped: false });
     try {
-      const command = recover && submission.command
-        ? await fetchCommand(submission.command.commandId, controller.signal)
+      const command = recover
+        ? submission.command ? await fetchCommand(submission.command.commandId, controller.signal)
+          : await fetchSessionMessage(target.nodeId, target.id, submission.requestId, controller.signal)
         : await sendSessionMessage(target.nodeId, target.id, submission.prompt, submission.requestId, controller.signal);
       if (controller.signal.aborted) return;
-      if (command.nodeId !== target.nodeId || command.sessionId !== target.id) throw new Error("回执与目标会话不匹配");
+      if (command.nodeId !== target.nodeId || command.sessionId !== target.id || command.action !== "send") throw new Error("回执与目标会话不匹配");
       const uncertain = command.status === "uncertain";
-      update(key, { submission: { ...submission, command, uncertain }, draft: uncertain || command.status === "failed" ? state.draft : "", error: command.error });
+      update(key, { submission: { ...submission, command, uncertain }, draft: RESTORE_DRAFT_STATUSES.includes(command.status) ? state.draft || submission.prompt : "", error: command.error });
     } catch (error) {
       if (controller.signal.aborted) return;
       if (error instanceof ApiAuthError) { authRef.current(); return; }
       // Only explicit client rejections prove that no command was accepted.
-      const rejected = error instanceof ApiHttpError && error.statusCode >= 400 && error.statusCode < 500;
+      const rejected = !recover && error instanceof ApiHttpError && error.statusCode >= 400 && error.statusCode < 500;
       update(key, { submission: rejected ? undefined : { ...submission, uncertain: true }, error: rejected ? error.message : "提交结果尚不确定。请保留原请求，手动核查或恢复。" });
     } finally {
       if (activeRef.current === controller) {
@@ -86,9 +92,35 @@ export function useSessionMessages(session: ScopedSession | null, onAuthFailure:
     }
   };
 
+  const cancel = async () => {
+    const submission = state.submission;
+    if (!session || lockRef.current || submission?.command?.status !== "queued") return;
+    const key = owner;
+    const controller = new AbortController();
+    activeRef.current = controller;
+    lockRef.current = true;
+    update(key, { cancelling: true, error: undefined });
+    try {
+      const command = await cancelSessionMessage(session.nodeId, session.id, submission.command.commandId, controller.signal);
+      if (controller.signal.aborted) return;
+      update(key, { submission: { ...submission, command, uncertain: command.status === "uncertain" },
+        ...(RESTORE_DRAFT_STATUSES.includes(command.status) ? { draft: state.draft || submission.prompt } : {}), error: command.error });
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (error instanceof ApiAuthError) { authRef.current(); return; }
+      update(key, { error: "未能确认取消排队，请核查原请求状态。", pollingStopped: true });
+    } finally {
+      if (activeRef.current === controller) {
+        activeRef.current = null;
+        lockRef.current = false;
+        update(key, { cancelling: false });
+      }
+    }
+  };
+
   const command = state.submission?.command;
   useEffect(() => {
-    if (!command || state.sending || state.pollingStopped || !["pending", "accepted"].includes(command.status)) return;
+    if (!command || state.sending || state.cancelling || state.pollingStopped || !POLLING_STATUSES.includes(command.status)) return;
     let disposed = false;
     let timer: number;
     let controller: AbortController | null = null;
@@ -98,15 +130,15 @@ export function useSessionMessages(session: ScopedSession | null, onAuthFailure:
       controller = new AbortController();
       try {
         const receipt = await fetchCommand(targetCommand.commandId, controller.signal);
-        if (disposed) return;
+        if (disposed || lockRef.current) return;
         if (receipt.nodeId !== targetCommand.nodeId || receipt.sessionId !== targetCommand.sessionId) throw new Error("命令回执目标不匹配");
         setStates((previous) => {
           const current = previous[owner];
-          if (!current?.submission) return previous;
-          const needsDraft = receipt.status === "failed" || receipt.status === "uncertain";
+          if (!current?.submission || current.submission.command?.commandId !== targetCommand.commandId) return previous;
+          const needsDraft = RESTORE_DRAFT_STATUSES.includes(receipt.status);
           return { ...previous, [owner]: { ...current, draft: needsDraft ? current.draft || current.submission.prompt : current.draft, submission: { ...current.submission, command: receipt, uncertain: receipt.status === "uncertain" }, error: receipt.error } };
         });
-        if (!disposed && ["pending", "accepted"].includes(receipt.status)) {
+        if (!disposed && POLLING_STATUSES.includes(receipt.status)) {
           count++;
           if (count < MAX_COMMAND_POLLS) timer = window.setTimeout(() => void poll(), POLL_INTERVAL_MS);
           else update(owner, { pollingStopped: true });
@@ -119,7 +151,7 @@ export function useSessionMessages(session: ScopedSession | null, onAuthFailure:
     }
     timer = window.setTimeout(() => void poll(), POLL_INTERVAL_MS);
     return () => { disposed = true; window.clearTimeout(timer); controller?.abort(); };
-  }, [owner, command?.commandId, command?.status, state.sending, state.pollingStopped, update]);
+  }, [owner, command?.commandId, command?.status, state.sending, state.cancelling, state.pollingStopped, update]);
 
-  return { ...state, setDraft: (draft: string) => update(owner, { draft }), submit };
+  return { ...state, setDraft: (draft: string) => update(owner, { draft }), submit, cancel };
 }

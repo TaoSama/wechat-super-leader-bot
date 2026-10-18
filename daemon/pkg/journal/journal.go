@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+	"unicode/utf8"
 
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/terminal"
@@ -22,7 +23,7 @@ const (
 	MaxPending       = 2048
 	MaxRecords       = 1000000
 	MaxDatabaseBytes = 512 * 1024 * 1024
-	MaxEntryBytes    = 128 * 1024
+	MaxEntryBytes    = protocol.MaxDaemonResultMessageBytes + 64*1024
 	FileName         = "commands.db"
 )
 
@@ -36,6 +37,7 @@ var (
 
 type Entry struct {
 	Fingerprint      string                       `json:"fingerprint"`
+	SessionID        string                       `json:"sessionId,omitempty"`
 	Dispatch         *protocol.DispatchIdentity   `json:"dispatch,omitempty"`
 	TerminalDelivery *terminal.DeliveryIdentity   `json:"terminalDelivery,omitempty"`
 	Result           protocol.DaemonResultMessage `json:"result"`
@@ -205,6 +207,12 @@ func decode(key, value []byte) (Entry, error) {
 }
 
 func put(bucket *bolt.Bucket, entry Entry) error {
+	if len(entry.Result.Output) > protocol.MaxTurnOutputBytes {
+		return protocol.ErrTurnOutputLimit
+	}
+	if !utf8.ValidString(entry.Result.Output) {
+		return errors.New("command journal output contains invalid UTF-8")
+	}
 	encoded, err := json.Marshal(entry)
 	if err != nil {
 		return err
@@ -243,7 +251,7 @@ func (j *Journal) Lookup(cmd protocol.ControllerCommandMessage) (Entry, bool, er
 // Begin commits a claim before any adapter call. A pre-existing claim is never
 // permission to execute again, even when no result was durably recorded.
 func (j *Journal) Begin(cmd protocol.ControllerCommandMessage) (Entry, bool, error) {
-	entry := Entry{Fingerprint: fingerprint(cmd), Result: unknownResult(cmd.CommandID)}
+	entry := Entry{Fingerprint: fingerprint(cmd), SessionID: cmd.SessionID, Result: unknownResult(cmd.CommandID)}
 	created := false
 	err := j.db.Update(func(tx *bolt.Tx) error {
 		records, pending := tx.Bucket(recordsBucket), tx.Bucket(pendingBucket)

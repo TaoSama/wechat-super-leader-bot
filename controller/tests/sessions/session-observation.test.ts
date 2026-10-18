@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { CommandService } from "../../src/commands/service.js";
 import { LeaderOrchestrator } from "../../src/leader/orchestrator.js";
+import { ExecutionScheduler } from "../../src/leader/plans/scheduler.js";
 import { LEADER_TOOLS, SYSTEM_PROMPT } from "../../src/leader/contracts.js";
 import type { LeaderModel, ModelMessage, ModelReply } from "../../src/leader/model/contracts.js";
 import { MemoryStore } from "../../src/store/memory.js";
@@ -72,34 +73,53 @@ describe("read-only desktop observation", () => {
     { status: "idle", loaded: false },
   ])("does not use desktop idle to bypass raw send guards for $status/$loaded", async ({ status, loaded }) => {
     const target: ScopedSession = { ...session("session", status, desktop({ status: "idle" })), loaded, capabilities: ["read", "send"] };
+    const original = structuredClone(target);
     const sendCommand = vi.fn();
     const hub = { isNodeConnected: () => true, getNodeSession: () => target,
       getNodeSkills: () => [], registerCommandResultWaiter: () => ({ wait: async () => null, cancel: () => {} }), sendCommand };
-    const service = new CommandService(new MemoryStore(), hub, 300);
-    await expect(service.submit({ nodeId: "node", sessionId: "session", action: "send", prompt: "fixture", requestId: "request" }))
-      .rejects.toThrow("not idle or not loaded");
+    const store = new MemoryStore();
+    const service = new CommandService(store, hub, 300);
+    const command = await service.submit({ nodeId: "node", sessionId: "session", action: "send", prompt: "fixture", requestId: "request" });
+    expect(command).toMatchObject({ status: "queued", sendRoute: "control-socket", deliveryMode: "next-turn" });
+    expect(service.canDispatchSend({ nodeId: target.nodeId, sessionId: target.id }, "control-socket")).toBe(false);
+    await service.dispatchQueued();
+    expect((await store.getCommand(command.commandId))?.status).toBe("queued");
     expect(sendCommand).not.toHaveBeenCalled();
+    expect(target).toEqual(original);
   });
 
-  it.each(["notLoaded", "unknown"])("does not allow desktop idle to authorize a Leader plan for %s", async status => {
+  it.each(["notLoaded", "unknown"])("keeps a confirmed Leader plan waiting when only desktop idle is available for %s", async status => {
     const target: ScopedSession = { ...session("session", status, desktop({ status: "idle" })), capabilities: ["read", "send"] };
+    const original = structuredClone(target);
+    const sendCommand = vi.fn();
     const hub = { getAllSessions: async () => [target], getNodeStatusList: () => [], getAllSkills: () => [],
-      getNodeSkills: () => [], getNodeSession: () => target, isNodeConnected: () => true };
+      getNodeSkills: () => [], getNodeSession: () => target, isNodeConnected: () => true,
+      registerCommandResultWaiter: () => ({ wait: async () => null, cancel: () => {} }), sendCommand };
     const store = new MemoryStore();
-    const commands = { submit: vi.fn() };
-    let calls = 0;
-    let planResult: unknown;
-    const model: LeaderModel = { complete: async messages => {
-      if (++calls === 1) return { content: null, toolCalls: [{ id: "plan", type: "function", function: {
+    const commands = new CommandService(store, hub, 300);
+    const submit = vi.spyOn(commands, "submit");
+    const executions = new ExecutionScheduler(store, commands, { now: () => NOW,
+      canDispatch: (execution, index) => {
+        const action = execution.plan.actions[index];
+        return !!action.sendRoute && commands.canDispatchSend(action, action.sendRoute);
+      },
+    });
+    const model: LeaderModel = { complete: async () => ({ content: null, toolCalls: [{ id: "plan", type: "function", function: {
         name: "propose_plan", arguments: JSON.stringify({ actions: [{ nodeId: "node", sessionId: "session", prompt: "fixture" }] }),
-      } }] };
-      planResult = JSON.parse(messages.find(item => item.role === "tool")!.content!);
-      return { content: "目标只读，没有派发。", toolCalls: [] };
-    } };
-    await new LeaderOrchestrator(store, hub, commands, model, () => NOW).handle("chat", "plan", "给会话生成执行计划");
-    expect(planResult).toMatchObject({ error: "[node] session：Target session is not idle or not loaded" });
-    expect((await store.getLeaderState("chat"))?.data.pending).toBeUndefined();
-    expect(commands.submit).not.toHaveBeenCalled();
+      } }] }) };
+    const leader = new LeaderOrchestrator(store, hub, commands, model, () => NOW, undefined, executions);
+    expect((await leader.handle("chat", "plan", "给会话生成执行计划")).text).toContain("尚未派发");
+    expect((await store.getLeaderState("chat"))?.data.pending?.actions[0]).toMatchObject({ sendRoute: "control-socket" });
+    expect((await leader.handle("chat", "confirm", "确认执行")).text).toContain("自动推进中");
+    const execution = (await store.getLatestExecution("chat"))!;
+    expect(execution).toMatchObject({ status: "active", attempts: [null] });
+    expect((await executions.view(execution.id, "chat"))?.steps[0].status).toBe("waiting");
+    await executions.advance(execution.id);
+    expect((await store.getExecution(execution.id))?.attempts).toEqual([null]);
+    expect(await store.listRecentCommands()).toEqual([]);
+    expect(submit).not.toHaveBeenCalled();
+    expect(sendCommand).not.toHaveBeenCalled();
+    expect(target).toEqual(original);
   });
 });
 

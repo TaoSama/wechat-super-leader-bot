@@ -3,7 +3,7 @@ import { expect, it, vi } from "vitest";
 import { PostgresStore } from "../../src/store/postgres.js";
 import { createExecution } from "../../src/leader/plans/execution.js";
 import { createTerminalNotification, claimNotificationRecord, receiptNotificationRecord, normalizeNotification,
-  NOTIFICATION_ATTEMPT_MS, type StoredNotification } from "../../src/notifications/contracts.js";
+  NOTIFICATION_ATTEMPT_MS, LEGACY_NOTIFICATION_ATTEMPT_MS, type StoredNotification } from "../../src/notifications/contracts.js";
 
 vi.mock("pg", () => ({ default: { Pool: vi.fn() } }));
 const NOW = 1_700_000_000_000;
@@ -15,7 +15,10 @@ function legacy(index: number, status: StoredNotification["status"] = "pending")
     actions: [{ nodeId: "node", sessionId: "session", prompt: "private", sendRoute: "control-socket" }] }, NOW);
   let n = createTerminalNotification({ ...execution, status: "failed" }, NOW)!;
   n.text = `计划 ${execution.id}（共 1 步）：计划失败，已停止后续派发；这不表示已运行的原会话任务停止，可查询计划进度核对。`;
-  if (status !== "pending") n = claimNotificationRecord(n, uuid(index + 100), ["allowed"], NOW + 1);
+  if (status !== "pending") {
+    n = claimNotificationRecord(n, uuid(index + 100), ["allowed"], NOW + 1);
+    n.attemptExpiresAt = NOW + 1 + LEGACY_NOTIFICATION_ATTEMPT_MS;
+  }
   if (status === "accepted" || status === "uncertain") n = receiptNotificationRecord(n, uuid(index + 100), status, NOW + 2);
   const { source, ...fields } = n;
   return { id: n.id, execution_id: n.id, chat_id: n.chatId, kind: n.kind, status: n.status,
@@ -56,7 +59,7 @@ class MigrationPool {
     if (sql.startsWith("SELECT * FROM leader_notifications WHERE id=$1")) {
       const row = this.rows.get(String(values[0])); return { rows: row ? [structuredClone(row)] : [] };
     }
-    if (/^(CREATE |ALTER |DELETE FROM node_sessions|UPDATE commands)/.test(sql)) return { rows: [] };
+    if (/^(CREATE |ALTER |DROP INDEX |INSERT INTO known_sessions |DELETE FROM node_sessions|UPDATE commands)/.test(sql)) return { rows: [] };
     throw new Error(`Unexpected migration fixture SQL: ${sql}`);
   }
   async end() {}
@@ -116,4 +119,20 @@ it("strictly validates already-converted rows rather than accepting legacy alias
   const { pool, store } = fixture([converted]);
   await expect(store.init()).rejects.toThrow(); expect(pool.rows.get(old.id)).toEqual(converted);
   expect(pool.statements.at(-1)).toBe("ROLLBACK");
+});
+
+it("preserves already-persisted progress and replaces source uniqueness with bounded sequence indexes", async () => {
+  const old = legacy(1, "accepted"), { executionId, ...fields } = old.data;
+  const progress = { ...old, id: uuid(20), goal_id: null, kind: "progress", data: { ...fields, id: uuid(20), kind: "progress",
+    source: { type: "plan", id: executionId }, progress: { sequence: 1, eventKey: "exact:accepted" } } };
+  const { pool, store } = fixture([progress]);
+  await store.init();
+  expect(pool.rows.get(progress.id)).toEqual(progress);
+  const first = structuredClone(pool.rows); await store.init(); expect(pool.rows).toEqual(first);
+  expect(pool.statements).toContain("ALTER TABLE leader_notifications DROP CONSTRAINT IF EXISTS leader_notifications_execution_id_key");
+  expect(pool.statements).toContain("DROP INDEX IF EXISTS leader_notifications_goal_id_key");
+  expect(pool.statements.some(sql => sql.includes("execution_id_progress_sequence_key") && sql.includes("WHERE kind='progress'"))).toBe(true);
+  expect(pool.statements.some(sql => sql.includes("goal_id_terminal_key") && sql.includes("WHERE kind<>'progress'"))).toBe(true);
+  expect((await store.getNotification(progress.id, NOW + 2))!.status).toBe("accepted");
+  await expect(store.claimNotification(progress.id, uuid(99), ["allowed"], NOW + 2)).rejects.toThrow();
 });

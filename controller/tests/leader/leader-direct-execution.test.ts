@@ -295,7 +295,8 @@ describe("Leader direct execution", () => {
       const result = await save(...args);
       if (result && args[2].inflight?.plan && !changed) {
         changed = true;
-        if (change === "route") f.sessions[0].status = "active";
+        if (change === "route") f.sessions[0].sendAvailability = {route:"desktop-owner",state:"blocked",reason:"checking",
+          observedAt:new Date(f.now()).toISOString(),validUntil:new Date(f.now()+45000).toISOString()};
         else f.skills[0].digest = "c".repeat(64);
       }
       return result;

@@ -36,6 +36,9 @@ export const MetricsRibbon: React.FC<MetricsRibbonProps> = ({
   ).length;
 
   const counts = {
+    queued: 0,
+    cancelled: 0,
+    expired: 0,
     pending: 0,
     accepted: 0,
     "input-written": 0,
@@ -110,8 +113,9 @@ export const MetricsRibbon: React.FC<MetricsRibbonProps> = ({
             </div>
             <div className="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-1 tabular-nums">
               <span className="text-xl sm:text-2xl font-mono font-semibold text-[#E6EDF3]">
-                {counts.pending + counts.accepted}
+                {counts.queued + counts.pending + counts.accepted}
               </span>
+              <span className="text-xs font-mono text-amber-300">排队:{counts.queued}</span>
               <span
                 className="text-xs font-mono text-amber-300"
                 title="等待守护进程响应"
@@ -147,6 +151,8 @@ export const MetricsRibbon: React.FC<MetricsRibbonProps> = ({
               <span className="text-xs font-mono text-emerald-400">
                 完成:{counts.completed}
               </span>
+              <span className="text-xs font-mono text-[#94A3B8]">已取消:{counts.cancelled}</span>
+              <span className="text-xs font-mono text-amber-300">已过期:{counts.expired}</span>
               <span className="text-xs font-mono text-amber-300" title="仅输入投递结束，执行未确认">
                 输入已写入:{counts["input-written"]}
               </span>

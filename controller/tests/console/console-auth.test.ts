@@ -652,7 +652,7 @@ describe("Console Auth HTTP API & Security", () => {
 
       // 3. Simulated async exception masks internal secret
       const secretToMask = "very_secret_database_credential_554433";
-      const spy = vi.spyOn(ctx.store, "listRecentCommands").mockRejectedValueOnce(
+      const spy = vi.spyOn(ctx.store, "listRecentCommandSummaries").mockRejectedValueOnce(
         new Error(`Connection failed: ${secretToMask}`)
       );
 

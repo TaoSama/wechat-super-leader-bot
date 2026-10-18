@@ -3,6 +3,7 @@ import { initGoalTables } from "./goal-postgres.js";
 import { initNotificationTables } from "./notification-postgres.js";
 import { initExecutionTables } from "./execution-postgres.js";
 import { initConsoleAuthTables } from "./console-postgres.js";
+import { initMessageImageTables } from "./message-images-postgres.js";
 
 export async function initializeDatabase(pool: pg.Pool): Promise<void> {
   const client = await pool.connect();
@@ -37,11 +38,19 @@ export async function initializeDatabase(pool: pg.Pool): Promise<void> {
         PRIMARY KEY (chat_id, message_id)
       );
     `);
+    await client.query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_images JSONB");
+    await initMessageImageTables(client);
     await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS skills JSONB NOT NULL DEFAULT '[]'::jsonb");
     await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS turn_id VARCHAR(128)");
     await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS send_route VARCHAR(32)");
     await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS input_receipt JSONB");
-    await client.query("CREATE INDEX IF NOT EXISTS commands_inspection_idx ON commands (node_id, command_id) WHERE turn_id IS NOT NULL AND action = 'send' AND status IN ('accepted', 'uncertain')");
+    await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS delivery_mode VARCHAR(16)");
+    await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS expected_turn_id VARCHAR(128)");
+    await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS authority JSONB");
+    await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS queue_order BIGSERIAL");
+    await client.query("CREATE INDEX IF NOT EXISTS commands_queue_idx ON commands (node_id, session_id, queue_order) WHERE status IN ('queued','pending','accepted','uncertain')");
+    await client.query("DROP INDEX IF EXISTS commands_inspection_idx");
+    await client.query("CREATE INDEX commands_inspection_idx ON commands (node_id, command_id) WHERE action = 'send' AND status IN ('pending', 'accepted', 'uncertain')");
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS node_sessions (
@@ -52,6 +61,10 @@ export async function initializeDatabase(pool: pg.Pool): Promise<void> {
         PRIMARY KEY (node_id, session_id)
       );
     `);
+    await client.query(`CREATE TABLE IF NOT EXISTS known_sessions (
+      node_id VARCHAR(64) NOT NULL, session_id VARCHAR(64) NOT NULL, data JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(node_id,session_id))`);
+    await client.query(`INSERT INTO known_sessions SELECT * FROM node_sessions ON CONFLICT(node_id,session_id) DO NOTHING`);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS leader_states (

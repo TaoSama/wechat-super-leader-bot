@@ -3,11 +3,15 @@ package appserver
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex/internal/threadstate"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 )
+
+// PagedHistoryAvailable declares that tail reads use native bounded pagination.
+func (a *AppServerAdapter) PagedHistoryAvailable() bool { return true }
 
 func (a *AppServerAdapter) ReadHistory(ctx context.Context, sessionID, cursor string, limit int) (protocol.SessionHistory, error) {
 	var empty protocol.SessionHistory
@@ -22,25 +26,41 @@ func (a *AppServerAdapter) ReadHistory(ctx context.Context, sessionID, cursor st
 		return empty, errors.New(protocol.HistoryUnavailable)
 	}
 	defer rc.closeLogged()
-	loadedSet, err := rc.getLoadedSet(ctx, a.rpcTimeout)
-	if err != nil {
-		return empty, errors.New(protocol.HistoryFailed)
+	params := map[string]any{"threadId": sessionID, "sortDirection": "desc", "limit": limit}
+	if cursor != "" {
+		params["cursor"] = cursor
 	}
-	metadata, err := rc.call(ctx, "thread/read", map[string]any{"threadId": sessionID, "includeTurns": false}, a.rpcTimeout)
-	if err != nil {
+	// Metadata, loaded state and the bounded tail are independent reads. Issue
+	// them together rather than paying a round trip for each one on every poll.
+	var loadedSet map[string]bool
+	var metadata, page map[string]any
+	var loadedErr, metadataErr, pageErr error
+	readCtx, cancelReads := context.WithCancel(ctx)
+	defer cancelReads()
+	var reads sync.WaitGroup
+	reads.Add(3)
+	go func() { defer reads.Done(); loadedSet, loadedErr = rc.getLoadedSet(readCtx, a.rpcTimeout) }()
+	go func() {
+		defer reads.Done()
+		metadata, metadataErr = rc.call(readCtx, "thread/read", map[string]any{"threadId": sessionID, "includeTurns": false}, a.rpcTimeout)
+	}()
+	go func() {
+		defer reads.Done()
+		page, pageErr = rc.call(readCtx, "thread/items/list", params, a.rpcTimeout)
+		if pageErr != nil {
+			cancelReads()
+		}
+	}()
+	reads.Wait()
+	if pageErr != nil {
+		return empty, errors.New(protocol.HistoryUnavailable)
+	}
+	if loadedErr != nil || metadataErr != nil {
 		return empty, errors.New(protocol.HistoryFailed)
 	}
 	thread, ok := metadata["thread"].(map[string]any)
 	if !ok || threadstate.ExtractString(thread, "id") != sessionID {
 		return empty, errors.New(protocol.HistoryFailed)
-	}
-	params := map[string]any{"threadId": sessionID, "sortDirection": "desc", "limit": limit}
-	if cursor != "" {
-		params["cursor"] = cursor
-	}
-	page, err := rc.call(ctx, "thread/items/list", params, a.rpcTimeout)
-	if err != nil {
-		return empty, errors.New(protocol.HistoryUnavailable)
 	}
 	rawItems, ok := page["data"].([]any)
 	if !ok || len(rawItems) > limit {

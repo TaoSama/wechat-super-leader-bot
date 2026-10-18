@@ -6,10 +6,26 @@ import { isTerminalHistoryTarget, isTerminalSession } from "./sessions/terminal.
 
 export const ActionTypeSchema = z.enum(["read", "send"]);
 export type ActionType = z.infer<typeof ActionTypeSchema>;
+export const MAX_DAEMON_CONTROL_MESSAGE_BYTES = 1024 * 1024;
+export const MAX_TURN_OUTPUT_BYTES = 8 * 1024 * 1024;
+export const MAX_DAEMON_RESULT_MESSAGE_BYTES = 6 * MAX_TURN_OUTPUT_BYTES + 64 * 1024;
 export const SessionCapabilitySchema = z.enum(["read", "send", "resume-send"]);
 
 export const SendRouteSchema = z.enum(["desktop-owner", "control-socket", "app-server-resume", "terminal-pane"]);
 export type SendRoute = z.infer<typeof SendRouteSchema>;
+export const DeliveryModeSchema = z.enum(["next-turn", "steer"]);
+export type DeliveryMode = z.infer<typeof DeliveryModeSchema>;
+export type CommandAuthority =
+  | { type: "admin" }
+  | { type: "chat"; chatId: string }
+  | { type: "console"; tokenHash: string; expiresAt: string }
+  | { type: "plan" | "goal"; id: string; chatId: string };
+export const CommandAuthoritySchema = z.union([
+  z.object({type:z.literal("admin")}).strict(),
+  z.object({type:z.literal("chat"),chatId:z.string().min(1).max(64)}).strict(),
+  z.object({type:z.literal("console"),tokenHash:z.string().regex(/^[a-f0-9]{64}$/),expiresAt:z.string().datetime({offset:true})}).strict(),
+  z.object({type:z.enum(["plan","goal"]),id:z.string().uuid(),chatId:z.string().min(1).max(64)}).strict(),
+]);
 const SendAvailabilityFields = {
   state: z.enum(["ready", "blocked", "unavailable"]),
   observedAt: z.string().datetime({ offset: true }),
@@ -32,6 +48,9 @@ export const DaemonResultStatusSchema = z.enum([
 export type DaemonResultStatus = z.infer<typeof DaemonResultStatusSchema>;
 
 export const CommandStatusSchema = z.enum([
+  "queued",
+  "cancelled",
+  "expired",
   "pending",
   "accepted",
   "completed",
@@ -215,7 +234,12 @@ export const ControllerCommandMessageSchema = z.object({
   expiresAt: z.string(), // ISO8601
   skills: SkillRefsSchema.optional(),
   sendRoute: SendRouteSchema.optional(),
+  deliveryMode: DeliveryModeSchema.optional(),
+  expectedTurnId: TurnIdSchema.optional(),
 }).refine(value => value.action !== "read" || value.sendRoute === undefined, "Read commands cannot carry a send route")
+  .refine(value => value.action !== "read" || value.deliveryMode === undefined,"Read commands cannot carry delivery mode")
+  .refine(value => value.deliveryMode === "steer" ? value.action === "send" && value.expectedTurnId !== undefined : value.expectedTurnId === undefined,
+    "Only steer requires an exact expected turn ID")
   .refine(value => value.action !== "send" ||
     (value.sendRoute === "terminal-pane" ? TerminalSessionIdSchema.safeParse(value.sessionId).success : !value.sessionId.startsWith("terminal:")),
   "Terminal targets require the exclusive terminal-pane send route");
@@ -248,7 +272,12 @@ export const PostCommandRequestSchema = z
     prompt: z.string().max(16000).optional(),
     requestId: z.string().min(1).max(128), // required & non-empty
     skills: SkillRefsSchema.optional(),
+    deliveryMode: DeliveryModeSchema.optional(),
+    expectedTurnId: TurnIdSchema.optional(),
   }).strict()
+  .refine(value => value.action !== "read" || value.deliveryMode === undefined,"Read commands cannot carry delivery mode")
+  .refine(value => value.deliveryMode === "steer" ? value.action === "send" && value.expectedTurnId !== undefined : value.expectedTurnId === undefined,
+    "Only steer requires an exact expected turn ID")
   .refine(
     (data) => {
       if (data.action === "send") {
@@ -284,6 +313,10 @@ export interface CommandRecord {
   error?: string;
   turnId?: string;
   inputReceipt?: InputReceipt;
+  deliveryMode?: DeliveryMode;
+  expectedTurnId?: string;
+  authority?: CommandAuthority;
+  queueOrder?: number;
   expiresAt: string;
   createdAt: string;
   updatedAt: string;
@@ -304,6 +337,7 @@ export interface MessageRecord {
   text: string;
   replyText: string;
   commandId?: string;
+  images?: import("./sessions/media-contracts.js").ReplyImage[];
   createdAt: string;
 }
 

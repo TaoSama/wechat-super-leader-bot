@@ -13,6 +13,7 @@ interface Subscriber {
   checking?: Promise<boolean>;
   cancelCheck?: () => void;
   authDeadline?: ReturnType<typeof setTimeout>;
+  drainDeadline?: ReturnType<typeof setTimeout>;
   pendingSnapshot?: string;
   sending: boolean;
   lastSnapshot?: string;
@@ -52,6 +53,8 @@ export class StatusEvents<T> {
     response.once("close", () => this.close(subscriber));
     response.once("error", () => this.close(subscriber));
     response.on("drain", () => {
+      clearTimeout(subscriber.drainDeadline);
+      subscriber.drainDeadline = undefined;
       subscriber.blocked = false;
       this.changed();
     });
@@ -94,6 +97,7 @@ export class StatusEvents<T> {
     if (subscriber.closed) return;
     subscriber.closed = true;
     clearTimeout(subscriber.authDeadline);
+    clearTimeout(subscriber.drainDeadline);
     subscriber.cancelCheck?.();
     subscriber.pendingSnapshot = undefined;
     this.subscribers.delete(subscriber);
@@ -142,6 +146,9 @@ export class StatusEvents<T> {
     }
     try {
       subscriber.blocked = !subscriber.response.write(frame);
+      if (subscriber.blocked) {
+        subscriber.drainDeadline = setTimeout(() => this.close(subscriber), STATUS_AUTH_INTERVAL_MS);
+      }
       return true;
     } catch {
       this.close(subscriber);
@@ -153,9 +160,8 @@ export class StatusEvents<T> {
     for (const subscriber of this.subscribers) {
       void this.authorized(subscriber).then(valid => {
         if (!valid) return;
-        // A client that has not drained within one heartbeat cannot accumulate snapshots.
-        if (subscriber.blocked) this.close(subscriber);
-        else this.write(subscriber, ": heartbeat\n\n");
+        // Each blocked write has its own full drain interval, independent of the global heartbeat phase.
+        if (!subscriber.blocked) this.write(subscriber, ": heartbeat\n\n");
       });
     }
     this.changed();

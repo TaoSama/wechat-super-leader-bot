@@ -2,11 +2,62 @@ package journal
 
 import (
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 	bolt "go.etcd.io/bbolt"
 )
+
+func TestFullSizeEscapedOutputSurvivesJournalRestart(t *testing.T) {
+	dir := testPrivateDir(t)
+	j, err := Open(dir, "large-result-scope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := testCommand("large-command", "task")
+	if _, created, err := j.Begin(cmd); err != nil || !created {
+		t.Fatalf("begin: %v", err)
+	}
+	output := strings.Repeat("<", protocol.MaxTurnOutputBytes)
+	result := protocol.DaemonResultMessage{Type: "result", CommandID: cmd.CommandID,
+		Status: protocol.StatusCompleted, TurnID: "target", Output: output}
+	if err := j.Finish(result); err != nil {
+		t.Fatal(err)
+	}
+	closeJournal(t, j)
+	j, err = Open(dir, "large-result-scope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeJournal(t, j)
+	results, err := j.Unacked()
+	if err != nil || len(results) != 1 || results[0].Output != output {
+		t.Fatalf("full-size replay mismatch: results=%d error=%v", len(results), err)
+	}
+}
+
+func TestOutputOverflowDoesNotFinalizeJournalReceipt(t *testing.T) {
+	j, err := Open(testPrivateDir(t), "output-limit-scope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeJournal(t, j)
+	cmd := testCommand("overflow-command", "task")
+	if _, _, err := j.Begin(cmd); err != nil {
+		t.Fatal(err)
+	}
+	result := protocol.DaemonResultMessage{Type: "result", CommandID: cmd.CommandID,
+		Status: protocol.StatusCompleted, Output: strings.Repeat("x", protocol.MaxTurnOutputBytes+1)}
+	if err := j.Finish(result); !errors.Is(err, protocol.ErrTurnOutputLimit) {
+		t.Fatalf("output overflow not rejected: %v", err)
+	}
+	entry, found, err := j.Lookup(cmd)
+	if err != nil || !found || entry.Finished || entry.Result.Status == protocol.StatusCompleted {
+		t.Fatalf("overflow recorded as completed: finished=%t found=%t err=%v", entry.Finished, found, err)
+	}
+}
 
 func TestJournalPreservesMissingVersusRecordedEmptyOutput(t *testing.T) {
 	for _, present := range []bool{false, true} {

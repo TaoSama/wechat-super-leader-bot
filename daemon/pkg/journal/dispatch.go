@@ -119,14 +119,18 @@ func (j *Journal) ReadDispatch(commandID, sessionID, turnID string) (protocol.Di
 	err := j.db.View(func(tx *bolt.Tx) error {
 		data := tx.Bucket(recordsBucket).Get([]byte(commandID))
 		if data == nil {
-			return ErrNoDispatch
+			return ErrDispatchIdentity
 		}
 		entry, err := decode([]byte(commandID), data)
 		if err != nil {
 			return err
 		}
 		if entry.Dispatch == nil {
-			return ErrNoDispatch
+			if !entry.Finished || entry.SessionID != sessionID || entry.Result.TurnID != turnID || entry.TerminalDelivery != nil {
+				return ErrDispatchIdentity
+			}
+			identity = protocol.DispatchIdentity{Route: protocol.RouteControlSocket, SessionID: sessionID}
+			return nil
 		}
 		if !entry.Finished || entry.Dispatch.SessionID != sessionID || entry.Result.TurnID != turnID {
 			return ErrDispatchIdentity

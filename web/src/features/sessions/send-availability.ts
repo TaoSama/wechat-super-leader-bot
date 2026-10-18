@@ -6,6 +6,38 @@ import { TERMINAL_SESSION_ID } from "./input-receipt";
 export const MAX_SEND_AVAILABILITY_AGE_MS = 45_000;
 const AVAILABILITY_KEYS = new Set(["route", "state", "observedAt", "validUntil", "reason"]);
 const REASONS = new Set(["busy", "preflight-rejected", "unavailable", "checking"]);
+const TARGET_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const KNOWN_SESSION_STATES = new Set(["idle", "active", "busy", "running", "notLoaded"]);
+
+export function isSessionMessageTarget(session: ScopedSession): boolean {
+  return TARGET_ID.test(session.nodeId) && (isTerminalSession(session) ? TERMINAL_SESSION_ID.test(session.id) : TARGET_ID.test(session.id));
+}
+
+// Queue admission proves target identity and capability, never current dispatch authority.
+export function canQueueSession(session: ScopedSession, connected: boolean, now = Date.now()): boolean {
+  if (isTerminalSession(session) || !isSessionMessageTarget(session) ||
+      !KNOWN_SESSION_STATES.has(session.status) || !Number.isFinite(now)) return false;
+  const observed = (timestamp: unknown) => isIsoTimestamp(timestamp) && Date.parse(timestamp) <= now &&
+    (!connected || now - Date.parse(timestamp) <= MAX_SEND_AVAILABILITY_AGE_MS);
+  if (session.desktopObservation !== undefined) {
+    const desktop = normalizeDesktopObservation(session.desktopObservation);
+    if (!desktop || desktop.status === "unknown" || !observed(desktop.observedAt) ||
+        connected && desktop.availability !== "available") return false;
+  }
+  const availability = normalizeSendAvailability(session.sendAvailability);
+  if (availability) {
+    if (availability.route !== "desktop-owner" || !observed(availability.observedAt) || !isIsoTimestamp(availability.validUntil) ||
+        Date.parse(availability.validUntil) <= Date.parse(availability.observedAt) ||
+        Date.parse(availability.validUntil) - Date.parse(availability.observedAt) > MAX_SEND_AVAILABILITY_AGE_MS ||
+        connected && !isSendAvailabilityFresh(availability, now) ||
+        availability.state !== "ready" && availability.reason !== "busy") return false;
+    return !connected || availability.reason === "busy" || session.desktopObservation?.status === "active";
+  }
+  if (!observed(session.observedAt)) return false;
+  const native = session.capabilities.includes("send") && session.loaded === true && session.status !== "notLoaded";
+  const resume = session.provider === "codex-app" && session.capabilities.includes("resume-send") && typeof session.loaded === "boolean";
+  return (native || resume) && (!connected || ["active", "busy", "running"].includes(session.status));
+}
 
 // An invalid, present qualification is retained as an explicit denial. Dropping
 // it would accidentally authorize the unrelated control-socket fallback.

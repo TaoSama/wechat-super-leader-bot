@@ -531,7 +531,7 @@ describe("Super Leader 会话工作台", () => {
     fireEvent.click(screen.getByRole("button", { name: "退出控制台登录" }));
 
     await waitFor(() => {
-      expect(screen.getByText("需要微信一次性登录链接")).toBeInTheDocument();
+      expect(screen.getByText("把工作带在身边")).toBeInTheDocument();
       expect(screen.getByText("给我控制台链接")).toBeInTheDocument();
     });
   });

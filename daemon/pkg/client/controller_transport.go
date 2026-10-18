@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 )
@@ -20,11 +21,25 @@ var errControllerPayloadLimit = errors.New("controller message exceeds payload l
 // Validate the complete wire frame, including merged sources, desktop state,
 // skills and envelope. Never silently truncate an inventory or command result.
 func encodeControllerMessage(message any) ([]byte, error) {
+	limit := protocol.MaxControllerMessageBytes
+	var result *protocol.DaemonResultMessage
+	switch value := message.(type) {
+	case protocol.DaemonResultMessage:
+		result = &value
+	case *protocol.DaemonResultMessage:
+		result = value
+	}
+	if result != nil && result.Type == "result" {
+		if len(result.Output) > protocol.MaxTurnOutputBytes || !utf8.ValidString(result.Output) {
+			return nil, errControllerPayloadLimit
+		}
+		limit = protocol.MaxDaemonResultMessageBytes
+	}
 	encoded, err := json.Marshal(message)
 	if err != nil {
 		return nil, errors.New("controller message encoding failed")
 	}
-	if len(encoded) > protocol.MaxControllerMessageBytes {
+	if len(encoded) > limit {
 		return nil, errControllerPayloadLimit
 	}
 	return encoded, nil

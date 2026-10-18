@@ -6,7 +6,6 @@ import (
 
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex"
 	codexdesktop "github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex/desktop"
-	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/journal"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 )
 
@@ -21,6 +20,9 @@ type desktopController interface {
 func (d *Daemon) sendPrompt(ctx context.Context, cmd protocol.ControllerCommandMessage, prompt string) (string, error) {
 	if isTerminalSession(cmd.SessionID) {
 		return "", errors.New("terminal sessions are read-only; no input was sent")
+	}
+	if cmd.DeliveryMode == protocol.DeliverySteer {
+		return d.steerPrompt(ctx, cmd, prompt)
 	}
 	switch cmd.SendRoute {
 	case protocol.RouteTerminalPane:
@@ -78,6 +80,13 @@ func (d *Daemon) turnInspector(msg protocol.InspectTurnMessage) (codex.TurnInspe
 	if d.journal != nil {
 		identity, err := d.journal.ReadDispatch(msg.CommandID, msg.SessionID, msg.TurnID)
 		if err == nil {
+			if identity.Route == protocol.RouteControlSocket {
+				inspector, ok := d.adapter.(codex.TurnInspector)
+				if !ok {
+					return nil, errors.New("original control adapter cannot inspect turns")
+				}
+				return inspector, nil
+			}
 			if identity.Route == protocol.RouteAppServerResume {
 				sender, ok := d.adapter.(codex.ResumeSender)
 				inspector, inspectOK := d.adapter.(codex.TurnInspector)
@@ -91,9 +100,7 @@ func (d *Daemon) turnInspector(msg protocol.InspectTurnMessage) (codex.TurnInspe
 			}
 			return d.desktopController, nil
 		}
-		if !errors.Is(err, journal.ErrNoDispatch) {
-			return nil, errors.New("original dispatch identity unavailable")
-		}
+		return nil, errors.New("original dispatch identity unavailable")
 	}
 	inspector, ok := d.adapter.(codex.TurnInspector)
 	if !ok {

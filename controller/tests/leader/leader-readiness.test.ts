@@ -5,13 +5,15 @@ import { NodeHub } from "../../src/nodes/hub.js";
 import { CommandService } from "../../src/commands/service.js";
 import { MemoryStore } from "../../src/store/memory.js";
 import { LeaderOrchestrator } from "../../src/leader/orchestrator.js";
-import { SEND_READINESS_WAIT_MS } from "../../src/sessions/send-readiness.js";
+import { ExecutionScheduler } from "../../src/leader/plans/scheduler.js";
+import { EXECUTION_TTL_MS, executionRequestId } from "../../src/leader/plans/execution.js";
+import { LeaderDataSchema } from "../../src/leader/contracts.js";
 import type { LeaderModel, ModelMessage } from "../../src/leader/model/contracts.js";
-import type { Session } from "../../src/types.js";
+import type { ControllerCommandMessage, Session } from "../../src/types.js";
 
 class Socket extends EventEmitter {
   readyState: number = WebSocket.OPEN;
-  commands: unknown[] = [];
+  commands: ControllerCommandMessage[] = [];
   send(raw: string, callback?: (error?: Error) => void) {
     const message = JSON.parse(raw);
     if (message.type === "command") this.commands.push(message);
@@ -20,16 +22,27 @@ class Socket extends EventEmitter {
   close() { this.readyState = WebSocket.CLOSED; this.emit("close"); }
   receive(message: unknown) { this.emit("message", JSON.stringify(message)); }
 }
-function session(id: string, state: "ready" | "blocked" = "blocked"): Session {
+type Readiness = "ready" | "checking" | "busy" | "unavailable" | "expired";
+const AUTHORITY_VALID_MS = 45_000;
+function session(id: string, state: Readiness = "checking"): Session {
   const observedAt = new Date().toISOString();
   return { id, provider: "codex-app", title: id, cwd: "/fixture", status: "notLoaded", loaded: false,
     capabilities: ["read"], observedAt,
-    desktopObservation: { source: "codex-desktop", availability: "available", status: "idle", observedAt },
-    sendAvailability: { route: "desktop-owner", state, ...(state === "blocked" ? { reason: "checking" as const } : {}),
-      observedAt, validUntil: new Date(Date.now() + 45000).toISOString() } };
+    desktopObservation: { source: "codex-desktop", availability: "available", status: state === "busy" ? "active" : "idle", observedAt },
+    sendAvailability: { route: "desktop-owner", state: state === "unavailable" ? "unavailable" :
+      state === "ready" || state === "expired" ? "ready" : "blocked",
+      ...(state === "checking" || state === "busy" ? { reason: state } : {}),
+      observedAt: state === "expired" ? new Date(Date.now() - AUTHORITY_VALID_MS).toISOString() : observedAt,
+      validUntil: new Date(Date.now() + (state === "expired" ? -1 : AUTHORITY_VALID_MS)).toISOString() } };
+}
+function nativeSession(id: string): Session {
+  return { id, provider: "codex-app", title: id, cwd: "/fixture", loaded: true, status: "idle",
+    capabilities: ["read", "send"], observedAt: new Date().toISOString() };
 }
 const actions = ["invest", "research"].map(sessionId => ({ nodeId: "demoair", sessionId, prompt: "研究任务" }));
 const hubs: NodeHub[] = [];
+const schedulers: ExecutionScheduler[] = [];
+const schedulerErrors: unknown[] = [];
 function fixture(sessions = [session("invest"), session("research")]) {
   const store = new MemoryStore(), hub = new NodeHub(store, new Map()), socket = new Socket();
   hubs.push(hub);
@@ -45,142 +58,190 @@ function fixture(sessions = [session("invest"), session("research")]) {
     return { content: "查询已结束", toolCalls: [] };
   } };
   const commands = new CommandService(store, hub, 60);
-  const leader = new LeaderOrchestrator(store, hub, commands, model);
+  const createScheduler = () => {
+    const scheduler = new ExecutionScheduler(store, commands, { onError: error => { schedulerErrors.push(error); },
+      canDispatch: (execution, index) => {
+        const action = execution.plan.actions[index];
+        return !!action.sendRoute && commands.canDispatchSend(action, action.sendRoute);
+      } });
+    schedulers.push(scheduler);
+    return scheduler;
+  };
+  const scheduler = createScheduler();
+  const leader = new LeaderOrchestrator(store, hub, commands, model, Date.now, undefined, scheduler);
   const changed = (next: Session[]) => socket.receive({ type: "heartbeat", sessions: next, skills: [] });
   const subscribe = vi.spyOn(hub, "subscribeSessionChanges");
-  return { store, hub, socket, leader, changed, tools, subscribe };
+  return { store, hub, socket, commands, scheduler, createScheduler, leader, changed, tools, subscribe };
 }
 beforeEach(() => vi.useFakeTimers());
 afterEach(async () => {
+  await Promise.all(schedulers.splice(0).map(scheduler => scheduler.stop()));
   for (const hub of hubs.splice(0)) await hub.closeAll();
   vi.useRealTimers();
+  vi.restoreAllMocks();
+  expect(schedulerErrors.splice(0)).toEqual([]);
 });
 
-describe("Leader readiness waits", () => {
-  it("waits for both exact targets before proposing and never dispatches on proposal", async () => {
-    const f = fixture();
-    const pending = f.leader.handle("chat", "plan", "分别给投资和研究发任务");
-    await vi.advanceTimersByTimeAsync(0);
-    expect(f.subscribe).toHaveBeenCalledTimes(1);
-    f.changed([session("invest", "ready"), session("research")]);
-    await vi.advanceTimersByTimeAsync(0);
-    expect((await f.store.getLeaderState("chat"))?.data.pending).toBeUndefined();
-    f.changed([session("invest", "ready"), session("research", "ready")]);
-    expect((await pending).text).toContain("待执行计划");
-    expect(f.socket.commands).toEqual([]);
-  });
-
-  it("reports the checking target after the bounded timeout with no pending plan or command", async () => {
-    const f = fixture();
-    const pending = f.leader.handle("chat", "plan", "发任务");
-    await vi.advanceTimersByTimeAsync(SEND_READINESS_WAIT_MS);
-    await pending;
-    expect(f.tools.join()).toContain("invest");
-    expect(f.tools.join()).toContain("检查超时");
-    expect(f.tools.join()).not.toContain("clarify");
-    expect((await f.store.getLeaderState("chat"))?.data.pending).toBeUndefined();
-    expect(f.socket.commands).toEqual([]);
-  });
-
-  it("stops on disconnect rather than accepting a replacement connection", async () => {
-    const f = fixture();
-    const pending = f.leader.handle("chat", "plan", "发任务");
-    await vi.advanceTimersByTimeAsync(0);
-    f.socket.close();
-    await pending;
-    expect(f.tools.join()).toContain("节点已断开");
-    expect(f.socket.commands).toEqual([]);
-  });
-
-  it("rejects a busy peer immediately while another target is checking", async () => {
-    const busy = session("research");
-    busy.sendAvailability!.reason = "busy";
-    const f = fixture([session("invest"), busy]);
-    await f.leader.handle("chat", "plan", "发任务");
+describe("Leader durable readiness waits", () => {
+  it.each(["checking", "busy", "unavailable", "expired"] as const)("previews known %s desktop targets without waiting or dispatching", async state => {
+    const f = fixture([session("invest", state), session("research", "ready")]);
+    expect((await f.leader.handle("chat", "plan", "分别给投资和研究发任务")).text).toContain("待执行计划");
+    const pending = LeaderDataSchema.parse((await f.store.getLeaderState("chat"))?.data).pending;
+    expect(pending?.actions.map(action => [action.sessionId, action.sendRoute])).toEqual([
+      ["invest", "desktop-owner"], ["research", "desktop-owner"],
+    ]);
     expect(f.subscribe).not.toHaveBeenCalled();
-    expect(f.tools.join()).toContain("research");
-    expect(f.tools.join()).toContain("会话忙碌");
-    expect(f.socket.commands).toEqual([]);
-  });
-
-  it("waits during confirmation and dispatches each frozen action only once after recovery", async () => {
-    const f = fixture([session("invest", "ready"), session("research", "ready")]);
-    await f.leader.handle("chat", "plan", "发任务");
-    f.changed([session("invest"), session("research", "ready")]);
-    const pending = f.leader.handle("chat", "confirm", "确认执行");
-    await vi.advanceTimersByTimeAsync(0);
-    expect(f.socket.commands).toEqual([]);
-    f.changed([session("invest", "ready"), session("research", "ready")]);
-    await pending;
-    expect(f.socket.commands).toHaveLength(2);
-    await f.leader.handle("chat", "confirm", "确认执行");
-    expect(f.socket.commands).toHaveLength(2);
-  });
-
-  it("does not dispatch when the confirmed plan expires during the wait", async () => {
-    const f = fixture([session("invest", "ready"), session("research", "ready")]);
-    await f.leader.handle("chat", "plan", "发任务");
-    const state = (await f.store.getLeaderState("chat"))!;
-    state.data.pending!.expiresAt = Date.now() + 1000;
-    await f.store.compareAndSetLeaderState("chat", state.revision, state.data);
-    f.changed([session("invest"), session("research", "ready")]);
-    const pending = f.leader.handle("chat", "confirm", "确认执行");
-    await vi.advanceTimersByTimeAsync(1000);
-    await pending;
-    f.changed([session("invest", "ready"), session("research", "ready")]);
-    expect(f.socket.commands).toEqual([]);
     expect(await f.store.getLatestExecution("chat")).toBeNull();
-  });
-
-  it.each(["busy", "unavailable", "timeout"])("creates no command for either target when confirmation ends with %s", async change => {
-    const f = fixture([session("invest", "ready"), session("research", "ready")]);
-    await f.leader.handle("chat", "plan", "发任务");
-    f.changed([session("invest"), session("research", "ready")]);
-    const pending = f.leader.handle("chat", "confirm", "确认执行");
-    await vi.advanceTimersByTimeAsync(0);
-    if (change === "timeout") await vi.advanceTimersByTimeAsync(SEND_READINESS_WAIT_MS);
-    else {
-      const blocked = session("research");
-      if (change === "busy") blocked.sendAvailability!.reason = "busy";
-      else blocked.sendAvailability!.state = "unavailable";
-      f.changed([session("invest"), blocked]);
-    }
-    expect((await pending).text).toContain("没有派发");
     expect(f.socket.commands).toEqual([]);
-    expect(await f.store.getLatestExecution("chat")).toBeNull();
   });
 
-  it("revalidates the original claim after readiness recovers", async () => {
-    const f = fixture([session("invest", "ready"), session("research", "ready")]);
+  it("rejects read-only targets without an independent send route", async () => {
+    const readOnly = nativeSession("invest");
+    readOnly.capabilities = ["read"];
+    const f = fixture([readOnly, session("research", "ready")]);
     await f.leader.handle("chat", "plan", "发任务");
-    f.changed([session("invest"), session("research", "ready")]);
-    const pending = f.leader.handle("chat", "confirm", "确认执行");
-    await vi.advanceTimersByTimeAsync(0);
-    const state = (await f.store.getLeaderState("chat"))!;
-    await f.store.compareAndSetLeaderState("chat", state.revision, state.data);
-    f.changed([session("invest", "ready"), session("research", "ready")]);
-    await expect(pending).rejects.toThrow("聊天状态发生变化");
-    expect(f.socket.commands).toEqual([]);
-    expect(await f.store.getLatestExecution("chat")).toBeNull();
-  });
-
-  it.each(["during-wait", "before-binding"])("rejects a ready peer switching routes %s with zero dispatch", async timing => {
-    const f = fixture([session("invest", "ready"), session("research")]);
-    const pending = f.leader.handle("chat", "plan", "发任务");
-    await vi.advanceTimersByTimeAsync(0);
-    expect(f.subscribe).toHaveBeenCalledTimes(1);
-    if (timing === "before-binding") {
-      // Resolve the wait, then replace the inventory before its awaiting caller resumes.
-      f.changed([session("invest", "ready"), session("research", "ready")]);
-    }
-    const native = session("invest", "ready");
-    delete native.sendAvailability;
-    Object.assign(native, { loaded: true, status: "idle", capabilities: ["read", "send"] });
-    f.changed([native, session("research", timing === "before-binding" ? "ready" : "blocked")]);
-    await pending;
-    expect(f.tools.join()).toContain("invest");
-    expect(f.tools.join()).toContain("发送路线已变化");
+    expect(f.tools.join()).toContain("read-only");
     expect((await f.store.getLeaderState("chat"))?.data.pending).toBeUndefined();
+    expect(await f.store.getLatestExecution("chat")).toBeNull();
     expect(f.socket.commands).toEqual([]);
+  });
+
+  it("rejects an unknown target rather than queueing against a different known session", async () => {
+    const f = fixture([session("unrelated", "ready"), session("research", "ready")]);
+    await f.leader.handle("chat", "plan", "发任务");
+    expect(f.tools.join()).toContain("read-only");
+    expect((await f.store.getLeaderState("chat"))?.data.pending).toBeUndefined();
+    expect(await f.store.getLatestExecution("chat")).toBeNull();
+    expect(f.socket.commands).toEqual([]);
+  });
+
+  it("persists a busy native target and retains its independent control-socket capability", async () => {
+    const busy = nativeSession("invest");
+    busy.status = "active";
+    const f = fixture([busy, session("research")]);
+    await f.leader.handle("chat", "plan", "发任务");
+    await f.leader.handle("chat", "confirm", "确认执行");
+    const execution = (await f.store.getLatestExecution("chat"))!;
+    expect(execution).toMatchObject({ status: "active", attempts: [null, null] });
+    expect(execution.plan.actions[0].sendRoute).toBe("control-socket");
+    expect(f.socket.commands).toEqual([]);
+    f.changed([nativeSession("invest"), session("research")]);
+    await f.scheduler.advance(execution.id);
+    expect(f.socket.commands).toHaveLength(1);
+    expect(f.socket.commands[0]).toMatchObject({ sessionId: "invest", sendRoute: "control-socket" });
+  });
+
+  it("persists confirmation and dispatches a ready independent root while its peer keeps waiting", async () => {
+    const f = fixture([session("invest"), session("research", "ready")]);
+    await f.leader.handle("chat", "plan", "发任务");
+    expect((await f.leader.handle("chat", "confirm", "确认执行")).text).toContain("自动推进中");
+    const execution = (await f.store.getLatestExecution("chat"))!;
+    expect(execution.status).toBe("active");
+    expect(execution.attempts[0]).toBeNull();
+    expect(execution.attempts[1]).not.toBeNull();
+    expect(await f.store.findCommandByRequestId(executionRequestId(execution, 0))).toBeNull();
+    expect(f.socket.commands.map(command => command.sessionId)).toEqual(["research"]);
+    expect(await f.scheduler.view(execution.id, "chat")).toMatchObject({
+      steps: [{ sessionId: "invest", status: "waiting" }, { sessionId: "research", status: "pending" }],
+    });
+    await f.leader.handle("chat", "confirm", "确认执行");
+    expect(f.socket.commands).toHaveLength(1);
+  });
+
+  it("recovers persisted waiting steps after scheduler restart, only on their original targets and once", async () => {
+    const f = fixture([session("invest", "busy"), session("research")]);
+    await f.leader.handle("chat", "plan", "发任务");
+    await f.leader.handle("chat", "confirm", "确认执行");
+    const execution = (await f.store.getLatestExecution("chat"))!;
+    expect(execution.attempts).toEqual([null, null]);
+    expect(f.socket.commands).toEqual([]);
+    await f.scheduler.stop();
+    const recovered = f.createScheduler();
+    f.changed([session("unrelated", "ready"), session("invest", "busy"), session("research")]);
+    await recovered.advance(execution.id);
+    expect((await f.store.getExecution(execution.id))?.attempts).toEqual([null, null]);
+    f.changed([session("unrelated", "ready"), session("invest", "ready"), session("research")]);
+    await recovered.advance(execution.id);
+    await recovered.advance(execution.id);
+    expect(f.socket.commands.map(command => [command.nodeId, command.sessionId, command.sendRoute])).toEqual([
+      ["demoair", "invest", "desktop-owner"],
+    ]);
+    f.changed([session("invest", "ready"), session("research", "ready")]);
+    await recovered.advance(execution.id);
+    await recovered.advance(execution.id);
+    expect(f.socket.commands.map(command => command.sessionId)).toEqual(["invest", "research"]);
+    for (const index of execution.plan.actions.keys()) {
+      const command = await f.store.findCommandByRequestId(executionRequestId(execution, index));
+      expect(command).toMatchObject({ commandId: f.socket.commands[index].commandId, status: "pending",
+        authority: { type: "plan", id: execution.id, chatId: "chat" } });
+    }
+  });
+
+  it.each(["cancelled", "expired"] as const)("never dispatches a %s waiting execution after readiness recovers", async status => {
+    const f = fixture();
+    await f.leader.handle("chat", "plan", "发任务");
+    await f.leader.handle("chat", "confirm", "确认执行");
+    const execution = (await f.store.getLatestExecution("chat"))!;
+    if (status === "cancelled") await f.leader.handle("chat", "cancel", "取消计划");
+    else vi.setSystemTime(Date.now() + EXECUTION_TTL_MS);
+    f.changed([session("invest", "ready"), session("research", "ready")]);
+    await f.scheduler.advance(execution.id);
+    await f.commands.dispatchQueued();
+    expect(await f.store.getExecution(execution.id)).toMatchObject({ status, attempts: [null, null] });
+    for (const index of execution.plan.actions.keys()) {
+      expect(await f.store.findCommandByRequestId(executionRequestId(execution, index))).toBeNull();
+    }
+    expect(f.socket.commands).toEqual([]);
+  });
+
+  it("rejects an expired preview before publishing an execution", async () => {
+    const f = fixture();
+    await f.leader.handle("chat", "plan", "发任务");
+    const state = (await f.store.getLeaderState("chat"))!;
+    vi.setSystemTime(LeaderDataSchema.parse(state.data).pending!.expiresAt);
+    f.changed([session("invest", "ready"), session("research", "ready")]);
+    expect((await f.leader.handle("chat", "confirm", "确认执行")).text).toContain("计划已过期");
+    expect(await f.store.getLatestExecution("chat")).toBeNull();
+    expect(f.socket.commands).toEqual([]);
+  });
+
+  it("checks the confirmation claim atomically even when every target is waiting", async () => {
+    const f = fixture();
+    await f.leader.handle("chat", "plan", "发任务");
+    const confirmExecution = f.store.confirmExecution.bind(f.store);
+    const confirm = vi.spyOn(f.store, "confirmExecution").mockImplementation(async (...args) => {
+      const state = (await f.store.getLeaderState("chat"))!;
+      await f.store.compareAndSetLeaderState("chat", state.revision, state.data);
+      return confirmExecution(...args);
+    });
+    await expect(f.leader.handle("chat", "confirm", "确认执行")).rejects.toThrow("聊天状态发生变化");
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(await f.store.getLatestExecution("chat")).toBeNull();
+    expect(f.socket.commands).toEqual([]);
+  });
+
+  it("does not confirm a preview whose original target changed routes", async () => {
+    const f = fixture();
+    await f.leader.handle("chat", "plan", "发任务");
+    f.changed([nativeSession("invest"), session("research")]);
+    expect((await f.leader.handle("chat", "confirm", "确认执行")).text).toContain("没有派发");
+    expect(await f.store.getLatestExecution("chat")).toBeNull();
+    expect(f.socket.commands).toEqual([]);
+  });
+
+  it("keeps the confirmed route frozen and waits until that route recovers", async () => {
+    const f = fixture();
+    await f.leader.handle("chat", "plan", "发任务");
+    await f.leader.handle("chat", "confirm", "确认执行");
+    const execution = (await f.store.getLatestExecution("chat"))!;
+    f.changed([nativeSession("invest"), session("research")]);
+    await f.scheduler.advance(execution.id);
+    expect((await f.store.getExecution(execution.id))?.attempts).toEqual([null, null]);
+    expect(f.socket.commands).toEqual([]);
+    f.changed([session("invest", "ready"), session("research")]);
+    await f.scheduler.advance(execution.id);
+    expect(f.socket.commands).toHaveLength(1);
+    expect(f.socket.commands[0]).toMatchObject({ sessionId: "invest", sendRoute: "desktop-owner" });
+    expect((await f.store.getExecution(execution.id))?.plan).toEqual(execution.plan);
   });
 });

@@ -35,6 +35,23 @@ it("accepts the short-output relay on SSE before and after plan completion witho
   unmount(); expect(stream.closed).toBe(true); expect(vi.getTimerCount()).toBe(0);
 });
 
+it("keeps queued plan and goal snapshots live with frozen sources and no target turn receipt", () => {
+  const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
+  const { result, unmount } = renderHook(() => useStatusPolling(true, 1000));
+  const stream = FakeEventSource.instances[0];
+  const executions = { ...emptyExecutions(), items: [completedRelayFixture("active")] };
+  const goals = { ...emptyGoals(), items: [goalFixture()] };
+  executions.items[0].steps[1].status = "queued"; delete executions.items[0].steps[1].turnId;
+  goals.items[0].actions[1].status = "queued"; delete goals.items[0].actions[1].turnId;
+  act(() => stream.status("排队中的会话", executions, goals));
+  expect(result.current.data?.executions).toEqual(executions);
+  expect(result.current.data?.goals).toEqual(goals);
+  expect(result.current.data?.executions.items[0].steps[1].resultSources).toEqual(executions.items[0].steps[1].resultSources);
+  expect(result.current.error).toBeNull(); expect(result.current.connectionState).toBe("live");
+  expect(stream.closed).toBe(false); expect(fetch).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
+  unmount(); expect(stream.closed).toBe(true); expect(vi.getTimerCount()).toBe(0);
+});
+
 it("replaces goal evidence on the existing stream without polling, extra timers or replay, and rejects malformed updates", () => {
   const fetch = vi.fn(() => new Promise<Response>(() => {})); vi.stubGlobal("fetch", fetch);
   const { result, unmount } = renderHook(() => useStatusPolling(true, 1000));

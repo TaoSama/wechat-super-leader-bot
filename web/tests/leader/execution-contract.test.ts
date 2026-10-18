@@ -22,7 +22,7 @@ describe("required bounded console execution contract", () => {
     value.items = Array.from({ length: 12 }, (_, index) => ({ ...executionFixture(), id: `plan-${index}` }));
     value.hasMore = true;
     expect(parseConsoleExecutions(value)).toEqual(value);
-    for (const status of ["waiting", "claimed", "pending", "accepted", "completed", "failed", "uncertain", "cancelled", "expired"]) {
+    for (const status of ["waiting", "claimed", "queued", "pending", "accepted", "completed", "failed", "uncertain", "cancelled", "expired"]) {
       const copy = snapshot();
       Object.assign(copy.items[0].steps[0], { status });
       expect(parseConsoleExecutions(copy).items[0].steps[0].status).toBe(status);

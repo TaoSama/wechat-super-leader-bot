@@ -67,8 +67,8 @@ func TestDesktopDispatchClaimAndLegacyReplay(t *testing.T) {
 		if err := j.BindDispatch(legacy, identity); err == nil {
 			t.Fatal("legacy claim allowed desktop binding")
 		}
-		if _, err := j.ReadDispatch(legacy.CommandID, legacy.SessionID, "legacy-turn"); !errors.Is(err, ErrNoDispatch) {
-			t.Fatalf("legacy read-only inspection routing unavailable: %v", err)
+		if _, err := j.ReadDispatch(legacy.CommandID, legacy.SessionID, "legacy-turn"); !errors.Is(err, ErrDispatchIdentity) {
+			t.Fatalf("unfinished claim granted read-only inspection routing: %v", err)
 		}
 		if _, created, err := j.Begin(legacy); err != nil || created {
 			t.Fatalf("legacy replay guard lost: %t %v", created, err)
@@ -84,8 +84,8 @@ func TestDesktopDispatchClaimAndLegacyReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := j.ReadDispatch("missing", cmd.SessionID, "legacy-turn"); !errors.Is(err, ErrNoDispatch) {
-		t.Fatalf("missing desktop identity not distinguished: %v", err)
+	if _, err := j.ReadDispatch("missing", cmd.SessionID, "legacy-turn"); !errors.Is(err, ErrDispatchIdentity) {
+		t.Fatalf("missing identity granted inspection fallback: %v", err)
 	}
 }
 
