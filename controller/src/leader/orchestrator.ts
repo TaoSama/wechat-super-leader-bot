@@ -102,14 +102,17 @@ export class LeaderOrchestrator {
       }
     }
     const previousPlan = data.pending;
+    const confirmationTime = this.now();
+    const livePlan = previousPlan && previousPlan.expiresAt > confirmationTime ? previousPlan : undefined;
+    const liveGoal = data.pendingGoal && data.pendingGoal.expiresAt > confirmationTime ? data.pendingGoal : undefined;
     const confirms = confirmation.test(text.trim());
     const goalId = goalConfirmation(text.trim());
-    const ambiguous = confirms && !!previousPlan && !!data.pendingGoal;
-    const plan = confirms && !ambiguous ? previousPlan : undefined;
+    const ambiguous = confirms && !!livePlan && !!liveGoal;
+    const plan = confirms && !ambiguous ? livePlan ?? (liveGoal ? undefined : previousPlan) : undefined;
     const goal = goalId ? data.pendingGoal?.id === goalId ? data.pendingGoal : undefined
       : confirms && !ambiguous && !plan ? data.pendingGoal : undefined;
-    if (plan || data.pending && data.pending.expiresAt <= this.now()) data.pending = undefined;
-    if (goal) data.pendingGoal = undefined;
+    if (plan || data.pending && data.pending.expiresAt <= confirmationTime) data.pending = undefined;
+    if (goal || data.pendingGoal && data.pendingGoal.expiresAt <= confirmationTime) data.pendingGoal = undefined;
     data.inflight = { messageId, inputHash, expiresAt: this.now() + CLAIM_TTL_MS, plan, goal };
     const claimed = await this.save(chatId, saved?.revision ?? 0, data);
     let reply: LeaderReply;
@@ -153,7 +156,7 @@ export class LeaderOrchestrator {
         });
         data.memories = memoriesBefore;
         data.pending = previousPlan && previousPlan.expiresAt > this.now() ? previousPlan : undefined;
-        data.pendingGoal = pendingGoalBefore;
+        data.pendingGoal = pendingGoalBefore && pendingGoalBefore.expiresAt > this.now() ? pendingGoalBefore : undefined;
         reply = { text: failureReply(error, reference) };
       }
     }
