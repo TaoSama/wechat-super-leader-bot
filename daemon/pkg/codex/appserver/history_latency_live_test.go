@@ -11,8 +11,8 @@ import (
 )
 
 // Opt-in timing of an existing native socket. This sends only initialize,
-// loaded-list discovery, metadata and bounded items reads; no bodies or target
-// identities are logged, and no thread is resumed or changed.
+// optional bounded loaded-list discovery, metadata and bounded items reads.
+// No bodies or target identities are logged, and no thread is resumed or changed.
 func TestLiveHistoryFirstPageLatency(t *testing.T) {
 	socket := os.Getenv("CODEX_APP_SERVER_SOCKET")
 	if os.Getenv("LIVE_CODEX_HISTORY_LATENCY") != "1" || socket == "" {
@@ -53,7 +53,6 @@ func TestLiveHistoryFirstPageLatency(t *testing.T) {
 		method string
 		params map[string]any
 	}{
-		{"thread/loaded/list", map[string]any{}},
 		{"thread/read", map[string]any{"threadId": sessionID, "includeTurns": false}},
 		{"thread/items/list", map[string]any{"threadId": sessionID, "sortDirection": "desc", "limit": pageSize}},
 	}

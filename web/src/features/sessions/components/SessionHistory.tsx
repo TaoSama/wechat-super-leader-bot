@@ -12,12 +12,12 @@ interface Props {
 }
 
 export function SessionHistory({ session, terminal, showHistory, history, scroll }: Props) {
-  if (!showHistory) return <div className="history-scroll" aria-label="终端观测说明"><div className="history-content">
+  if (!showHistory) return <div className="history-scroll" role="region" aria-label="终端观测说明"><div className="history-content">
     <p>{session.sendAvailability?.route === "terminal-pane" ? "此会话提供终端运行状态与单步输入，暂未接入完整对话历史。" : "此会话提供终端运行状态，暂未接入对话历史与发送。"}</p>
     <p>可以在微信中询问这个会话的最新输出，读取有限的终端快照。快照可能裁剪，不是完整对话记录。</p>
   </div></div>;
 
-  return <div className="history-scroll" ref={scroll.scrollRef} tabIndex={0} aria-label="会话历史" onScroll={scroll.onScroll}>
+  return <div className="history-scroll" role="region" ref={scroll.scrollRef} tabIndex={0} aria-label="会话历史" onScroll={scroll.onScroll}>
     <div className="history-content">
       {terminal && <p className="muted">终端会话记录 · 仅显示已保存的内容</p>}
       {history.history?.nextCursor && <button type="button" className="older-button" disabled={history.loadingOlder || !history.canRead} onClick={() => void scroll.loadOlder()}>{history.loadingOlder ? "正在读取更早消息…" : "加载更早的消息"}</button>}

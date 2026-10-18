@@ -74,6 +74,7 @@ func (a *AppServerAdapter) ReadHistory(ctx context.Context, sessionID, cursor st
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	session := sessionFromThread(thread, false, now)
+	session.Loaded = nil
 	session.Capabilities = []protocol.ActionType{protocol.ActionRead}
 	history := protocol.SessionHistory{Session: session, Items: []protocol.HistoryItem{}, FetchedAt: now}
 	if next != "" {

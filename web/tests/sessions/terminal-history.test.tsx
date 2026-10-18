@@ -161,7 +161,7 @@ describe("terminal transcript workspace", () => {
     fireEvent.click(screen.getByTestId(`session-row-fixture-${SESSION_ID}`));
     await settle();
     expect(screen.getByText("助手 · 文本片段（非完整轮次）")).toBeInTheDocument();
-    expect(screen.getByLabelText("会话历史")).toHaveTextContent("Grok 可见片段");
+    expect(screen.getByRole("region", { name: "会话历史" })).toHaveTextContent("Grok 可见片段");
     expect(screen.queryByText("执行完成 (Completed)")).toBeNull();
     expect(screen.getByRole("button", { name: "发送消息" })).toBeDisabled();
   });
@@ -208,7 +208,7 @@ describe("terminal transcript workspace", () => {
     render(workspace({ ...session, historySource: undefined }));
     fireEvent.click(screen.getByTestId(`session-row-fixture-${SESSION_ID}`));
     await advance(60000);
-    expect(screen.getByLabelText("终端观测说明")).toHaveTextContent("不是完整对话记录");
+    expect(screen.getByRole("region", { name: "终端观测说明" })).toHaveTextContent("不是完整对话记录");
     expect(screen.queryByRole("button", { name: "刷新会话历史" })).toBeNull();
     expect(fetch).not.toHaveBeenCalled();
   });

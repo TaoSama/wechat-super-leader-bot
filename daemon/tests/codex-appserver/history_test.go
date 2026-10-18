@@ -79,7 +79,7 @@ func TestReadHistoryReadonlyAndPublicProjection(t *testing.T) {
 	if len(history.Items) != 3 || history.Items[0].ID != "old" || history.Items[1].ID != "tool" || history.Items[2].ID != "new" || history.Items[1].Kind != "tool" || history.Items[1].Text != "visible tool result" {
 		t.Fatalf("incorrect public order: %+v", history.Items)
 	}
-	if history.Session.Model != "actual" || history.Session.ModelProvider != "provider" || history.Session.ReasoningEffort != "high" || history.Session.Loaded == nil || *history.Session.Loaded || history.Session.UpdatedAt != "2026-10-11T00:00:00Z" || len(history.Session.Capabilities) != 1 || history.Session.Capabilities[0] != protocol.ActionRead {
+	if history.Session.Model != "actual" || history.Session.ModelProvider != "provider" || history.Session.ReasoningEffort != "high" || history.Session.Loaded != nil || history.Session.UpdatedAt != "2026-10-11T00:00:00Z" || len(history.Session.Capabilities) != 1 || history.Session.Capabilities[0] != protocol.ActionRead {
 		t.Fatalf("incorrect native metadata: %+v", history.Session)
 	}
 	if history.NextCursor == nil || *history.NextCursor != "older" || history.Items[0].Timestamp != "2026-10-11T00:00:00Z" {
@@ -88,6 +88,9 @@ func TestReadHistoryReadonlyAndPublicProjection(t *testing.T) {
 	encoded, err := json.Marshal(history)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"loaded":`) {
+		t.Fatal("history must omit unobserved loaded state")
 	}
 	if strings.Contains(string(encoded), "PRIVATE") || strings.Contains(string(encoded), "do-not-export") {
 		t.Fatal("raw private objects leaked")

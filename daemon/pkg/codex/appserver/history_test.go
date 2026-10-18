@@ -2,12 +2,14 @@ package appserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,9 +58,16 @@ func TestHistoryPipelinesBoundedTailWithoutLoadingCompleteConversation(t *testin
 		t.Fatal(err)
 	}
 	if !adapter.PagedHistoryAvailable() || len(page.Items) != 2 || page.Items[0].ID != "old" || page.Items[1].ID != "new" ||
-		page.Session.ID != "session" || page.Session.Loaded == nil || *page.Session.Loaded || len(page.Session.Capabilities) != 1 ||
+		page.Session.ID != "session" || page.Session.Loaded != nil || len(page.Session.Capabilities) != 1 ||
 		page.Session.Capabilities[0] != "read" || page.NextCursor == nil || *page.NextCursor != "oldest" {
 		t.Fatalf("invalid native bounded page: %+v", page)
+	}
+	encoded, err := json.Marshal(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"loaded":`) {
+		t.Fatal("history must omit unobserved loaded state")
 	}
 	select {
 	case err := <-finished:
