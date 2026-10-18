@@ -27,7 +27,7 @@ export async function verifyReliableDelivery(harness) {
     elapseDispatchInterval } = harness;
   assert(Buffer.byteLength(RAW_REPLY, 'utf8') > 128 * 1_024, 'Large-result fixture must exceed 128KiB');
   assert(RESUMABLE_REPLY.length <= 4_500 && RESUMABLE_DISPLAY.length > 3_800 && RESUMABLE_DISPLAY.length <= 7_600,
-    'Ordinary report must fit model raw limit and require exactly two displayed chunks');
+    'Ordinary report must fit model raw limit and require multiple displayed chunks');
   const complete = (command, output = RAW_REPLY) => sendFrame({ type: 'result', commandId: command.commandId,
     turnId: 'synthetic-turn-' + command.commandId, status: 'completed', output });
   const launch = async () => {
@@ -164,20 +164,27 @@ export async function verifyReliableDelivery(harness) {
 }
 
 async function verifyUnknownOrdinaryReply(harness) {
-  const { incoming, chatId, contextToken, query, runGateway, sent, statePath, fault, wireEvents, evidence } = harness;
+  const { incoming, chatId, contextToken, query, runGateway, sent, statePath, fault, wireEvents, evidence, clientId } = harness;
   const messageId = randomUUID(), key = JSON.stringify(['synthetic-account', chatId, messageId]);
+  const queryId = randomUUID(), queryKey = JSON.stringify(['synthetic-account', chatId, queryId]);
   const message = (text, clientId) => ({ message_type: TEXT_TYPE, from_user_id: chatId, client_id: clientId,
     create_time_ms: Date.now(), context_token: contextToken, item_list: [{ type: TEXT_TYPE, text_item: { text } }] });
   const previous = JSON.parse(await readFile(statePath, 'utf8'));
   const start = sent.length;
   fault.remaining = 2; fault.mode = 'disconnect';
-  incoming.push(message(RAW_REPLY_TASK, messageId), message(query, randomUUID()));
+  incoming.push(message(RAW_REPLY_TASK, messageId), message(query, queryId));
   const result = await runGateway('--poll-once');
   assert.equal(result.skippedCount, 0, 'Durably admitted replies should not be reported as skipped inputs');
   assert.equal(result.processedCount, 2, 'Unknown delivery blocked the next message in the batch');
   assert.equal(sent.length - start, 3, 'Unknown delivery retried or blocked the later reply');
-  assert.equal(sent.slice(start, start + 2).map(text).join(''), RESUMABLE_DISPLAY,
-    'Ambiguous ordinary delivery did not use the explicit formatted report');
+  assert.deepEqual(sent.slice(start).map(part => part.client_id),
+    [clientId(key, 0), clientId(key, 1), clientId(queryKey, 0)],
+    'Unknown report continued beyond its second part or replaced the later query reply');
+  assert.equal(text(sent[start + 2]), '当前尚未执行；等待你的明确确认。',
+    'Later batch query did not receive its own expected reply');
+  const submittedPrefix = sent.slice(start, start + 2).map(text).join('');
+  assert(RESUMABLE_DISPLAY.startsWith(submittedPrefix) && submittedPrefix.length < RESUMABLE_DISPLAY.length,
+    'Ambiguous ordinary delivery changed the formatted prefix or continued beyond its unknown part');
   assert(sent.slice(start, start + 2).every(part => !/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/u.test(text(part))),
     'Ordinary reply split broke a Unicode surrogate pair');
   const state = JSON.parse(await readFile(statePath, 'utf8'));
@@ -193,7 +200,8 @@ async function verifyUnknownOrdinaryReply(harness) {
   assert.equal(sent.length, sentAfter, 'Restart resent an ambiguous ordinary reply');
   assert.equal(wireEvents.filter(event => event.kind === 'model').length, modelCalls, 'Restart forwarded an isolated message again');
   evidence('ordinary-unknown-isolated', { confirmedParts: 1, inFlight: true, isolated: 1,
-    laterBatchMessageProcessed: 1, cursorAdvanced: true, restartResends: 0, repeatedModelCalls: 0 });
+    laterBatchMessageProcessed: 1, laterBatchReplyIdentityVerified: true,
+    cursorAdvanced: true, restartResends: 0, repeatedModelCalls: 0 });
 }
 
 async function verifyProgressDelivery(harness, complete) {

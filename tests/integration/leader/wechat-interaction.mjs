@@ -140,8 +140,18 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
         if (body.input[0]?.content?.startsWith('你负责根据刚刚核查的真实执行记录')) {
           assert.deepEqual(body.tools, [], 'Confirmation model received mutation tools');
           const evidence = JSON.parse(last.content);
-          const observations = evidence.targets.map(target => {
+          const observations = evidence.targets.map((target, index) => {
             assert.equal(target.nodeId, NODE); assert.equal(target.sessionId, SESSION);
+            if (!target.exactReceipt) {
+              assert.equal(target.historyError, '尚无本次派发指令，未声称会话已经接收或执行');
+              assert.deepEqual(target.exactTurnHistory, [], 'Undispatched dependency manufactured execution history');
+              const step = evidence.durableState.steps[index];
+              assert.equal(step.status, 'waiting', 'Undispatched dependency was not waiting');
+              assert(step.dependsOn.length > 0, 'No-command confirmation had no genuinely waiting dependency');
+              assert(!deliveries.some(command => command.prompt === step.prompt),
+                'Waiting dependency had already been delivered');
+              return '后续步骤已保存，等待前序结果。';
+            }
             assert.equal(target.historyError, undefined, 'Confirmation fell back after failing to read execution history');
             const read = historyReads.findLast(item => !item.confirmed && item.history.fetchedAt === target.historyFetchedAt);
             assert(read, 'Confirmation model ran before a fresh session history response');
@@ -224,7 +234,7 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
       } catch (error) { errors.push(error); respond(response, { error: 'Synthetic Controller proxy failure' }, 500); }
     });
     gatewayControllerUrl = `http://127.0.0.1:${await listen(proxy)}`;
-    controller.env.RESULT_PUBLIC_ORIGIN = gatewayControllerUrl;
+    controller.env.CONSOLE_PUBLIC_URL = gatewayControllerUrl;
     await controller.start();
 
     let sessionStatus = 'idle';
