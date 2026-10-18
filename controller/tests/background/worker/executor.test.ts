@@ -59,6 +59,13 @@ describe("Codex CLI process contract", () => {
       expect(observed.args.join(" ")).toContain('shell_environment_policy.inherit="none"');
       expect(observed.args.join(" ")).toContain('network={enabled=true}');
       expect(observed.args.join(" ")).toContain('"/proc"="deny"');
+      const profile = observed.args.find((value: string) => value.startsWith('permissions.background_worker='));
+      expect(profile).toContain('\":minimal\"=\"read\"');
+      const canonicalWorkspace = fs.realpathSync(f.workspace);
+      expect(profile).toContain(`${JSON.stringify(canonicalWorkspace)}=\"write\"`);
+      expect(profile).toContain(`${JSON.stringify(path.join(path.dirname(canonicalWorkspace), "home"))}=\"deny\"`);
+      expect(profile).not.toContain(`${JSON.stringify(fs.realpathSync(f.options.root))}=\"deny\"`);
+      expect(profile).not.toContain(`${JSON.stringify(path.dirname(canonicalWorkspace))}=\"deny\"`);
       expect(observed.home).toBe(observed.codexHome.replace(/home$/, "workspace"));
       expect(observed.unexpected).toBeUndefined();
     } finally { delete process.env.WORKER_TEST_SECRET; }

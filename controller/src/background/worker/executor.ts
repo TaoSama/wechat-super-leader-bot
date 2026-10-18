@@ -37,11 +37,11 @@ export class CodexCliExecutor implements WorkerExecutor {
         .filter(file => file.startsWith("/opt/homebrew/Cellar/") && file.endsWith(".dylib"))
         .flatMap(file => [path.dirname(file), "/opt/homebrew/opt"]))]
       : [];
-    const workerDir = path.dirname(request.workspace);
     // The runtime package is readable; other worker homes, controller files and
     // process environments are outside this worker's filesystem capability.
-    const filesystem = [[":minimal", "read"], [this.options.root, "deny"], [this.options.artifactRoot, "deny"],
-      [workerDir, "deny"], [request.workspace, "write"],
+    // Keep the default outside-workspace denial. Denying its ancestors as well
+    // prevents Linux's filesystem helper from constructing the home mount.
+    const filesystem = [[":minimal", "read"], [this.options.artifactRoot, "deny"], [request.workspace, "write"],
       [request.home, "deny"], ["/etc/super-leader", "deny"], ["/proc", "deny"],
       [path.resolve(path.dirname(command), ".."), "read"],
       [path.resolve(path.dirname(nodePath), ".."), "read"], ...nodeLibraries.map(file => [file, "read"])]

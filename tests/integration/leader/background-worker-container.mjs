@@ -87,6 +87,7 @@ async function fixture() {
   assert.match(fs.readFileSync('/proc/self/attr/current', 'utf8'), /super-leader-codex/);
   assert.throws(() => fs.writeFileSync('/app/root-write-probe', 'x'));
   fs.writeFileSync(path.join(WORKER_ROOT, 'outside.txt'), 'non-secret outside fixture');
+  fs.writeFileSync(path.join(ARTIFACT_ROOT, 'outside.txt'), 'non-secret artifact fixture');
   let requestNumber = 0, command, lastCommand;
   const fixtureServer = http.createServer(async (req, res) => {
     if (req.url === '/network') { res.end('network-fixture-ok'); return; }
@@ -126,15 +127,25 @@ async function fixture() {
   };
   try {
     const workerId = randomUUID(), marker = randomUUID();
+    const home = path.join(WORKER_ROOT, 'workers', workerId, 'home');
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(path.join(home, 'secret-probe'), 'non-secret home fixture');
+    const siblingId = randomUUID(), sibling = path.join(WORKER_ROOT, 'workers', siblingId);
+    for (const directory of ['workspace', 'home', 'invocations']) fs.mkdirSync(path.join(sibling, directory), { recursive: true });
+    fs.writeFileSync(path.join(sibling, 'state.json'), JSON.stringify({ workerId: siblingId }));
+    const siblingProbe = path.join(sibling, 'workspace', 'secret-probe');
+    fs.writeFileSync(siblingProbe, 'non-secret sibling fixture');
     let threadId;
     for (let round = 1; round <= 2; round++) {
       probeStage = `worker-round-${round}`;
       const invocationId = randomUUID();
+      const isolationChecks = provider ? ''
+        : `,outsideHidden:denied('${WORKER_ROOT}/outside.txt'),siblingsHidden:denied('${siblingProbe}'),homeHidden:denied('${home}/secret-probe'),controllerHidden:denied('/app/package.json'),artifactHidden:denied('${ARTIFACT_ROOT}/outside.txt'),procHidden:denied('/proc/1/environ')&&denied('/proc/self/environ')`;
       const js = round === 1
-        ? `const fs=require('node:fs');const denied=p=>{try{fs.readFileSync(p);return false}catch{return true}};const report={marker:${JSON.stringify(marker)},round:1,keyHidden:!process.env.CODEX_API_KEY&&!process.env.OPENAI_API_KEY,outsideHidden:denied('${WORKER_ROOT}/outside.txt'),siblingsHidden:!fs.existsSync('${WORKER_ROOT}/workers'),procHidden:!fs.existsSync('/proc/1/environ'),network:await (await fetch('${url}/network')).text()};fs.writeFileSync('seed.txt',report.marker);fs.writeFileSync('report.json',JSON.stringify(report));`
+        ? `const fs=require('node:fs');const denied=p=>{try{fs.readFileSync(p);return false}catch{return true}};const report={marker:${JSON.stringify(marker)},round:1,keyHidden:!process.env.CODEX_API_KEY&&!process.env.OPENAI_API_KEY&&!process.env.CODEX_HOME${isolationChecks},network:await (await fetch('${url}/network')).text()};fs.writeFileSync('seed.txt',report.marker);fs.writeFileSync('report.json',JSON.stringify(report));`
         : `const fs=require('node:fs');const report=JSON.parse(fs.readFileSync('report.json','utf8'));if(fs.readFileSync('seed.txt','utf8')!==report.marker)throw Error('seed mismatch');report.round=2;report.resumed=true;fs.writeFileSync('report.json',JSON.stringify(report));`;
       command = `node --input-type=module -e ${shellQuote(`import {createRequire} from 'node:module';const require=createRequire(import.meta.url);${js}`)}`;
-      await runtime.start({ workerId, invocationId, task: `实际运行以下命令，工具成功才返回completed，附件仅report.json：\n${command}`, input: { round } });
+      await runtime.start({ workerId, invocationId, task: `实际运行以下命令，工具成功才返回completed，附件仅report.json。命令只生成本轮验收报告；/network是本轮自建测试HTTP，仅返回固定无敏感字符串，不提供控制接口。\n${command}`, input: { round } });
       const status = await wait(workerId, invocationId);
       if (status.status !== 'completed') console.log(JSON.stringify({ pass: false, probe: probeStage, status: status.status, error: status.error }));
       assert.equal(status.status, 'completed');
@@ -144,7 +155,9 @@ async function fixture() {
       const artifacts = await runtime.exportArtifacts(workerId, invocationId);
       const report = JSON.parse(fs.readFileSync(artifacts.find(item => item.name === 'report.json').path, 'utf8'));
       assert.equal(report.marker, marker); assert.equal(report.round, round);
-      for (const key of ['keyHidden', 'outsideHidden', 'siblingsHidden', 'procHidden']) assert.equal(report[key], true, key);
+      const hiddenKeys = provider ? ['keyHidden']
+        : ['keyHidden', 'outsideHidden', 'siblingsHidden', 'homeHidden', 'controllerHidden', 'artifactHidden', 'procHidden'];
+      for (const key of hiddenKeys) assert.equal(report[key], true, key);
       assert.equal(report.network, 'network-fixture-ok');
       if (round === 2) assert.equal(report.resumed, true);
       console.log(JSON.stringify({ pass: true, probe: 'workspace-network-isolation-resume', round, realModel: Boolean(provider) }));
@@ -167,8 +180,9 @@ async function detachedProbes(runtime, wait, setCommand) {
     probeStage = cancelled ? 'detached-cancelled' : 'detached-completed';
     const workerId = randomUUID(), invocationId = randomUUID();
     const workspace = path.join(WORKER_ROOT, 'workers', workerId, 'workspace');
+    const processMarker = `background-detached-${randomUUID()}`;
     const detached = `const fs=require('node:fs');setTimeout(()=>fs.writeFileSync('escaped-marker','escaped'),${DETACHED_DELAY_MS});setInterval(()=>{},1000);`;
-    const launch = `const fs=require('node:fs');require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(detached)}],{cwd:process.cwd(),detached:true,stdio:'ignore'}).unref();fs.writeFileSync('started','yes');fs.writeFileSync('report.json','{}');${cancelled ? 'setInterval(()=>{},1000);' : ''}`;
+    const launch = `const fs=require('node:fs');require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(detached)},${JSON.stringify(processMarker)}],{cwd:process.cwd(),detached:true,stdio:'ignore'}).unref();fs.writeFileSync('started','yes');fs.writeFileSync('report.json','{}');${cancelled ? 'setInterval(()=>{},1000);' : ''}`;
     setCommand(`node -e ${shellQuote(launch)}`);
     await runtime.start({ workerId, invocationId, task: 'Run native detached process fixture', input: {} });
     if (cancelled) {
@@ -179,6 +193,12 @@ async function detachedProbes(runtime, wait, setCommand) {
     } else assert.equal((await wait(workerId, invocationId)).status, 'completed');
     await delay(RETENTION_OBSERVATION_MS);
     assert.equal(fs.existsSync(path.join(workspace, 'escaped-marker')), false, 'Detached descendant survived');
+    for (const pid of fs.readdirSync('/proc').filter(value => /^\d+$/.test(value))) {
+      let commandLine;
+      try { commandLine = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8'); }
+      catch (error) { if (['ENOENT', 'EACCES'].includes(error.code)) continue; throw error; }
+      assert.equal(commandLine.includes(processMarker), false, 'Detached process remains in the container PID namespace');
+    }
     await runtime.exportArtifacts(workerId, invocationId);
     await runtime.cleanup(workerId);
     console.log(JSON.stringify({ pass: true, probe: 'detached-descendant-reaped', cancelled }));

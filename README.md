@@ -315,6 +315,8 @@ CLI、Docker、内核版本或网络模式变化后需重新验证这些策略�
 最晚十一点交付，缺的说明原因。”模型先列出机器与原生任务，让来源绑定到实际发现的 ID。
 各机器 Daemon 需要配置该用户实际的 `--codex-home`，通过认证 WSS 只读返回任务和执行证据。
 它不会向源会话发送催促、重跑任务或修改其定时设置。
+同一份汇总可以绑定多台机器的多个来源，由一个后台会话收集；不同目标分别建立后台任务，
+避免无关上下文混在一起。某个来源失败时先报告该来源，其余来源仍继续观察。
 
 观察以 `nodeId + automationId + 预期执行窗口` 定位本轮，再核对准确的 `sessionId + turnId` 与结果。
 heartbeat 可能复用旧会话，cron 可能每轮新建会话；标题、最近一条回复和 idle 状态均不能证明本轮完成。
@@ -404,6 +406,11 @@ node scripts/verify.mjs --list              # 查看计划，不运行检查
 它使用隔离 Controller、临时 PostgreSQL 和合成执行会话，确认正文由 `gpt-6.1-sol` 生成，
 核对确认前读取本次回执及匹配轮次历史、accepted 不冒充执行、后续查询不重派及北京时间换算。
 它不请求微信或真实桌面会话，匿名结果保存在 `.runtime/verification/task-confirmation-live.json`。
+
+后台容器额外验收使用 `node tests/integration/leader/background-worker-container.mjs --run --native-only`，
+在已构建镜像和已加载安全策略上运行真实 CLI，核对接续、越界拒读及完成/取消后的子进程清理。
+省略 `--native-only` 时从标准输入接收临时模型配置，验证真实模型两轮接续、工作区读写和联网。
+两种模式已在本地 Linux ARM 容器通过；生产宿主的架构、安全策略和网络仍需部署时单独核验。
 
 | 回执 | 能证明什么 |
 | --- | --- |
