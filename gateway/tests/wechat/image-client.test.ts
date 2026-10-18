@@ -19,6 +19,7 @@ function fixture(t: TestContext) {
   fs.writeFileSync(credentials, JSON.stringify({ token: "synthetic-private", accountId: "fixture" }));
   const state = new StateManager(credentials, statePath);
   state.setContextToken("chat", "synthetic-context");
+  state.recordInboundContext("synthetic-inbound-key", "chat", Date.now() - 1000);
   const calls: string[] = [], sends: Record<string, unknown>[] = [];
   let hook: ((body: Record<string, unknown>) => Promise<Response> | Response) | undefined;
   let uploadHook: (() => Promise<Response> | Response) | undefined;

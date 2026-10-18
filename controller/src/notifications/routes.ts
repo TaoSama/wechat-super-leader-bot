@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import type { IStore } from "../store/interface.js";
-import { NotificationIdSchema, NotificationReceiptStatusSchema } from "./contracts.js";
+import { NotificationIdSchema, NotificationReceiptStatusSchema, NotificationDeferReasonSchema } from "./contracts.js";
 import { validateChatId } from "../leader/state.js";
 
 const MAX_REQUESTED_CHATS = 128;
@@ -9,6 +9,7 @@ const chatId = z.string().refine(value => { try { validateChatId(value); return 
 const PendingSchema = z.object({ chatIds: z.array(chatId).max(MAX_REQUESTED_CHATS) }).strict();
 const ClaimSchema = z.object({ attemptId: NotificationIdSchema }).strict();
 const ReceiptSchema = ClaimSchema.extend({ status: NotificationReceiptStatusSchema }).strict();
+const DeferSchema = ClaimSchema.extend({ reason: NotificationDeferReasonSchema }).strict();
 
 export function createNotificationRouter(store: IStore, allowed: () => ReadonlySet<string>, now: () => number): Router {
   const router = Router();
@@ -49,6 +50,13 @@ export function createNotificationRouter(store: IStore, allowed: () => ReadonlyS
     const parsed = ReceiptSchema.safeParse(req.body);
     if (!req.is("application/json") || !parsed.success) { res.status(400).json({ error: "Invalid notification receipt request" }); return; }
     respond(res, await store.recordNotificationReceipt(id, parsed.data.attemptId, parsed.data.status, now()));
+  });
+  router.post("/:id/defer", async (req, res) => {
+    const id = parseId(req, res);
+    if (!id) return;
+    const parsed = DeferSchema.safeParse(req.body);
+    if (!req.is("application/json") || !parsed.success) { res.status(400).json({ error: "Invalid notification defer request" }); return; }
+    respond(res, await store.deferNotification(id, parsed.data.attemptId, parsed.data.reason, now()));
   });
   return router;
 }

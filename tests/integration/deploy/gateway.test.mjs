@@ -95,6 +95,11 @@ test('with --profile wechat, gateway is configured with exact production constra
   assert.equal(gateway.environment.WECHAT_STATE_PATH, '/var/lib/super-leader-gateway/state.json');
   assert.equal(gateway.environment.GATEWAY_HEALTH_PATH, '/var/lib/super-leader-gateway/health.json');
   assert.equal(gateway.environment.GATEWAY_NOTIFICATIONS, 'false');
+  assert.equal(gateway.environment.GATEWAY_MAX_CHARS, '3800');
+  assert.equal(gateway.environment.GATEWAY_CONTEXT_WINDOW_MS, '82800000');
+  assert.equal(gateway.environment.GATEWAY_SEND_BUDGET, '10');
+  assert.equal(gateway.environment.GATEWAY_OUTBOX_LIMIT, '1000');
+  assert.equal(gateway.environment.GATEWAY_POLL_TIMEOUT_MS, '35000');
   assert.equal(gateway.environment.GATEWAY_PLAN_NOTIFICATIONS, undefined);
   assert.equal(gateway.environment.POSTGRES_PASSWORD, undefined);
   assert.equal(gateway.environment.NODE_TOKENS, undefined);
@@ -160,6 +165,22 @@ test('plan and goal notifications require an explicit gateway-only opt-in', () =
   ], { encoding: 'utf8', timeout: 10000, env: { ...fakeEnv, GATEWAY_NOTIFICATIONS: 'true' } }));
   assert.equal(parsed.services.gateway.environment.GATEWAY_NOTIFICATIONS, 'true');
   assert.equal(parsed.services.controller.environment.GATEWAY_NOTIFICATIONS, undefined);
+});
+
+test('local WeChat policy overrides reach only Gateway', () => {
+  const policy = {
+    GATEWAY_MAX_CHARS: '2000', GATEWAY_CONTEXT_WINDOW_MS: '3600000',
+    GATEWAY_SEND_BUDGET: '20', GATEWAY_OUTBOX_LIMIT: '200', GATEWAY_POLL_TIMEOUT_MS: '45000',
+  };
+  const parsed = JSON.parse(execCompose([
+    '--env-file', '/dev/null', '--profile', 'wechat',
+    '-f', composeYamlPath, '-f', composeProdPath, '-f', composeGatewayPath,
+    'config', '--format', 'json',
+  ], { encoding: 'utf8', timeout: 10000, env: { ...fakeEnv, ...policy } }));
+  for (const [name, value] of Object.entries(policy)) {
+    assert.equal(parsed.services.gateway.environment[name], value);
+    assert.equal(parsed.services.controller.environment[name], undefined);
+  }
 });
 
 test('Dockerfile.gateway defines valid non-root UID 1000 and standard ENTRYPOINT/CMD', () => {

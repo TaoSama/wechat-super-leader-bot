@@ -51,6 +51,7 @@ it("only management Bearer can list, read, claim and receipt; Cookie/node creden
   const id = await seed();
   const endpoints: [string, unknown?][] = [["/v1/notifications/pending", { chatIds: ["allowed"] }],
     [`/v1/notifications/${id}`], [`/v1/notifications/${id}/claim`, { attemptId: uuid(100) }],
+    [`/v1/notifications/${id}/defer`, { attemptId: uuid(100), reason: "budget_exhausted" }],
     [`/v1/notifications/${id}/receipt`, { attemptId: uuid(100), status: "accepted" }]];
   for (const [path, body] of endpoints) {
     expect((await call(path, body, {})).status).toBe(401);
@@ -129,6 +130,39 @@ it("expired unclaimed notifications are not delivered; unknown UUIDs return 404"
   expect((await call(`/v1/notifications/${missing}`)).status).toBe(404);
   expect((await call(`/v1/notifications/${missing}/claim`, { attemptId: uuid(100) })).status).toBe(404);
   expect((await call(`/v1/notifications/${missing}/receipt`, { attemptId: uuid(100), status: "accepted" })).status).toBe(404);
+  expect((await call(`/v1/notifications/${missing}/defer`, { attemptId: uuid(100), reason: "budget_exhausted" })).status).toBe(404);
+});
+
+it("defer is strict, idempotent and never releases a new attempt or an uncertain delivery", async () => {
+  const id = await seed(), path = `/v1/notifications/${id}`;
+  for (const body of [{ attemptId: "bad", reason: "budget_exhausted" }, { attemptId: uuid(100) },
+    { attemptId: uuid(100), reason: "retry" }, { attemptId: uuid(100), reason: "budget_exhausted", acknowledgedChunks: 1 }]) {
+    expect((await call(`${path}/defer`, body)).status).toBe(400);
+  }
+  expect((await call(`${path}/defer?retry=true`, { attemptId: uuid(100), reason: "budget_exhausted" })).status).toBe(400);
+  const plain = await fetch(`${base}${path}/defer`, { method: "POST", headers: { ...bearer, "Content-Type": "text/plain" },
+    body: JSON.stringify({ attemptId: uuid(100), reason: "budget_exhausted" }) });
+  expect(plain.status).toBe(400);
+  await plain.arrayBuffer();
+  expect((await call(`${path}/defer`, { attemptId: uuid(100), reason: "budget_exhausted" })).status).toBe(409);
+  const claimed = await call(`${path}/claim`, { attemptId: uuid(100) });
+  expect((await call(`${path}/defer`, { attemptId: uuid(101), reason: "budget_exhausted" })).status).toBe(409);
+  const body = { attemptId: uuid(100), reason: "budget_exhausted" };
+  const released = await call(`${path}/defer`, body);
+  expect(released.status).toBe(200);
+  expect(released.body.notification).toMatchObject({ status: "pending", lastDeferredAttemptId: uuid(100), lastDeferReason: body.reason,
+    text: claimed.body.notification.text, expiresAt: claimed.body.notification.expiresAt });
+  for (const key of ["attemptId", "attemptedAt", "attemptExpiresAt"]) expect(released.body.notification).not.toHaveProperty(key);
+  expect((await call(`${path}/defer`, body)).body).toEqual(released.body);
+  expect((await call(`${path}/claim`, { attemptId: uuid(100) })).status).toBe(409);
+  const next = await call(`${path}/claim`, { attemptId: uuid(101) });
+  expect(next.status).toBe(200);
+  expect((await call(`${path}/defer`, body)).status).toBe(409);
+  now += NOTIFICATION_ATTEMPT_MS;
+  expect((await call(`${path}/defer`, { attemptId: uuid(101), reason: "window_expired" })).status).toBe(409);
+  expect((await call(path)).body.notification.status).toBe("uncertain");
+  expect((await call(`${path}/receipt`, { attemptId: uuid(101), status: "uncertain" })).status).toBe(200);
+  expect((await call(`${path}/defer`, { attemptId: uuid(101), reason: "window_expired" })).status).toBe(409);
 });
 
 it("returns original Markdown beyond 128KiB identically through pending, read and claim", async () => {

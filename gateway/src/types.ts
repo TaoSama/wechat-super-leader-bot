@@ -17,6 +17,24 @@ export interface GatewaySyncState {
   baseline_established?: boolean;
   baseline_in_progress?: boolean;
   baseline_established_at?: string;
+  context_budgets?: Record<string, import("./runtime/context-policy.js").ContextBudgetState>;
+  inbound_watermarks?: Record<string, { createdAtMs: number; keys: string[] }>;
+  delivery_outbox?: Record<string, DeliveryOutboxItem>;
+}
+
+export interface DeliveryOutboxItem {
+  kind: "reply" | "notification";
+  deliveryKey: string;
+  chatId: string;
+  messageId: string;
+  splitMaxChars: number;
+  splitMultiPart: boolean;
+  status: "pending" | "claiming" | "claimed" | "defer" | "receipt" | "uncertain" | "expired";
+  attemptId?: string;
+  deferReason?: import("./runtime/context-policy.js").DeferReason;
+  receiptStatus?: "accepted" | "uncertain";
+  expiresAt?: number;
+  notificationKind?: "completed" | "failed" | "blocked" | "expired" | "progress";
 }
 
 export interface ReplyDeliveryState {
@@ -33,6 +51,7 @@ export interface InboundWeChatMessage {
   messageId: string;
   deliveryKey: string;
   contextToken?: string;
+  createdAtMs?: number;
 }
 
 export interface ControllerMessageRequest {

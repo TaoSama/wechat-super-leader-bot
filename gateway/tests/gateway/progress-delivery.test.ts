@@ -35,6 +35,8 @@ test("three progress events and the final result each trigger typing and preserv
   const f = harness(t, { items });
   for (let index = 0; index < items.length; index++) {
     assert.deepEqual(await f.gateway.deliverNotificationsOnce(), { accepted: 1, uncertain: 0, skipped: 0 });
+    assert.equal(f.state.contextBudgets.chat.remaining, f.state.policy.sendBudget - index - 1);
+    assert.equal(f.state.contextBudgets.chat.progressSent, Math.min(index + 1, progress.length));
   }
   assert.equal(f.typings.length, 4);
   assert.ok(f.typings.every(item => item.status === 1));

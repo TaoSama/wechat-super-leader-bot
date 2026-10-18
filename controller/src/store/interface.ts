@@ -3,7 +3,7 @@ import { InputReceipt } from "../sessions/input-receipt.js";
 import { LeaderState } from "../leader/state.js";
 import type { CreateExecutionResult, ExecutionRecord } from "../leader/plans/execution.js";
 import type { ExecutionConfirmationAuthority } from "../leader/plans/confirmation.js";
-import type { Notification, NotificationReceiptStatus, NotificationSource } from "../notifications/contracts.js";
+import type { Notification, NotificationReceiptStatus, NotificationDeferReason, NotificationSource } from "../notifications/contracts.js";
 import type { GoalRecord, GoalConfirmationAuthority, CreateGoalResult } from "../leader/goals/goal.js";
 import type { MessageImageStore } from "../sessions/message-images.js";
 import type { CommandSummary } from "../commands/public.js";
@@ -100,4 +100,5 @@ export interface IStore extends IConsoleAuthStore, MessageImageStore {
   getNotification(id: string, now: number): Promise<Notification | null>;
   claimNotification(id: string, attemptId: string, chatIds: readonly string[], now: number): Promise<Notification | null>;
   recordNotificationReceipt(id: string, attemptId: string, status: NotificationReceiptStatus, now: number): Promise<Notification | null>;
+  deferNotification(id: string, attemptId: string, reason: NotificationDeferReason, now: number): Promise<Notification | null>;
 }

@@ -9,6 +9,7 @@ import { ControllerClient } from "../../src/controller/client.js";
 import { WeChatGateway } from "../../src/gateway.js";
 
 test("WeChatGateway end-to-end pollOnce, deduplication across chats, and cursor checkpointing", async () => {
+  const createdAtMs = Date.now() - 1000;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-e2e-"));
   const credPath = path.join(tmpDir, "account.json");
   const statePath = path.join(tmpDir, "state.json");
@@ -34,6 +35,7 @@ test("WeChatGateway end-to-end pollOnce, deduplication across chats, and cursor 
         msgs: [
           {
             message_type: 1,
+            create_time_ms: createdAtMs,
             from_user_id: "chat-a",
             client_id: "same-client-id",
             context_token: "ctx-a",
@@ -41,6 +43,7 @@ test("WeChatGateway end-to-end pollOnce, deduplication across chats, and cursor 
           },
           {
             message_type: 1,
+            create_time_ms: createdAtMs,
             from_user_id: "chat-b",
             client_id: "same-client-id",
             context_token: "ctx-b",
@@ -67,6 +70,8 @@ test("WeChatGateway end-to-end pollOnce, deduplication across chats, and cursor 
       order.push(`authorize:${body.chatId}`);
       return new Response(JSON.stringify({ allowed: true }));
     }
+    assert.equal(init?.method, "POST");
+    assert.ok(String(input).endsWith("/v1/messages"));
     order.push(`forward:${body.chatId}`);
     forwardedToController.push(body);
     return new Response(JSON.stringify({ text: "**Reply** to " + body.chatId }), { status: 200 });
@@ -107,6 +112,7 @@ test("WeChatGateway end-to-end pollOnce, deduplication across chats, and cursor 
 });
 
 test("Poison batch: CHAT_NOT_ALLOWED skips unallowed chat and lets cursor advance for valid chat", async () => {
+  const createdAtMs = Date.now() - 1000;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-poison-"));
   const credPath = path.join(tmpDir, "account.json");
   const statePath = path.join(tmpDir, "state.json");
@@ -128,12 +134,14 @@ test("Poison batch: CHAT_NOT_ALLOWED skips unallowed chat and lets cursor advanc
         msgs: [
           {
             message_type: 1,
+            create_time_ms: createdAtMs,
             from_user_id: "unauthorized-stranger",
             client_id: "poison-msg-1",
             item_list: [{ type: 1, text_item: { text: "spam" } }],
           },
           {
             message_type: 1,
+            create_time_ms: createdAtMs,
             from_user_id: "authorized-owner",
             client_id: "valid-msg-2",
             context_token: "ctx-owner",
@@ -155,6 +163,8 @@ test("Poison batch: CHAT_NOT_ALLOWED skips unallowed chat and lets cursor advanc
       return new Response(JSON.stringify({ error: "chat not allowed", code: "CHAT_NOT_ALLOWED" }), { status: 403 });
     }
     if (String(input).endsWith("/v1/chats/authorize")) return new Response(JSON.stringify({ allowed: true }));
+    assert.equal(init?.method, "POST");
+    assert.ok(String(input).endsWith("/v1/messages"));
     forwardedChats.push(body.chatId);
     return new Response(JSON.stringify({ text: "ok" }), { status: 200 });
   };
@@ -184,6 +194,7 @@ test("Poison batch: CHAT_NOT_ALLOWED skips unallowed chat and lets cursor advanc
 });
 
 test("ambiguous multipart failure is isolated durably while later chats and the cursor advance", async (t) => {
+  const createdAtMs = Date.now() - 1000;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-multipart-"));
   t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
   const credPath = path.join(tmpDir, "account.json");
@@ -192,6 +203,7 @@ test("ambiguous multipart failure is isolated durably while later chats and the 
 
   const sentChunks: Array<{ text: string; clientId: string }> = [];
   const attemptedChunks: string[] = [];
+  const forwardedChats: string[] = [];
   let failSecondChunkOnce = true;
 
   const ilinkFetch = async (input: string | URL | Request, init?: RequestInit) => {
@@ -207,13 +219,14 @@ test("ambiguous multipart failure is isolated durably while later chats and the 
         msgs: [
           {
             message_type: 1,
+            create_time_ms: createdAtMs,
             from_user_id: "owner",
             client_id: "msg-multipart-1",
             context_token: "ctx-owner",
             item_list: [{ type: 1, text_item: { text: "give long output" } }],
           },
           {
-            message_type: 1, from_user_id: "other", client_id: "later-message", context_token: "ctx-other",
+            message_type: 1, create_time_ms: createdAtMs, from_user_id: "other", client_id: "later-message", context_token: "ctx-other",
             item_list: [{ type: 1, text_item: { text: "later request" } }],
           },
         ],
@@ -235,7 +248,10 @@ test("ambiguous multipart failure is isolated durably while later chats and the 
 
   const controllerFetch = async (input: string | URL | Request, init?: RequestInit) => {
     if (String(input).endsWith("/v1/chats/authorize")) return new Response(JSON.stringify({ allowed: true }));
+    assert.equal(init?.method, "POST");
+    assert.ok(String(input).endsWith("/v1/messages"));
     const body = JSON.parse(String(init?.body));
+    forwardedChats.push(body.chatId);
     return new Response(JSON.stringify({ text: body.chatId === "other" ? "later" : "Part1\nPart2\nPart3" }), { status: 200 });
   };
 
@@ -252,8 +268,8 @@ test("ambiguous multipart failure is isolated durably while later chats and the 
   const gw1 = new WeChatGateway({ stateManager: sm1, ilink: ilink1, controller: ctrl1, splitMaxChars: 6 });
 
   const first = await gw1.pollOnce();
-  assert.equal(first.skippedCount, 1);
-  assert.equal(first.processedCount, 1);
+  assert.equal(first.skippedCount, 0);
+  assert.equal(first.processedCount, 2, "both commands are durably handled before reply delivery");
   assert.equal(sm1.syncBuf, "cursor-next");
   assert.deepEqual(sentChunks.map((c) => c.text), ["Part1\n", "later"]);
 
@@ -276,6 +292,9 @@ test("ambiguous multipart failure is isolated durably while later chats and the 
   const unknownKey = sm2.computeDeliveryKey("owner", "msg-multipart-1");
   assert.equal(sm2.isMessageProcessed(unknownKey), true);
   assert.equal(sm2.hasUncertainReply(unknownKey), true);
+  assert.equal(sm2.outbox[unknownKey]?.status, "uncertain");
+  assert.equal(sm2.replyDeliveries[unknownKey]?.acknowledgedChunks, 1);
+  assert.deepEqual(forwardedChats, ["owner", "other"], "uncertain delivery never replays either Controller command");
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });

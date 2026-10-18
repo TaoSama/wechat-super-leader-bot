@@ -14,6 +14,8 @@ export const NOTIFICATION_ATTEMPT_MS = 30 * 60_000;
 export const LEGACY_NOTIFICATION_ATTEMPT_MS = 60_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_TIMESTAMP = 8_640_000_000_000_000;
+export type NotificationDeferReason = "budget_exhausted" | "window_expired" | "context_changed";
+const DEFER_REASONS: readonly NotificationDeferReason[] = ["budget_exhausted", "window_expired", "context_changed"];
 
 export interface Notification {
   id: string;
@@ -29,12 +31,18 @@ export interface Notification {
   attemptId?: string;
   attemptedAt?: number;
   attemptExpiresAt?: number;
+  lastDeferredAttemptId?: string;
+  lastDeferReason?: NotificationDeferReason;
 }
 export interface NotificationDeliverySummary { accepted: number; uncertain: number; skipped: number }
 function invalid(): never { throw new Error("Controller notification response schema invalid"); }
 export function notificationUuid(value: unknown): string {
   if (typeof value !== "string" || !UUID.test(value)) return invalid();
   return value;
+}
+export function notificationDeferReason(value: unknown): NotificationDeferReason {
+  if (typeof value !== "string" || !DEFER_REASONS.includes(value as NotificationDeferReason)) return invalid();
+  return value as NotificationDeferReason;
 }
 export function notificationObject(value: unknown, fields: string[]): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return invalid();
@@ -47,7 +55,7 @@ function timestamp(value: unknown): number {
   return value;
 }
 export function parseNotification(raw: unknown): Notification {
-  const value = notificationObject(raw, ["id", "source", "chatId", "kind", "progress", "part", "text", "createdAt", "expiresAt", "status", "attemptId", "attemptedAt", "attemptExpiresAt"]);
+  const value = notificationObject(raw, ["id", "source", "chatId", "kind", "progress", "part", "text", "createdAt", "expiresAt", "status", "attemptId", "attemptedAt", "attemptExpiresAt", "lastDeferredAttemptId", "lastDeferReason"]);
   const id = notificationUuid(value.id), source = notificationObject(value.source, ["type", "id"]);
   const sourceId = notificationUuid(source.id);
   if (source.type !== "plan" && source.type !== "goal") return invalid();
@@ -77,17 +85,21 @@ export function parseNotification(raw: unknown): Notification {
   if (!value.text.trim() && (value.kind === "progress" || (part.part?.total ?? 1) === 1)) return invalid();
   const createdAt = timestamp(value.createdAt), expiresAt = timestamp(value.expiresAt);
   if (expiresAt <= createdAt) return invalid();
-  const hasAttempt = value.attemptId !== undefined || value.attemptedAt !== undefined || value.attemptExpiresAt !== undefined;
+  let deferred: Pick<Notification, "lastDeferredAttemptId" | "lastDeferReason"> = {};
+  if (Object.hasOwn(value, "lastDeferredAttemptId") || Object.hasOwn(value, "lastDeferReason")) {
+    deferred = { lastDeferredAttemptId: notificationUuid(value.lastDeferredAttemptId), lastDeferReason: notificationDeferReason(value.lastDeferReason) };
+  }
+  const hasAttempt = ["attemptId", "attemptedAt", "attemptExpiresAt"].some(field => Object.hasOwn(value, field));
   let attempt: Pick<Notification, "attemptId" | "attemptedAt" | "attemptExpiresAt"> = {};
   if (hasAttempt) {
     const attemptId = notificationUuid(value.attemptId), attemptedAt = timestamp(value.attemptedAt), attemptExpiresAt = timestamp(value.attemptExpiresAt);
-    if (attemptedAt < createdAt || attemptExpiresAt <= attemptedAt || attemptExpiresAt > expiresAt ||
+    if (attemptId === deferred.lastDeferredAttemptId || attemptedAt < createdAt || attemptExpiresAt <= attemptedAt || attemptExpiresAt > expiresAt ||
         ![NOTIFICATION_ATTEMPT_MS, LEGACY_NOTIFICATION_ATTEMPT_MS].some(duration => attemptExpiresAt === Math.min(expiresAt, attemptedAt + duration))) return invalid();
     attempt = { attemptId, attemptedAt, attemptExpiresAt };
   }
   if (["pending", "expired"].includes(value.status) ? hasAttempt : !hasAttempt) return invalid();
   return { id, source: { type: source.type, id: sourceId }, chatId: value.chatId, kind: value.kind as Notification["kind"], text: value.text,
-    createdAt, expiresAt, status: value.status as Notification["status"], ...progress, ...part, ...attempt };
+    createdAt, expiresAt, status: value.status as Notification["status"], ...progress, ...part, ...attempt, ...deferred };
 }
 export function sameNotification(a: Notification, b: Notification): boolean {
   return a.id === b.id && a.source.type === b.source.type && a.source.id === b.source.id && a.chatId === b.chatId && a.kind === b.kind &&

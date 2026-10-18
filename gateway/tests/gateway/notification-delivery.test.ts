@@ -53,7 +53,7 @@ for (const source of ["plan", "goal"] as const) test(`${source} result Markdown 
 test("long notification preserves all Markdown and Unicode across bounded chunks", async t => {
   const item = notification();
   item.text = "# 执行结果\n\n- **完成**：" + "验证通过🚀".repeat(200);
-  const f = harness(t, { items: [item] }), maxChars = 96;
+  const f = harness(t, { items: [item], policy: { sendBudget: 100 } }), maxChars = 96;
   const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink,
     notifications: true, splitMaxChars: maxChars, splitMultiPart: true });
   assert.equal((await gateway.deliverNotificationsOnce()).accepted, 1);
@@ -79,7 +79,7 @@ test("failed Markdown notification is permanently uncertain without another send
     notifications: true, splitMaxChars: 96, splitMultiPart: true });
   assert.deepEqual(await gateway.deliverNotificationsOnce(), { accepted: 0, uncertain: 1, skipped: 0 });
   const state = new StateManager(f.accountPath, f.statePath);
-  const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.ilink, notifications: true });
+  const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.createILink(state), notifications: true });
   await restarted.deliverNotificationsOnce();
   assert.equal(f.records.get(item.id)?.status, "uncertain");
   assert.equal(f.sends.length, 1);
@@ -101,7 +101,7 @@ test("uncertain goal notification remains permanent across gateway restart", asy
   f.hooks.send = () => ({ ret: null });
   assert.equal((await f.gateway.deliverNotificationsOnce()).uncertain, 1);
   const state = new StateManager(f.accountPath, f.statePath);
-  const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.ilink, notifications: true });
+  const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.createILink(state), notifications: true });
   await restarted.deliverNotificationsOnce();
   assert.equal(f.records.get(item.id)?.status, "uncertain");
   assert.equal(f.sends.length, 1);
@@ -117,11 +117,13 @@ for (const sourceType of ["plan", "goal"] as const) test(`claim cannot change ${
   assert.equal(f.sends.length, 0);
   assert.equal(f.requests.filter(request => request.url.endsWith("claim")).length, 1);
 });
-test("default disabled, missing baseline/context/account and stop perform no list/claim/send", async t => {
-  for (const mode of ["disabled", "baseline", "context", "account", "stop"]) {
+test("disabled, missing prerequisites, expired budgets and stop perform no list/claim/send", async t => {
+  for (const mode of ["disabled", "baseline", "context", "account", "budget", "window", "stop"]) {
     const f = harness(t, { enabled: mode !== "disabled", baseline: mode !== "baseline" });
     if (mode === "context") f.state.contextTokens = {};
     if (mode === "account") f.state.account = null;
+    if (mode === "budget") f.state.contextBudgets = {};
+    if (mode === "window") f.state.contextBudgets.chat.refreshedAt = Date.now() - f.state.policy.contextWindowMs;
     if (mode === "stop") f.gateway.stop();
     assert.deepEqual(await f.gateway.deliverNotificationsOnce(), { accepted: 0, uncertain: 0, skipped: 0 });
     assert.equal(f.requests.length, 0); assert.equal(f.sends.length, 0);
@@ -138,16 +140,28 @@ test("missing-context older records do not block reachable chat notifications", 
   assert.ok(f.sends.every(send => send.to_user_id === "chat"));
   assert.equal([...f.records.values()].filter(item => item.status === "pending").length, 4);
 });
-test("over 128 contexts rotate sorted bounded chat batches without permanent starvation", async t => {
+test("over 128 contexts use per-chat lookups and rotate bounded cycles without starvation", async t => {
   const f = harness(t, { items: [notification(1, "chat-129")] });
   f.state.contextTokens = Object.fromEntries(Array.from({ length: 130 }, (_, index) => [`chat-${String(index).padStart(3, "0")}`, "context"]));
+  for (const chatId of Object.keys(f.state.contextTokens)) f.state.recordInboundContext(`fixture:inbound:${chatId}`, chatId, Date.now() - 1000);
   assert.equal((await f.gateway.deliverNotificationsOnce()).accepted, 0);
   assert.equal((await f.gateway.deliverNotificationsOnce()).accepted, 1);
   const batches = f.requests.filter(request => request.url.endsWith("pending")).map(request => request.body.chatIds as string[]);
-  assert.equal(batches[0].length, 128); assert.equal(batches[1].length, 128);
-  assert.deepEqual(batches[0], Object.keys(f.state.contextTokens).sort().slice(0, 128));
-  assert.deepEqual(batches[1].slice(0, 2), ["chat-128", "chat-129"]);
+  assert.ok(batches.every(batch => batch.length === 1), "an unrelated queue head must never hide another chat");
+  assert.deepEqual(batches.slice(0, 128).flat(), Object.keys(f.state.contextTokens).sort().slice(0, 128));
+  assert.deepEqual(batches.slice(128).flat(), ["chat-128", "chat-129"]);
   assert.equal(new Set(batches.flat()).size, 130);
+});
+test("round robin gives each reachable chat one notification before returning to a busy chat", async t => {
+  const f = harness(t, { items: [notification(1, "chat-a"), notification(2, "chat-a"), notification(3, "chat-b")] });
+  f.state.contextTokens = { "chat-a": "context-a", "chat-b": "context-b" };
+  for (const chatId of Object.keys(f.state.contextTokens)) f.state.recordInboundContext(`fixture:inbound:${chatId}`, chatId, Date.now() - 1000);
+  for (let cycle = 0; cycle < 3; cycle++) {
+    const before = f.sends.length;
+    assert.equal((await f.gateway.deliverNotificationsOnce()).accepted, 1);
+    assert.equal(f.sends.length - before, 1);
+  }
+  assert.deepEqual(f.sends.map(send => send.to_user_id), ["chat-a", "chat-b", "chat-a"]);
 });
 test("notification delivery is single-flight and limited to one outbox item per cycle", async t => {
   const f = harness(t, { items: Array.from({ length: 5 }, (_, index) => notification(index + 1)) });
@@ -159,19 +173,23 @@ test("notification delivery is single-flight and limited to one outbox item per 
   assert.equal(f.sends.length, 1);
   assert.equal(f.requests.filter(request => request.url.endsWith("pending")).length, 1);
 });
-test("lost claim receipt is not retried, sent, or replayed after restart", async t => {
+test("lost claim response resumes the existing unattempted send after restart without reclaiming", async t => {
   const f = harness(t);
   f.hooks.claim = () => { throw new Error("claim response lost"); };
   await assert.rejects(f.gateway.deliverNotificationsOnce(), /lost/);
   assert.equal(f.sends.length, 0);
   assert.equal(f.requests.filter(request => request.url.endsWith("claim")).length, 1);
   const state = new StateManager(f.accountPath, f.statePath);
-  const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.ilink, notifications: true });
-  await restarted.deliverNotificationsOnce();
-  assert.equal(f.sends.length, 0);
+  const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.createILink(state), notifications: true });
+  assert.deepEqual(await restarted.deliverNotificationsOnce(), { accepted: 1, uncertain: 0, skipped: 0 });
+  assert.equal(f.sends.length, 1);
   assert.equal(f.requests.filter(request => request.url.endsWith("claim")).length, 1);
+  assert.equal(f.records.get(notification().id)?.status, "accepted");
+  assert.ok(f.requests.some(request => request.url === `/v1/notifications/${notification().id}`));
+  await restarted.deliverNotificationsOnce();
+  assert.equal(f.sends.length, 1);
 });
-for (const mode of ["stop", "expiry", "attempt-expiry", "context", "account", "baseline"]) test(`post-claim ${mode} prevents sending and records uncertainty`, async t => {
+for (const mode of ["stop", "expiry", "attempt-expiry", "context", "account", "baseline", "budget"]) test(`post-claim ${mode} prevents sending and retains the appropriate evidence`, async t => {
   t.mock.timers.enable({ apis: ["Date"], now: 1800000000000 });
   const f = harness(t);
   f.hooks.claim = item => {
@@ -181,11 +199,51 @@ for (const mode of ["stop", "expiry", "attempt-expiry", "context", "account", "b
     if (mode === "context") delete f.state.contextTokens.chat;
     if (mode === "account") f.state.account!.accountId = "changed";
     if (mode === "baseline") f.state.baselineEstablished = false;
+    if (mode === "budget") f.state.contextBudgets.chat.remaining = 0;
     return item;
   };
+  const deferred = ["stop", "context", "account", "baseline", "budget"].includes(mode);
+  const expired = ["expiry", "attempt-expiry"].includes(mode);
   assert.deepEqual(await f.gateway.deliverNotificationsOnce(), { accepted: 0, uncertain: 0, skipped: 1 });
   assert.equal(f.sends.length, 0);
-  assert.equal([...f.records.values()][0].status, "uncertain");
+  const record = [...f.records.values()][0];
+  assert.equal(record.status, deferred ? "pending" : "claimed");
+  assert.equal(f.state.outbox[`notification:${record.id}`].status, expired ? "expired" : "pending");
+  assert.equal(f.requests.filter(request => request.url.endsWith("/receipt")).length, 0,
+    "local cancellation or expiry before the first send must never fabricate delivery uncertainty");
+  const defers = f.requests.filter(request => request.url.endsWith("/defer"));
+  assert.equal(defers.length, deferred ? 1 : 0);
+  if (deferred) {
+    assert.equal(record.lastDeferReason, mode === "budget" ? "budget_exhausted" : "context_changed");
+    assert.equal(defers[0].body.attemptId, record.lastDeferredAttemptId);
+    assert.equal(record.attemptId, undefined);
+  }
+  if (expired) {
+    const restored = new StateManager(f.accountPath, f.statePath);
+    assert.equal(restored.outbox[`notification:${record.id}`].status, "expired");
+    const restarted = new WeChatGateway({ stateManager: restored, controller: f.controller,
+      ilink: f.createILink(restored), notifications: true });
+    await restarted.deliverNotificationsOnce();
+    assert.equal(f.sends.length, 0);
+    assert.equal(f.requests.filter(request => request.url.endsWith("/receipt")).length, 0);
+  }
+});
+test("post-claim exhausted budget defers durably and resumes only after new inbound context", async t => {
+  const f = harness(t);
+  f.hooks.claim = item => { f.state.contextBudgets.chat.remaining = 0; return item; };
+  assert.equal((await f.gateway.deliverNotificationsOnce()).skipped, 1);
+  assert.equal(f.sends.length, 0);
+  const state = new StateManager(f.accountPath, f.statePath);
+  const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.createILink(state), notifications: true });
+  await restarted.deliverNotificationsOnce();
+  assert.equal(f.sends.length, 0);
+  assert.equal(f.requests.filter(request => request.url.endsWith("/claim")).length, 1);
+  state.recordInboundContext("fixture:new-inbound", "chat", Date.now());
+  f.hooks.claim = undefined;
+  assert.equal((await restarted.deliverNotificationsOnce()).accepted, 1);
+  assert.equal(f.sends.length, 1);
+  assert.equal(f.records.get(notification().id)?.status, "accepted");
+  assert.equal(f.requests.filter(request => request.url.endsWith("/claim")).length, 2);
 });
 for (const field of ["chatId", "text", "kind", "createdAt", "expiresAt", "attemptId"] as const) test(`post-claim ${field} mismatch fails closed`, async t => {
   const f = harness(t);
@@ -343,7 +401,11 @@ test("failed notification receipt persistence does not emit a persisted-failure 
   await assert.rejects(f.gateway.deliverNotificationsOnce(), /receipt unavailable/);
   assert.equal([...f.records.values()][0].status, "claimed");
   assert.equal(diagnostics.length, 0);
-  await f.gateway.deliverNotificationsOnce();
+  await assert.rejects(f.gateway.deliverNotificationsOnce(), /receipt unavailable/);
+  f.hooks.receipt = undefined;
+  assert.equal((await f.gateway.deliverNotificationsOnce()).uncertain, 1);
+  assert.equal([...f.records.values()][0].status, "uncertain");
+  assert.equal(diagnostics.length, 0);
   assert.equal(f.sends.length, 1);
 });
 test("run loop reports a sanitized send failure even without consuming the delivery summary", async t => {
@@ -363,7 +425,21 @@ test("accepted send with exhausted receipt retries leaves claim queryable, never
   await assert.rejects(f.gateway.deliverNotificationsOnce(), /unavailable/);
   assert.equal(f.sends.length, 1);
   assert.equal([...f.records.values()][0].status, "claimed");
-  await f.gateway.deliverNotificationsOnce(); assert.equal(f.sends.length, 1);
+  await assert.rejects(f.gateway.deliverNotificationsOnce(), /unavailable/);
+  f.hooks.receipt = undefined;
+  assert.equal((await f.gateway.deliverNotificationsOnce()).accepted, 1);
+  assert.equal([...f.records.values()][0].status, "accepted");
+  assert.equal(f.sends.length, 1);
+});
+test("ordinary reply recovery failure still delivers pending notifications and preserves the original error", async t => {
+  const f = harness(t), replyError = new Error("ordinary stale reply recovery failed");
+  t.mock.method(f.gateway, "flushRepliesOnce", async () => { throw replyError; });
+  await assert.rejects(f.gateway.deliverNotificationsOnce(), error => {
+    assert.equal(error, replyError);
+    return true;
+  });
+  assert.equal(f.records.get(notification().id)?.status, "accepted");
+  assert.equal(f.sends.length, 1);
 });
 test("run loop starts notification work alongside inbound polling and isolates notification errors", async t => {
   const f = harness(t); const order: string[] = [], errors: Error[] = [];
@@ -386,8 +462,11 @@ test("notification work does not create a processing phase or hide stale inbound
   const before = JSON.parse(fs.readFileSync(healthPath, "utf8"));
   const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink, notifications: true, healthTracker: health });
   let release!: () => void;
-  f.hooks.pending = async () => new Promise<void>(resolve => { release = resolve; });
+  let markStarted!: () => void;
+  const started = new Promise<void>(resolve => { markStarted = resolve; });
+  f.hooks.pending = async () => new Promise<void>(resolve => { release = resolve; markStarted(); });
   const pending = gateway.deliverNotificationsOnce();
+  await started;
   t.mock.timers.tick(120001);
   assert.equal(checkGatewayHealth(healthPath).ok, false);
   const during = JSON.parse(fs.readFileSync(healthPath, "utf8"));
@@ -406,8 +485,11 @@ test("notification cleanup does not erase a concurrent inbound polling health ph
   const health = new HealthTracker(healthPath); health.startRun();
   const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink, notifications: true, healthTracker: health });
   let release!: () => void;
-  f.hooks.pending = async () => new Promise<void>(resolve => { release = resolve; });
+  let markStarted!: () => void;
+  const started = new Promise<void>(resolve => { markStarted = resolve; });
+  f.hooks.pending = async () => new Promise<void>(resolve => { release = resolve; markStarted(); });
   const pending = gateway.deliverNotificationsOnce();
+  await started;
   health.recordPollStart();
   const phase = JSON.parse(fs.readFileSync(healthPath, "utf8")).phase;
   release(); await pending;
@@ -425,7 +507,7 @@ test("stop after the first notification chunk cancels the remaining chunks and r
   assert.equal(f.sends.length, 1);
   assert.equal(f.records.get(item.id)?.status, "uncertain");
   const restartedState = new StateManager(f.accountPath, f.statePath);
-  const restarted = new WeChatGateway({ stateManager: restartedState, controller: f.controller, ilink: f.ilink,
+  const restarted = new WeChatGateway({ stateManager: restartedState, controller: f.controller, ilink: f.createILink(restartedState),
     notifications: true, splitMaxChars: 32 });
   await restarted.deliverNotificationsOnce();
   assert.equal(f.sends.length, 1);
@@ -439,9 +521,12 @@ test("blocked notification work does not prevent inbound polling or replace its 
     notifications: true, healthTracker: health });
   let release!: () => void;
   let notificationStarted = false;
-  f.hooks.pending = () => new Promise<void>(resolve => { notificationStarted = true; release = resolve; });
+  let markStarted!: () => void;
+  const started = new Promise<void>(resolve => { markStarted = resolve; });
+  f.hooks.pending = () => new Promise<void>(resolve => { notificationStarted = true; release = resolve; markStarted(); });
   let polls = 0;
-  f.hooks.poll = () => {
+  f.hooks.poll = async () => {
+    await started;
     polls++;
     assert.equal(notificationStarted, true);
     assert.equal(JSON.parse(fs.readFileSync(healthPath, "utf8")).phase.name, "polling");

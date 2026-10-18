@@ -8,10 +8,10 @@ import { nextCommandState, inspectionLimit, validateStoredCommandInput } from ".
 import { validateNodeSessionInventory, withNodeSessionsLock } from "./node-sessions.js";
 import type { CreateExecutionResult, ExecutionRecord } from "../leader/plans/execution.js";
 import type { ExecutionConfirmationAuthority } from "../leader/plans/confirmation.js";
-import type { Notification, NotificationReceiptStatus } from "../notifications/contracts.js";
+import type { Notification, NotificationReceiptStatus, NotificationDeferReason } from "../notifications/contracts.js";
 import type { GoalRecord, GoalConfirmationAuthority, CreateGoalResult } from "../leader/goals/goal.js";
 import { pgConfirmGoal, pgGetGoal, pgGetLatestGoal, pgCompareAndSetGoal, pgListRunnableGoals, pgListRecentGoals } from "./goal-postgres.js";
-import { pgListPendingNotifications, pgGetNotification, pgClaimNotification, pgRecordNotificationReceipt } from "./notification-postgres.js";
+import { pgListPendingNotifications, pgGetNotification, pgClaimNotification, pgRecordNotificationReceipt, pgDeferNotification } from "./notification-postgres.js";
 import { pgCreateExecutionIfAbsent, pgGetExecution, pgGetLatestExecution,
   pgCompareAndSetExecution, pgListActiveExecutions, pgConfirmExecution, pgListRecentExecutions, pgCreateLockedExecution } from "./execution-postgres.js";
 import {
@@ -429,6 +429,9 @@ export class PostgresStore implements IStore {
   }
   async recordNotificationReceipt(id: string, attemptId: string, status: NotificationReceiptStatus, now: number): Promise<Notification | null> {
     return pgRecordNotificationReceipt(this.pool, id, attemptId, status, now);
+  }
+  async deferNotification(id: string, attemptId: string, reason: NotificationDeferReason, now: number): Promise<Notification | null> {
+    return pgDeferNotification(this.pool, id, attemptId, reason, now);
   }
 
   // Console Auth Store

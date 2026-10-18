@@ -3,16 +3,15 @@ import { ILinkClient } from "./wechat/client.js";
 import { ControllerClient, ChatNotAllowedError } from "./controller/client.js";
 import { PermanentImageDownloadError } from "./controller/image-client.js";
 import { DEFAULT_MESSAGE_MAX_CHARS } from "./wechat/markdown.js";
-import { HealthTracker, sanitizeErrorType } from "./runtime/health.js";
-import { CHECKPOINT_MARGIN_MS, ENTRY_TYPING_BUDGET_MS, REPLY_TIMEOUT_MS, NOTIFICATION_REPLY_TIMEOUT_MS } from "./runtime/budgets.js";
-import { randomUUID } from "node:crypto";
-import fs from "node:fs";
-import { NOTIFICATION_CHAT_LIMIT, NOTIFICATION_TIMEOUT_MS, NOTIFICATION_RECEIPT_RETRIES, NOTIFICATION_LIMIT,
-  parseNotification, sameNotification, type NotificationDeliverySummary } from "./controller/notification-contract.js";
+import { HealthTracker } from "./runtime/health.js";
+import { CHECKPOINT_MARGIN_MS, ENTRY_TYPING_BUDGET_MS, REPLY_TIMEOUT_MS } from "./runtime/budgets.js";
+import { type NotificationDeliverySummary } from "./controller/notification-contract.js";
+import { NotificationOutbox, NotificationDiagnosticError } from "./runtime/notification-outbox.js";
+import { LocalSendDeferredError } from "./runtime/context-policy.js";
+import type { ControllerMessageResponse, DeliveryOutboxItem } from "./types.js";
+import { OutboxBackpressureError } from "./runtime/delivery-state.js";
+export { NotificationDiagnosticError } from "./runtime/notification-outbox.js";
 
-const NOTIFICATION_RECEIPT_BUDGET_MS = NOTIFICATION_TIMEOUT_MS * (NOTIFICATION_RECEIPT_RETRIES + 1);
-const NOTIFICATION_SEND_FAILED_EVENT = "notification_send_failed";
-const STDERR_FD = 2;
 const MIN_NOTIFICATION_INTERVAL_MS = 1;
 
 async function waitForNotificationPoll(intervalMs: number, signal: AbortSignal): Promise<void> {
@@ -26,20 +25,6 @@ async function waitForNotificationPoll(intervalMs: number, signal: AbortSignal):
     const timer = setTimeout(finish, Math.max(MIN_NOTIFICATION_INTERVAL_MS, intervalMs));
     signal.addEventListener("abort", finish, { once: true });
   });
-}
-
-export class NotificationDiagnosticError extends Error {
-  constructor() { super("Notification diagnostic write failed"); }
-}
-
-function reportNotificationSendFailure(notificationId: string, attemptId: string, errorType: string): void {
-  try {
-    const line = JSON.stringify({ event: NOTIFICATION_SEND_FAILED_EVENT, notificationId, attemptId, errorType }) + "\n";
-    if (fs.writeSync(STDERR_FD, line) !== Buffer.byteLength(line)) throw new NotificationDiagnosticError();
-  } catch {
-    // The permanent receipt is already saved; a diagnostic failure must never reopen sending.
-    throw new NotificationDiagnosticError();
-  }
 }
 
 export interface PollCycleSummary {
@@ -66,8 +51,10 @@ export class WeChatGateway {
   public readonly healthTracker?: HealthTracker;
   public readonly notifications: boolean;
   private stopped: boolean = false;
-  private deliveringNotifications: boolean = false;
-  private notificationChatCursor = 0;
+  private readonly notificationOutbox: NotificationOutbox;
+  private flushingReplies = false;
+  private readonly activeReplyDeliveries = new Set<string>();
+  private replyOutboxCursor = 0;
   private readonly notificationAbort = new AbortController();
 
   constructor(options: {
@@ -86,6 +73,10 @@ export class WeChatGateway {
     this.splitMultiPart = options.splitMultiPart ?? true;
     this.healthTracker = options.healthTracker;
     this.notifications = options.notifications ?? false;
+    this.notificationOutbox = new NotificationOutbox({ stateManager: this.stateManager, ilink: this.ilink,
+      controller: this.controller, splitMaxChars: this.splitMaxChars, signal: this.notificationAbort.signal,
+      splitMultiPart: this.splitMultiPart,
+      shouldContinue: () => !this.stopped && this.stateManager.isReadyForActivePolling() });
   }
 
   public stop(): void {
@@ -95,61 +86,12 @@ export class WeChatGateway {
 
   /** One durable multipart delivery per claim; client IDs only correlate evidence. */
   public async deliverNotificationsOnce(): Promise<NotificationDeliverySummary> {
-    const summary: NotificationDeliverySummary = { accepted: 0, uncertain: 0, skipped: 0 };
-    if (!this.notifications || this.stopped || this.deliveringNotifications || !this.stateManager.isReadyForActivePolling()) return summary;
-    const chatIds = Object.keys(this.stateManager.contextTokens).filter(chatId => chatId.trim() &&
-      typeof this.stateManager.contextTokens[chatId] === "string" && this.stateManager.contextTokens[chatId].trim()).sort();
-    if (!chatIds.length || !this.stateManager.account?.token) return summary;
-    this.deliveringNotifications = true;
-    try {
-      const offset = this.notificationChatCursor % chatIds.length;
-      const batch = [...chatIds.slice(offset), ...chatIds.slice(0, offset)].slice(0, NOTIFICATION_CHAT_LIMIT);
-      this.notificationChatCursor = (offset + batch.length) % chatIds.length;
-      const fingerprint = this.stateManager.getLoginFingerprint();
-      const items = await this.controller.listNotifications(batch);
-      if (!Array.isArray(items) || items.length > NOTIFICATION_LIMIT) throw new Error("Controller notification response schema invalid");
-      for (const raw of items) {
-        const item = parseNotification(raw);
-        const context = this.stateManager.contextTokens[item.chatId];
-        if (this.stopped || item.status !== "pending" || !batch.includes(item.chatId) || !context?.trim() ||
-            item.expiresAt <= Date.now() || fingerprint !== this.stateManager.getLoginFingerprint()) { summary.skipped++; continue; }
-        const attemptId = randomUUID();
-        const claimed = parseNotification(await this.controller.claimNotification(item.id, attemptId));
-        if (!sameNotification(item, claimed) || claimed.status !== "claimed" || claimed.attemptId !== attemptId) {
-          throw new Error("Controller notification claim identity mismatch");
-        }
-        if (this.stopped || !this.stateManager.isReadyForActivePolling() || claimed.expiresAt <= Date.now() ||
-            claimed.attemptExpiresAt! <= Date.now() || context !== this.stateManager.contextTokens[item.chatId] ||
-            fingerprint !== this.stateManager.getLoginFingerprint()) {
-          await this.controller.recordNotificationReceipt(item.id, attemptId, "uncertain");
-          summary.skipped++;
-          continue;
-        }
-        let status: "accepted" | "uncertain" = "accepted";
-        let sendErrorType: string | undefined;
-        try {
-          const timeoutMs = Math.min(NOTIFICATION_REPLY_TIMEOUT_MS,
-            claimed.attemptExpiresAt! - Date.now() - NOTIFICATION_RECEIPT_BUDGET_MS);
-          if (timeoutMs <= 0) throw new Error("WeChat notification claim has insufficient delivery budget");
-          await this.ilink.sendMarkdownReply(item.chatId, item.text, {
-            deliveryKey: `notification:${item.id}`, maxCharsPerChunk: this.splitMaxChars,
-            timeoutMs, signal: this.notificationAbort.signal,
-            shouldContinue: () => !this.stopped && this.stateManager.isReadyForActivePolling() &&
-              claimed.attemptExpiresAt! > Date.now() && item.expiresAt > Date.now() &&
-              context === this.stateManager.contextTokens[item.chatId] && fingerprint === this.stateManager.getLoginFingerprint(),
-          });
-        } catch (error) {
-          status = "uncertain"; // A send failure is evidence uncertainty, never a resend instruction.
-          sendErrorType = sanitizeErrorType(error);
-        }
-        await this.controller.recordNotificationReceipt(item.id, attemptId, status);
-        summary[status]++;
-        if (sendErrorType !== undefined) reportNotificationSendFailure(item.id, attemptId, sendErrorType);
-      }
-      return summary;
-    } finally {
-      this.deliveringNotifications = false;
-    }
+    if (!this.notifications || this.stopped || !this.stateManager.isReadyForActivePolling()) return { accepted: 0, uncertain: 0, skipped: 0 };
+    let replyError: unknown;
+    try { await this.flushRepliesOnce(); } catch (error) { replyError = error; }
+    const summary = await this.notificationOutbox.deliverOnce();
+    if (replyError) throw replyError;
+    return summary;
   }
 
   /**
@@ -170,6 +112,8 @@ export class WeChatGateway {
 
       // Record delivery keys for inbound text messages so they are never processed after baseline
       for (const msg of batch.messages) {
+        this.stateManager.recordInboundContext(msg.deliveryKey, msg.chatId, msg.createdAtMs, false, msg.contextToken);
+        if (msg.contextToken && !this.stateManager.contextTokens[msg.chatId]) this.stateManager.setContextToken(msg.chatId, msg.contextToken);
         if (msg.deliveryKey) {
           this.stateManager.recordProcessedMessageKey(msg.deliveryKey);
         }
@@ -228,6 +172,19 @@ export class WeChatGateway {
             continue;
           }
           await this.controller.assertChatAllowed(msg.chatId);
+          this.stateManager.recordInboundContext(msg.deliveryKey, msg.chatId, msg.createdAtMs, Boolean(msg.contextToken?.trim()), msg.contextToken);
+          if (this.stateManager.outbox[msg.deliveryKey]) {
+            this.stateManager.recordProcessedMessageKey(msg.deliveryKey, { preserveReplyEvidence: true });
+            processedCount++;
+            continue;
+          }
+          try { this.stateManager.assertOutboxCapacity(msg.deliveryKey); }
+          catch (error) {
+            if (!(error instanceof OutboxBackpressureError)) throw error;
+            // The new inbound may have restored the budget needed to drain a full queue.
+            await this.flushRepliesOnce();
+            this.stateManager.assertOutboxCapacity(msg.deliveryKey);
+          }
           await this.ilink.sendTyping(msg.chatId);
           const controllerReply = await this.controller.forwardMessage({
             chatId: msg.chatId,
@@ -235,32 +192,12 @@ export class WeChatGateway {
             text: msg.text,
           });
 
-          const replyDeadline = Date.now() + REPLY_TIMEOUT_MS;
-          if (controllerReply.images?.length) {
-            await this.ilink.sendImageReply(msg.chatId, controllerReply.images, {
-              deliveryKey: `image-reply:${msg.deliveryKey}`,
-              timeoutMs: REPLY_TIMEOUT_MS,
-              shouldContinue: () => !this.stopped,
-              getImageBytes: (image, signal) => this.controller.downloadImage({
-                chatId: msg.chatId, messageId: msg.messageId, image,
-              }, signal),
-            });
-          }
-
-          if (controllerReply.text.length > 0) {
-            const timeoutMs = replyDeadline - Date.now();
-            if (timeoutMs <= 0) throw new Error("WeChat reply timed out before completion");
-            await this.ilink.sendMarkdownReply(msg.chatId, controllerReply.text, {
-              deliveryKey: msg.deliveryKey,
-              maxCharsPerChunk: this.splitMaxChars,
-              splitMultiPart: this.splitMultiPart,
-              timeoutMs,
-            });
-          }
-
+          this.stateManager.putOutbox({ kind: "reply", chatId: msg.chatId, messageId: msg.messageId,
+            deliveryKey: msg.deliveryKey, splitMaxChars: this.splitMaxChars, splitMultiPart: this.splitMultiPart, status: "pending" });
           if (msg.deliveryKey) {
-            this.stateManager.recordProcessedMessageKey(msg.deliveryKey);
+            this.stateManager.recordProcessedMessageKey(msg.deliveryKey, { preserveReplyEvidence: true });
           }
+          await this.deliverReply(this.stateManager.outbox[msg.deliveryKey], controllerReply);
           processedCount++;
           this.healthTracker?.recordMessageProgress();
         } catch (err) {
@@ -289,6 +226,7 @@ export class WeChatGateway {
       if (interrupted) this.healthTracker?.recordProcessingEnd();
       else {
         this.stateManager.commitCursor(batch.nextSyncBuf);
+        await this.flushRepliesOnce();
         this.healthTracker?.recordPollSuccess();
       }
       return {
@@ -302,6 +240,69 @@ export class WeChatGateway {
       this.healthTracker?.recordPollError(err);
       throw err;
     }
+  }
+
+  private async deliverReply(item: DeliveryOutboxItem, reply: ControllerMessageResponse): Promise<void> {
+    if (this.stopped || item.status !== "pending" || this.activeReplyDeliveries.has(item.deliveryKey)) return;
+    this.activeReplyDeliveries.add(item.deliveryKey);
+    try {
+      const deadline = Date.now() + REPLY_TIMEOUT_MS;
+      if (reply.images?.length) {
+        await this.ilink.sendImageReply(item.chatId, reply.images, { deliveryKey: `image-reply:${item.deliveryKey}`,
+          timeoutMs: REPLY_TIMEOUT_MS, shouldContinue: () => !this.stopped,
+          getImageBytes: (image, signal) => this.controller.downloadImage({ chatId: item.chatId, messageId: item.messageId, image }, signal) });
+      }
+      if (reply.text.length) {
+        const timeoutMs = deadline - Date.now();
+        if (timeoutMs <= 0) throw new Error("WeChat reply timed out before completion");
+        await this.ilink.sendMarkdownReply(item.chatId, reply.text, { deliveryKey: item.deliveryKey,
+          maxCharsPerChunk: item.splitMaxChars, splitMultiPart: item.splitMultiPart, timeoutMs,
+          shouldContinue: () => !this.stopped });
+      }
+      this.stateManager.removeOutbox(item.deliveryKey);
+    } catch (error) {
+      if (error instanceof LocalSendDeferredError) return;
+      if (error instanceof PermanentImageDownloadError) {
+        this.stateManager.recordReplyFailure(`image-reply:${item.deliveryKey}`, error.reason);
+        this.stateManager.updateOutbox(item.deliveryKey, { status: "expired" });
+        return;
+      }
+      if (this.hasQuarantinedInboundReply(item.deliveryKey)) {
+        this.stateManager.updateOutbox(item.deliveryKey, { status: "uncertain" });
+        return;
+      }
+      throw error;
+    } finally { this.activeReplyDeliveries.delete(item.deliveryKey); }
+  }
+
+  /** Recovery reads immutable responses only; an old command is never POSTed again. */
+  public async flushRepliesOnce(): Promise<void> {
+    if (this.flushingReplies || this.stopped) return;
+    this.flushingReplies = true;
+    let firstError: unknown;
+    try {
+      const items = Object.values(this.stateManager.outbox).filter(item => item.kind === "reply" && item.status === "pending" &&
+        !this.activeReplyDeliveries.has(item.deliveryKey));
+      const offset = this.replyOutboxCursor % Math.max(1, items.length);
+      for (const item of [...items.slice(offset), ...items.slice(0, offset)]) {
+        if (this.hasQuarantinedInboundReply(item.deliveryKey)) {
+          this.stateManager.updateOutbox(item.deliveryKey, { status: "uncertain" });
+          continue;
+        }
+        const text = this.stateManager.replyDeliveries[item.deliveryKey];
+        if (text && text.acknowledgedChunks === text.totalChunks && !text.inFlight) {
+          this.stateManager.removeOutbox(item.deliveryKey);
+          continue;
+        }
+        if (!this.stateManager.canSendToChat(item.chatId)) continue;
+        this.replyOutboxCursor = (items.indexOf(item) + 1) % items.length;
+        try { await this.deliverReply(item, await this.controller.getMessageReply(item.chatId, item.messageId)); }
+        catch (error) { firstError ??= error; }
+        // One resumed reply per turn keeps getupdates and independent chats moving.
+        break;
+      }
+    } finally { this.flushingReplies = false; }
+    if (firstError) throw firstError;
   }
 
   private hasQuarantinedInboundReply(deliveryKey: string): boolean {

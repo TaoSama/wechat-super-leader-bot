@@ -35,6 +35,7 @@ test("WeChatGateway refuses pollOnce/run without baseline established", async ()
 });
 
 test("WeChatGateway establishBaseline drains history to empty batch without forwarding or replying", async () => {
+  const createdAtMs = Date.now() - 1000;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-baseline-drain-"));
   const credPath = path.join(tmpDir, "account.json");
   const statePath = path.join(tmpDir, "state.json");
@@ -57,6 +58,7 @@ test("WeChatGateway establishBaseline drains history to empty batch without forw
           msgs: [
             {
               message_type: 1,
+              create_time_ms: createdAtMs,
               from_user_id: "u-history",
               client_id: "hist-msg-1",
               context_token: "ctx-token-1",
@@ -118,6 +120,8 @@ test("WeChatGateway establishBaseline drains history to empty batch without forw
   assert.equal(controllerCalls, 0, "must never call Controller during baseline");
   assert.equal(sendCalls, 0, "must never reply during baseline");
   assert.equal(sm.contextTokens["u-history"], "ctx-token-1");
+  assert.equal(sm.canSendToChat("u-history"), false, "baseline history cannot grant a fresh outbound budget");
+  assert.deepEqual(sm.outbox, {});
   const histKey = sm.computeDeliveryKey("u-history", "hist-msg-1");
   assert.equal(sm.isMessageProcessed(histKey), true);
 

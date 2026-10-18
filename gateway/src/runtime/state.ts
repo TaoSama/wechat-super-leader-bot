@@ -3,6 +3,8 @@ import * as path from "node:path";
 import * as os from "node:os";
 import * as crypto from "node:crypto";
 import { WeChatAccount, GatewaySyncState, ReplyDeliveryState } from "../types.js";
+import { DeliveryState } from "./delivery-state.js";
+import type { ContextPolicy } from "./context-policy.js";
 
 export const MAX_PROCESSED_MESSAGE_KEYS = 1000;
 export const MAX_REPLY_DELIVERIES = 1000;
@@ -45,12 +47,11 @@ export function writePrivateJsonSync(targetPath: string, data: unknown): void {
   }
 }
 
-export class StateManager {
+export class StateManager extends DeliveryState {
   public readonly credentialsPath: string;
   public readonly statePath: string;
   public account: WeChatAccount | null = null;
   public syncBuf: string = "";
-  public contextTokens: Record<string, string> = {};
   public processedMessageKeys: string[] = [];
   public sentReplyProgress: Record<string, number> = {};
   public replyDeliveries: Record<string, ReplyDeliveryState> = {};
@@ -59,7 +60,8 @@ export class StateManager {
   public baselineEstablishedAt: string | undefined = undefined;
   private processedMessageKeySet: Set<string> = new Set();
 
-  constructor(credentialsPath: string, statePath?: string) {
+  constructor(credentialsPath: string, statePath?: string, policy: Partial<ContextPolicy> = {}) {
+    super(policy);
     this.credentialsPath = resolvePath(credentialsPath);
     this.statePath = statePath ? resolvePath(statePath) : `${this.credentialsPath}.gateway.state.json`;
     this.loadAccount();
@@ -118,6 +120,9 @@ export class StateManager {
         this.processedMessageKeySet = new Set();
         this.sentReplyProgress = {};
         this.replyDeliveries = {};
+        this.contextBudgets = {};
+        this.inboundWatermarks = {};
+        this.outbox = {};
         this.baselineEstablished = false;
         this.baselineInProgress = false;
         this.baselineEstablishedAt = undefined;
@@ -147,6 +152,7 @@ export class StateManager {
         }
       }
       this.baselineEstablished = state.baseline_established === true;
+      this.restoreDeliveryState(state);
       this.replyDeliveries = {};
       if (state.reply_deliveries !== undefined) {
         if (!state.reply_deliveries || typeof state.reply_deliveries !== "object" || Array.isArray(state.reply_deliveries)) {
@@ -190,6 +196,9 @@ export class StateManager {
       sent_reply_progress: this.sentReplyProgress,
       reply_deliveries: this.replyDeliveries,
       baseline_established: this.baselineEstablished,
+      context_budgets: this.contextBudgets,
+      inbound_watermarks: this.inboundWatermarks,
+      delivery_outbox: this.outbox,
     };
     if (this.baselineInProgress) {
       state.baseline_in_progress = true;
@@ -331,7 +340,8 @@ export class StateManager {
     const next = { ...this.replyDeliveries };
     let removedKey: string | undefined;
     if (Object.keys(next).length >= MAX_REPLY_DELIVERIES) {
-      const completed = Object.keys(next).find(key => next[key].acknowledgedChunks === next[key].totalChunks && !next[key].inFlight);
+      const completed = Object.keys(next).find(key => next[key].acknowledgedChunks === next[key].totalChunks && !next[key].inFlight &&
+        !this.outbox[key] && !(key.startsWith("image-reply:") && this.outbox[key.slice("image-reply:".length)]));
       if (!completed) throw new Error("WeChat reply delivery state capacity exhausted");
       delete next[completed];
       removedKey = completed;

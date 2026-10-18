@@ -52,6 +52,7 @@ test("stop completes one message and durable key, preserves cursor, then restart
   const forwarded: string[] = [];
   const sent: string[] = [];
   const batch = { ret: 0, get_updates_buf: "new-cursor", msgs: ["first", "second"].map(id => ({
+    create_time_ms: Date.now() - 1000,
     message_type: 1, from_user_id: "user", client_id: id, context_token: "synthetic-context",
     item_list: [{ type: 1, text_item: { text: id } }],
   })) };
@@ -75,7 +76,8 @@ test("stop completes one message and durable key, preserves cursor, then restart
   assert.equal(stopped.processedCount, 1);
   assert.equal(stopped.nextSyncBuf, "old-cursor");
   assert.deepEqual(forwarded, ["first"]);
-  assert.equal(sent.length, 1);
+  assert.equal(sent.length, 0);
+  assert.equal(Object.values(f.state.outbox)[0]?.status, "pending");
   const oldCheckpoint = JSON.parse(fs.readFileSync(f.statePath, "utf8"));
   assert.equal(oldCheckpoint.sync_buf, "old-cursor");
   assert.equal(oldCheckpoint.processed_message_keys.length, 1);
@@ -86,6 +88,7 @@ test("stop completes one message and durable key, preserves cursor, then restart
     controller: new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic",
       fetchImpl: async (url, init) => {
         if (String(url).endsWith("/v1/chats/authorize")) return json({ allowed: true });
+        if (init?.method === "GET") return json({ text: "reply" });
         forwarded.push(JSON.parse(init?.body as string).messageId); return json({ text: "reply" });
       } }),
     healthTracker: f.health });
@@ -117,6 +120,7 @@ test("multipart sending has a finite 60s budget and persists only completed chun
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1800000000000 });
   const f = fixture(t);
   f.state.setContextToken("user", "synthetic-context");
+  f.state.recordInboundContext("new-inbound", "user", Date.now() - 1000);
   let requests = 0;
   const ilink = new ILinkClient({ stateManager: f.state, fetchImpl: async (url, init) => {
     if (String(url).endsWith("getconfig")) return json({ ret: 0, typing_ticket: "ticket" });

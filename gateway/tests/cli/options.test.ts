@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseGatewayCli } from "../../src/cli/options.js";
+import { getHelpText, parseGatewayCli } from "../../src/cli/options.js";
 
 test("CLI parseGatewayCli mode mutual exclusivity and env handling", () => {
   // Disallow multiple modes
@@ -35,3 +35,49 @@ test("CLI parseGatewayCli mode mutual exclusivity and env handling", () => {
   assert.equal(optsRunFromEnv.mode, "run");
   assert.equal(optsRunFromEnv.run, true);
 });
+
+test("message chunk budget defaults to 3800 UTF-16 units with CLI overriding environment", () => {
+  assert.equal(parseGatewayCli([], {}).maxChars, 3800);
+  assert.equal(parseGatewayCli([], { GATEWAY_MAX_CHARS: "2400" }).maxChars, 2400);
+  assert.equal(parseGatewayCli(["--max-chars", "1200"], { GATEWAY_MAX_CHARS: "2400" }).maxChars, 1200);
+  assert.equal(parseGatewayCli(["--max-chars", "1200"], { GATEWAY_MAX_CHARS: "invalid" }).maxChars, 1200);
+  assert.equal(parseGatewayCli(["--max-chars", "1"], {}).maxChars, 1);
+  assert.equal(parseGatewayCli([], { GATEWAY_MAX_CHARS: String(Number.MAX_SAFE_INTEGER) }).maxChars, Number.MAX_SAFE_INTEGER);
+  assert.match(getHelpText(), /--max-chars[^\n]*GATEWAY_MAX_CHARS[^\n]*3800/);
+});
+
+test("message chunk budget rejects nonpositive, fractional, nonfinite and unsafe values from CLI or environment", () => {
+  const invalid = ["", "0", "-1", "1.5", "NaN", "Infinity", "-Infinity", String(Number.MAX_SAFE_INTEGER + 1)];
+  for (const value of invalid) {
+    assert.throws(() => parseGatewayCli([`--max-chars=${value}`], {}), /Invalid max-chars/, `CLI accepted ${JSON.stringify(value)}`);
+    assert.throws(() => parseGatewayCli([], { GATEWAY_MAX_CHARS: value }), /Invalid max-chars/, `environment accepted ${JSON.stringify(value)}`);
+  }
+});
+
+const POLICY_OPTIONS = [
+  { option: "context-window-ms", environment: "GATEWAY_CONTEXT_WINDOW_MS", field: "contextWindowMs", default: 82_800_000, maximum: 604_800_000, configured: 86_400_000 },
+  { option: "send-budget", environment: "GATEWAY_SEND_BUDGET", field: "sendBudget", default: 10, maximum: 1000, configured: 20 },
+  { option: "outbox-limit", environment: "GATEWAY_OUTBOX_LIMIT", field: "outboxLimit", default: 1000, maximum: 1000, configured: 100 },
+] as const;
+
+for (const { option, environment, field, default: defaultValue, maximum, configured } of POLICY_OPTIONS) {
+  test(`${option} uses its configured default and CLI overrides the environment within application resource limits`, () => {
+    assert.equal(parseGatewayCli([], {})[field], defaultValue);
+    assert.equal(parseGatewayCli([], { [environment]: String(configured) })[field], configured);
+    assert.equal(parseGatewayCli([`--${option}`, "1"], { [environment]: String(configured) })[field], 1);
+    assert.equal(parseGatewayCli([`--${option}`, String(configured)], { [environment]: "invalid" })[field], configured);
+    assert.equal(parseGatewayCli([`--${option}`, String(maximum)], {})[field], maximum);
+    assert.equal(parseGatewayCli([], { [environment]: String(maximum) })[field], maximum);
+    assert.ok(getHelpText().includes(`--${option}`));
+    assert.ok(getHelpText().includes(environment));
+  });
+
+  test(`${option} rejects invalid safe integers and values above its application resource limit`, () => {
+    const invalid = ["", "0", "-1", "1.5", "NaN", "Infinity", "-Infinity", String(Number.MAX_SAFE_INTEGER + 1), String(maximum + 1)];
+    for (const value of invalid) {
+      const expected = new RegExp(`Invalid context policy ${field}`);
+      assert.throws(() => parseGatewayCli([`--${option}=${value}`], {}), expected, `CLI accepted ${JSON.stringify(value)}`);
+      assert.throws(() => parseGatewayCli([], { [environment]: value }), expected, `environment accepted ${JSON.stringify(value)}`);
+    }
+  });
+}

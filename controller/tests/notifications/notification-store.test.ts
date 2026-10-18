@@ -227,6 +227,54 @@ for (const [name, factory] of [["memory", () => new MemoryStore()], ["postgres S
       expect(await store.listPendingNotifications(["allowed"], NOW + NOTIFICATION_ATTEMPT_MS)).toEqual([]);
     });
 
+    it("defers only the matching active attempt atomically and repeated release is idempotent", async () => {
+      const store = factory(), record = await terminal(store);
+      const original = await store.getNotification(record.id, NOW);
+      await expect(store.deferNotification(record.id, attempt, "budget_exhausted", NOW)).rejects.toBeInstanceOf(ConflictError);
+      await store.claimNotification(record.id, attempt, ["allowed"], NOW);
+      const released = await Promise.all(Array.from({ length: 4 }, () =>
+        store.deferNotification(record.id, attempt, "budget_exhausted", NOW + 1)));
+      expect(released.every(value => JSON.stringify(value) === JSON.stringify(released[0]))).toBe(true);
+      expect(released[0]).toEqual({ ...original, lastDeferredAttemptId: attempt, lastDeferReason: "budget_exhausted" });
+      expect(released[0]).not.toHaveProperty("attemptId");
+      expect((await store.listPendingNotifications(["allowed"], NOW + 2)).map(value => value.id)).toEqual([record.id]);
+      await store.init();
+      expect(await store.getNotification(record.id, NOW + 2)).toEqual(released[0]);
+      await expect(store.deferNotification(record.id, attempt, "window_expired", NOW + 2)).rejects.toBeInstanceOf(ConflictError);
+      await expect(store.claimNotification(record.id, attempt, ["allowed"], NOW + 2)).rejects.toBeInstanceOf(ConflictError);
+      const next = await store.claimNotification(record.id, uuid(100), ["allowed"], NOW + 2);
+      await expect(store.deferNotification(record.id, attempt, "budget_exhausted", NOW + 3)).rejects.toBeInstanceOf(ConflictError);
+      await expect(store.recordNotificationReceipt(record.id, attempt, "accepted", NOW + 3)).rejects.toBeInstanceOf(ConflictError);
+      expect(await store.getNotification(record.id, NOW + 3)).toEqual(next);
+      const again = await store.deferNotification(record.id, uuid(100), "context_changed", NOW + 3);
+      expect(again).toMatchObject({ status: "pending", lastDeferredAttemptId: uuid(100), lastDeferReason: "context_changed" });
+      expect(again!.text).toBe(original!.text);
+      expect(again!.expiresAt).toBe(original!.expiresAt);
+      expect(await store.deferNotification(uuid(999), attempt, "budget_exhausted", NOW)).toBeNull();
+    });
+
+    it("never releases an expired lease, expired event, explicit uncertainty or accepted result", async () => {
+      const store = factory();
+      for (const [index, status] of (["claimed", "uncertain", "accepted"] as const).entries()) {
+        const record = await terminal(store, index + 1);
+        await store.claimNotification(record.id, attempt, ["allowed"], NOW);
+        if (status !== "claimed") await store.recordNotificationReceipt(record.id, attempt, status, NOW + 1);
+        const at = status === "claimed" ? NOW + NOTIFICATION_ATTEMPT_MS : NOW + 2;
+        const before = await store.getNotification(record.id, at);
+        await expect(store.deferNotification(record.id, attempt, "window_expired", at)).rejects.toBeInstanceOf(ConflictError);
+        expect(await store.getNotification(record.id, at)).toEqual(before);
+        expect(await store.listPendingNotifications(["allowed"], at)).toEqual([]);
+      }
+      const expired = await terminal(store, 10);
+      await store.claimNotification(expired.id, attempt, ["allowed"], NOW + NOTIFICATION_TTL_MS - 1);
+      await expect(store.deferNotification(expired.id, attempt, "window_expired", NOW + NOTIFICATION_TTL_MS)).rejects.toBeInstanceOf(ConflictError);
+      const pending = await terminal(store, 11);
+      await store.claimNotification(pending.id, uuid(200), ["allowed"], NOW);
+      await store.deferNotification(pending.id, uuid(200), "budget_exhausted", NOW + 1);
+      await expect(store.deferNotification(pending.id, uuid(200), "budget_exhausted", NOW + NOTIFICATION_TTL_MS)).rejects.toBeInstanceOf(ConflictError);
+      expect((await store.getNotification(pending.id, NOW + NOTIFICATION_TTL_MS))!.status).toBe("expired");
+    });
+
     it("revoked or expired pending claims conflict; unknown IDs are null and deadlines clip at event expiry", async () => {
       const store = factory();
       const record = await terminal(store);
@@ -321,11 +369,28 @@ it("rejects forged row metadata, invalid text and unknown fields without publish
   await expect(store.getNotification(record.id, NOW)).rejects.toThrow("metadata");
   row.chat_id = "allowed";
   for (const invalid of [{ ...row.data, text: " " }, { ...row.data, text: "x".repeat(NOTIFICATION_TEXT_LIMIT + 1) }, { ...row.data, output: "secret" },
-    { ...row.data, executionId: uuid(999) }, { ...row.data, attemptId: attempt }]) expect(() => normalizeNotification(invalid)).toThrow();
+    { ...row.data, executionId: uuid(999) }, { ...row.data, attemptId: attempt },
+    { ...row.data, lastDeferredAttemptId: attempt }, { ...row.data, lastDeferReason: "budget_exhausted" },
+    { ...row.data, lastDeferredAttemptId: attempt, lastDeferReason: "retry" }]) expect(() => normalizeNotification(invalid)).toThrow();
   pool.corruptUpdate = true;
   await expect(store.claimNotification(record.id, attempt, ["allowed"], NOW)).rejects.toThrow("metadata");
   expect((await store.getNotification(record.id, NOW))!.status).toBe("pending");
   expect(pool.queries).toContain("ROLLBACK");
+});
+
+it("Postgres defer locks before checking ownership and rolls back a failed locked update", async () => {
+  const { store, pool } = postgres(), record = await terminal(store);
+  const claimed = await store.claimNotification(record.id, attempt, ["allowed"], NOW);
+  pool.queries.length = 0;
+  pool.corruptUpdate = true;
+  await expect(store.deferNotification(record.id, attempt, "budget_exhausted", NOW + 1)).rejects.toThrow("metadata");
+  expect(pool.queries[0]).toBe("BEGIN");
+  expect(pool.queries[1]).toBe("SELECT * FROM leader_notifications WHERE id=$1 FOR UPDATE");
+  expect(pool.queries.at(-1)).toBe("ROLLBACK");
+  expect(pool.queries).not.toContain("COMMIT");
+  expect(await store.getNotification(record.id, NOW + 1)).toEqual(claimed);
+  pool.corruptUpdate = false;
+  expect(await store.deferNotification(record.id, attempt, "budget_exhausted", NOW + 1)).toMatchObject({ status: "pending" });
 });
 
 it("startup and stale CAS never backfill notifications for pre-existing terminal records", async () => {
