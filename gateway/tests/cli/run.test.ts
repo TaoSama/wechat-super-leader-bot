@@ -5,30 +5,38 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { runCli } from "../../src/cli/run.js";
 import { HealthTracker } from "../../src/runtime/health.js";
+import { StateManager } from "../../src/runtime/state.js";
 
 const ENV = { CONTROLLER_TOKEN: "synthetic-controller-token", GATEWAY_LEADER_API_KEY: "synthetic-model-key" };
 const INVALID_IDS = [
   { label: "missing", value: undefined },
   { label: "empty", value: "" },
   { label: "whitespace", value: " \t\n " },
+  { label: "object", value: { id: "synthetic-account" } },
+  { label: "number", value: 42 },
+  { label: "array", value: ["synthetic-account"] },
+  { label: "boolean", value: true },
+  { label: "false boolean", value: false },
+  { label: "null", value: null },
   { label: "oversized ASCII", value: "a".repeat(4097) },
   { label: "oversized UTF-8", value: "界".repeat(1366) },
 ];
 
-function fixture(t: TestContext, accountId?: string) {
+function fixture(t: TestContext, accountId?: unknown) {
   const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "gateway-cli-account-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const credentials = path.join(directory, "account.json");
   fs.writeFileSync(credentials, JSON.stringify({ token: "synthetic-wechat-token", ...(accountId === undefined ? {} : { accountId }) }));
   let stdout = "";
   t.mock.method(process.stdout, "write", (chunk: string | Uint8Array) => { stdout += String(chunk); return true; });
-  return { directory, args: ["--credentials-path", credentials, "--leader-root", path.join(directory, "leader")],
+  return { directory, credentials, args: ["--credentials-path", credentials, "--leader-root", path.join(directory, "leader")],
     summary: () => JSON.parse(stdout) as { ok: boolean; hasValidAccountId: boolean } };
 }
 
 for (const { label, value } of INVALID_IDS) {
   test(`Codex --check reports ${label} account identity without exposing its value`, async t => {
     const f = fixture(t, value);
+    assert.equal(new StateManager(f.credentials).account?.accountId, typeof value === "string" ? value : "");
     t.mock.method(globalThis, "fetch", async () => { assert.fail("--check must not make network requests"); });
     assert.equal(await runCli([...f.args, "--check", "--leader-mode", "codex"], ENV), 1);
     assert.equal(f.summary().ok, false);

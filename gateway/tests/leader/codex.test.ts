@@ -91,6 +91,35 @@ test("native memory edits, early thread ID and restart resume persist in isolate
   assert.doesNotMatch(other.readMemory()["task.md"].content, /重发问题/);
 });
 
+test("each native turn gets current Beijing time, including midnight after thread resume", async t => {
+  const root = fixture(t);
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-18T15:14:05Z") });
+  const inputs: string[] = [];
+  const resumed: Array<string | undefined> = [];
+  const sdkFactory = fakeFactory(async function* (input, _settings, _sdk, resume) {
+    inputs.push(input);
+    resumed.push(resume);
+    yield { type: "thread.started", thread_id: "beijing-time-thread" };
+    yield* complete("当前时间已核对");
+  });
+  const options = { root, model: "test-model", sdkFactory };
+  await new CodexReplyEngine(options).reply("account", request, noController);
+  t.mock.timers.tick(2_755_000);
+  await new CodexReplyEngine(options).reply("account", { ...request, messageId: "after-midnight" }, noController);
+  assert.deepEqual(resumed, [undefined, "beijing-time-thread"]);
+  assert.match(inputs[0], /<current_time time_zone="Asia\/Shanghai">2026-10-18 23:14:05 UTC\+08:00<\/current_time>/);
+  assert.match(inputs[1], /<current_time time_zone="Asia\/Shanghai">2026-10-19 00:00:00 UTC\+08:00<\/current_time>/);
+  assert.doesNotMatch(inputs[1], /2026-10-18 23:14:05/);
+  for (const input of inputs) {
+    assert.match(input, /不沿用历史消息或记忆中的“现在”/);
+    assert.match(input, /来源没有时区时，标注时区未知，不猜测/);
+    assert.match(input, /标题简短并独立成段，列表每项单独一行/);
+    assert.match(input, /默认不反复输出“桌面观测过期”“已失联”等技术状态/);
+    assert.match(input, /用户询问细节或能力时，如实解释当前限制/);
+    assert.match(input, /不要伪造在线状态或声称尚未验证的执行已经完成/);
+  }
+});
+
 test("completed message survives restart without rerunning; conflicting duplicate is refused", async t => {
   const root = fixture(t);
   let calls = 0;

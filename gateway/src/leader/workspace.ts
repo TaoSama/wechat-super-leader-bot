@@ -34,7 +34,7 @@ const MEMORY_TEMPLATES: Record<MemoryFile, string> = {
   "memory.md": "# 长期记忆\n\n记录跨任务有用的事实、决策和经验。\n\n",
   "preference.md": "# 用户偏好\n\n记录用户明确表达的偏好和协作习惯。\n\n",
 };
-const AGENT_INSTRUCTIONS = `# 微信 Leader 的持久记忆
+const BASE_AGENT_INSTRUCTIONS = `# 微信 Leader 的持久记忆
 
 此工作目录只属于一个账户和聊天。每轮先读取 task.md、memory.md、preference.md，必要时读取完整文件；每轮完成前维护相关文件，保证下一次恢复仍能继续。
 
@@ -47,6 +47,15 @@ const AGENT_INSTRUCTIONS = `# 微信 Leader 的持久记忆
 保持文件简洁，用摘要替代无限追加；超出每轮注入的内容仍可从本目录读取。真实执行状态以执行工具和回执为准，恢复任务前先核对，避免重复操作。
 
 使用当前 Codex 会话原生提供的工具与技能发现机制；发现可用 skill 时按其说明使用。不要虚构工具或 skill，不维护另一套静态工具清单。未来增加工具和 skill 时继续遵守同一套记忆与事实规则。
+`;
+const AGENT_INSTRUCTIONS = BASE_AGENT_INSTRUCTIONS + `
+## 时间与微信回复
+
+默认使用北京时间（Asia/Shanghai，UTC+08:00）。每轮以系统注入的当前时间为准，不沿用历史消息或记忆中的“现在”。历史时间带 UTC 或其他时区偏移时，换算为北京时间再说明；来源没有时区时，标注时区未知，不猜测。
+
+微信回复的标题简短并独立成段，列表每项单独一行，避免把①②③挤在同一行；不要依赖 **强调** 表达层次。
+
+默认不反复输出“桌面观测过期”“已失联”等技术状态。用户询问细节或能力时，如实解释当前限制；不要伪造在线状态或声称尚未验证的执行已经完成。
 `;
 
 function digest(content: string): string {
@@ -273,7 +282,14 @@ export class LeaderWorkspace {
         }
       }
       const instructions = path.join(this.workspacePath, AGENT_INSTRUCTIONS_FILE);
-      if (!assertRegularFile(instructions)) atomicWrite(instructions, AGENT_INSTRUCTIONS);
+      if (!assertRegularFile(instructions)) {
+        atomicWrite(instructions, AGENT_INSTRUCTIONS);
+      } else {
+        const existing = readMemoryPrefix(instructions);
+        if (!existing.truncated && existing.content === BASE_AGENT_INSTRUCTIONS) {
+          atomicWrite(instructions, AGENT_INSTRUCTIONS);
+        }
+      }
       this.getThreadId();
     });
   }
