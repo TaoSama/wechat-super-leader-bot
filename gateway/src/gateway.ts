@@ -1,7 +1,7 @@
 import { StateManager } from "./runtime/state.js";
 import { ILinkClient } from "./wechat/client.js";
 import { ControllerClient, ChatNotAllowedError } from "./controller/client.js";
-import { DEFAULT_MESSAGE_MAX_CHARS } from "./wechat/markdown.js";
+import { DEFAULT_MESSAGE_MAX_CHARS, markdownToWeChat } from "./wechat/markdown.js";
 import { HealthTracker, sanitizeErrorType } from "./runtime/health.js";
 import { CHECKPOINT_MARGIN_MS, REPLY_TIMEOUT_MS, SEND_REQUEST_TIMEOUT_MS } from "./runtime/budgets.js";
 import { randomUUID } from "node:crypto";
@@ -114,7 +114,9 @@ export class WeChatGateway {
         let status: "accepted" | "uncertain" = "accepted";
         let sendErrorType: string | undefined;
         try {
-          await this.ilink.sendSingleText(item.chatId, item.text, `super-leader:notification:${item.id}`);
+          // A claim permits one bounded message, even when ordinary replies use multiple chunks.
+          const text = markdownToWeChat(item.text, Math.min(this.splitMaxChars, DEFAULT_MESSAGE_MAX_CHARS));
+          await this.ilink.sendSingleText(item.chatId, text, `super-leader:notification:${item.id}`);
         } catch (error) {
           status = "uncertain"; // A send failure is evidence uncertainty, never a resend instruction.
           sendErrorType = sanitizeErrorType(error);

@@ -61,7 +61,7 @@ describe("Leader orchestration", () => {
   it("uses multiple model tools to inspect real targets without treating tool output as user authority", async () => {
     const f = fixture([tool("list_sessions", {}), tool("read_session", { nodeId: "demoair", sessionId: "s1" }), final("该会话已有输出，尚未确认任务完成。")]);
     const reply = await f.create().handle("chat", "m1", "帮我看看 demoair 上的任务做到哪了");
-    expect(reply.text).toContain("本轮未向会话派发执行指令");
+    expect(reply.text).toBe("该会话已有输出，尚未确认任务完成。");
     expect(f.commands.submit).not.toHaveBeenCalled();
     expect(f.hub.readHistory).toHaveBeenCalledExactlyOnceWith("demoair", "s1", { limit: 8 }, expect.any(AbortSignal));
     expect((await f.store.getLeaderState("chat"))?.data.commandIds).toEqual([]);
@@ -78,12 +78,70 @@ describe("Leader orchestration", () => {
     expect(f.commands.submit).not.toHaveBeenCalled();
     const restarted = f.create();
     const reply = await restarted.handle("chat", "confirm", "就按这个执行");
-    expect(reply.text).toContain("accepted");
+    expect(reply.text).toContain("已接收，等待完成");
+    expect(reply.text).not.toMatch(/accepted|cmd-|turn-/);
     expect(reply.text).toContain("不代表工作完成");
     expect(f.commands.submit).toHaveBeenCalledTimes(2);
     expect(await f.create().handle("chat", "confirm", "就按这个执行")).toEqual(reply);
     expect((await restarted.handle("chat", "again", "确认执行")).text).toContain("没有待确认计划");
     expect(f.commands.submit).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["确认", "执行", "开始", "开始执行", "请确认！", " 确认执行。 "])("executes a preview directly on the explicit short confirmation %s", async text => {
+    const f = fixture([tool("propose_plan", { actions })]);
+    await f.create().handle("chat", "preview", "安排任务");
+    const reply = await f.create().handle("chat", "confirm", text);
+    expect(reply.text).toContain("已接收");
+    expect(f.model.calls).toHaveLength(1);
+    expect(f.commands.submit).toHaveBeenCalledTimes(1);
+    expect(await f.create().handle("chat", "confirm", text)).toEqual(reply);
+    await f.create().handle("chat", "repeat", "开始");
+    expect(f.commands.submit).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["不要执行", "先别开始", "不确认", "确认吗？", "开始？", "可以执行了吗", "确认后会怎么样", "执行并修改另一个会话"])("does not interpret a negative, question or expanded request as confirmation: %s", async text => {
+    const f = fixture([tool("propose_plan", { actions }), final("请核对上述任务")]);
+    await f.create().handle("chat", "preview", "安排任务");
+    await f.create().handle("chat", "question", text);
+    expect(f.commands.submit).not.toHaveBeenCalled();
+    expect(f.model.calls).toHaveLength(2);
+  });
+
+  it("preserves a preview across multi-tool queries and failed queries, then confirms after restart", async () => {
+    const f = fixture([tool("propose_plan", { actions })]);
+    await f.create().handle("chat", "preview", "安排任务");
+    const pending = (await f.store.getLeaderState("chat"))!.data.pending;
+    const query = new ScriptedModel([tool("list_sessions", {}), tool("get_plan_progress", {}), final("计划尚未执行")]);
+    const response = await f.create(query).handle("chat", "query", "先看看状态");
+    expect(response.text).toBe("计划尚未执行");
+    expect(query.calls).toHaveLength(3);
+    expect((await f.store.getLeaderState("chat"))!.data.pending).toEqual(pending);
+    const failed: LeaderModel = { complete: async () => { throw new Error("query unavailable"); } };
+    await f.create(failed).handle("chat", "failed-query", "再查一遍");
+    expect((await f.store.getLeaderState("chat"))!.data.pending).toEqual(pending);
+    await f.create().handle("chat", "confirm", "执行");
+    expect(f.commands.submit).toHaveBeenCalledTimes(1);
+  });
+
+  it("isolates short confirmations by chat and expires retained previews during queries", async () => {
+    const f = fixture([tool("propose_plan", { actions }), final("状态已更新")]);
+    await f.create().handle("chat", "preview", "安排任务");
+    expect((await f.create().handle("other-chat", "confirm", "开始")).text).toContain("没有待确认计划");
+    expect(f.commands.submit).not.toHaveBeenCalled();
+    f.tick(PLAN_TTL_MS + 1);
+    await f.create().handle("chat", "query", "查询状态");
+    expect((await f.store.getLeaderState("chat"))!.data.pending).toBeUndefined();
+    await f.create().handle("chat", "confirm", "确认");
+    expect(f.commands.submit).not.toHaveBeenCalled();
+  });
+
+  it("distinguishes same-title targets on the same node in the confirmation preview", async () => {
+    const f = fixture([tool("propose_plan", { actions: [actions[0], { ...actions[0], sessionId: "sibling", prompt: "另一个任务" }] })]);
+    f.sessions.push({ ...f.sessions[0], id: "sibling" });
+    const response = await f.create().handle("chat", "preview", "安排两个同名会话");
+    expect(response.text).toContain("[demoair] 测试（s1）");
+    expect(response.text).toContain("[demoair] 测试（sibling）");
+    expect(f.commands.submit).not.toHaveBeenCalled();
   });
 
   it("previews frozen dependencies and advances only after exact completion, independent of chat queries", async () => {
@@ -292,7 +350,7 @@ describe("Leader orchestration", () => {
       plan: { id: "old-plan", expiresAt: 100, actions },
     } });
     const response = await f.create(new ScriptedModel([final("需要核查")])).handle("chat", "new", "现在怎么样了");
-    expect(response.text).toContain("未向会话派发");
+    expect(response.text).toBe("需要核查");
     expect(f.commands.submit).not.toHaveBeenCalled();
     expect((await f.store.getLeaderState("chat"))?.data.receipts).toEqual(expect.arrayContaining([
       expect.objectContaining({ messageId: "old", text: expect.stringContaining("未自动重试") }),

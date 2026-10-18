@@ -6,6 +6,7 @@ import { ConflictError } from "./interface.js";
 import { executionListQuery } from "./execution-list.js";
 import { createTerminalNotification, validateNotificationTime } from "../notifications/contracts.js";
 import { insertTerminalNotification } from "./notification-postgres.js";
+import { notificationCommands, planNotificationRequestIds, type NotificationCommandReader } from "../notifications/presentation.js";
 import { lockChatAuthorization } from "./goal-postgres.js";
 import { assertExecutionConfirmation, normalizeExecutionConfirmation,
   type ExecutionConfirmationAuthority } from "../leader/plans/confirmation.js";
@@ -120,7 +121,8 @@ export async function pgGetLatestExecution(pool: pg.Pool, chatId: string): Promi
   return result.rows.length ? executionFromRow(result.rows[0]) : null;
 }
 
-export async function pgCompareAndSetExecution(pool: pg.Pool, next: ExecutionRecord, expectedRevision: number, now = Date.now()): Promise<ExecutionRecord | null> {
+export async function pgCompareAndSetExecution(pool: pg.Pool, next: ExecutionRecord, expectedRevision: number, now = Date.now(),
+  commandReader?: (client: pg.PoolClient) => NotificationCommandReader): Promise<ExecutionRecord | null> {
   validateNotificationTime(now);
   validateExpectedRevision(expectedRevision);
   const normalized = structuredClone(normalizeExecution(next));
@@ -139,7 +141,9 @@ export async function pgCompareAndSetExecution(pool: pg.Pool, next: ExecutionRec
       WHERE id=$1 AND revision=$5 RETURNING *`,
     [normalized.id, normalized.revision, normalized.status, JSON.stringify(normalized), expectedRevision]);
     const execution = updated.rows.length ? executionFromRow(updated.rows[0]) : null;
-    const notification = execution && createTerminalNotification(execution, now);
+    const commands = execution && commandReader && ["completed", "failed", "expired"].includes(execution.status) ?
+      await notificationCommands(commandReader(client), planNotificationRequestIds(execution)) : [];
+    const notification = execution && createTerminalNotification(execution, now, commands);
     if (notification) await insertTerminalNotification(client, notification);
     await client.query("COMMIT");
     return execution;

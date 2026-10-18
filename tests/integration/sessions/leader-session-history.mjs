@@ -79,7 +79,7 @@ export async function verifyLeaderSessionHistory({ request, pool, model, target,
   assert(read.body.text.includes('"scope":"recent_recorded_history"'));
   assert(read.body.text.includes('"completeHistory":false'));
   assert(read.body.text.includes('任务完成尚未确认'));
-  assert(read.body.text.includes('本轮未向会话派发执行指令'));
+  assert(!read.body.text.includes('本轮未向会话派发执行指令'), 'History query appended repetitive dispatch boilerplate');
   assert(read.body.text.includes('UNTRUSTED'), 'Untrusted recorded text was not carried as tool evidence');
   const after = await snapshot();
   assert.deepEqual(after.commands, before.commands, 'History query created a durable command');

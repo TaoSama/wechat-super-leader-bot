@@ -48,6 +48,7 @@ describe("confirmed terminal input is a single durable command, not an execution
     const reply = await f.create().handle("chat", "confirm", "确认执行");
     expect(reply.text).toContain("输入已写入，执行未确认");
     expect(reply.text).not.toContain("任务完成");
+    expect(reply.text).not.toContain("指令：cmd");
     expect(f.commands.submit).toHaveBeenCalledTimes(1);
     expect(f.commands.submit.mock.calls[0][0].requestId).toBe(terminalPlanRequestId("chat", planId));
     expect(f.commands.submit.mock.calls[0][3]).toBe("terminal-pane");

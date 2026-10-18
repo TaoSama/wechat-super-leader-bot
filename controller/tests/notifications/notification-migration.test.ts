@@ -14,6 +14,7 @@ function legacy(index: number, status: StoredNotification["status"] = "pending")
   const execution = createExecution("allowed", { id: uuid(index), expiresAt: NOW + 60_000,
     actions: [{ nodeId: "node", sessionId: "session", prompt: "private", sendRoute: "control-socket" }] }, NOW);
   let n = createTerminalNotification({ ...execution, status: "failed" }, NOW)!;
+  n.text = `计划 ${execution.id}（共 1 步）：计划失败，已停止后续派发；这不表示已运行的原会话任务停止，可查询计划进度核对。`;
   if (status !== "pending") n = claimNotificationRecord(n, uuid(index + 100), ["allowed"], NOW + 1);
   if (status === "accepted" || status === "uncertain") n = receiptNotificationRecord(n, uuid(index + 100), status, NOW + 2);
   const { source, ...fields } = n;
@@ -92,7 +93,7 @@ it.each([
   ["mixed source", (r: Row) => { r.data.source = { type: "plan", id: r.id }; }],
   ["mismatched legacy ID", (r: Row) => { r.data.executionId = uuid(999); }],
   ["unknown field", (r: Row) => { r.data.output = "private"; }],
-  ["forged text", (r: Row) => { r.data.text = "model-controlled text"; }],
+  ["invalid text", (r: Row) => { r.data.text = " "; }],
   ["pending attempt", (r: Row) => { r.data.attemptId = uuid(99); }],
   ["wrong metadata chat", (r: Row) => { r.chat_id = "forbidden"; }],
   ["wrong metadata source", (r: Row) => { r.execution_id = uuid(999); }],

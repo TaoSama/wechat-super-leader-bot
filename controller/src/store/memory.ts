@@ -8,6 +8,7 @@ import { executionListQuery } from "./execution-list.js";
 import { normalizeGoal, assertGoalConfirmation, validateGoalUpdate, goalIsOpen, type GoalRecord,
   type GoalConfirmationAuthority, type CreateGoalResult } from "../leader/goals/goal.js";
 import { validateGoalProofs } from "../leader/goals/view.js";
+import { notificationCommands, planNotificationRequestIds, goalNotificationRequestIds } from "../notifications/presentation.js";
 import { createTerminalNotification, createGoalNotification, readNotification, claimNotificationRecord, receiptNotificationRecord,
   NotificationIdSchema, NotificationReceiptStatusSchema, validateNotificationTime, NOTIFICATION_BATCH_LIMIT,
   type Notification, type StoredNotification, type NotificationReceiptStatus } from "../notifications/contracts.js";
@@ -284,7 +285,10 @@ export class MemoryStore implements IStore {
     const current = this.executions.get(normalized.id);
     if (!current || current.revision !== expectedRevision || current.status !== "active") return null;
     validateExecutionUpdate(current, normalized);
-    const notification = createTerminalNotification(normalized, now);
+    const requestIds = ["completed", "failed", "expired"].includes(normalized.status) ? planNotificationRequestIds(normalized) : [];
+    const commands = requestIds.length ? await notificationCommands(this, requestIds) : [];
+    if (this.executions.get(normalized.id)?.revision !== expectedRevision) return null;
+    const notification = createTerminalNotification(normalized, now, commands);
     if (notification && this.notifications.has(notification.id)) throw new ConflictError("Execution notification already exists");
     this.executions.set(normalized.id, normalized);
     if (notification) this.notifications.set(notification.id, notification);
@@ -334,9 +338,12 @@ export class MemoryStore implements IStore {
     validateGoalUpdate(current, goal, now());
     await validateGoalProofs(this, current, goal, now());
     if (this.goals.get(goal.id)?.revision !== revision) return null;
+    const requestIds = current.status === "active" && ["completed", "blocked", "expired"].includes(goal.status) ? goalNotificationRequestIds(goal) : [];
+    const commands = requestIds.length ? await notificationCommands(this, requestIds) : [];
+    if (this.goals.get(goal.id)?.revision !== revision) return null;
     const commitTime = now();
     validateGoalUpdate(current, goal, commitTime);
-    const notification = createGoalNotification(current, goal, commitTime);
+    const notification = createGoalNotification(current, goal, commitTime, commands);
     if (notification && this.notifications.has(notification.id)) throw new ConflictError("Goal notification already exists");
     // All validation precedes synchronous publication of both records.
     this.goals.set(goal.id, goal);

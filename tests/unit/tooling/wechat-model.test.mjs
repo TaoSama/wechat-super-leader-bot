@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { findConfirmedTargetCommand } from '../../live/wechat-model.mjs';
 
 const cli = fileURLToPath(new URL('../../live/wechat-model.mjs', import.meta.url));
 const run = (...args) => spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8' });
@@ -11,6 +12,19 @@ test('test-wechat-model --help exits 0 with options', () => {
   assert.equal(result.status, 0);
   assert.match(result.stdout, /--session ID/);
   assert.match(result.stdout, /--url URL/);
+  assert.match(result.stdout, /confirmation \("执行"\)/);
+});
+
+test('confirmation identifies exactly the newly created target command without parsing reply text', () => {
+  assert.equal(findConfirmedTargetCommand(['existing-command'], ['new-command', 'existing-command']), 'new-command');
+  assert.equal(findConfirmedTargetCommand([], ['metadata-command-id']), 'metadata-command-id');
+});
+
+test('confirmation rejects missing or ambiguous new target commands', () => {
+  for (const after of [['existing-command'], [], ['existing-command', 'new-one', 'new-two']]) {
+    assert.throws(() => findConfirmedTargetCommand(['existing-command'], after),
+      /Confirmation must create exactly one send command for the exact target/);
+  }
 });
 
 test('test-wechat-model fails when --session is missing', () => {
