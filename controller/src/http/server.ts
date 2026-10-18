@@ -36,6 +36,7 @@ import { createReadResponseCompression } from "./response-compression.js";
 import { TaskNotifications } from "../runtime/task-notifications.js";
 import { createAutomationRouter } from "../automations/routes.js";
 import { createResultArtifactRouter, createResultDeliveryRouter } from "../deliveries/routes.js";
+import { createBackgroundRouter, createSourceAutomationRouter } from "../background/routes.js";
 
 function makeMessageRequestId(chatId: string, messageId: string): string {
   // Use sha256 of JSON tuple to guarantee zero collision even if chatId or messageId contains delimiter characters
@@ -92,7 +93,8 @@ export class ControllerServer {
         onChanged: () => this.statusEvents?.changed(),
       });
       this.leader = new LeaderOrchestrator(store, this.hub, this.commands, leaderModel, now,
-        requestId => this.consoleAuth.issueLink(requestId), this.executions, this.goals, this.taskNotifications.automations);
+        requestId => this.consoleAuth.issueLink(requestId), this.executions, this.goals, this.taskNotifications.automations,
+        this.taskNotifications.background);
     }
     this.resolver = new NaturalLanguageResolver();
     this.statusEvents = new StatusEvents(() => this.statusSnapshot());
@@ -186,6 +188,9 @@ export class ControllerServer {
     this.app.use(express.json({ limit: "1mb" }));
     this.app.use("/auth", createConsoleAuthRouter(this.consoleAuth));
     this.app.use("/v1/result-artifacts", createResultArtifactRouter(this.taskNotifications.results, () => this.config.allowedChatIds, this.now));
+    if (this.taskNotifications.backgroundArtifacts) {
+      this.app.use("/v1/background-artifacts", this.taskNotifications.backgroundArtifacts.router());
+    }
 
     // Public liveness endpoint
     this.app.get("/health", (req: Request, res: Response) => {
@@ -202,6 +207,8 @@ export class ControllerServer {
     apiRouter.use(createMessageReplyRouter(this.store, () => this.config.allowedChatIds));
     apiRouter.use("/notifications", createNotificationRouter(this.store, () => this.config.allowedChatIds, this.now));
     apiRouter.use("/deliveries", createResultDeliveryRouter(this.taskNotifications.results, () => this.config.allowedChatIds));
+    apiRouter.use("/background-tasks", createBackgroundRouter(this.taskNotifications.background, () => this.config.allowedChatIds));
+    apiRouter.use("/source-automations", createSourceAutomationRouter(this.hub));
     apiRouter.use("/automations", createAutomationRouter(this.taskNotifications.automations, {
       allowed: () => this.config.allowedChatIds, now: this.now,
       authority: async (req, chatId) => ({ chatId, currentMessageId: String(req.headers["idempotency-key"] || crypto.randomUUID()), explicitCurrentTurnAuthorization: true }),

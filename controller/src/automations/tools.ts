@@ -10,7 +10,7 @@ function tool(name: string, description: string, schema: z.ZodType): ModelTool {
   return { type: "function", function: { name, description, parameters: z.toJSONSchema(schema, { io: "input" }) as Record<string, unknown> } };
 }
 export const AUTOMATION_TOOLS: ModelTool[] = [
-  tool("create_automation", "Create a reminder or a session task only when the current user explicitly requests scheduling. Use discovered node/session IDs. Starting is silent; meaningful results, failures and recoveries are delivered separately. A trusted current-turn authorization check is enforced.", CreateScheduleSchema),
+  tool("create_automation", "Create a reminder, session schedule, or isolated background task with current human authorization. For immediate independent work or waiting for existing tasks to finish, use kind=background, nested background spec, and timing.type=at with the current time. Discover all source automations before configuring read-only cross-machine monitoring; never dispatch to their sessions. Use discovered node/session IDs for session schedules. Starting is silent; meaningful results and failures use the unified result queue.", CreateScheduleSchema),
   tool("list_automations", "List current user's schedules and statuses", EmptySchema),
   tool("update_automation", "Pause, resume or cancel a schedule explicitly requested by the current user", UpdateSchema),
   tool("automation_runs", "Read persisted schedule execution results and command status", IdSchema),

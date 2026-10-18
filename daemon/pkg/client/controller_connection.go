@@ -177,6 +177,17 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 				continue
 			}
 			if cmd.Type != "command" {
+				if cmd.Type == "cancel_automation" {
+					d.cancelAutomation(data)
+					continue
+				}
+				if cmd.Type == "list_automations" || cmd.Type == "inspect_automation" {
+					if err := d.scheduleAutomationRead(connCtx, data, historySlots, &historyWorkers, sendJSON, errCh); err != nil {
+						reportFailure(err)
+						return
+					}
+					continue
+				}
 				if cmd.Type == "cancel_media" {
 					d.cancelMedia(data)
 					continue

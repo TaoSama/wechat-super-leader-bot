@@ -57,7 +57,22 @@ test('configuration validation ignores cwd dotenv and ambient Compose file selec
 });
 
 test('production tmpfs options form exactly one mount', () => {
-  assert.deepEqual(production.services.controller.tmpfs, ['/tmp:size=16m,mode=1777']);
+  assert.deepEqual(production.services.controller.tmpfs, ['/tmp:size=64m,mode=1777']);
+});
+
+test('small-host memory and worker concurrency overrides preserve the sandbox', () => {
+  const configured = JSON.parse(execCompose([
+    '--env-file', '/dev/null',
+    '-f', fileURLToPath(new URL('../../../compose.yaml', import.meta.url)),
+    '-f', fileURLToPath(new URL('../../../deploy/compose.production.yaml', import.meta.url)),
+    'config', '--format', 'json',
+  ], { encoding: 'utf8', timeout: 10000,
+    env: { ...fakeEnv, CONTROLLER_MEMORY_LIMIT: '512m', BACKGROUND_MAX_CONCURRENT: '1' } })).services.controller;
+  assert.equal(configured.mem_limit, '536870912');
+  assert.equal(configured.environment.BACKGROUND_MAX_CONCURRENT, '1');
+  assert.deepEqual(configured.security_opt, production.services.controller.security_opt);
+  assert.equal(configured.read_only, true);
+  assert.equal(configured.init, true);
 });
 
 test('production uses the explicitly configured console origin', () => {
@@ -81,4 +96,29 @@ test('Nginx keeps WSS upgrades and HTTP requests on the same protected endpoint'
   assert.match(nginx, /return 308 https:\/\/leader\.example\.com\$request_uri;/);
   assert.match(nginx, /access_log off;/);
   assert.doesNotMatch(nginx, /proxy_set_header Authorization/);
+});
+
+
+test('background workers use separate durable stores and a bounded sandbox container', () => {
+  const controller = production.services.controller;
+  assert.equal(controller.user, '1000:1000');
+  assert.equal(controller.init, true);
+  assert.equal(controller.environment.BACKGROUND_WORKER_ROOT, '');
+  assert.equal(controller.environment.BACKGROUND_ARTIFACT_ROOT, '/var/lib/super-leader-artifacts');
+  assert.equal(controller.environment.BACKGROUND_MAX_CONCURRENT, '2');
+  assert.equal(controller.mem_limit, '1610612736');
+  assert.equal(controller.pids_limit, 512);
+  assert.equal(controller.cpus, 2);
+  assert.equal(controller.stop_grace_period, '30s');
+  assert.deepEqual(controller.security_opt, ['no-new-privileges:true',
+    'seccomp:./deploy/security/codex-seccomp.json', 'apparmor:super-leader-codex']);
+  const stores = controller.volumes.filter(volume => volume.type === 'volume');
+  assert.equal(stores.length, 2);
+  assert.deepEqual(stores.map(volume => volume.target).sort(), [
+    '/var/lib/super-leader-artifacts', '/var/lib/super-leader-background']);
+  assert.equal(new Set(stores.map(volume => volume.source)).size, 2);
+  const dockerfile = readFileSync(new URL('../../../deploy/Dockerfile.controller', import.meta.url), 'utf8');
+  assert.match(dockerfile, /@openai\/codex@0\.163\.0/);
+  assert.match(dockerfile, /ca-certificates/);
+  assert.match(dockerfile, /chown node:node \/var\/lib\/super-leader-background \/var\/lib\/super-leader-artifacts/);
 });

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { CreateScheduleSchema, type AutomationRepository, type AutomationRunner, type CreateSchedule, type FrozenTarget, type RunnerOutcome, type Schedule } from "./contracts.js";
+import { CreateScheduleSchema, type AutomationRepository, type AutomationRun, type AutomationRunner, type CreateSchedule, type FrozenTarget, type RunnerOutcome, type Schedule } from "./contracts.js";
+import type { BackgroundSpec } from "../background/contracts.js";
 import { validateTiming } from "./timing.js";
 import { assertSameCreation, automationId, automationRequestId } from "./identity.js";
 import { AutomationValidationError } from "./errors.js";
@@ -17,6 +18,9 @@ export interface AutomationServiceOptions {
   repository: AutomationRepository;
   runner: AutomationRunner;
   resolveTarget?: (nodeId: string, sessionId: string) => Promise<FrozenTarget>;
+  validateBackground?: (background: BackgroundSpec, authority: CreationAuthority) => Promise<void>;
+  /** The run and its outbox are already durable; failures here must never redispatch the run. */
+  onFinished?: (run: AutomationRun, schedule: Schedule, outcome: RunnerOutcome) => Promise<void>;
   now?: () => number;
   onError?: (error: unknown, context: string) => void;
 }
@@ -44,6 +48,10 @@ export class AutomationService {
     const now = this.now();
     const nextAt = validateTiming(parsed, now);
     let target: FrozenTarget | undefined;
+    if (parsed.kind === "background") {
+      if (!this.options.validateBackground) throw new Error("Background worker execution is unavailable");
+      await this.options.validateBackground(parsed.background, authority);
+    }
     if (parsed.kind === "session") {
       if (!this.options.resolveTarget) throw new Error("Session discovery is unavailable");
       target = await this.options.resolveTarget(parsed.nodeId, parsed.sessionId);
@@ -64,14 +72,15 @@ export class AutomationService {
     try {
       const running = await this.repository.claimRunning(this.now(), owner, limit);
       await Promise.all(running.map(async ({ schedule, run }) => {
+        let outcome: RunnerOutcome;
         try {
-          const outcome = await this.options.runner.inspect(run, schedule);
-          await this.repository.finish(run.id, owner, outcome, this.now());
+          outcome = await this.options.runner.inspect(run, schedule);
         } catch (error) {
           this.options.onError?.(error, `automation inspect ${run.id}`);
           // Inspecting again is safe; dispatching again is not.
-          await this.repository.finish(run.id, owner, { status: "running", commandId: run.commandId, error: "Inspection temporarily failed; retrying observation without redispatch" }, this.now());
+          outcome = { status: "running", commandId: run.commandId, error: "Inspection temporarily failed; retrying observation without redispatch" };
         }
+        await this.finish(run, schedule, owner, outcome);
       }));
       const due = await this.repository.claimDue(this.now(), owner, limit);
       await Promise.all(due.map(async ({ schedule, run }) => {
@@ -86,8 +95,16 @@ export class AutomationService {
             outcome = { status: "unknown", error: "Dispatch failed without a definite non-submission receipt; inspect manually before resuming" };
           }
         }
-        await this.repository.finish(run.id, owner, outcome, this.now());
+        await this.finish(run, schedule, owner, outcome);
       }));
     } finally { this.ticking = false; }
+  }
+  private async finish(run: AutomationRun, schedule: Schedule, owner: string, outcome: RunnerOutcome): Promise<void> {
+    if (!await this.repository.finish(run.id, owner, outcome, this.now()) || !this.options.onFinished) return;
+    try { await this.options.onFinished(run, schedule, outcome); }
+    catch (error) {
+      if (!this.options.onError) throw error;
+      this.options.onError(error, `automation post-commit ${run.id}`);
+    }
   }
 }

@@ -1,4 +1,6 @@
 import { WebSocket } from "ws";
+import { AutomationRequests } from "../sessions/automation-requests.js";
+import { AutomationError, AutomationInspectOptionsSchema, type AutomationInspectOptions, type AutomationInspection, type SourceAutomation } from "../sessions/automation-contracts.js";
 import {
   ControllerCommandMessage,
   DaemonMessage,
@@ -41,6 +43,24 @@ export class NodeHub {
   private tokenToNode: Map<string, string>;
   private historyRequests = new SessionHistoryRequests();
   private mediaRequests = new SessionMediaRequests();
+  private automationRequests = new AutomationRequests();
+
+  async listAutomations(nodeId: string, signal?: AbortSignal): Promise<SourceAutomation[]> {
+    const node = this.nodes.get(nodeId);
+    if (!node || !this.isNodeConnected(nodeId)) throw new AutomationError(503, "automation_offline");
+    return this.automationRequests.list(nodeId, node.ws, signal);
+  }
+
+  async inspectAutomation(nodeId: string, options: AutomationInspectOptions, signal?: AbortSignal): Promise<AutomationInspection> {
+    const args = AutomationInspectOptionsSchema.parse(options);
+    const node = this.nodes.get(nodeId);
+    if (!node || !this.isNodeConnected(nodeId)) return {...args,status:"unknown",sources:[],observedAt:Date.now(),reason:"node_offline"};
+    try { return await this.automationRequests.inspect(nodeId,node.ws,args,signal); }
+    catch (error) {
+      if (!(error instanceof AutomationError) || error.code === "automation_cancelled") throw error;
+      return {...args,status:"unknown",sources:[],observedAt:Date.now(),reason:error.code};
+    }
+  }
 
   private mediaNode(nodeId: string, sessionId: string): ConnectedNode {
     const node = this.nodes.get(nodeId);
@@ -172,6 +192,10 @@ export class NodeHub {
           if (this.mediaRequests.receive(nodeId, ws, json)) resetHeartbeatWatchdog();
           return;
         }
+        if (json?.type === "automation_response" && nodeRecord.isHelloCompleted) {
+          if (this.automationRequests.receive(nodeId,ws,json)) resetHeartbeatWatchdog();
+          return;
+        }
         const parseResult = DaemonMessageSchema.safeParse(json);
         if (!parseResult.success) {
           console.error(`[${nodeId}] invalid daemon message schema:`, parseResult.error.format());
@@ -209,6 +233,7 @@ export class NodeHub {
       if (nodeRecord.heartbeatTimer) clearTimeout(nodeRecord.heartbeatTimer);
       this.historyRequests.disconnect(ws);
       this.mediaRequests.disconnect(ws);
+      this.automationRequests.disconnect(ws);
       if (this.nodes.get(nodeId)?.ws === ws) {
         this.nodes.delete(nodeId);
         this.sessionsChanged(nodeId);
@@ -235,6 +260,7 @@ export class NodeHub {
     ws.on("error", (err) => {
       this.historyRequests.disconnect(ws);
       this.mediaRequests.disconnect(ws);
+      this.automationRequests.disconnect(ws);
       console.error(`[${nodeId}] ws error:`, err);
     });
   }
@@ -503,6 +529,7 @@ export class NodeHub {
   async closeAll(): Promise<void> {
     this.historyRequests.closeAll();
     this.mediaRequests.closeAll();
+    this.automationRequests.closeAll();
     const closingNodes = [...this.nodes.entries()];
     this.nodes.clear();
     for (const [nodeId] of closingNodes) this.sessionsChanged(nodeId);

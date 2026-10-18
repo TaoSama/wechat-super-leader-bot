@@ -13,10 +13,17 @@ flowchart TB
   GW --> C["Controller / Super Leader · TypeScript"]
   W["Web 工作台 · React"] -->|HTTPS + Cookie| C
   C --> M["Responses API · 模型决策"]
-  C --> PG[("PostgreSQL · 命令 / 计划 / 目标 / 记忆")]
+  C --> PG[("PostgreSQL · 命令 / 计划 / 调度 / 成果 / 记忆")]
+  C --> A["统一调度账本"]
+  A --> B["隔离后台会话 · 独立目录 · 24 小时"]
+  A --> Q["成果 Outbox / 每聊天投递队列"]
+  B --> Q
+  Q --> GW
   D["宿主机 Daemon · Go"] -->|主动 WSS| C
   D --> O["已有 Codex 桌面 owner / 控制 socket"]
   D --> T["显式配置的已有 CLI 终端"]
+  D --> R["原生定时任务配置 / 执行记录 · 只读"]
+  A -->|按机器、任务、执行窗口观察| D
 ```
 
 Controller 是唯一编排权威：模型提出决策，Controller 校验授权、冻结输入、持久化和派发。
@@ -40,7 +47,7 @@ app-server 按原 ID 恢复后发送，不创建替代会话。已有 writer 冲
 | `scripts/verify.mjs` | 合成目标的统一验证入口 |
 
 ```text
-controller/src/ commands/、http/、leader/、nodes/、notifications/、sessions/、skills/、store/
+controller/src/ automations/、background/、commands/、http/、leader/、nodes/、notifications/、sessions/、skills/、store/
 daemon/cmd/     super-leader-daemon CLI 入口
 daemon/pkg/     client/、codex/{appserver,desktop,rollout}/、protocol/、service/
 gateway/src/    cli/、controller/、leader/、runtime/、wechat/
@@ -67,7 +74,9 @@ compose.yaml    本机控制平面基础编排
 | 有序技能 | 每任务最多 4 个技能，授权入库和派发均核对顺序与版本摘要 |
 | 任务排队 | 已知会话忙碌或机器离线时保存待发送内容；原会话恢复可用后按顺序投递，未发送前可取消 |
 | 进度与结果 | Gateway 显式开启后，长任务最多同步 3 次真实进展；结果不超过 3 条时完整分条发送，更长则发送模型摘要和完整附件 |
-| 定时任务 | 自然语言创建单次提醒或 cron 会话任务，可查询、暂停、恢复和取消；执行记录与通知投递分别保存 |
+| 定时任务 | 自然语言创建单次提醒、cron 会话任务或隔离后台任务，可查询、暂停、恢复和取消；执行记录与通知投递分别保存 |
+| 跨机定时观察 | 只读收集不同机器上的 Codex 原生定时任务结果，延迟时继续检查，按截止时间汇总 |
+| 隔离后台执行 | 独立会话和可写目录完成小任务，默认保留 24 小时，支持原上下文追问与显式延期 |
 | 会话图片 | 明确要求发送后，读取原会话中的图片附件并发到当前微信聊天，一次最多 3 张 |
 
 例如：“让代码审查会话检查这个提交，只读，完成后告诉我结果”会直接派发；目标不明确才追问。
@@ -164,7 +173,7 @@ node scripts/local.mjs --sessions --controller https://leader.example.com
 | `--sock` | 已有 Codex 控制 socket；可按原 ID 恢复未加载会话，不创建后端 |
 | `--desktop-sock` | 已有桌面 IPC 的状态、模型与历史观测 |
 | `--desktop-send` | 显式开启原桌面 owner 发送，要求 desktop socket |
-| `--codex-home` | 只读文件元数据发现，不等于历史或发送授权 |
+| `--codex-home` | 只读发现会话元数据与原生定时任务配置、执行记录；不授予发送权限 |
 | `--terminal-sock` / `--terminal-pane` | 显式指定已有终端和准确 pane |
 | `--terminal-history-root` | 逐提供方授权已记录 CLI 历史目录 |
 | `--terminal-send-mode=non-atomic` | 显式接受已有 PTY 单步输入的非原子边界 |
@@ -267,7 +276,8 @@ CLI、Docker、内核版本或网络模式变化后需重新验证这些策略�
 可以直接说“明天上午九点提醒我检查部署”“每天九点让这个会话检查服务，有变化再通知我”，
 或“列出我的定时任务”“暂停这个任务”“恢复这个任务”“取消这个任务”。
 定时任务按明确时区保存；同一任务不重叠运行，重启后核查原请求与回执，不重新派发结果未知的执行。
-暂停和取消会阻止尚未提交的任务，不终止已开始的会话。监控无变化时保持安静，失败和恢复会产生通知。
+暂停只阻止后续调度轮次，本轮仍会继续收集结果。取消停止后续调度；对于隔离后台任务，
+还会停止当前 worker 的后续执行与追问。已有源会话不受影响。监控无变化时保持安静，失败和恢复会产生通知。
 
 任务执行不依赖微信窗口。文字、图片、文件、进度和定时通知共用每聊天的发送账本。
 真实新入站刷新窗口与额度；历史基线、重放和状态查询不刷新。
@@ -299,6 +309,88 @@ CLI、Docker、内核版本或网络模式变化后需重新验证这些策略�
 升级时沿用原 PostgreSQL 和 Gateway 状态目录；自动初始化新表与通知转换标记，新成果 sender 与旧通知 sender 互斥。
 新版本写入任务和成果后，应优先向前修复；不要用旧二进制清理或重放新状态。
 
+### 跨机器观察原生 Codex 定时任务
+
+例如：“每天上午十点，检查 节点 A 和 节点 B 上今天的日报定时任务，等它们执行完汇总给我；
+最晚十一点交付，缺的说明原因。”模型先列出机器与原生任务，让来源绑定到实际发现的 ID。
+各机器 Daemon 需要配置该用户实际的 `--codex-home`，通过认证 WSS 只读返回任务和执行证据。
+它不会向源会话发送催促、重跑任务或修改其定时设置。
+同一份汇总可以绑定多台机器的多个来源，由一个后台会话收集；不同目标分别建立后台任务，
+避免无关上下文混在一起。某个来源失败时先报告该来源，其余来源仍继续观察。
+
+观察以 `nodeId + automationId + 预期执行窗口` 定位本轮，再核对准确的 `sessionId + turnId` 与结果。
+heartbeat 可能复用旧会话，cron 可能每轮新建会话；标题、最近一条回复和 idle 状态均不能证明本轮完成。
+尚未开始、执行中、已完成、已失败和结果未知分别保存。机器离线、记录缺失或无法唯一确定轮次时，
+结果为 unknown，不把它当业务失败，也不拿上一轮结果补齐。
+
+默认按 2、5、10 分钟补查，之后沿用最后一个间隔；没有变化时保持安静。
+观察截止默认 6 小时，可按任务指定，最长 24 小时。截止时汇总已取得的结果并列出缺项；
+有证据的失败或需要用户操作才单独报告。调度延迟不会触发重跑源任务。
+
+### 后台会话的 24 小时生命周期
+
+例如：“独立开一个后台任务，查一下这些资料，完成后把结论给我。”
+每轮创建独立 Codex thread 和可写工作目录，只传任务、必要输入和用户偏好。
+后台会话可以联网、运行小脚本、写文件；不需要项目知识或长期记忆，也不共享日常聊天的工作文件。
+等待源结果时释放执行进程，后续检查和用户追问通过同一 thread 恢复上下文与文件。
+
+会话从创建时起默认保留 24 小时；任务完成立即交回成果，已完成且未取消的会话在到期前仍可接续。
+可以说“继续刚才那个后台任务，补充一下数据来源”，或“把这个后台会话保留到明晚”。
+普通追问和自动复查不延长保留期，只有明确延期才修改到期时间；每次延期最多保留至请求时刻后 24 小时。
+同一后台会话的执行、复查与追问串行排队；全局默认最多同时执行 2 个后台轮次。
+周期任务每轮新建会话，避免前后轮上下文互相影响。
+
+业务截止时间决定何时交付本轮结论，会话到期时间决定还能否继续追问，两者分别记录。
+到期后停止新轮次，活跃轮次有界收尾；成果可靠接收后清理会话工作区及后台账本中的执行正文，保留最小归属与成果凭据。
+若无法确认子进程已退出，会话进入隔离待处理状态，不继续执行，也不误删仍可能被使用的目录。
+附件先移入独立成果目录，以签名下载链接交付，默认保留 7 天；清理工作区不会删除仍在保留期的成果。
+结果和追问的补充成果进入原有 durable outbox 与每聊天投递队列，聊天忙时排队，通知失败不重新执行任务。
+
+后台任务沿用 Controller 的统一调度器与 PostgreSQL 账本；源定时任务继续由各机器的 Codex 桌面端执行。
+Web 定时任务卡片区分“后台任务”，执行状态与成果投递状态分别查看；追问和延期通过微信提出，或使用管理员 API。
+
+以下管理员 API 使用 Bearer 认证，后台任务接口另核对 `chatId` 允许名单与任务归属；控制台 Cookie 不授予这些接口权限。
+列表和详情仅返回任务预览、阶段、到期时间、检查记录与结果，不返回工作目录或模型输入。
+
+| 接口 | 输入与用途 |
+| --- | --- |
+| `GET /v1/background-tasks?chatId=…` | 查询当前聊天的后台任务 |
+| `GET /v1/background-tasks/:runId?chatId=…` | 查询指定轮次、来源观测和追问结果 |
+| `POST /v1/background-tasks/:runId/follow-up` | JSON：`chatId`、`prompt`、稳定的 `requestId`；保存到同一后台会话串行执行 |
+| `POST /v1/background-tasks/:runId/extend` | JSON：`chatId`、带时区的 ISO `expiresAt`；显式延长会话保留期 |
+| `GET /v1/source-automations?nodeId=…` | 只读列出指定机器的原生定时任务 |
+| `GET /v1/source-automations/:automationId?nodeId=…&expectedAt=…&notAfter=…` | 以毫秒时间戳指定本轮窗口，只读检查准确执行记录 |
+
+追问受理不代表已执行完成；请求结果未知时先查询原 `runId`，重试应保留原 `requestId`。
+
+| 变量 | 默认值与用途 |
+| --- | --- |
+| `BACKGROUND_WORKER_ROOT` | 未设置时关闭后台执行；设置为后台会话专用的绝对目录 |
+| `BACKGROUND_ARTIFACT_ROOT` | 后台附件专用绝对目录；必须与工作目录分离，不能互相嵌套 |
+| `BACKGROUND_CODEX_PATH` | `codex`，后台 Codex CLI 可执行文件路径 |
+| `BACKGROUND_MODEL_NAME` / `BACKGROUND_MODEL_BASE_URL` / `BACKGROUND_MODEL_API_KEY` | 默认复用 Leader 模型配置，可分别覆盖 |
+| `BACKGROUND_TURN_TIMEOUT_MS` | `600000`，单次模型轮次上限，最大 `3600000`；与会话 24 小时保留期独立 |
+| `BACKGROUND_MAX_CONCURRENT` | `2`，全局后台并发数，范围 1–8 |
+| `CONTROLLER_MEMORY_LIMIT` | `1536m`，生产 Compose 的 Controller 容器内存上限；按宿主容量和实测负载配置 |
+
+部署时为工作目录和成果目录分别提供持久可写卷，Controller 重启后保留同一 thread 和防重回执。
+生产 Compose 默认关闭后台执行；启用时设置 `BACKGROUND_WORKER_ROOT=/var/lib/super-leader-background`，
+并提供 Leader 模型配置或独立的 `BACKGROUND_MODEL_*` 配置。成果卷位于 `/var/lib/super-leader-artifacts`。
+运行时使用独立 HOME/CODEX_HOME 与工作目录写入权限，不继承日常聊天配置；
+生产 Compose 已分别挂载 `background-workers` 和 `background-artifacts`，可通过
+`BACKGROUND_WORKER_VOLUME` / `BACKGROUND_ARTIFACT_VOLUME` 指定现有卷名。
+Controller 使用 UID/GID `1000:1000`、只读根文件系统、默认 1.5 GiB 内存上限、2 CPU、512 PID 上限和 64 MiB `/tmp`，
+镜像内固定安装 Codex CLI `0.163.0`。
+资源上限不是预留容量；小内存宿主应先用 `BACKGROUND_MAX_CONCURRENT=1` 验证实际峰值，
+同时为 Gateway、数据库和其他服务留出余量，再设置 `CONTROLLER_MEMORY_LIMIT`。单个小任务的峰值不代表任意脚本的最大占用。
+
+Linux 宿主机必须允许非特权 user namespace，容器使用
+`deploy/security/codex-seccomp.json` 与 `super-leader-codex` AppArmor profile。
+启动前将 `deploy/security/codex-apparmor` 安装到 `/etc/apparmor.d/super-leader-codex`，
+并执行 `apparmor_parser -Kr /etc/apparmor.d/super-leader-codex` 加载；宿主 AppArmor 服务负责重启后恢复。
+正式切换前在无凭证临时容器中核验策略，并验证真实后台写文件与同一 thread 恢复。
+升级 Codex、Docker、内核或改变容器网络/PID 模式后需要重新验证，不能只靠目录分离证明隔离有效。
+
 ## 验证与结果边界
 
 ```sh
@@ -318,6 +410,11 @@ node scripts/verify.mjs --list              # 查看计划，不运行检查
 核对确认前读取本次回执及匹配轮次历史、accepted 不冒充执行、后续查询不重派及北京时间换算。
 它不请求微信或真实桌面会话，匿名结果保存在 `.runtime/verification/task-confirmation-live.json`。
 
+后台容器额外验收使用 `node tests/integration/leader/background-worker-container.mjs --run --native-only`，
+在已构建镜像和已加载安全策略上运行真实 CLI，核对接续、越界拒读及完成/取消后的子进程清理。
+省略 `--native-only` 时从标准输入接收临时模型配置，验证真实模型两轮接续、工作区读写和联网。
+两种模式已在本地 Linux ARM 容器通过；生产宿主的架构、安全策略和网络仍需部署时单独核验。
+
 | 回执 | 能证明什么 |
 | --- | --- |
 | `queued` | 尚未投递，等待原会话可用；允许取消，超过有效期不会发送 |
@@ -334,3 +431,6 @@ node scripts/verify.mjs --list              # 查看计划，不运行检查
 持续目标的“完成”是模型依据记录判断条件满足，不等于独立业务验收。
 请在自己的环境逐项验收微信登录链接、真实手机会话控制、跨物理机闭环、
 CLI 与用户服务，并分别记录证据。
+原生定时观察需核对各机器实际的 heartbeat 和 cron 配置、准确轮次及完成结果；
+具体任务及节点以自己的环境为准。cron 的准确轮次匹配已有合成认证 WSS 链路验证，
+尚不能据此宣称不同物理机器上的真实 cron 执行均已验收。
