@@ -187,6 +187,25 @@ test('local WeChat policy overrides reach only Gateway', () => {
   }
 });
 
+test('result download origin preserves explicit configuration before console and default fallbacks', () => {
+  const cases = [
+    { env: {}, expected: 'https://leader.taoai.site' },
+    { env: { CONSOLE_PUBLIC_URL: 'https://console.invalid' }, expected: 'https://console.invalid' },
+    { env: { CONSOLE_PUBLIC_URL: 'https://console.invalid', RESULT_PUBLIC_ORIGIN: 'https://results.invalid' },
+      expected: 'https://results.invalid' },
+    { env: { CONSOLE_PUBLIC_URL: 'https://console.invalid', RESULT_PUBLIC_ORIGIN: '' },
+      expected: 'https://console.invalid' },
+  ];
+  for (const { env, expected } of cases) {
+    const parsed = JSON.parse(execCompose([
+      '--env-file', '/dev/null', '--profile', 'wechat',
+      '-f', composeYamlPath, '-f', composeProdPath, '-f', composeGatewayPath,
+      'config', '--format', 'json',
+    ], { encoding: 'utf8', timeout: 10000, env: { ...fakeEnv, ...env } }));
+    assert.equal(parsed.services.gateway.environment.RESULT_PUBLIC_ORIGIN, expected);
+  }
+});
+
 test('Codex replies inherit private model credentials and permit an explicit Gateway override', () => {
   const render = env => JSON.parse(execCompose([
     '--env-file', '/dev/null', '--profile', 'wechat',

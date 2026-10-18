@@ -4,168 +4,162 @@ import { waitFor } from '../../support/control-plane-fixture.mjs';
 import { RAW_REPLY } from './reliable-delivery.mjs';
 
 const SEND_BUDGET = 10;
-const ORDINARY_REPLY_PARTS = 1;
-const NOTIFICATION_WINDOW_PARTS = SEND_BUDGET - ORDINARY_REPLY_PARTS;
+const ACKNOWLEDGEMENT = '本次指令已接收，执行情况待后续核查。';
+const ACKNOWLEDGEMENT_CHARS = 2;
+const ACKNOWLEDGEMENT_PARTS = ACKNOWLEDGEMENT.length / ACKNOWLEDGEMENT_CHARS;
 const EMPTY_RESTART_POLLS = 2;
-const text = message => message.item_list[0].text_item.text;
+const THREE_PART_OUTPUT = '预算正文 😀\n' + '甲'.repeat(8_000) + '\n**终段完整**';
+const text = message => message.item_list[0].text_item?.text;
 
-/** Requires a drained, real PostgreSQL/Controller/Gateway fixture using the default ten-send budget. */
+/** Real Controller/PG/Gateway; small confirmation chunks consume the actual default quota. */
 export async function verifyBudgetNotifications(harness) {
-  const { controller, runGateway, pending, sent, deliveries, sendFrame, statePath, evidence, healthy,
-    chatId, directTask, clientId, refreshContext } = harness;
+  const { runGateway, pending, sent, deliveries, sendFrame, statePath, evidence, healthy,
+    chatId, directTask, resultClientId, refreshContext, getDelivery, fullResult,
+    elapseDispatchInterval, artifactText } = harness;
   const state = async () => JSON.parse(await readFile(statePath, 'utf8'));
-  const notificationRecord = async id => {
-    const response = await controller.request('/v1/notifications/' + id);
-    assert.equal(response.status, 200);
-    return response.body.notification;
-  };
-  assert.equal((await pending()).length, 0, 'Budget notification fixture starts with pending notifications');
+  assert.equal((await pending()).length, 0, 'Budget fixture starts with pending results');
   assert.equal(Object.keys((await state()).delivery_outbox).length, 0,
-    'Budget notification fixture starts with unfinished ordinary replies or notifications');
+    'Budget fixture starts with unfinished ordinary replies');
 
   const commandStart = deliveries.length, ordinaryStart = sent.length;
-  const ordinary = await refreshContext(directTask);
+  const ordinary = await refreshContext(directTask, undefined,
+    { gatewayEnv: { GATEWAY_MAX_CHARS: String(ACKNOWLEDGEMENT_CHARS) } });
   await waitFor(() => { healthy(); return deliveries.length === commandStart + 1; },
-    'Budget notification task reaches the exact native session');
+    'Budget result task reaches the exact native session');
   assert.equal(ordinary.summary.processedCount, 1);
-  assert.equal(ordinary.replies.length, ORDINARY_REPLY_PARTS);
-  assert.equal(sent.length - ordinaryStart, ORDINARY_REPLY_PARTS,
-    'Task acknowledgement must consume exactly one send from the new window');
-  assert.equal((await state()).context_budgets[chatId].remaining, NOTIFICATION_WINDOW_PARTS);
-
+  assert.equal(ordinary.replies.length, ACKNOWLEDGEMENT_PARTS);
+  assert.equal(ordinary.replies.map(text).join(''), ACKNOWLEDGEMENT);
+  assert.equal(sent.length - ordinaryStart, ACKNOWLEDGEMENT_PARTS,
+    'Model confirmation did not consume the real shared send budget');
+  assert.equal((await state()).context_budgets[chatId].remaining, SEND_BUDGET - ACKNOWLEDGEMENT_PARTS);
   const command = deliveries.at(-1);
   sendFrame({ type: 'result', commandId: command.commandId,
-    turnId: 'synthetic-turn-' + command.commandId, status: 'completed', output: RAW_REPLY });
-  let notification;
+    turnId: 'synthetic-turn-' + command.commandId, status: 'completed', output: THREE_PART_OUTPUT });
+  let plan;
   await waitFor(async () => {
-    healthy();
-    notification = (await pending()).find(item => item.kind === 'completed' && item.text.includes(RAW_REPLY));
-    return Boolean(notification);
-  }, 'Full Markdown completion becomes a durable budget-limited notification');
-  assert.equal(notification.part?.total ?? 1, 1,
-    'Fixture must exercise Gateway chunks of one Controller notification, not Controller multipart records');
-  const key = 'notification:' + notification.id, notificationStart = sent.length;
+    healthy(); plan = (await pending()).find(item => item.kind === 'completed' && item.text.includes('预算正文 😀'));
+    return Boolean(plan);
+  }, 'Three-message completion becomes a durable result');
+  assert.equal(plan.mode, 'text');
+  assert.equal(plan.messages.length, 3, 'Fixture must exercise the maximum full-text result plan');
+  const raw = await fullResult(plan.id);
+  assert(raw.includes(THREE_PART_OUTPUT), 'Result artifact changed the exact recorded Markdown');
+  const expectedDisplay = raw.replace(/^### /gm, '').replace('**任务**', '任务')
+    .replace('**终段完整**', '终段完整').trim();
+  assert.equal(plan.messages.join(''), expectedDisplay,
+    'Result plan did not format the complete Markdown before its immutable split');
+  const resultStart = sent.length;
   const first = await runGateway('--poll-once');
   assert.equal(first.notifications.accepted, 0);
-  assert.equal(first.notifications.uncertain, 0, 'Local budget exhaustion fabricated an unknown delivery');
-  let durable = await state(), delivery = durable.reply_deliveries[key];
-  assert.equal(durable.delivery_outbox[key].splitMaxChars, 3_800, 'Default CLI notification split budget changed');
-  assert(delivery.totalChunks > NOTIFICATION_WINDOW_PARTS, 'Notification must require another inbound window');
-  const totalChunks = delivery.totalChunks, digest = delivery.digest;
-  const ids = Array.from({ length: totalChunks }, (_, index) => clientId(key, index));
-  const idSet = new Set(ids);
-  const notificationParts = () => sent.slice(notificationStart).filter(message => idSet.has(message.client_id));
-  const assertParts = acknowledged => {
-    const parts = notificationParts();
-    assert.equal(parts.length, acknowledged, 'Confirmed notification chunks were duplicated or lost');
-    assert.deepEqual(parts.map(part => part.client_id), ids.slice(0, acknowledged),
-      'Notification restart changed chunk identity or replayed an acknowledged chunk');
-    assert.equal(new Set(parts.map(part => part.client_id)).size, parts.length);
-    assert(notification.text.startsWith(parts.map(text).join('')), 'Continuation changed the original Markdown prefix');
-    assert(parts.every(part => !/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/u.test(text(part))),
-      'A notification chunk split a Unicode surrogate pair');
-  };
-  const assertDeferred = async acknowledged => {
-    const receipt = await notificationRecord(notification.id), current = await state();
-    assert.equal(receipt.status, 'pending', 'Exhausted local budget must defer, not claim or quarantine');
-    assert.equal(receipt.lastDeferReason, 'budget_exhausted');
-    assert.equal(typeof receipt.lastDeferredAttemptId, 'string');
-    assert.equal(receipt.attemptId, undefined);
-    assert.equal(receipt.attemptedAt, undefined);
-    assert.equal(receipt.attemptExpiresAt, undefined);
-    assert.equal(receipt.text, notification.text);
-    assert.deepEqual(receipt.source, notification.source);
-    assert.deepEqual(current.reply_deliveries[key], { digest, totalChunks,
-      acknowledgedChunks: acknowledged, inFlight: false });
-    assert.equal(current.delivery_outbox[key].status, 'pending');
-    assert.equal(current.delivery_outbox[key].attemptId, undefined);
-    assert.equal(current.context_budgets[chatId].remaining, 0);
-    assertParts(acknowledged);
-    return { receipt, current };
-  };
-
-  assert.equal(sent.length - notificationStart, NOTIFICATION_WINDOW_PARTS,
-    'The first notification window exceeded the nine sends left by its ordinary reply');
-  let deferred = await assertDeferred(NOTIFICATION_WINDOW_PARTS);
-  const firstDeferAttempt = deferred.receipt.lastDeferredAttemptId;
-  const stoppedAt = sent.length, beforeRestart = deferred.current;
+  assert.equal(first.notifications.uncertain, 0, 'Local budget exhaustion fabricated an unknown result');
+  assert.equal(sent.length, resultStart,
+    'A three-message result must defer as a whole when only one shared send remains');
+  let deferred = await getDelivery(plan.id);
+  assert.equal(deferred.status, 'waiting_for_user');
+  assert.equal(deferred.lastDeferReason, 'budget_exhausted');
+  assert.equal(typeof deferred.lastDeferredAttemptId, 'string');
+  assert.equal(deferred.submittedMessages, 0);
+  assert.equal(deferred.attemptId, undefined);
+  assert.equal(deferred.attemptedAt, undefined);
+  assert.equal(deferred.attemptExpiresAt, undefined);
+  assert.deepEqual(deferred.messages, plan.messages);
+  assert.deepEqual(deferred.source, plan.source);
+  const firstDeferAttempt = deferred.lastDeferredAttemptId;
+  const frozenBudget = (await state()).context_budgets[chatId];
+  assert.equal(frozenBudget.remaining, 1);
   for (let index = 0; index < EMPTY_RESTART_POLLS; index++) {
     const restarted = await runGateway('--poll-once');
     assert.equal(restarted.processedCount, 0);
     assert.equal(restarted.notifications.accepted, 0);
     assert.equal(restarted.notifications.uncertain, 0);
-    assert.equal(sent.length, stoppedAt, 'Gateway CLI restart replenished budget or resent an acknowledged chunk');
-    deferred = await assertDeferred(NOTIFICATION_WINDOW_PARTS);
-    assert.equal(deferred.receipt.lastDeferredAttemptId, firstDeferAttempt,
-      'No-context restart opened a new notification delivery attempt');
-    assert.deepEqual(deferred.current.context_budgets[chatId], beforeRestart.context_budgets[chatId]);
+    assert.equal(sent.length, resultStart, 'CLI restart replenished budget or submitted a deferred result');
+    deferred = await getDelivery(plan.id);
+    assert.equal(deferred.status, 'waiting_for_user');
+    assert.equal(deferred.lastDeferredAttemptId, firstDeferAttempt,
+      'No-context restart opened a new result attempt');
+    assert.deepEqual((await state()).context_budgets[chatId], frozenBudget);
   }
 
-  let acknowledged = NOTIFICATION_WINDOW_PARTS, refreshes = 0;
-  const maximumRefreshes = Math.ceil((totalChunks - acknowledged) / NOTIFICATION_WINDOW_PARTS);
-  while (acknowledged < totalChunks) {
-    assert(refreshes < maximumRefreshes, 'Notification made no bounded progress after fresh inbound contexts');
-    const roundStart = sent.length, previousBudget = (await state()).context_budgets[chatId];
-    const refreshed = await refreshContext();
-    refreshes++;
-    healthy();
-    const expected = Math.min(NOTIFICATION_WINDOW_PARTS, totalChunks - acknowledged);
-    const roundParts = sent.slice(roundStart).filter(message => idSet.has(message.client_id));
-    assert.equal(refreshed.summary.processedCount, 1);
-    assert.equal(refreshed.replies.length, ORDINARY_REPLY_PARTS);
-    assert.equal(roundParts.length, expected, 'Fresh context did not resume only the remaining notification chunks');
-    assert.equal(sent.length - roundStart, ORDINARY_REPLY_PARTS + expected,
-      'Refreshed window did not share its ten-send budget with the ordinary reply');
-    assert.deepEqual(roundParts.map(part => part.client_id), ids.slice(acknowledged, acknowledged + expected));
-    acknowledged += expected;
-    durable = await state();
-    delivery = durable.reply_deliveries[key];
-    assert.notEqual(durable.context_budgets[chatId].lastInboundKey, previousBudget.lastInboundKey,
-      'Continuation did not use a genuinely new inbound context');
-    assert(roundParts.every(part => part.context_token === durable.context_tokens[chatId]),
-      'Continuation used an obsolete WeChat context token');
-    assert.equal(delivery.digest, digest, 'Context refresh changed the frozen chunk plan');
-    assert.equal(delivery.totalChunks, totalChunks);
-    assert.equal(delivery.acknowledgedChunks, acknowledged);
-    assert.equal(delivery.inFlight, false);
-    assert.equal(durable.context_budgets[chatId].remaining, SEND_BUDGET - ORDINARY_REPLY_PARTS - expected);
-    assert.equal(refreshed.summary.notifications.uncertain, 0);
-    assert.equal(refreshed.summary.notifications.accepted, acknowledged === totalChunks ? 1 : 0);
-    assertParts(acknowledged);
-    if (acknowledged < totalChunks) {
-      const next = await assertDeferred(acknowledged);
-      assert.notEqual(next.receipt.lastDeferredAttemptId, deferred.receipt.lastDeferredAttemptId,
-        'Fresh notification attempt reused its previous deferred attempt identity');
-      deferred = next;
-    }
+  await elapseDispatchInterval();
+  const refreshStart = sent.length;
+  const refreshed = await refreshContext();
+  assert.equal(refreshed.summary.processedCount, 1);
+  assert.equal(refreshed.replies.length, 1);
+  assert.equal(refreshed.summary.notifications.accepted, 1);
+  assert.equal(refreshed.summary.notifications.uncertain, 0);
+  const ids = plan.messages.map((_message, index) => resultClientId(plan.id, index));
+  const parts = sent.slice(refreshStart).filter(message => ids.includes(message.client_id));
+  assert.equal(sent.length - refreshStart, 4, 'Fresh ten-send window did not share ordinary and result sends');
+  assert.equal(sent[refreshStart].client_id, refreshed.replies[0].client_id,
+    'Deferred result preceded the new inbound ordinary response');
+  assert.deepEqual(parts.map(part => part.client_id), ids);
+  assert.equal(parts.map(text).join(''), expectedDisplay, 'Deferred result lost or duplicated display text');
+  assert(parts.every(part => !/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/u.test(text(part))),
+    'Result split a Unicode surrogate pair');
+  const current = await state();
+  assert.notEqual(current.context_budgets[chatId].lastInboundKey, frozenBudget.lastInboundKey);
+  assert.equal(current.context_budgets[chatId].remaining, SEND_BUDGET - 4);
+  assert(parts.every(part => part.context_token === current.context_tokens[chatId]));
+  for (let index = 0; index < parts.length; index++) {
+    const receipt = current.reply_deliveries[`result:${plan.id}:step:${index}`];
+    assert.equal(receipt.acknowledgedChunks, 1);
+    assert.equal(receipt.totalChunks, 1);
+    assert.equal(receipt.inFlight, false);
   }
-
-  const accepted = await notificationRecord(notification.id);
-  assert.equal(accepted.status, 'accepted');
-  assert.equal(accepted.text, notification.text);
-  assert.equal(durable.delivery_outbox[key], undefined);
-  assert.equal(notificationParts().map(text).join(''), notification.text,
-    'Budget-limited completion did not reconstruct the exact persisted Markdown');
-  const finalSent = sent.length;
-  assert.equal((await runGateway('--poll-once')).notifications.uncertain, 0);
-  assert.equal(sent.length, finalSent, 'Gateway restart replayed an accepted notification');
+  assert.equal((await getDelivery(plan.id)).status, 'accepted');
+  assert.equal(await fullResult(plan.id), raw, 'Formatted delivery overwrote raw Markdown artifact');
+  const acceptedCount = sent.length;
+  await runGateway('--poll-once');
+  assert.equal(sent.length, acceptedCount, 'Restart replayed accepted result steps');
   assert.equal((await pending()).length, 0);
-  assert.equal(deliveries.length, commandStart + 1, 'Context-only queries redispatched the native task');
+  assert.equal(deliveries.length, commandStart + 1, 'Context-only query redispatched the native task');
   const defers = harness.controllerRequests.filter(request => request.method === 'POST' &&
-    request.path === `/v1/notifications/${notification.id}/defer`);
-  assert(defers.length >= 1, 'Local pause did not use the actual Controller defer endpoint');
-  assert(defers.every(request => request.status === 200 && request.body.reason === 'budget_exhausted'));
+    request.path === `/v1/deliveries/${plan.id}/defer`);
+  assert.equal(defers.length, 1, 'Waiting result was claimed/deferred repeatedly without a new inbound');
+  assert(defers.every(request => request.status === 200 && request.body.reason === 'budget_exhausted' &&
+    request.body.submittedMessages === 0));
   assert.equal(harness.controllerRequests.filter(request => request.method === 'POST' &&
-    request.path === `/v1/notifications/${notification.id}/receipt` && request.body.status === 'uncertain').length, 0);
-  evidence('budget-notification-resume', { sendBudget: SEND_BUDGET, firstOrdinaryReplyParts: ORDINARY_REPLY_PARTS,
-    defaultMaxChars: 3_800, deferEndpoint: 'POST /v1/notifications/:id/defer', deferHttpStatus: 200,
-    deferRequests: defers.length, unknownReceipts: 0,
-    firstNotificationParts: NOTIFICATION_WINDOW_PARTS, firstAcknowledgedChunks: NOTIFICATION_WINDOW_PARTS,
-    firstInFlight: false, deferredStatus: 'pending', deferReason: 'budget_exhausted',
-    noContextRestartPolls: EMPTY_RESTART_POLLS, noContextResends: 0, refreshes, totalChunks,
-    originalBytes: Buffer.byteLength(notification.text, 'utf8'), exactReconstruction: true,
-    acknowledgedChunkResends: 0, finalStatus: accepted.status });
-  return { sendBudget: SEND_BUDGET, firstNotificationParts: NOTIFICATION_WINDOW_PARTS,
-    noContextRestartPolls: EMPTY_RESTART_POLLS, refreshes, totalChunks, acknowledgedChunkResends: 0,
-    exactReconstruction: true, finalStatus: accepted.status };
+    request.path === `/v1/deliveries/${plan.id}/receipt` && request.body.status === 'uncertain').length, 0);
+
+  // Long results occupy exactly one model summary and one raw attachment. Both use the
+  // same default ledger as the task acknowledgement; no unlimited text splitting remains.
+  const longCommandStart = deliveries.length;
+  await refreshContext(directTask);
+  assert.equal((await state()).context_budgets[chatId].remaining, SEND_BUDGET - 1);
+  await waitFor(() => { healthy(); return deliveries.length === longCommandStart + 1; }, 'Long budget task accepted');
+  const longCommand = deliveries.at(-1);
+  sendFrame({ type: 'result', commandId: longCommand.commandId,
+    turnId: 'synthetic-turn-' + longCommand.commandId, status: 'completed', output: RAW_REPLY });
+  let attachment;
+  await waitFor(async () => {
+    healthy(); attachment = (await pending()).find(item => item.kind === 'completed' && item.mode === 'attachment');
+    return Boolean(attachment);
+  }, 'Long result model summary and attachment prepared');
+  assert.equal(attachment.messages.length, 1);
+  const longRaw = await fullResult(attachment.id);
+  assert(longRaw.includes(RAW_REPLY), 'Long artifact lost raw Markdown');
+  await elapseDispatchInterval();
+  const fileStart = sent.length;
+  assert.equal((await runGateway('--poll-once')).notifications.accepted, 1);
+  const fileParts = sent.slice(fileStart);
+  assert.equal(fileParts.length, 2, 'Long result exceeded summary plus attachment');
+  assert.equal(fileParts[0].client_id, resultClientId(attachment.id, 0));
+  assert.equal(text(fileParts[0]), attachment.messages[0]);
+  assert.equal(fileParts[1].client_id, resultClientId(attachment.id, 1, 'file'));
+  assert.equal(fileParts[1].item_list[0].type, 4);
+  assert.equal(await artifactText(fileParts[1]), longRaw, 'AES attachment changed raw result bytes');
+  assert.equal((await state()).context_budgets[chatId].remaining, SEND_BUDGET - 3,
+    'File and text did not each consume one send from the shared quota');
+  assert.equal((await getDelivery(attachment.id)).status, 'accepted');
+  const finalSent = sent.length;
+  await runGateway('--poll-once');
+  assert.equal(sent.length, finalSent, 'Restart replayed accepted attachment result');
+  assert.equal(deliveries.length, commandStart + 2, 'Read-only result recovery reran native work');
+  evidence('budget-result-resume', { sendBudget: SEND_BUDGET, confirmationParts: ACKNOWLEDGEMENT_PARTS,
+    remainingBeforeThreeMessageResult: 1, deferEndpoint: 'POST /v1/deliveries/:id/defer', deferRequests: defers.length,
+    submittedBeforeRefresh: 0, unknownReceipts: 0, noContextRestartPolls: EMPTY_RESTART_POLLS,
+    ordinaryReplyBeforeCatchup: true, resumedFullTextMessages: 3, rawMarkdownRetained: true,
+    longResultSummaryMessages: 1, longResultAttachments: 1, sharedFileTextQuota: true, acceptedStepResends: 0 });
+  return { sendBudget: SEND_BUDGET, deferredFullTextMessages: 3, noContextResends: 0,
+    resumedFullTextMessages: 3, summaryMessages: 1, attachments: 1, exactRawAttachment: true };
 }

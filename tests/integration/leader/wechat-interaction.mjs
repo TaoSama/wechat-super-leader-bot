@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { createDecipheriv, createHash, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -16,6 +16,7 @@ import { closeTestWebSocket, stopTestProcess, withTestCleanup } from '../../supp
 import { createControllerFixture, createPostgresFixture, waitFor } from '../../support/control-plane-fixture.mjs';
 import { PROGRESS_TASK, RAW_REPLY_TASK, RESUMABLE_REPLY, verifyReliableDelivery } from './reliable-delivery.mjs';
 import { BUDGET_REPLY, BUDGET_REPLY_TASK, verifyWechatBudget } from './wechat-budget.mjs';
+import { fixtureHistory } from './confirmation-fixture.mjs';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const CHAT = 'synthetic-wechat-interaction-chat';
@@ -26,11 +27,14 @@ const PROPOSAL = '请先给合成会话制定一个统计记录的单步计划�
 const DIRECT_TASK = '请直接统计合成会话中的待办记录，并把最终结果告诉我';
 const DIRECT_PROMPT = '统计合成待办记录并报告最终数量';
 const DIRECT_FINAL = '**直接执行最终结果**：共 23 条待办，其中 5 条已完成。';
+const DIRECT_FINAL_DISPLAY = '直接执行最终结果：共 23 条待办，其中 5 条已完成。';
 const QUERY = '开始执行了吗？';
 const MISROUTED_QUERY = '合成会话里的待办记录统计完了吗？';
 const NEGATIVE = '暂时不要执行';
 const PROGRESS = 'SYNTHETIC_PROGRESS_ONLY：正在统计，尚未完成';
 const FINAL = '**验收最终结果**：共 17 条记录，其中 3 条需要复核。';
+const FINAL_DISPLAY = '验收最终结果：共 17 条记录，其中 3 条需要复核。';
+const RESULT_SUMMARY = '模型摘要：完整成果已生成，请查看附件。';
 const HTTP_MS = 5_000;
 const PROCESS_MS = 30_000;
 const HEARTBEAT_MS = 500;
@@ -82,11 +86,23 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
   const statePath = join(dir, 'synthetic-state.json');
   const certPath = join(dir, 'localhost-cert.pem');
   const keyPath = join(dir, 'localhost-key.pem');
+  const preloadPath = join(dir, 'synthetic-cdn.mjs');
   const sent = [], incoming = [], inputs = [], deliveries = [], acknowledgements = [], modelCalls = [], errors = [], logs = [];
+  const recordedResults = [], historyReads = [], confirmationCalls = [];
   const wireEvents = [], notificationClientIds = new Set(), fault = { remaining: 0, mode: null };
+  const uploads = new Map();
   const fingerprint = createHash('sha256').update(JSON.stringify(['synthetic-account', 'synthetic-wechat-token'])).digest('hex');
   const clientId = (key, index) => 'super-leader:' + createHash('sha256')
     .update(JSON.stringify([fingerprint, CHAT, key, index])).digest('hex').slice(0, 24);
+  const resultClientId = (id, index, kind = 'text') => kind === 'file'
+    ? 'super-leader:file:' + createHash('sha256').update(JSON.stringify([fingerprint, CHAT, `result:${id}:step:${index}`])).digest('hex').slice(0, 24)
+    : clientId(`result:${id}:step:${index}`, 0);
+  const registerDeliveryIds = plan => {
+    for (let index = 0; index < 4; index++) {
+      notificationClientIds.add(resultClientId(plan.id, index));
+      notificationClientIds.add(resultClientId(plan.id, index, 'file'));
+    }
+  };
   const authorizationCalls = [], controllerRequests = [], validContexts = new Set([CONTEXT]);
   let controller, model, wechat, proxy, gatewayControllerUrl, socket, heartbeat, gatewayChild, cursor = 0;
   const healthy = () => { if (errors.length) throw errors[0]; };
@@ -121,7 +137,43 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
         modelCalls.push(last);
         wireEvents.push({ kind: 'model', text: last.content });
         let output;
-        if (last.content === PROPOSAL) {
+        if (body.input[0]?.content?.startsWith('你负责根据刚刚核查的真实执行记录')) {
+          assert.deepEqual(body.tools, [], 'Confirmation model received mutation tools');
+          const evidence = JSON.parse(last.content);
+          const observations = evidence.targets.map(target => {
+            assert.equal(target.nodeId, NODE); assert.equal(target.sessionId, SESSION);
+            assert.equal(target.historyError, undefined, 'Confirmation fell back after failing to read execution history');
+            const read = historyReads.findLast(item => !item.confirmed && item.history.fetchedAt === target.historyFetchedAt);
+            assert(read, 'Confirmation model ran before a fresh session history response');
+            read.confirmed = true;
+            assert(read.eventIndex < wireEvents.length - 1, 'History response did not precede confirmation model');
+            const command = deliveries.find(item => item.commandId === target.exactReceipt?.commandId);
+            assert(command, 'Confirmation referenced a command that was never delivered');
+            assert.equal(target.exactReceipt.turnId, 'synthetic-turn-' + command.commandId);
+            const matching = read.history.items.filter(item => item.turnId === target.exactReceipt.turnId);
+            assert.equal(target.exactTurnHistory.length, matching.length, 'Confirmation substituted unrelated turn history');
+            for (const item of target.exactTurnHistory) {
+              assert.equal(item.turnId, target.exactReceipt.turnId);
+              assert(matching.some(source => source.id === item.id && source.text.startsWith(item.text)),
+                'Confirmation history was not obtained from the synthetic node');
+            }
+            if (target.exactReceipt.status === 'accepted') {
+              assert.equal(matching.length, 0, 'Accepted receipt manufactured execution output');
+              return '本次指令已接收，执行情况待后续核查。';
+            }
+            assert.equal(target.exactReceipt.status, 'completed');
+            return '本次指令已完成。';
+          });
+          confirmationCalls.push(evidence);
+          output = [{ type: 'message', role: 'assistant', status: 'completed',
+            content: [{ type: 'output_text', text: observations.join('\n') }] }];
+        } else if (body.input[0]?.content?.startsWith('根据任务的真实执行成果')) {
+          assert.equal(body.tools?.length ?? 0, 0, 'Result summary model received mutation tools');
+          const source = JSON.parse(last.content);
+          assert(source.excerpt.length > 11400, 'Summary was used for a result fitting three messages');
+          output = [{ type: 'message', role: 'assistant', status: 'completed',
+            content: [{ type: 'output_text', text: RESULT_SUMMARY }] }];
+        } else if (last.content === PROPOSAL) {
           output = [{ type: 'function_call', call_id: 'synthetic-proposal-' + modelCalls.length, name: 'propose_plan',
             arguments: JSON.stringify({ actions: [{ nodeId: NODE, sessionId: SESSION,
               prompt: '统计合成记录并报告最终数量', dependsOn: [] }] }) }];
@@ -150,14 +202,14 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
       NODE_TOKENS: JSON.stringify({ [NODE]: nodeToken }), ALLOWED_CHAT_IDS: CHAT, LEADER_MODE: 'model',
       LEADER_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1`, LEADER_MODEL_API_KEY: 'synthetic-model-key',
       LEADER_MODEL_NAME: 'synthetic-wechat-model',
+      TASK_NOTIFICATION_TICK_MS: '100',
     } });
     // The fixture inherits process.env; explicitly replace it with the sanitized environment.
     for (const key of Object.keys(controller.env)) if (!Object.hasOwn(env, key) &&
       !['HOST', 'PORT', 'CONSOLE_PUBLIC_URL', 'PERSISTENCE_MODE', 'DATABASE_URL', 'CONTROLLER_TOKEN', 'NODE_TOKENS',
-        'ALLOWED_CHAT_IDS', 'LEADER_MODE', 'LEADER_MODEL_BASE_URL', 'LEADER_MODEL_API_KEY', 'LEADER_MODEL_NAME'].includes(key)) {
+        'ALLOWED_CHAT_IDS', 'LEADER_MODE', 'LEADER_MODEL_BASE_URL', 'LEADER_MODEL_API_KEY', 'LEADER_MODEL_NAME', 'TASK_NOTIFICATION_TICK_MS'].includes(key)) {
       delete controller.env[key];
     }
-    await controller.start();
     proxy = createServer(async (request, response) => {
       try {
         const body = request.method === 'POST' ? await jsonBody(request) : undefined;
@@ -167,14 +219,19 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
           headers: { authorization: request.headers.authorization, 'content-type': 'application/json' },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(PROCESS_MS) });
         observation.status = result.status;
-        response.writeHead(result.status, { 'content-type': 'application/json' });
-        response.end(await result.text());
+        response.writeHead(result.status, { 'content-type': result.headers.get('content-type') ?? 'application/octet-stream' });
+        response.end(Buffer.from(await result.arrayBuffer()));
       } catch (error) { errors.push(error); respond(response, { error: 'Synthetic Controller proxy failure' }, 500); }
     });
     gatewayControllerUrl = `http://127.0.0.1:${await listen(proxy)}`;
+    controller.env.RESULT_PUBLIC_ORIGIN = gatewayControllerUrl;
+    await controller.start();
 
     let sessionStatus = 'idle';
-    const sendFrame = message => socket.send(JSON.stringify(message), error => { if (error) errors.push(error); });
+    const sendFrame = message => {
+      if (message.type === 'result') recordedResults.push({ ...message, nodeId: NODE });
+      socket.send(JSON.stringify(message), error => { if (error) errors.push(error); });
+    };
     const frame = type => ({ type, ...(type === 'hello' ? { version: 1, nodeId: NODE } : {}), sessions: [{
       id: SESSION, title: '合成统计会话', provider: 'codex-app', cwd: '/synthetic', status: sessionStatus, loaded: true,
       capabilities: ['read', 'send'], observedAt: new Date().toISOString(),
@@ -187,7 +244,14 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
     socket.on('message', raw => {
       try {
         const message = JSON.parse(raw.toString());
-        if (message.type === 'command') {
+        if (message.type === 'read_history') {
+          const session = frame('heartbeat').sessions.find(item => item.id === message.sessionId);
+          assert(session, 'History requested from an unknown synthetic session');
+          const response = fixtureHistory(message, session, deliveries, recordedResults);
+          wireEvents.push({ kind: 'history-response', requestId: message.requestId });
+          historyReads.push({ ...response, eventIndex: wireEvents.length - 1, confirmed: false });
+          sendFrame(response);
+        } else if (message.type === 'command') {
           assert.equal(message.nodeId, NODE);
           assert.equal(message.sessionId, SESSION);
           assert.equal(message.action, 'send');
@@ -218,6 +282,21 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
     wechat = createHttpsServer({ key: await readFile(keyPath), cert: await readFile(certPath) }, async (request, response) => {
       try {
         assert.equal(request.method, 'POST');
+        const url = new URL(request.url, 'https://synthetic.invalid');
+        if (url.pathname === '/c2c/upload') {
+          assert.equal(request.headers.authorization, undefined, 'CDN upload leaked the iLink bearer token');
+          const upload = uploads.get(url.searchParams.get('filekey'));
+          assert(upload, 'CDN bytes had no preceding upload authorization');
+          const chunks = []; for await (const chunk of request) chunks.push(chunk);
+          const encrypted = Buffer.concat(chunks);
+          assert.equal(encrypted.length, upload.authorization.filesize);
+          const decipher = createDecipheriv('aes-128-ecb', Buffer.from(upload.authorization.aeskey, 'hex'), null);
+          upload.plaintext = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+          assert.equal(upload.plaintext.length, upload.authorization.rawsize);
+          assert.equal(createHash('md5').update(upload.plaintext).digest('hex'), upload.authorization.rawfilemd5);
+          wireEvents.push({ kind: 'cdn-upload', filekey: upload.authorization.filekey });
+          response.writeHead(200, { 'x-encrypted-param': `download-${upload.authorization.filekey}` }); response.end(); return;
+        }
         assert.equal(request.headers.authorization, 'Bearer synthetic-wechat-token');
         const body = await jsonBody(request);
         if (request.url === '/ilink/bot/getupdates') {
@@ -233,12 +312,26 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
           assert.equal(body.status, 1);
           wireEvents.push({ kind: 'typing' });
           respond(response, { ret: 0, errcode: 0 });
+        } else if (url.pathname === '/ilink/bot/getuploadurl') {
+          assert.equal(body.to_user_id, CHAT); assert.equal(body.media_type, 3);
+          assert.equal(body.filesize % 16, 0); assert.equal(body.aeskey.length, 32);
+          uploads.set(body.filekey, { authorization: body });
+          respond(response, { ret: 0, upload_param: `upload-${body.filekey}` });
         } else {
           assert.equal(request.url, '/ilink/bot/sendmessage');
           assert.equal(body.msg.to_user_id, CHAT);
           assert(validContexts.has(body.msg.context_token), 'Send used an unknown synthetic context');
           assert.equal(body.msg.item_list.length, 1);
-          assert.equal(body.msg.item_list[0].type, MESSAGE_TYPE_TEXT);
+          const item = body.msg.item_list[0];
+          if (item.type === 4) {
+            const filekey = item.file_item.media.encrypt_query_param.replace(/^download-/, '');
+            const upload = uploads.get(filekey);
+            assert(upload?.plaintext, 'File send preceded its completed encrypted upload');
+            assert.equal(item.file_item.len, String(upload.plaintext.length));
+            assert.equal(Buffer.from(item.file_item.media.aes_key, 'base64').toString('utf8'), upload.authorization.aeskey);
+            assert.equal(item.file_item.media.encrypt_type, 1);
+            assert.match(item.file_item.file_name, /^result-.*\.md$/);
+          } else assert.equal(item.type, MESSAGE_TYPE_TEXT);
           sent.push(body.msg);
           wireEvents.push({ kind: 'send', message: body.msg });
           if (fault.remaining > 0 && --fault.remaining === 0) {
@@ -252,13 +345,23 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
       } catch (error) { errors.push(error); respond(response, { error: 'Synthetic WeChat protocol failure' }, 500); }
     });
     const wechatPort = await listen(wechat);
+    const wechatOrigin = `https://127.0.0.1:${wechatPort}`;
     await writeFile(accountPath, JSON.stringify({ token: 'synthetic-wechat-token', accountId: 'synthetic-account',
-      baseUrl: `https://127.0.0.1:${wechatPort}` }), { mode: 0o600 });
+      baseUrl: wechatOrigin }), { mode: 0o600 });
+    await writeFile(preloadPath, `const realFetch = globalThis.fetch;
+globalThis.fetch = async (input, init) => {
+  const url = new URL(String(input));
+  if (url.origin === 'https://novac2c.cdn.weixin.qq.com' && url.pathname === '/c2c/upload') {
+    return realFetch(${JSON.stringify(wechatOrigin)} + url.pathname + url.search, init);
+  }
+  if (![${JSON.stringify(wechatOrigin)}, ${JSON.stringify(gatewayControllerUrl)}].includes(url.origin)) throw new Error('Fixture blocked external fetch');
+  return realFetch(input, init);
+};\n`, { mode: 0o600 });
 
     const runGateway = async (mode, { expectedExit = 0, gatewayEnv = {} } = {}) => {
       healthy();
       let output = '', stderr = '';
-      gatewayChild = spawn(process.execPath, ['gateway/dist/index.js', mode, '--notifications', '--controller-url', gatewayControllerUrl,
+      gatewayChild = spawn(process.execPath, ['--import', preloadPath, 'gateway/dist/index.js', mode, '--notifications', '--controller-url', gatewayControllerUrl,
         '--credentials-path', accountPath, '--state-path', statePath, '--health-path', join(dir, 'health.json')],
       { cwd: ROOT, env: { ...env, CONTROLLER_TOKEN: token, NODE_EXTRA_CA_CERTS: certPath,
         ...(budgetOnly ? {} : { GATEWAY_SEND_BUDGET: '1000' }), ...gatewayEnv }, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -271,6 +374,9 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
       healthy();
       assert.equal(exit, expectedExit, 'Unexpected Gateway CLI exit: ' + stderr + output);
       gatewayChild = undefined;
+      const resultPlans = await controller.request('/v1/deliveries');
+      assert.equal(resultPlans.status, 200);
+      resultPlans.body.items.forEach(registerDeliveryIds);
       return expectedExit === 0 ? JSON.parse(output.trim()) : { exit, stderr };
     };
     const input = async (text, messageId = randomUUID(), contextToken = CONTEXT, gatewayOptions) => {
@@ -289,27 +395,57 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
         assert(typing >= 0, 'New input did not send a typing indicator');
         if (model >= 0) assert(typing < model, 'Input reached model before its typing indicator');
       }
-      evidence('wechat-input', { input: text, reply: replies.map(message => message.item_list[0].text_item.text).join('\n'), summary });
+      evidence('wechat-input', { input: text, reply: replies.map(message => message.item_list[0].text_item?.text ?? '[文件]').join('\n'), summary });
       return { messageId, summary, replies };
     };
     const pending = async () => {
-      const response = await controller.request('/v1/notifications/pending', { chatIds: [CHAT] });
+      const response = await controller.request('/v1/deliveries/pending', { chatIds: [CHAT] });
       assert.equal(response.status, 200);
-      for (const item of response.body.items) {
-        // IDs correlate exact delivery parts; no assumption about an outbound prefix identifies notifications.
-        for (let index = 0; index <= Math.ceil(item.text.length / 2_000); index++) {
-          notificationClientIds.add(clientId('notification:' + item.id, index));
-        }
-      }
-      return response.body.items;
+      return Promise.all(response.body.items.map(async item => {
+        registerDeliveryIds(item);
+        const source = item.kind === 'progress' ? await controller.request('/v1/notifications/' + item.id) : undefined;
+        if (source) assert.equal(source.status, 200);
+        return { ...item, text: item.messages.join(''), ...(source ? { progress: source.body.notification.progress } : {}) };
+      }));
+    };
+    const getDelivery = async id => {
+      const response = await controller.request('/v1/deliveries/' + id);
+      assert.equal(response.status, 200); return response.body.delivery;
+    };
+    const fullResult = async id => {
+      const plan = await getDelivery(id);
+      const response = await fetch(`${controller.base}/v1/deliveries/${id}/full`, {
+        headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(HTTP_MS),
+      });
+      assert.equal(response.status, 200);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      assert.equal(bytes.length, plan.artifact.size);
+      assert.equal(createHash('sha256').update(bytes).digest('hex'), plan.artifact.sha256);
+      return bytes.toString('utf8');
+    };
+    const artifactText = message => {
+      const item = message.item_list[0]; assert.equal(item.type, 4);
+      const filekey = item.file_item.media.encrypt_query_param.replace(/^download-/, '');
+      const upload = uploads.get(filekey); assert(upload?.plaintext);
+      return upload.plaintext.toString('utf8');
+    };
+    const elapseDispatchInterval = async () => {
+      const path = `${statePath}.results.json`;
+      let persisted;
+      try { persisted = JSON.parse(await readFile(path, 'utf8')); }
+      catch (error) { if (error.code === 'ENOENT') return; throw error; }
+      persisted.dispatchTimes[CHAT] = Date.now() - 60_001;
+      await writeFile(path, JSON.stringify(persisted), { mode: 0o600 });
     };
     await runGateway('--establish-baseline');
     assert.equal(sent.length, 0);
     if (budgetOnly) {
       await verifyWechatBudget({ controller, input, runGateway, pending, sent, incoming, deliveries, sendFrame,
         statePath, wireEvents, evidence, healthy, chatId: CHAT, contextToken: CONTEXT, directTask: DIRECT_TASK,
-        query: QUERY, clientId, controllerRequests, validContexts, restartController, setSessionStatus, databaseUrl });
+        query: QUERY, clientId, controllerRequests, validContexts, restartController, setSessionStatus, databaseUrl,
+        getDelivery, fullResult, artifactText, elapseDispatchInterval, resultClientId });
       healthy();
+      assert(confirmationCalls.length > 0, 'Budget interaction did not exercise model-generated confirmation');
       return;
     }
     await input(PROPOSAL);
@@ -365,7 +501,8 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
     const outbound = notificationMessages()[0];
     const actual = outbound.item_list[0].text_item.text;
     assert.equal(actual, notification.text, 'Actual WeChat send changed persisted Markdown');
-    assert(actual.includes(FINAL), 'Actual WeChat send omitted or corrupted the completed result: ' + actual);
+    assert(actual.includes(FINAL_DISPLAY), 'Actual WeChat send omitted or corrupted the completed result: ' + actual);
+    assert((await fullResult(notification.id)).includes(FINAL), 'Raw completed result lost its Markdown artifact');
     assert.equal(wireEvents[wireEvents.findIndex(event => event.message === outbound) - 1]?.kind, 'typing');
     assert(!actual.includes(PROGRESS), 'Actual WeChat notification contains progress instead of the result');
     evidence('exact-completion', { commandStatus: complete.body.status, daemonOutput: complete.body.output,
@@ -378,8 +515,7 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
     assert.equal((await pending()).length, 0);
     assert.equal(notificationMessages().length, 1, 'Repeated receipt/poll resent the completion notification');
     assert.equal(deliveries.length, 1, 'Receipt/poll replay caused a second command');
-    const persisted = await controller.request('/v1/notifications/' + notification.id);
-    assert.equal(persisted.body.notification.status, 'accepted');
+    assert.equal((await getDelivery(notification.id)).status, 'accepted');
 
     const misroutedQuery = await input(MISROUTED_QUERY);
     assert(misroutedQuery.replies.length > 0, 'Rejected planner execution did not answer the query');
@@ -456,12 +592,14 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
     assert.equal(directNotification.kind, 'completed');
     assert(directNotification.text.includes('23 条待办'), 'Direct task notification omitted the actual result');
     assert(!directNotification.text.includes(PROGRESS), 'Direct task notification contains accepted progress');
+    await elapseDispatchInterval();
     const directSummary = await runGateway('--poll-once');
     assert.equal(directSummary.notifications.accepted, 1);
     assert.equal(notificationMessages().length, 2, 'Direct task did not send exactly one completion notification');
     const directActual = notificationMessages()[1].item_list[0].text_item.text;
     assert.equal(directActual, directNotification.text, 'Direct notification changed persisted Markdown');
-    assert(directActual.includes(DIRECT_FINAL), 'Direct WeChat send omitted its result: ' + directActual);
+    assert(directActual.includes(DIRECT_FINAL_DISPLAY), 'Direct WeChat send omitted its result: ' + directActual);
+    assert((await fullResult(directNotification.id)).includes(DIRECT_FINAL), 'Direct result lost original Markdown');
     assert(!directActual.includes(PROGRESS), 'Direct notification sent accepted progress instead of the result');
     assert.equal(directConfirmationMessages(), 0, 'Direct task received a user confirmation before completion');
     evidence('direct-execution-completion', { commandStatus: directComplete.body.status,
@@ -477,16 +615,17 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
     assert.equal(sent.length, directSentAfterCompletion, 'Repeated direct completion/poll sent another message');
     assert.equal(notificationMessages().length, 2, 'Repeated direct completion/poll resent its notification');
     assert.equal(deliveries.length, 2, 'Repeated direct completion/poll dispatched another command');
-    const directPersisted = await controller.request('/v1/notifications/' + directNotification.id);
-    assert.equal(directPersisted.body.notification.status, 'accepted');
+    assert.equal((await getDelivery(directNotification.id)).status, 'accepted');
     assert.equal(authorizationCalls.filter(call => call.content === DIRECT_TASK).length, 1,
       'Direct completion replay requested authorization again');
     const directAuthorizationCount = authorizationCalls.filter(call => call.content === DIRECT_TASK).length;
     const reliableDelivery = await verifyReliableDelivery({ controller, input, runGateway, pending, sent, incoming, deliveries,
       sendFrame, statePath, fault, wireEvents, evidence, healthy, chatId: CHAT, contextToken: CONTEXT,
       directTask: DIRECT_TASK, nodeId: NODE, sessionId: SESSION, clientId,
-      restartController, setSessionStatus, databaseUrl, query: QUERY });
+      restartController, setSessionStatus, databaseUrl, query: QUERY,
+      getDelivery, fullResult, artifactText, elapseDispatchInterval, resultClientId });
     healthy();
+    assert(confirmationCalls.length > 0, 'Interaction did not exercise model-generated confirmation');
     evidence('PASS', { realControllerProcess: true, realGatewayCli: true, disposablePostgres: true,
       daemonCommands: deliveries.length, notificationWireParts: notificationMessages().length,
       reliableDelivery,

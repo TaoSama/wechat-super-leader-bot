@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import express, { type ErrorRequestHandler } from "express";
 import type { Server } from "node:http";
-import { AutomationService, MemoryAutomationRepository, createAutomationRouter } from "../../src/automations/index.js";
+import { AutomationService, MemoryAutomationRepository, createAutomationRouter, discoverAutomationTarget,
+  type AutomationServiceOptions } from "../../src/automations/index.js";
+import type { Session } from "../../src/types.js";
 
 const NOW = Date.parse("2026-10-18T00:00:00Z");
 const servers: Server[] = [];
@@ -12,9 +14,9 @@ const input = {
   kind: "reminder", title: "reminder", text: "hello", timezone: "Asia/Shanghai",
   timing: { type: "at", at: "2026-10-18T01:00:00Z" },
 };
-async function fixture() {
+async function fixture(resolveTarget?: AutomationServiceOptions["resolveTarget"]) {
   const repository = new MemoryAutomationRepository();
-  const service = new AutomationService({ repository, now: () => NOW, runner: {
+  const service = new AutomationService({ repository, now: () => NOW, resolveTarget, runner: {
     start: async () => ({ status: "unknown", error: "unused" }), inspect: async () => ({ status: "unknown", error: "unused" }),
   } });
   const observedErrors: unknown[] = [];
@@ -43,6 +45,53 @@ async function fixture() {
 }
 
 describe("automation HTTP error classification and creation identity", () => {
+  const sessionInput = { kind: "session", title: "session task", prompt: "inspect", nodeId: "node", sessionId: "session",
+    timezone: input.timezone, timing: input.timing };
+  const discoveredSession = (): Session => ({ id: "session", provider: "codex-app", title: "target", cwd: "/fixture",
+    status: "idle", loaded: true, capabilities: ["read", "send"], observedAt: new Date(NOW).toISOString() });
+
+  it.each([
+    { nodeId: "node", sessionId: "session", sendRoute: "terminal-pane" as const },
+    { nodeId: "other-node", sessionId: "session", sendRoute: "control-socket" as const },
+    { nodeId: "node", sessionId: "other-session", sendRoute: "control-socket" as const },
+  ])("returns 400 for an unsupported or mismatched resolved target: %j", async target => {
+    const f = await fixture(async () => target);
+    expect((await f.create(sessionInput, "invalid-target")).status).toBe(400);
+    expect(f.observedErrors).toEqual([]);
+    expect(await f.repository.list("user")).toEqual([]);
+  });
+
+  it.each([
+    null,
+    { ...discoveredSession(), provider: "terminal/codex" },
+    { ...discoveredSession(), capabilities: ["read"] as Session["capabilities"] },
+  ])("returns 400 for a nonexistent or unsupported discovered session: %j", async session => {
+    const f = await fixture(async (nodeId, sessionId) => discoverAutomationTarget({
+      isNodeConnected: () => true, getNodeSession: () => session,
+    }, nodeId, sessionId, NOW));
+    expect((await f.create(sessionInput, "undiscoverable-target")).status).toBe(400);
+    expect(f.observedErrors).toEqual([]);
+    expect(await f.repository.list("user")).toEqual([]);
+  });
+
+  it("keeps resolver outages, missing discovery and offline/stale target observations as 503", async () => {
+    const unavailable = await fixture();
+    expect((await unavailable.create(sessionInput, "missing-discovery")).status).toBe(503);
+    const outage = new Error("resolver connection reset");
+    const failing = await fixture(async () => { throw outage; });
+    expect((await failing.create(sessionInput, "resolver-outage")).status).toBe(503);
+    expect(failing.observedErrors).toEqual([outage]);
+    for (const connected of [false, true]) {
+      const f = await fixture(async (nodeId, sessionId) => discoverAutomationTarget({
+        isNodeConnected: () => connected,
+        getNodeSession: () => ({ ...discoveredSession(), observedAt: new Date(NOW - 60_000).toISOString() }),
+      }, nodeId, sessionId, NOW));
+      expect((await f.create(sessionInput, "temporary-unavailable")).status).toBe(503);
+      expect(f.observedErrors).toHaveLength(1);
+      expect(await f.repository.list("user")).toEqual([]);
+    }
+  });
+
   it.each([
     { ...input, timezone: "Mars/Olympus" },
     { ...input, timing: { type: "at", at: "2026-10-17T23:59:59Z" } },

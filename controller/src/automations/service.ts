@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { CreateScheduleSchema, type AutomationRepository, type AutomationRunner, type CreateSchedule, type FrozenTarget, type RunnerOutcome, type Schedule } from "./contracts.js";
 import { validateTiming } from "./timing.js";
 import { assertSameCreation, automationId, automationRequestId } from "./identity.js";
+import { AutomationValidationError } from "./errors.js";
 
 export interface CreationAuthority {
   chatId: string;
@@ -47,7 +48,7 @@ export class AutomationService {
       if (!this.options.resolveTarget) throw new Error("Session discovery is unavailable");
       target = await this.options.resolveTarget(parsed.nodeId, parsed.sessionId);
       if (target.nodeId !== parsed.nodeId || target.sessionId !== parsed.sessionId || target.sendRoute === "terminal-pane") {
-        throw new Error("Discovered session has no supported completion observation route");
+        throw new AutomationValidationError("Discovered session has no supported completion observation route");
       }
     }
     await authority.assertCurrentAuthority?.();

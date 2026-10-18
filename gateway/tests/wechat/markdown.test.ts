@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { markdownToWeChat, markdownForWeChat, TRUNCATION_NOTICE, DEFAULT_MESSAGE_MAX_CHARS } from "../../src/wechat/markdown.js";
 import { splitWeChatReply } from "../../src/wechat/client.js";
 
@@ -69,6 +70,31 @@ test("display formatting preserves the complete long response when given the ful
   assert.ok(!rendered.includes(TRUNCATION_NOTICE));
 });
 
+test("emphasis spans the complete three-message result and preserves multiline closing whitespace", () => {
+  const body = "甲".repeat(DEFAULT_MESSAGE_MAX_CHARS * 3);
+  for (const render of [markdownToWeChat, markdownForWeChat]) {
+    assert.equal(render("**" + body + "**", Number.MAX_SAFE_INTEGER), body);
+    assert.equal(render("__" + body + "__", Number.MAX_SAFE_INTEGER), body);
+    assert.equal(render("**首段\r\n\r\n末段 \t\r\n \t**后文", Number.MAX_SAFE_INTEGER), "首段\r\n\r\n末段 \t\r\n \t后文");
+    assert.equal(render("*x ".repeat(20_000), Number.MAX_SAFE_INTEGER), "*x ".repeat(20_000).trimEnd());
+    assert.equal(render("*/x ".repeat(20_000), Number.MAX_SAFE_INTEGER), "*/x ".repeat(20_000).trimEnd());
+    assert.equal(render("_x ".repeat(20_000), Number.MAX_SAFE_INTEGER), "_x ".repeat(20_000).trimEnd());
+  }
+});
+
+test("large unmatched emphasis finishes within a bounded worker instead of rescanning every suffix", () => {
+  const moduleUrl = import.meta.resolve("@super-leader/wechat-text");
+  const script = `import assert from 'node:assert/strict';
+import { markdownToWeChat } from ${JSON.stringify(moduleUrl)};
+for (const fragment of ['*x ', '*/x ', '_x ']) {
+  const source = fragment.repeat(200_000);
+  assert.equal(markdownToWeChat(source, Number.MAX_SAFE_INTEGER), source.trimEnd());
+}`;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 5_000 });
+  assert.equal(result.error, undefined, result.error?.message ?? "");
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test("preserves fenced code block contents without backticks", () => {
   const source = "```python\n# comment\n-1\nx = a_b * 2\nprint('**literal**')\n```";
   const expected = "# comment\n-1\nx = a_b * 2\nprint('**literal**')\n";
@@ -123,6 +149,31 @@ test("surrounding prose still formats when an unmatched inline delimiter precede
 
 test("preserves link destination with special characters", () => {
   assert.equal(markdownToWeChat("[下载](https://example.com/a_b_c?q=~x)"), "下载 (https://example.com/a_b_c?q=~x)");
+});
+
+test("link scanning preserves nested labels, image labels, malformed destinations and code precedence", () => {
+  assert.equal(markdownToWeChat("[[说明](https://example.com)"), "[说明 (https://example.com)");
+  assert.equal(markdownToWeChat("![**图**](asset) 和 [文档](https://example.com)"), "图 和 文档 (https://example.com)");
+  assert.equal(markdownToWeChat("`[代码` [说明](https://example.com)"), "[代码 说明 (https://example.com)");
+  assert.equal(markdownToWeChat("[坏](无闭合\n[好](ok)"), "[坏](无闭合\n好 (ok)");
+  assert.equal(markdownToWeChat("[坏](无闭合[另坏](仍无闭合"), "[坏](无闭合[另坏](仍无闭合");
+  assert.equal(markdownToWeChat("[跨\r行](含\r字符)"), "跨\r行 (含\r字符)");
+  assert.equal(markdownForWeChat("[文档](dest) ![图片](ignored)"), "文档: dest 图片");
+});
+
+test("large unmatched labels and malformed destinations finish without retrying every opener", () => {
+  const moduleUrl = import.meta.resolve("@super-leader/wechat-text");
+  const script = `import assert from 'node:assert/strict';
+import { markdownToWeChat } from ${JSON.stringify(moduleUrl)};
+for (const fragment of ['[', '![', '[x](']) {
+  const source = fragment.repeat(200_000);
+  assert.equal(markdownToWeChat(source, Number.MAX_SAFE_INTEGER), source);
+}
+const followedByBadUrl = '['.repeat(200_000) + 'x](unterminated';
+assert.equal(markdownToWeChat(followedByBadUrl, Number.MAX_SAFE_INTEGER), followedByBadUrl);`;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 5_000 });
+  assert.equal(result.error, undefined, result.error?.message ?? "");
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("preserves one-time login credentials in bare URLs exactly", () => {
