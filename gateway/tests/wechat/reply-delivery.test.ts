@@ -173,6 +173,28 @@ test("typing failure leaves formatted body delivery available", async t => {
   assert.deepEqual(f.sent, ["原文"]);
 });
 
+for (const endpoint of ["getconfig", "sendtyping"]) {
+  test(`formatted body delivery completes while ${endpoint} remains unresolved`, async t => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const f = fixture(t);
+    let release!: () => void, started!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const began = new Promise<void>(resolve => { started = resolve; });
+    const client = new ILinkClient({ stateManager: f.state, fetchImpl: async (input, init) => {
+      if (String(input).endsWith(endpoint)) { started(); await gate; }
+      return f.fetchImpl(input, init);
+    } });
+    const delivery = client.sendMarkdownReply("chat", "**原文**", { deliveryKey: `background-${endpoint}` });
+    try {
+      await began;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.deepEqual(f.sent, ["原文"]);
+      assert.equal(f.state.getReplySentChunks(`background-${endpoint}`), 1);
+    } finally { release(); await delivery; }
+    assert.equal(await delivery, 1);
+  });
+}
+
 test("upgrading a partially acknowledged raw Markdown plan preserves its original boundaries", async t => {
   const f = fixture(t);
   const original = "**旧标题**\n①第一项 ②第二项\n```ts\n  a_b += 1;\n```\n";

@@ -23,6 +23,7 @@ function accepted(response: Record<string, unknown>): boolean {
 /** Best-effort typing signals: failures are handled as false and never expose credentials. */
 export class TypingIndicator {
   private readonly entries = new Map<string, Entry>();
+  private readonly inFlight = new Set<string>();
   private readonly timeoutMs: number;
   private readonly now: () => number;
   private account: Account | null = null;
@@ -38,6 +39,7 @@ export class TypingIndicator {
   public async send(chatId: string, status: 1 | 2 = 1): Promise<boolean> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let inFlightKey: string | undefined;
     let generation = this.generation;
     try {
       const account = this.refreshAccount();
@@ -45,6 +47,10 @@ export class TypingIndicator {
       if (!account?.token || !chatId || (status !== 1 && status !== 2)) return false;
       const cached = this.entries.get(chatId);
       if (cached && cached.retryAt > this.now()) return false;
+      const key = JSON.stringify([generation, chatId, status]);
+      if (this.inFlight.has(key)) return false;
+      this.inFlight.add(key);
+      inFlightKey = key;
       const deadline = Date.now() + this.timeoutMs;
       const timeout = new Promise<boolean>(resolve => {
         timer = setTimeout(() => {
@@ -65,6 +71,7 @@ export class TypingIndicator {
       this.fail(chatId, generation);
       return false;
     } finally {
+      if (inFlightKey !== undefined) this.inFlight.delete(inFlightKey);
       if (timer !== undefined) clearTimeout(timer);
       controller.abort();
     }

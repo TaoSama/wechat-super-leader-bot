@@ -64,6 +64,66 @@ test("tickets are reused for start and stop and isolated by user", async () => {
   assert.equal(f.calls.filter(call => call.endpoint.endsWith("getconfig")).length, 2);
 });
 
+for (const endpoint of ["getconfig", "sendtyping"]) {
+  test(`overlapping typing during ${endpoint} is coalesced and later signals can refresh`, async t => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const f = harness();
+    let release!: () => void, started!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const began = new Promise<void>(resolve => { started = resolve; });
+    f.state.hook = async call => {
+      if (call.endpoint.endsWith(endpoint)) { started(); await gate; }
+      return call.endpoint.endsWith("getconfig") ? f.state.config : f.state.receipt;
+    };
+    const original = f.typing.send("chat");
+    try {
+      await began;
+      const count = f.calls.length;
+      assert.equal(await f.typing.send("chat"), false);
+      assert.equal(f.calls.length, count, "a duplicate cannot start another config or signal request");
+    } finally { release(); await original; }
+    assert.equal(await original, true);
+    assert.equal(f.calls.filter(call => call.endpoint.endsWith("getconfig")).length, 1);
+    assert.equal(f.calls.filter(call => call.endpoint.endsWith("sendtyping")).length, 1);
+    f.state.hook = undefined;
+    assert.equal(await f.typing.send("chat"), true);
+    assert.equal(f.calls.filter(call => call.endpoint.endsWith("getconfig")).length, 1);
+    f.state.now += DAY_MS;
+    f.state.config = { ret: 0, typing_ticket: "refreshed-ticket" };
+    assert.equal(await f.typing.send("chat"), true);
+    assert.equal(f.calls.filter(call => call.endpoint.endsWith("getconfig")).length, 2);
+    assert.equal(f.calls.at(-1)?.payload.typing_ticket, "refreshed-ticket");
+  });
+
+  test(`changing accounts bypasses an old in-flight ${endpoint} and preserves the new ticket`, async t => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const f = harness();
+    let release!: () => void, started!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const began = new Promise<void>(resolve => { started = resolve; });
+    f.state.hook = async call => {
+      if (call.token === "token-a" && call.endpoint.endsWith(endpoint)) {
+        started(); await gate; return { ret: -1 };
+      }
+      return call.endpoint.endsWith("getconfig") ? { ret: 0, typing_ticket: `ticket:${call.token}` } : { ret: 0 };
+    };
+    const old = f.typing.send("chat");
+    try {
+      await began;
+      f.state.account = { token: "token-b", fingerprint: "account-b" };
+      assert.equal(await f.typing.send("chat"), true, "the old account cannot suppress a new account signal");
+      assert.equal(f.calls.at(-1)?.token, "token-b");
+      assert.equal(f.calls.at(-1)?.payload.typing_ticket, "ticket:token-b");
+    } finally { release(); await old; }
+    assert.equal(await old, false);
+    const before = f.calls.length;
+    assert.equal(await f.typing.send("chat"), true, "late old rejection cannot back off the new account");
+    assert.equal(f.calls.length, before + 1, "the new account reuses its unaffected ticket");
+    assert.equal(f.calls.at(-1)?.payload.typing_ticket, "ticket:token-b");
+    assert.equal(f.calls.at(-1)?.token, "token-b");
+  });
+}
+
 test("ticket expires at 24 hours without refreshing its lifetime on reuse", async () => {
   const f = harness();
   await f.typing.send("chat");
