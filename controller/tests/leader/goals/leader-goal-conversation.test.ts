@@ -1,3 +1,4 @@
+import { acknowledgementFixture } from "../acknowledgement-fixture.js";
 import { expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { MemoryStore } from "../../../src/store/memory.js";
@@ -37,6 +38,8 @@ function fixture() {
   const responses: ModelReply[] = [];
   const messages: ModelMessage[][] = [];
   const model: LeaderModel = { complete: vi.fn(async input => {
+    const acknowledgement = acknowledgementFixture(input);
+    if (acknowledgement) return acknowledgement;
     messages.push(structuredClone(input));
     const result = responses.shift();
     if (!result) throw new Error("Missing model fixture response");
@@ -77,12 +80,12 @@ it("shows complete authorization and preserves its preview across ordinary queri
   expect((await f.store.listRecentGoals(["chat"], 10))).toHaveLength(1);
 });
 
-it.each(["确认", "执行", "开始"])("confirms a single pending goal on %s without another model call or duplicate authorization", async text => {
+it.each(["确认", "执行", "开始"])("confirms a single pending goal on %s with model prose and no duplicate authorization", async text => {
   const f = fixture(), { pending } = await f.propose();
   const reply = await f.create().handle("chat", "short-confirm", text);
   expect(reply.text).toContain("后台将按授权预算持续推进");
   expect((await f.store.getGoal(pending.id))?.status).toBe("active");
-  expect(f.model.complete).toHaveBeenCalledTimes(1);
+  expect(f.model.complete).toHaveBeenCalledTimes(2);
   expect(await f.create().handle("chat", "short-confirm", text)).toEqual(reply);
   await f.create().handle("chat", "repeat-short", "确认");
   expect(await f.store.listRecentGoals(["chat"], 10)).toHaveLength(1);
@@ -130,7 +133,7 @@ it.each([0, -1])("ignores a plan expired by %i ms when confirming a live goal", 
   expect(await f.store.getLatestExecution("chat")).toBeNull();
   expect((await f.store.getLeaderState("chat"))?.data.pending).toBeUndefined();
   expect(f.commands.submit).not.toHaveBeenCalled();
-  expect(f.model.complete).toHaveBeenCalledTimes(1);
+  expect(f.model.complete).toHaveBeenCalledTimes(2);
   expect(await f.create().handle("chat", "confirm-live-goal", "执行")).toEqual(reply);
   expect(await f.store.listRecentGoals(["chat"], 10)).toHaveLength(1);
 });
@@ -149,7 +152,7 @@ it.each([0, -1])("ignores a goal expired by %i ms when confirming a live plan", 
   expect(await f.store.getLatestGoal("chat")).toBeNull();
   expect((await f.store.getLeaderState("chat"))?.data.pendingGoal).toBeUndefined();
   expect(f.commands.submit).toHaveBeenCalledTimes(1);
-  expect(f.model.complete).toHaveBeenCalledTimes(1);
+  expect(f.model.complete).toHaveBeenCalledTimes(2);
   expect(await f.create().handle("chat", "confirm-live-plan", "执行")).toEqual(reply);
   expect(f.commands.submit).toHaveBeenCalledTimes(1);
 });

@@ -3,7 +3,7 @@ import { InputReceipt } from "../sessions/input-receipt.js";
 import { LeaderState } from "../leader/state.js";
 import type { CreateExecutionResult, ExecutionRecord } from "../leader/plans/execution.js";
 import type { ExecutionConfirmationAuthority } from "../leader/plans/confirmation.js";
-import type { Notification, NotificationReceiptStatus, NotificationDeferReason, NotificationSource } from "../notifications/contracts.js";
+import type { Notification, StoredNotification, NotificationReceiptStatus, NotificationDeferReason, NotificationSource } from "../notifications/contracts.js";
 import type { GoalRecord, GoalConfirmationAuthority, CreateGoalResult } from "../leader/goals/goal.js";
 import type { MessageImageStore } from "../sessions/message-images.js";
 import type { CommandSummary } from "../commands/public.js";
@@ -58,6 +58,8 @@ export interface IStore extends IConsoleAuthStore, MessageImageStore {
   listInspectableCommands(nodeId: string, limit?: number, afterCommandId?: string): Promise<CommandRecord[]>;
   listQueuedCommands(limit?: number, afterCommandId?: string): Promise<CommandRecord[]>;
   claimQueuedCommand(commandId: string, route: SendRoute): Promise<CommandRecord | null>;
+  /** Release this worker's claim only before calling the transport. Never recover an ambiguous send this way. */
+  requeueClaimedCommand(commandId: string): Promise<CommandRecord | null>;
   cancelQueuedCommand(commandId: string, authority?: CommandAuthority): Promise<CommandRecord | null>;
 
   // Messages
@@ -96,6 +98,9 @@ export interface IStore extends IConsoleAuthStore, MessageImageStore {
   listRecentGoals(chatIds: readonly string[], limit: number): Promise<GoalRecord[]>;
 
   listPendingNotifications(chatIds: readonly string[], now: number): Promise<Notification[]>;
+  listNotificationCandidates(chatIds: readonly string[], now: number, afterId?: string, limit?: number): Promise<StoredNotification[]>;
+  getNotificationParts(source: NotificationSource): Promise<StoredNotification[]>;
+  markNotificationPrepared(id: string, resultId: string): Promise<void>;
   enqueueProgressNotification(source: NotificationSource, now?: number): Promise<Notification | null>;
   getNotification(id: string, now: number): Promise<Notification | null>;
   claimNotification(id: string, attemptId: string, chatIds: readonly string[], now: number): Promise<Notification | null>;

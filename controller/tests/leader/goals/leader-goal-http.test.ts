@@ -1,3 +1,4 @@
+import { acknowledgementFixture } from "../acknowledgement-fixture.js";
 import { EventEmitter } from "node:events";
 import { afterEach, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
@@ -65,6 +66,8 @@ it("one HTTP confirmation starts a server-owned continuous loop and publishes it
     { type: "complete", criteria: [{ criterion: 1, actions: [2] }], reason: "精确最终证据支持条件，属于模型判断" },
   ];
   const model: LeaderModel = { complete: vi.fn(async (_messages, tools): Promise<ModelReply> => {
+    const acknowledgement = acknowledgementFixture(_messages);
+    if (acknowledgement) return acknowledgement;
     const background = tools.some(tool => tool.function.name === "decide_goal");
     const args = background ? decide.shift() : { objective: "持续得到核查结论", criteria: ["完成最终证据核查"],
       targets: [{ nodeId: "air", sessionId: "original" }], constraints: "只读，不外发", maxActions: 3,
@@ -106,7 +109,7 @@ it("one HTTP confirmation starts a server-owned continuous loop and publishes it
   expect(daemon.commands[0].prompt).toContain("取得初始核查基准");
   expect(daemon.commands[1].prompt).toContain("不同的最终核查");
   expect(daemon.commands[1].prompt).toContain("精确动作1");
-  expect(model.complete).toHaveBeenCalledTimes(4);
+  expect(model.complete).toHaveBeenCalledTimes(5);
   const status = await fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${TOKEN}` } });
   expect(status.status).toBe(200);
   const snapshot = await status.json();

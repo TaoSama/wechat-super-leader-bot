@@ -8,13 +8,14 @@ import { sameSkillRefs } from "../skills/catalog.js";
 import { nextCommandState, inspectionLimit, validateStoredCommandInput } from "./command-state.js";
 import { validateNodeSessionInventory } from "./node-sessions.js";
 import { executionListQuery } from "./execution-list.js";
+import { TERMINAL_RESULT_TTL_MS, PROGRESS_RESULT_TTL_MS, RESULT_COLLECTOR_BATCH_SIZE } from "../notifications/result-collector.js";
 import { normalizeGoal, assertGoalConfirmation, validateGoalUpdate, goalIsOpen, type GoalRecord,
   type GoalConfirmationAuthority, type CreateGoalResult } from "../leader/goals/goal.js";
 import { validateGoalProofs } from "../leader/goals/view.js";
 import { notificationCommands, planNotificationRequestIds, goalNotificationRequestIds } from "../notifications/presentation.js";
 import { notificationSource, sameNotificationSource, createProgressNotification, progressNotificationEligible, progressNotificationBudgetAvailable } from "../notifications/progress.js";
 import {NotificationSourceSchema, type NotificationSource } from "../notifications/contracts.js";
-import { createTerminalNotifications, createGoalNotifications, terminalNotificationPartEligible, readNotification, claimNotificationRecord, receiptNotificationRecord,
+import { normalizeNotification, createTerminalNotifications, createGoalNotifications, terminalNotificationPartEligible, readNotification, claimNotificationRecord, receiptNotificationRecord,
   deferNotificationRecord, NotificationDeferReasonSchema, NotificationIdSchema, NotificationReceiptStatusSchema, validateNotificationTime, NOTIFICATION_BATCH_LIMIT,
   type Notification, type StoredNotification, type NotificationReceiptStatus, type NotificationDeferReason } from "../notifications/contracts.js";
 import { normalizeExecution, validateExecutionUpdate, executionPageLimit, EXECUTION_PAGE_SIZE,
@@ -60,6 +61,7 @@ export class MemoryStore implements IStore {
   private executions = new Map<string, ExecutionRecord>();
   private goals = new Map<string, GoalRecord>();
   private notifications = new Map<string, StoredNotification>();
+  private notificationResults = new Map<string, string>();
   private consoleLinks = new Map<string, ConsoleLinkRecord>(); // tokenHash -> ConsoleLinkRecord
   private consoleSessions = new Map<string, ConsoleSessionRecord>(); // tokenHash -> ConsoleSessionRecord
 
@@ -177,6 +179,14 @@ export class MemoryStore implements IStore {
       (ACTIVE_COMMAND_STATUSES.includes(other.status) || other.status === "queued" && beforeInQueue(other,cmd)))) return null;
     const next = { ...cmd, status: "pending" as const, sendRoute: route, updatedAt: new Date().toISOString() };
     this.commands.set(commandId,next); return structuredClone(next);
+  }
+  async requeueClaimedCommand(commandId: string): Promise<CommandRecord | null> {
+    const cmd = this.commands.get(commandId);
+    if (!cmd || cmd.status !== "pending" || cmd.action !== "send" || cmd.authority?.type !== "automation" ||
+        cmd.turnId !== undefined || cmd.inputReceipt !== undefined || Date.parse(cmd.expiresAt) <= Date.now()) return null;
+    const next = { ...cmd, status: "queued" as const, updatedAt: new Date().toISOString() };
+    this.commands.set(commandId, next);
+    return structuredClone(next);
   }
   async cancelQueuedCommand(commandId: string, authority?: CommandAuthority): Promise<CommandRecord | null> {
     const cmd = this.commands.get(commandId);
@@ -452,6 +462,32 @@ export class MemoryStore implements IStore {
       (item.kind !== "progress" || this.progressEligible(item, now)) && terminalNotificationPartEligible(item,notifications))
       .sort((a, b) => Number(a.kind === "progress") - Number(b.kind === "progress") || a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       .slice(0, NOTIFICATION_BATCH_LIMIT).map(item => readNotification(item, now));
+  }
+  async listNotificationCandidates(chatIds: readonly string[], now: number, afterId = "", limit = RESULT_COLLECTOR_BATCH_SIZE): Promise<StoredNotification[]> {
+    validateNotificationTime(now);
+    if (afterId) NotificationIdSchema.parse(afterId);
+    const query = executionListQuery(chatIds, limit);
+    const notifications = [...this.notifications.values()];
+    return notifications.filter(item => query.chatIds.includes(item.chatId) && item.status === "pending" && !this.notificationResults.has(item.id) && item.id > afterId && item.createdAt <= now &&
+      (item.kind !== "progress" ? (item.part?.index ?? 1) === 1 && item.createdAt + TERMINAL_RESULT_TTL_MS > now :
+        item.createdAt + PROGRESS_RESULT_TTL_MS > now && item.expiresAt > now && this.progressEligible(item, now) &&
+        !notifications.some(other => other.kind === "progress" && other.status === "pending" &&
+          sameNotificationSource(other.source, item.source) && other.createdAt <= now &&
+          (other.createdAt > item.createdAt || other.createdAt === item.createdAt && other.id > item.id))))
+      .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0).slice(0, query.count).map(normalizeNotification);
+  }
+  async getNotificationParts(source: NotificationSource): Promise<StoredNotification[]> {
+    const parsed = NotificationSourceSchema.parse(source);
+    return [...this.notifications.values()].filter(item => item.kind !== "progress" && sameNotificationSource(item.source, parsed))
+      .sort((a, b) => (a.kind === "progress" ? 0 : a.part?.index ?? 1) - (b.kind === "progress" ? 0 : b.part?.index ?? 1) ||
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map(normalizeNotification);
+  }
+  async markNotificationPrepared(id: string, resultId: string): Promise<void> {
+    NotificationIdSchema.parse(id); NotificationIdSchema.parse(resultId);
+    const previous = this.notificationResults.get(id);
+    if (!this.notifications.has(id) || previous !== undefined && previous !== resultId)
+      throw new ConflictError("Notification result marker conflicts with its persisted source");
+    this.notificationResults.set(id, resultId);
   }
   private progressEligible(item: StoredNotification, now: number): boolean {
     const record = item.source.type === "plan" ? this.executions.get(item.source.id) : this.goals.get(item.source.id);

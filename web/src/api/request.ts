@@ -2,7 +2,7 @@ import { ApiAuthError, ApiHttpError, historyHttpError } from "./errors";
 
 const REQUEST_TIMEOUT_MS = 20_000;
 
-export async function sessionRequest(url: string, init: RequestInit, historyErrors = false): Promise<unknown> {
+export async function sessionRequest(url: string, init: RequestInit, historyErrors = false, format: "json" | "text" = "json"): Promise<unknown> {
   const controller = new AbortController();
   const abort = () => controller.abort();
   const timer = window.setTimeout(abort, REQUEST_TIMEOUT_MS);
@@ -17,7 +17,7 @@ export async function sessionRequest(url: string, init: RequestInit, historyErro
       if (historyErrors) throw await historyHttpError(response);
       throw new ApiHttpError(response.status, `请求未成功 (HTTP ${response.status})`);
     }
-    return await response.json();
+    return format === "text" ? await response.text() : await response.json();
   } finally {
     window.clearTimeout(timer);
     init.signal?.removeEventListener("abort", abort);

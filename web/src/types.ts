@@ -4,6 +4,8 @@
  */
 
 import type { ConsoleGoals } from "./features/leader/goal-contract";
+import type { ConsoleAutomation } from "./features/notifications/automation-contract";
+import type { ConsoleDelivery } from "./features/notifications/delivery-contract";
 export type ActionType = "read" | "send";
 export type SessionCapability = ActionType | "resume-send";
 
@@ -126,6 +128,8 @@ export interface ControlPlaneStatusResponse {
   commands: CommandRecord[];
   executions: ConsoleExecutions;
   goals: ConsoleGoals;
+  automations?: ConsoleAutomation[];
+  deliveries?: ConsoleDelivery[];
 }
 
 export type ExecutionStatus = "active" | "completed" | "failed" | "cancelled" | "expired";

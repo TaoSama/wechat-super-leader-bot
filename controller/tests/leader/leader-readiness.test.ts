@@ -1,3 +1,4 @@
+import { acknowledgementFixture } from "./acknowledgement-fixture.js";
 import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
@@ -45,12 +46,15 @@ const schedulers: ExecutionScheduler[] = [];
 const schedulerErrors: unknown[] = [];
 function fixture(sessions = [session("invest"), session("research")]) {
   const store = new MemoryStore(), hub = new NodeHub(store, new Map()), socket = new Socket();
+  vi.spyOn(hub, "readHistory").mockRejectedValue(new Error("Synthetic history unavailable"));
   hubs.push(hub);
   hub.handleConnection(socket as unknown as WebSocket, "macair");
   socket.receive({ type: "hello", version: 1, nodeId: "macair", sessions, skills: [] });
   const tools: string[] = [];
   let calls = 0;
   const model: LeaderModel = { complete: async (messages: ModelMessage[]) => {
+    const acknowledgement = acknowledgementFixture(messages);
+    if (acknowledgement) return acknowledgement;
     tools.push(...messages.filter(message => message.role === "tool").map(message => message.content ?? ""));
     if (++calls === 1) return { content: null, toolCalls: [{ id: "plan", type: "function", function: {
       name: "propose_plan", arguments: JSON.stringify({ actions }),

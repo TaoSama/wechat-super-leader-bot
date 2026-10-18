@@ -7,6 +7,8 @@ import { CommandFilter, matchesCommandFilter } from "../command-filters";
 import { NodesSection } from "./NodesSection";
 import { ExecutionsSection } from "./ExecutionsSection";
 import { GoalsSection } from "./GoalsSection";
+import { AutomationsSection } from "../../notifications/AutomationsSection";
+import { DeliveriesSection } from "../../notifications/DeliveriesSection";
 
 interface Props {
   data: ControlPlaneStatusResponse;
@@ -70,6 +72,8 @@ export function LeaderOverview({ data, nodes, selectedNodeId, onSelectNodeId, on
         <CommandsSection commands={data.commands} selectedNodeId={selectedNodeId} sessions={data.sessions} onOpenSession={onOpenSession}
           statusFilter={commandFilter} onStatusFilterChange={setCommandFilter} onClearNodeFilter={() => onSelectNodeId(null)} />
       </div>
+      <AutomationsSection items={data.automations ?? []} />
+      <DeliveriesSection items={data.deliveries ?? []} />
     </div>
     <details className="leader-footnote"><summary>回执如何解读</summary>
       <p>“已受理”表示输入已接受，执行结果尚未确认。</p>
