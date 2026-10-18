@@ -23,6 +23,7 @@ function fixture(t: TestContext) {
   const calls: string[] = [], sends: Record<string, unknown>[] = [];
   let hook: ((body: Record<string, unknown>) => Promise<Response> | Response) | undefined;
   let uploadHook: (() => Promise<Response> | Response) | undefined;
+  let typingHook: ((endpoint: string) => Promise<void>) | undefined;
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = new URL(String(input)); calls.push(url.pathname);
     if (url.pathname === "/c2c/upload") {
@@ -33,8 +34,10 @@ function fixture(t: TestContext) {
     }
     assert.equal((init?.headers as Record<string, string>).Authorization, "Bearer synthetic-private");
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-    if (url.pathname.endsWith("getconfig")) return Response.json({ ret: 0, typing_ticket: "synthetic-ticket" });
-    if (url.pathname.endsWith("sendtyping")) return Response.json({ ret: 0 });
+    if (url.pathname.endsWith("getconfig")) {
+      await typingHook?.("getconfig"); return Response.json({ ret: 0, typing_ticket: "synthetic-ticket" });
+    }
+    if (url.pathname.endsWith("sendtyping")) { await typingHook?.("sendtyping"); return Response.json({ ret: 0 }); }
     if (url.pathname.endsWith("getuploadurl")) {
       assert.deepEqual(body.base_info, { channel_version: "0.3.0" });
       assert.equal(body.media_type, 1);
@@ -47,6 +50,7 @@ function fixture(t: TestContext) {
   const client = (manager = state) => new ILinkClient({ stateManager: manager, fetchImpl });
   return { state, credentials, statePath, calls, sends, client,
     setSendHook: (next: typeof hook) => { hook = next; },
+    setTypingHook: (next: typeof typingHook) => { typingHook = next; },
     setUploadHook: (next: typeof uploadHook) => { uploadHook = next; } };
 }
 
@@ -55,7 +59,8 @@ test("image transport types, uploads encrypted bytes and confirms the final WeCh
   assert.equal(await f.client().sendImageReply("chat", [IMAGE], {
     deliveryKey: "images", getImageBytes: async () => PNG,
   }), 1);
-  assert.deepEqual(f.calls, ["/ilink/bot/getconfig", "/ilink/bot/sendtyping", "/ilink/bot/getuploadurl", "/c2c/upload", "/ilink/bot/sendmessage"]);
+  assert.deepEqual(f.calls.filter(call => !call.endsWith("getconfig") && !call.endsWith("sendtyping")),
+    ["/ilink/bot/getuploadurl", "/c2c/upload", "/ilink/bot/sendmessage"]);
   const sent = f.sends[0];
   assert.equal(sent.to_user_id, "chat");
   assert.equal(sent.context_token, "synthetic-context");
@@ -65,6 +70,27 @@ test("image transport types, uploads encrypted bytes and confirms the final WeCh
   assert.equal(f.state.replyDeliveries.images.acknowledgedChunks, 1);
   assert.equal(f.state.replyDeliveries.images.inFlight, false);
 });
+
+for (const endpoint of ["getconfig", "sendtyping"]) {
+  test(`image upload and delivery complete while ${endpoint} remains unresolved`, async t => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const f = fixture(t);
+    let release!: () => void, started!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const began = new Promise<void>(resolve => { started = resolve; });
+    f.setTypingHook(async request => { if (request === endpoint) { started(); await gate; } });
+    const delivery = f.client().sendImageReply("chat", [IMAGE], {
+      deliveryKey: `background-${endpoint}`, getImageBytes: async () => PNG,
+    });
+    try {
+      await began;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(f.sends.length, 1);
+      assert.equal(f.state.getReplySentChunks(`background-${endpoint}`), 1);
+    } finally { release(); await delivery; }
+    assert.equal(await delivery, 1);
+  });
+}
 
 test("CDN acceptance followed by unknown WeChat receipt persists uncertainty and forbids all replay", async t => {
   const f = fixture(t);

@@ -8,9 +8,15 @@ import { ILinkClient } from "../../src/wechat/client.js";
 import { ControllerClient } from "../../src/controller/client.js";
 import { WeChatGateway } from "../../src/gateway.js";
 
-test("WeChatGateway end-to-end pollOnce, deduplication across chats, and cursor checkpointing", async () => {
+for (const blockedEndpoint of [undefined, "getconfig", "sendtyping"])
+test(`WeChatGateway end-to-end pollOnce, deduplication and cursor checkpointing${blockedEndpoint ? ` with background ${blockedEndpoint}` : ""}`, async t => {
+  if (blockedEndpoint) t.mock.timers.enable({ apis: ["setTimeout"] });
+  let releaseTyping!: () => void, typingStarted!: () => void;
+  const typingGate = new Promise<void>(resolve => { releaseTyping = resolve; });
+  const typingBegan = new Promise<void>(resolve => { typingStarted = resolve; });
   const createdAtMs = Date.now() - 1000;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-e2e-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
   const credPath = path.join(tmpDir, "account.json");
   const statePath = path.join(tmpDir, "state.json");
   fs.writeFileSync(credPath, JSON.stringify({ token: "bot-tok", accountId: "bot-acc", baseUrl: "https://ilink.example" }));
@@ -22,7 +28,13 @@ test("WeChatGateway end-to-end pollOnce, deduplication across chats, and cursor 
   const ilinkFetch = async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     const body = JSON.parse(String(init?.body || "{}"));
-    if (url.endsWith("/getconfig")) return new Response(JSON.stringify({ ret: 0, typing_ticket: "ticket" }));
+    if (url.endsWith("/getconfig")) order.push(`config:${body.ilink_user_id}`);
+    if (blockedEndpoint && url.endsWith(`/${blockedEndpoint}`)) {
+      typingStarted(); await typingGate;
+    }
+    if (url.endsWith("/getconfig")) {
+      return new Response(JSON.stringify({ ret: 0, typing_ticket: "ticket" }));
+    }
     if (url.endsWith("/sendtyping")) {
       order.push(`typing:${body.ilink_user_id}`);
       return new Response(JSON.stringify({ ret: 0 }));
@@ -88,7 +100,16 @@ test("WeChatGateway end-to-end pollOnce, deduplication across chats, and cursor 
   });
   const gateway = new WeChatGateway({ stateManager: sm, ilink, controller: ctrl });
 
-  const summary1 = await gateway.pollOnce();
+  const poll = gateway.pollOnce();
+  if (blockedEndpoint) {
+    try {
+      await typingBegan;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(forwardedToController.length, 2, "queries reach the Controller before typing resolves");
+      assert.equal(sentToWeChat.length, 2, "body delivery also completes before typing resolves");
+    } finally { releaseTyping(); await poll; }
+  }
+  const summary1 = await poll;
   assert.equal(summary1.polledCount, 2);
   assert.equal(summary1.processedCount, 2);
   assert.equal(summary1.nextSyncBuf, "cursor-after-batch-1");
@@ -98,8 +119,7 @@ test("WeChatGateway end-to-end pollOnce, deduplication across chats, and cursor 
   assert.equal(sentToWeChat[0].text, "Reply to chat-a");
   assert.equal(sentToWeChat[1].text, "Reply to chat-b");
   for (const chatId of ["chat-a", "chat-b"]) {
-    assert.ok(order.indexOf(`authorize:${chatId}`) < order.indexOf(`typing:${chatId}`));
-    assert.ok(order.indexOf(`typing:${chatId}`) < order.indexOf(`forward:${chatId}`));
+    assert.ok(order.indexOf(`authorize:${chatId}`) < order.indexOf(`config:${chatId}`));
   }
 
   // Second poll with same messages must deduplicate both and not forward again
@@ -108,7 +128,6 @@ test("WeChatGateway end-to-end pollOnce, deduplication across chats, and cursor 
   assert.equal(forwardedToController.length, 2);
   assert.equal(sentToWeChat.length, 2);
 
-  fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 test("Poison batch: CHAT_NOT_ALLOWED skips unallowed chat and lets cursor advance for valid chat", async () => {
