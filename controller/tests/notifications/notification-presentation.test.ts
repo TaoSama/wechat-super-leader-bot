@@ -25,6 +25,7 @@ describe("notification result presentation", () => {
     const record = execution(), text = createTerminalNotification(record, NOW, [command(record)])!.text;
     expect(text).toContain("### 已完成"); expect(text).toContain("**任务**：检查订单统计");
     expect(text).toContain("> 订单总数：42\n> - 异常订单：0");
+    expect(text.match(/检查订单统计/gu)).toHaveLength(1);
     expect(text).not.toContain(record.id);
   });
   it.each(["requestId", "nodeId", "sessionId", "prompt", "turnId", "status", "sendRoute", "skills"] as const)(
