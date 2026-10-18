@@ -1,3 +1,4 @@
+import { RESULT_FILE_BYTES } from "../results/contracts.js";
 import { parseArgs } from "node:util";
 import { resolvePath } from "../runtime/state.js";
 import { DEFAULT_MESSAGE_MAX_CHARS } from "../wechat/markdown.js";
@@ -5,6 +6,8 @@ import { DEFAULT_HEALTH_MAX_AGE_MS } from "../runtime/health.js";
 import { DEFAULT_POLL_TIMEOUT_MS, MAX_POLL_TIMEOUT_MS, POLL_NETWORK_MARGIN_MS } from "../runtime/budgets.js";
 import { DEFAULT_CONTEXT_POLICY, MAX_CONTEXT_WINDOW_MS, MAX_SEND_BUDGET, MAX_OUTBOX_LIMIT,
   validateContextPolicy } from "../runtime/context-policy.js";
+
+const MAX_RESULT_FILE_BYTES = 512 * 1024 * 1024;
 
 export type GatewayCliMode = "check" | "establish-baseline" | "poll-once" | "run" | "healthcheck";
 
@@ -35,6 +38,8 @@ export interface ParsedCliOptions {
   leaderMode: "controller" | "codex";
   leaderRoot: string;
   leaderModel: string;
+  resultFileMaxBytes: number;
+  resultPublicOrigin?: string;
 }
 
 export function getHelpText(): string {
@@ -72,6 +77,8 @@ export function getHelpText(): string {
     `      --context-window-ms <ms>   Local reply window (env: GATEWAY_CONTEXT_WINDOW_MS, default: ${DEFAULT_CONTEXT_POLICY.contextWindowMs}; app resource maximum: ${MAX_CONTEXT_WINDOW_MS})`,
     `      --send-budget <count>      Local sends per inbound window (env: GATEWAY_SEND_BUDGET, default: ${DEFAULT_CONTEXT_POLICY.sendBudget}; app resource maximum: ${MAX_SEND_BUDGET})`,
     `      --outbox-limit <count>     Local deferred reply capacity (env: GATEWAY_OUTBOX_LIMIT, default: ${DEFAULT_CONTEXT_POLICY.outboxLimit}; app resource maximum: ${MAX_OUTBOX_LIMIT})`,
+    `      --result-file-max-bytes <n> Maximum result attachment bytes (env: RESULT_FILE_MAX_BYTES, default: ${RESULT_FILE_BYTES}; maximum: 536870912)`,
+    "      --result-public-origin <url> Public result download origin (env: RESULT_PUBLIC_ORIGIN or CONSOLE_PUBLIC_URL)",
     "      --notifications            Deliver plan and goal state notifications (env: GATEWAY_NOTIFICATIONS=true, default: false)",
   ].join("\n");
 }
@@ -106,6 +113,8 @@ export function parseGatewayCli(args: string[], env: NodeJS.ProcessEnv = process
       "leader-mode": { type: "string" },
       "leader-root": { type: "string" },
       "leader-model": { type: "string" },
+      "result-file-max-bytes": { type: "string" },
+      "result-public-origin": { type: "string" },
     },
   });
 
@@ -183,8 +192,16 @@ export function parseGatewayCli(args: string[], env: NodeJS.ProcessEnv = process
   const leaderModel = (values["leader-model"] ?? env.GATEWAY_LEADER_MODEL ?? "gpt-6.1-sol").trim();
   if (!leaderModel) throw new Error("Invalid leader-model: must not be empty");
 
+  const resultFileMaxBytes = Number(values["result-file-max-bytes"] ?? env.RESULT_FILE_MAX_BYTES ?? RESULT_FILE_BYTES);
+  if (!Number.isSafeInteger(resultFileMaxBytes) || resultFileMaxBytes <= 0 || resultFileMaxBytes > MAX_RESULT_FILE_BYTES) {
+    throw new Error("Invalid result-file-max-bytes: must be a positive integer up to 536870912");
+  }
+  const resultPublicOrigin = values["result-public-origin"] || env.RESULT_PUBLIC_ORIGIN || env.CONSOLE_PUBLIC_URL || undefined;
+
   return {
     leaderMode, leaderRoot, leaderModel,
+    resultFileMaxBytes,
+    resultPublicOrigin,
     help: Boolean(values.help),
     mode,
     check: mode === "check",

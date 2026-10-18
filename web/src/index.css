@@ -9,3 +9,11 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+.notification-card { padding: 18px 20px; }
+.notification-card .section-description { margin-top: 10px; }
+.notification-card .execution-times { margin-top: 12px; }
+.notification-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 20px; margin-top: 10px; font-size: 12px; }
+.notification-actions button { min-height: 44px; }
+.notification-delivery-status { font-size: 12px; margin-top: 10px; color: var(--text-secondary); }
+.notification-full-content { max-height: 65vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.8; padding: 16px; margin-top: 12px; background: var(--bg-panel); border-radius: 6px; }

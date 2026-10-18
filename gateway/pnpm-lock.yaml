@@ -216,6 +216,9 @@ importers:
       '@openai/codex-sdk':
         specifier: 0.163.0
         version: 0.163.0(patch_hash=08bde329ccbf938e60829f951c2d90a0657fb408d84ef07d50eb1dbaf868321d)
+      '@super-leader/wechat-text':
+        specifier: file:../packages/wechat-text
+        version: file:../packages/wechat-text
     devDependencies:
       '@types/node':
         specifier: ^26.6.4
@@ -286,6 +289,9 @@ packages:
     engines: {node: '>=16'}
     cpu: [x64]
     os: [win32]
+
+  '@super-leader/wechat-text@file:../packages/wechat-text':
+    resolution: {directory: ../packages/wechat-text, type: directory}
 
   '@types/node@26.6.4':
     resolution: {integrity: sha512-ldVPDCzj7fsaGZrLB0NuHuTvJcsNasysBAqMolr/cgxrLd1xbqxIr3XJiPnHHJUCxj5sNF1vnRj9aWnrVh5Jcg==}
@@ -830,6 +836,8 @@ snapshots:
 
   '@openai/codex@0.163.0-win32-x64':
     optional: true
+
+  '@super-leader/wechat-text@file:../packages/wechat-text': {}
 
   '@types/node@26.6.4':
     dependencies:

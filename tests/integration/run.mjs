@@ -24,6 +24,7 @@ import { verifyPlanExecution, planModelCall, PLAN_CHAT, PLAN_NODE } from './lead
 import { verifyPlanResultHandoff, resultModelCall, RESULT_NODES } from './leader/plan-result-handoff.mjs';
 import { verifyGoalStore } from './leader/goal-store.mjs';
 import { verifyGoals, goalModelCall, GOAL_NODE, GOAL_CHAT } from './leader/goals.mjs';
+import { acknowledgementModelReply, fixtureHistory } from './leader/confirmation-fixture.mjs';
 import { closeTestWebSocket, withTestCleanup } from '../support/cleanup.mjs';
 import { createControllerFixture, createPostgresFixture, waitFor } from '../support/control-plane-fixture.mjs';
 
@@ -33,7 +34,7 @@ const { values } = parseArgs({ options: {
 if (values.help) {
   console.log('Usage: node tests/integration/run.mjs\nRequires built Controller and Gateway, Docker, Go, and postgres:16-alpine. Creates and cleans its own temporary database/container. Uses fixture nodes plus a real Go daemon connected ONLY to simulated desktop sockets; notification delivery uses simulated WeChat only. Real Codex discovery/read is a separate opt-in entrypoint: tests/live/control-plane.mjs.');
 } else {
-  await main().catch(error => { console.error(error.message); process.exitCode = 1; });
+  await main().catch(error => { console.error(error.stack ?? error.message); process.exitCode = 1; });
 }
 
 async function main() {
@@ -54,12 +55,15 @@ async function main() {
   let socket;
   let modelServer;
   const logs = [];
+  const modelFailures = [];
+  let confirmationReplies = 0;
   const fixtureSkills = Array.from({ length: 4 }, (_, index) => ({
     id: String(index + 1).repeat(64), digest: String(index + 5).repeat(64),
     name: '"'.repeat(126) + index, description: 'Test fixture only', path: `/test/${index}/SKILL.md`,
   }));
   const skillRefs = fixtureSkills.map(({ id, digest }) => ({ id, digest })).reverse();
   const received = [];
+  const recordedResults = [];
   const inspections = [];
   const leaderHistoryModel = createLeaderHistoryModelFixture({ nodeId: 'desktop-fixture-node',
     sessionId: '11111111-2222-4333-8444-555555555555' });
@@ -79,7 +83,9 @@ async function main() {
         const terminalInputCall = terminalInputModelCall(last.content);
         const goalCall = goalModelCall(last, request.tools);
         const historyReply = leaderHistoryModel.respond(last);
-        if (goalCall) message = call(goalCall.name, goalCall.args);
+        const acknowledgement = acknowledgementModelReply(request);
+        if (acknowledgement) { message = acknowledgement; confirmationReplies++; }
+        else if (goalCall) message = call(goalCall.name, goalCall.args);
         else if (historyReply) message = historyReply;
         else if (last.type === 'function_call_output') message.content = `Tool evidence: ${last.output}`;
         else if (planCall) message = call(planCall.name, planCall.args);
@@ -101,6 +107,7 @@ async function main() {
         res.end(JSON.stringify({ status: 'completed', output }));
       } catch (error) {
         res.writeHead(500); res.end('Mock model fixture error');
+        modelFailures.push({ name: error.name, message: error.message });
         logs.push(`Mock model fixture failed: ${error.name}`);
       }
     });
@@ -116,7 +123,11 @@ async function main() {
       LEADER_MODE: 'model', LEADER_MODEL_BASE_URL: `http://127.0.0.1:${modelServer.address().port}/v1`,
       LEADER_MODEL_NAME: 'local-fixture-only', LEADER_MODEL_API_KEY: 'non-secret-test-key',
     } });
-    const { base, port, env, request } = controller;
+    const { base, port, env, request: controllerRequest } = controller;
+    const request = async (path, body, authenticated) => {
+      try { return await controllerRequest(path, body, authenticated); }
+      catch (error) { throw new Error(`Integration request failed: ${path} ${body?.messageId ?? ''}`, { cause: error }); }
+    };
     const start = () => controller.start();
     const { PostgresStore } = await import('../../controller/dist/store/postgres.js');
     const stores = [new PostgresStore(env.DATABASE_URL), new PostgresStore(env.DATABASE_URL)];
@@ -216,6 +227,12 @@ async function main() {
       await once(socket, 'open');
       socket.on('message', raw => {
       const command = JSON.parse(raw.toString());
+      if (command.type === 'read_history') {
+        const session = sessions().find(item => item.id === command.sessionId);
+        assert(session, 'History requested from an unknown synthetic session');
+        socket.send(JSON.stringify(fixtureHistory(command, session, received, recordedResults)));
+        return;
+      }
       if (command.type === 'inspect_command') {
         inspections.push(command);
         socket.send(JSON.stringify({ type: 'result', commandId: command.commandId,
@@ -224,16 +241,18 @@ async function main() {
       }
       if (command.type === 'inspect_turn') {
         inspections.push(command);
-        socket.send(JSON.stringify({ type: 'result', commandId: command.commandId, turnId: command.turnId,
-          status: 'completed', output: 'exact tracked turn final' }));
+        const result = { type: 'result', commandId: command.commandId, turnId: command.turnId,
+          status: 'completed', output: 'exact tracked turn final' };
+        recordedResults.push({ ...result, nodeId: 'test-node' }); socket.send(JSON.stringify(result));
         return;
       }
       if (command.type !== 'command') return;
       deliveries++;
       received.push(command);
       if (command.prompt === 'leave-pending') return;
-      socket.send(JSON.stringify({ type: 'result', commandId: command.commandId, status: command.action === 'send' ? 'accepted' : 'completed',
-        ...(command.action === 'send' ? { turnId: `turn-${command.commandId}` } : {}), output: 'integration-result' }));
+      const result = { type: 'result', commandId: command.commandId, status: command.action === 'send' ? 'accepted' : 'completed',
+        ...(command.action === 'send' ? { turnId: `turn-${command.commandId}` } : {}), output: 'integration-result' };
+      recordedResults.push({ ...result, nodeId: 'test-node' }); socket.send(JSON.stringify(result));
       });
       const sessions = () => ['test-session', 'pending-session'].map(id => ({
       id, provider: 'codex-app', title: 'integration', cwd: '/test', status: 'idle', loaded: true, capabilities: ['read', 'send'], observedAt: new Date().toISOString(),
@@ -368,6 +387,9 @@ async function main() {
       const goalIds = await verifyGoals({ WebSocket, base, request, nodeToken: goalToken, store: planStore, restart, waitFor });
       await verifyGoalNotifications({ base, token, request, store: planStore, restart, goalIds });
     }, [{ label: 'plan PostgreSQL store', cleanup: () => planStore.close() }]);
+    assert.deepEqual(modelFailures, [], 'Model fixture assertions failed; a fallback receipt must not hide them');
+    assert(confirmationReplies > 0, 'Model-generated confirmation was not exercised');
+    console.log('PASS model-generated confirmations read fresh session history, use matching accepted/completed turns only, and never promote acceptance to execution');
   }, [
     { label: 'fixture WebSocket', cleanup: () => closeTestWebSocket(socket) },
     { label: 'fixture Controller', cleanup: () => controller?.stop() },

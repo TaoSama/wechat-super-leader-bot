@@ -5,6 +5,8 @@ import { isTerminalHistoryTarget } from "../features/sessions/terminal-session";
 import { parseConsoleExecutions } from "../features/leader/execution-contract";
 import { parseConsoleGoals } from "../features/leader/goal-contract";
 import { normalizeInputReceipt, TERMINAL_SESSION_ID } from "../features/sessions/input-receipt";
+import { parseAutomations } from "../features/notifications/automation-contract";
+import { parseDeliveries } from "../features/notifications/delivery-contract";
 
 const VALID_COMMAND_STATUSES: ReadonlySet<CommandStatus> = new Set([
   "queued",
@@ -160,5 +162,6 @@ export function normalizeControlPlaneStatus(raw: unknown): ControlPlaneStatusRes
 
   const leaderMode = data.leaderMode === "rules" || data.leaderMode === "model" ? data.leaderMode : "unknown";
   const leaderModel = typeof data.leaderModel === "string" && data.leaderModel.trim() ? data.leaderModel : undefined;
-  return { nodes, sessions, commands, leaderMode, leaderModel, executions: parseConsoleExecutions(data.executions), goals: parseConsoleGoals(data.goals) };
+  return { nodes, sessions, commands, leaderMode, leaderModel, executions: parseConsoleExecutions(data.executions), goals: parseConsoleGoals(data.goals),
+    automations: parseAutomations(data.automations), deliveries: parseDeliveries(data.deliveries) };
 }

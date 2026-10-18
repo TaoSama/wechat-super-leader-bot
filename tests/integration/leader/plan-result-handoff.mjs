@@ -5,6 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { PLAN_CHAT } from './plan-execution.mjs';
 import { openPlanConsoleProbe } from './plan-console.mjs';
 import { closeTestWebSocket, withTestCleanup } from '../../support/cleanup.mjs';
+import { fixtureHistory } from './confirmation-fixture.mjs';
 
 export const RESULT_NODES = ['result-source-node', 'result-destination-node'];
 const PREFIX = 'result-fixture:';
@@ -31,11 +32,13 @@ export function resultModelCall(text) {
 export async function verifyPlanResultHandoff({ WebSocket, base, request, nodeTokens, store, reopenStore, restart, waitFor }) {
   const { executionRequestId } = await import('../../../controller/dist/leader/plans/execution.js');
   const sockets = new Map(), errors = [], delivered = [], inspections = [], acknowledgements = [], executionIds = [];
+  const recordedResults = [];
   let timer, probe;
   const healthy = () => { if (errors.length) throw errors[0]; };
   const write = (nodeId, message) => {
     const socket = sockets.get(nodeId);
     assert(socket?.readyState === WebSocket.OPEN, 'Result fixture socket is not open');
+    if (message.type === 'result') recordedResults.push({ ...message, nodeId });
     socket.send(JSON.stringify(message), error => { if (error) errors.push(error); });
   };
   const frame = (nodeId, type) => ({ type, ...(type === 'hello' ? { version: 1, nodeId } : {}),
@@ -53,7 +56,11 @@ export async function verifyPlanResultHandoff({ WebSocket, base, request, nodeTo
       socket.on('message', raw => {
         try {
           const item = JSON.parse(raw.toString());
-          if (item.type === 'command') {
+          if (item.type === 'read_history') {
+            const session = frame(nodeId, 'heartbeat').sessions.find(session => session.id === item.sessionId);
+            assert(session, 'History requested from an unknown result session');
+            write(nodeId, fixtureHistory(item, session, delivered, recordedResults));
+          } else if (item.type === 'command') {
             assert.equal(item.nodeId, nodeId);
             assert.equal(item.action, 'send');
             assert(TARGETS.some(target => target.nodeId === nodeId && target.sessionId === item.sessionId));

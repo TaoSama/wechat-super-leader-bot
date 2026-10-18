@@ -13,6 +13,8 @@ export class CommandError extends Error {
   constructor(public readonly httpStatus: number, message: string) { super(message); }
 }
 type Hub = Pick<NodeHub, "isNodeConnected" | "getNodeSession" | "getNodeSkills" | "registerCommandResultWaiter" | "sendCommand">;
+export type AutomationCommandAuthorizer = (authority: Extract<CommandAuthority, { type: "automation" }>,
+  command: CommandRecord) => Promise<boolean | "paused">;
 
 /** One durable submission path. Only an atomic queued claim permits a new mutation. */
 export class CommandService {
@@ -20,7 +22,8 @@ export class CommandService {
   private tick?: Promise<void>;
   private cursor = "";
   constructor(private store: IStore, private hub: Hub, private ttlSeconds: number,
-    private readonly onStatusChanged?: () => void, private readonly isChatAllowed: (chatId: string) => boolean = () => true) {}
+    private readonly onStatusChanged?: () => void, private readonly isChatAllowed: (chatId: string) => boolean = () => true,
+    private readonly isAutomationAuthorized?: AutomationCommandAuthorizer) {}
 
   start(): void {
     if (this.timer) return;
@@ -121,13 +124,14 @@ export class CommandService {
     this.cursor = records.length === QUEUE_BATCH_SIZE ? records.at(-1)!.commandId : "";
     for (const record of records) await this.dispatchOne(record,0);
   }
-  private async authorized(record: CommandRecord): Promise<boolean> {
+  private async authorized(record: CommandRecord): Promise<boolean | "paused"> {
     const authority = record.authority;
     if (!authority || authority.type === "admin") return true;
     if (authority.type === "console") return Date.parse(authority.expiresAt)>Date.now() &&
       !!await this.store.getConsoleSession(authority.tokenHash,new Date().toISOString());
     if (!this.isChatAllowed(authority.chatId)) return false;
     if (authority.type === "chat") return true;
+    if (authority.type === "automation") return this.isAutomationAuthorized ? this.isAutomationAuthorized(authority, record) : false;
     if (authority.type === "plan") {
       const plan = await this.store.getExecution(authority.id);
       return !!plan && plan.chatId === authority.chatId && plan.status === "active" && plan.expiresAt>Date.now() &&
@@ -140,7 +144,9 @@ export class CommandService {
   private async dispatchOne(record: CommandRecord, waitMs: number): Promise<void> {
     if (record.status !== "queued") return;
     if (Date.parse(record.expiresAt)<=Date.now()) { await this.store.markExpiredActiveCommandsUncertain(); return; }
-    if (!await this.authorized(record)) {
+    const authorization = await this.authorized(record);
+    if (authorization === "paused") return;
+    if (!authorization) {
       await this.store.cancelQueuedCommand(record.commandId,{type:"admin"}); this.onStatusChanged?.(); return;
     }
     let route: SendRoute | undefined;
@@ -149,7 +155,13 @@ export class CommandService {
     if (!route) return;
     const claimed = await this.store.claimQueuedCommand(record.commandId,route);
     if (!claimed) return;
-    if (!await this.authorized(claimed)) { await this.store.updateCommandStatus(claimed.commandId,"failed",undefined,"Dispatch authority revoked before transmission"); return; }
+    const claimedAuthorization = await this.authorized(claimed);
+    if (claimedAuthorization === "paused") {
+      await this.store.requeueClaimedCommand(claimed.commandId);
+      this.onStatusChanged?.();
+      return;
+    }
+    if (!claimedAuthorization) { await this.store.updateCommandStatus(claimed.commandId,"failed",undefined,"Dispatch authority revoked before transmission"); return; }
     await this.transmit(claimed,waitMs);
   }
   private async transmit(record: CommandRecord, waitMs: number): Promise<void> {

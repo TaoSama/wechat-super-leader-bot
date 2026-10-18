@@ -17,6 +17,7 @@ export interface Config {
   webDistDir?: string;
   leader?: { baseUrl: string; apiKey: string; model: string };
   consolePublicUrl?: string;
+  taskNotifications?: { fileMaxBytes: number; retentionMs: number; tickMs: number; fallbackEndpointsJson?: string };
 }
 
 function parseStrictInt(value: string | undefined, name: string, min: number, max: number, defaultValue: number): number {
@@ -166,5 +167,11 @@ export function loadConfig(): Config {
     webDistDir: process.env.WEB_DIST_DIR,
     leader,
     consolePublicUrl,
+    taskNotifications: {
+      fileMaxBytes: parseStrictInt(process.env.RESULT_FILE_MAX_BYTES, "RESULT_FILE_MAX_BYTES", 1, 512 * 1024 * 1024, 50 * 1024 * 1024),
+      retentionMs: parseStrictInt(process.env.RESULT_RETENTION_HOURS, "RESULT_RETENTION_HOURS", 1, 8760, 168) * 60 * 60_000,
+      tickMs: parseStrictInt(process.env.TASK_NOTIFICATION_TICK_MS, "TASK_NOTIFICATION_TICK_MS", 100, 60_000, 5_000),
+      fallbackEndpointsJson: process.env.FALLBACK_WEBHOOKS,
+    },
   };
 }

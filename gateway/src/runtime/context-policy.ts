@@ -79,7 +79,7 @@ export function getDeferReason(
   return undefined;
 }
 
-function effectiveRemaining(state: ContextBudgetState, policy: ContextPolicy): number {
+export function effectiveRemaining(state: ContextBudgetState, policy: ContextPolicy): number {
   const spent = state.grantedBudget === undefined ? 0 : Math.max(0, state.grantedBudget - state.remaining);
   return Math.min(state.remaining, Math.max(0, policy.sendBudget - spent));
 }

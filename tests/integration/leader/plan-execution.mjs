@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { openPlanConsoleProbe, assertProjection } from './plan-console.mjs';
+import { fixtureHistory } from './confirmation-fixture.mjs';
 
 export const PLAN_NODE = 'plan-fixture-node';
 export const PLAN_CHAT = 'plan-fixture-chat';
@@ -34,6 +35,7 @@ export function planModelCall(text) {
 export async function verifyPlanExecution({ WebSocket, base, request, nodeToken, store, restart, waitFor }) {
   const { createExecution, executionRequestId, EXECUTION_CLAIM_MS } = await import('../../../controller/dist/leader/plans/execution.js');
   const deliveries = [], inspections = [], acknowledgements = [], errors = [], executionIds = [];
+  const recordedResults = [];
   let socket, timer, consoleProbe, generation = 0;
   let catalog = [skill];
   const sessions = [SESSION_A, SESSION_B].map(id => ({
@@ -45,6 +47,7 @@ export async function verifyPlanExecution({ WebSocket, base, request, nodeToken,
     skills: catalog });
   const write = message => {
     if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('Plan fixture socket is not open');
+    if (message.type === 'result') recordedResults.push({ ...message, nodeId: PLAN_NODE });
     socket.send(JSON.stringify(message), error => { if (error) errors.push(error); });
   };
   const publish = async () => {
@@ -64,7 +67,11 @@ export async function verifyPlanExecution({ WebSocket, base, request, nodeToken,
     socket.on('message', raw => {
       try {
         const message = JSON.parse(raw.toString());
-        if (message.type === 'command') {
+        if (message.type === 'read_history') {
+          const session = frame('heartbeat').sessions.find(item => item.id === message.sessionId);
+          assert(session, 'History requested from an unknown plan session');
+          write(fixtureHistory(message, session, deliveries, recordedResults));
+        } else if (message.type === 'command') {
           assert.equal(message.nodeId, PLAN_NODE);
           assert.equal(message.action, 'send');
           assert(sessions.some(session => session.id === message.sessionId));

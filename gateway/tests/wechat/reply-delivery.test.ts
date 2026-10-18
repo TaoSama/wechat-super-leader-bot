@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { StateManager } from "../../src/runtime/state.js";
-import { ILinkClient } from "../../src/wechat/client.js";
+import { ILinkClient, splitWeChatReply } from "../../src/wechat/client.js";
 import { ILinkSendReceiptError } from "../../src/wechat/send-receipt.js";
 
 const MULTIPART_TEST_SEND_BUDGET = 1000;
@@ -36,18 +37,18 @@ function fixture(t: TestContext) {
     client: (manager = state) => new ILinkClient({ stateManager: manager, fetchImpl }) };
 }
 
-test("default delivery preserves over-budget raw Markdown and emoji in 3800-unit chunks", async t => {
+test("default delivery formats the complete body and preserves over-budget code and emoji", async t => {
   const f = fixture(t);
   const original = "中".repeat(3799) + "🚀\n\n```ts\n  **literal**\n```\n\t";
   const result = await f.client().sendMarkdownReply("chat", original, { deliveryKey: "default-budget" });
   assert.equal(result, 2);
   assert.equal(f.sent[0].length, 3799);
-  assert.equal(f.sent.join(""), original);
+  assert.equal(f.sent.join(""), "中".repeat(3799) + "🚀\n\n  **literal**\n");
   assert.ok(f.sent.every(chunk => chunk.length <= 3800 && Buffer.from(chunk, "utf8").toString("utf8") === chunk));
   assert.equal(f.state.getReplySentChunks("default-budget"), result);
 });
 
-test("transport preserves full Markdown, Unicode, code fences and whitespace in every mode", async t => {
+test("transport renders Markdown before splitting and resumes the same display after restart", async t => {
   const f = fixture(t);
   const original = " \n# 标题🚀\n\n**重点** [文档](https://example.test/a_b)\n```ts\n  a_b += 1;\n```\n\t";
   assert.ok(original.length > 9);
@@ -55,7 +56,7 @@ test("transport preserves full Markdown, Unicode, code fences and whitespace in 
     deliveryKey: "full", maxCharsPerChunk: 9, splitMultiPart: false,
   });
   assert.equal(result, f.sent.length);
-  assert.equal(f.sent.join(""), original);
+  assert.equal(f.sent.join(""), "标题🚀\n\n重点 文档 (https://example.test/a_b)\n  a_b += 1;\n");
   assert.ok(f.sent.every(chunk => chunk.length <= 9 && Buffer.from(chunk, "utf8").toString("utf8") === chunk));
   const reloaded = new StateManager(f.credentials, f.statePath);
   assert.equal(reloaded.getReplySentChunks("full"), result);
@@ -162,14 +163,53 @@ test("changed reply body, recipient or chunk budget fails closed", async t => {
   assert.equal(f.sent.length, 2);
 });
 
-test("typing failure leaves raw body delivery available", async t => {
+test("typing failure leaves formatted body delivery available", async t => {
   const f = fixture(t);
   const client = new ILinkClient({ stateManager: f.state, fetchImpl: async (input, init) => {
     if (!String(input).endsWith("sendmessage")) throw new Error("private-ticket-fetch-error");
     return f.fetchImpl(input, init);
   } });
   assert.equal(await client.sendMarkdownReply("chat", "**原文**", { deliveryKey: "typing-failed" }), 1);
-  assert.deepEqual(f.sent, ["**原文**"]);
+  assert.deepEqual(f.sent, ["原文"]);
+});
+
+test("upgrading a partially acknowledged raw Markdown plan preserves its original boundaries", async t => {
+  const f = fixture(t);
+  const original = "**旧标题**\n①第一项 ②第二项\n```ts\n  a_b += 1;\n```\n";
+  const budget = 12, chunks = splitWeChatReply(original, budget), key = "legacy-raw";
+  const digest = createHash("sha256").update(JSON.stringify([
+    f.state.getLoginFingerprint(), "chat", budget, original,
+  ])).digest("hex");
+  f.state.prepareReplyDelivery(key, digest, chunks.length);
+  f.state.beginReplyChunk(key, 0);
+  f.state.confirmReplyChunk(key, 0);
+  const resumed = new StateManager(f.credentials, f.statePath, f.state.policy);
+  await f.client(resumed).sendMarkdownReply("chat", original, { deliveryKey: key, maxCharsPerChunk: budget });
+  assert.deepEqual(f.sent, chunks.slice(1));
+  assert.equal(resumed.getReplySentChunks(key), chunks.length);
+  await f.client(resumed).sendMarkdownReply("chat", original, { deliveryKey: key, maxCharsPerChunk: budget });
+  assert.equal(f.sent.length, chunks.length - 1, "old acknowledged prefix must never be repeated");
+});
+
+test("frozen result fragments remain verbatim and occupy exactly their planned message", async t => {
+  const f = fixture(t);
+  const original = "**原文**\n①" + "正文".repeat(1895);
+  assert.ok(original.length <= 3800);
+  await f.client().sendMarkdownReply("chat", original, { deliveryKey: "result-fragment", verbatim: true });
+  assert.deepEqual(f.sent, [original]);
+});
+
+test("an unknown old Markdown send remains quarantined through the renderer upgrade", async t => {
+  const f = fixture(t);
+  const original = "**已开始**", key = "legacy-unknown";
+  const digest = createHash("sha256").update(JSON.stringify([
+    f.state.getLoginFingerprint(), "chat", 3800, original,
+  ])).digest("hex");
+  f.state.prepareReplyDelivery(key, digest, 1);
+  f.state.beginReplyChunk(key, 0);
+  const resumed = new StateManager(f.credentials, f.statePath, f.state.policy);
+  await assert.rejects(f.client(resumed).sendMarkdownReply("chat", original, { deliveryKey: key }), /uncertain/);
+  assert.equal(f.sent.length, 0);
 });
 
 test("multipart timeout bounds an uncooperative send and persists its unknown outcome", async t => {

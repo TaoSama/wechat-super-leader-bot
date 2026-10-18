@@ -1,3 +1,4 @@
+import { acknowledgementFixture } from "./acknowledgement-fixture.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { CommandService } from "../../src/commands/service.js";
 import { LeaderOrchestrator } from "../../src/leader/orchestrator.js";
@@ -25,6 +26,8 @@ class ScriptedModel implements LeaderModel {
         name: AUTHORIZATION_TOOL_NAME, arguments: JSON.stringify({ intent: "task" }),
       } }],
     };
+    const acknowledgement = acknowledgementFixture(messages);
+    if (acknowledgement) return acknowledgement;
     this.calls.push(structuredClone(messages));
     const reply = this.replies.shift();
     if (!reply) throw new Error("Missing queued Leader fixture response");

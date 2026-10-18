@@ -21,7 +21,7 @@ export class NotificationDiagnosticError extends Error {
   constructor() { super("Notification diagnostic write failed"); }
 }
 
-function reportNotificationSendFailure(notificationId: string, attemptId: string, errorType: string): void {
+export function reportNotificationSendFailure(notificationId: string, attemptId: string, errorType: string): void {
   try {
     const line = JSON.stringify({ event: "notification_send_failed", notificationId, attemptId, errorType }) + "\n";
     if (fs.writeSync(STDERR_FD, line) !== Buffer.byteLength(line)) throw new NotificationDiagnosticError();
@@ -275,6 +275,7 @@ export class NotificationOutbox {
       this.sentThisCycle = true;
       await this.options.ilink.sendMarkdownReply(item.chatId, item.text, {
         deliveryKey: ref.deliveryKey, maxCharsPerChunk: ref.splitMaxChars, splitMultiPart: ref.splitMultiPart, kind,
+        verbatim: true,
         timeoutMs, signal: this.options.signal,
         shouldContinue: () => {
           if (item.attemptExpiresAt! <= Date.now() || item.expiresAt <= Date.now()) throw new LocalSendDeferredError("window_expired");

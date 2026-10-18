@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { RAW_REPLY } from './reliable-delivery.mjs';
 import { verifyBudgetNotifications } from './wechat-budget-notifications.mjs';
 
 export const BUDGET_REPLY_TASK = '请输出完整合成预算报告以验证默认十片后只读恢复';
-export const BUDGET_REPLY = RAW_REPLY.slice(0, RAW_REPLY.lastIndexOf('\n', 4_400)).trim();
+const BUDGET_BODY = '甲'.repeat(4_100);
+export const BUDGET_REPLY = '# 合成预算报告\n\n**' + BUDGET_BODY + '**\n\n终段完整。';
+const BUDGET_DISPLAY_REPLY = '合成预算报告\n\n' + BUDGET_BODY + '\n\n终段完整。';
 const DEFAULT_SEND_BUDGET = 10;
 // Ordinary model answers are bounded to 4500 chars; small explicit chunks exercise ten-send
 // exhaustion without changing that Controller contract. Notification tests use default 3800.
@@ -17,6 +18,9 @@ export async function verifyWechatBudget(harness) {
   const { input, runGateway, sent, statePath, incoming, evidence, chatId, contextToken, controllerRequests,
     validContexts, restartController, query, wireEvents } = harness;
   const state = async () => JSON.parse(await readFile(statePath, 'utf8'));
+  assert(BUDGET_REPLY.length <= 4_500, 'Budget response exceeded the ordinary Controller response contract');
+  assert(BUDGET_DISPLAY_REPLY.length > DEFAULT_SEND_BUDGET * REPLY_CHUNK_CHARS,
+    'Formatted response must require a genuine eleventh send');
   const messageId = randomUUID(), key = JSON.stringify(['synthetic-account', chatId, messageId]);
   const start = sent.length;
   await input(BUDGET_REPLY_TASK, messageId, contextToken, { gatewayEnv: { GATEWAY_MAX_CHARS: String(REPLY_CHUNK_CHARS) } });
@@ -63,7 +67,9 @@ export async function verifyWechatBudget(harness) {
     assert.equal(matches.length, 1, 'Confirmed original reply part resent or missing at index ' + index);
     return matches[0];
   });
-  assert.equal(replyParts.map(text).join(''), BUDGET_REPLY, 'GET recovery changed or truncated frozen Markdown');
+  assert.equal(replyParts.map(text).join(''), BUDGET_DISPLAY_REPLY,
+    'GET recovery changed or truncated the frozen formatted reply');
+  assert(!replyParts.map(text).join('').includes('**'), 'Ordinary reply leaked Markdown emphasis');
   assert(replyParts.slice(DEFAULT_SEND_BUDGET).every(part => part.context_token === nextContext));
   assert(replyParts.slice(DEFAULT_SEND_BUDGET).some(part => text(part).length > 200),
     'Restart applied new CLI split config to an existing frozen reply');
@@ -85,8 +91,8 @@ export async function verifyWechatBudget(harness) {
     originalModelCalls: initialModels, confirmedPartResends: 0, frozenSplitSurvivesConfigChange: true,
     exactReconstruction: true });
 
-  const refreshContext = (message = query, token = 'synthetic-notification-context-' + randomUUID()) =>
-    input(message, randomUUID(), token);
+  const refreshContext = (message = query, token = 'synthetic-notification-context-' + randomUUID(), options) =>
+    input(message, randomUUID(), token, options);
   await harness.setSessionStatus('idle');
   await verifyBudgetNotifications({ ...harness, refreshContext });
   evidence('PASS-default-budget', { realControllerProcess: true, realGatewayCli: true,

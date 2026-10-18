@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as crypto from "node:crypto";
 import { WeChatAccount, GatewaySyncState, ReplyDeliveryState } from "../types.js";
 import { DeliveryState } from "./delivery-state.js";
-import type { ContextPolicy } from "./context-policy.js";
+import { effectiveRemaining, type ContextPolicy } from "./context-policy.js";
 
 export const MAX_PROCESSED_MESSAGE_KEYS = 1000;
 export const MAX_REPLY_DELIVERIES = 1000;
@@ -59,6 +59,14 @@ export class StateManager extends DeliveryState {
   public baselineInProgress: boolean = false;
   public baselineEstablishedAt: string | undefined = undefined;
   private processedMessageKeySet: Set<string> = new Set();
+  private replyEvidenceProtection: (key: string) => boolean = () => false;
+
+  public setReplyEvidenceProtection(protect: (key: string) => boolean): void { this.replyEvidenceProtection = protect; }
+
+  public remainingSendBudget(chatId: string): number {
+    const budget = this.contextBudgets[chatId];
+    return budget && this.canSendToChat(chatId) ? effectiveRemaining(budget, this.policy) : 0;
+  }
 
   constructor(credentialsPath: string, statePath?: string, policy: Partial<ContextPolicy> = {}) {
     super(policy);
@@ -341,7 +349,7 @@ export class StateManager extends DeliveryState {
     let removedKey: string | undefined;
     if (Object.keys(next).length >= MAX_REPLY_DELIVERIES) {
       const completed = Object.keys(next).find(key => next[key].acknowledgedChunks === next[key].totalChunks && !next[key].inFlight &&
-        !this.outbox[key] && !(key.startsWith("image-reply:") && this.outbox[key.slice("image-reply:".length)]));
+        !this.replyEvidenceProtection(key) && !this.outbox[key] && !(key.startsWith("image-reply:") && this.outbox[key.slice("image-reply:".length)]));
       if (!completed) throw new Error("WeChat reply delivery state capacity exhausted");
       delete next[completed];
       removedKey = completed;

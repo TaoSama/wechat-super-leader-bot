@@ -31,6 +31,14 @@ export async function pgClaimQueuedCommand(pool: pg.Pool, map: Mapper, id: strin
   finally { client.release(); }
 }
 
+/** Atomic row update retains FIFO order and cannot revive expired, accepted, or uncertain work. */
+export async function pgRequeueClaimedCommand(pool: pg.Pool, map: Mapper, id: string): Promise<CommandRecord | null> {
+  const result = await pool.query(`UPDATE commands SET status='queued',updated_at=NOW()
+    WHERE command_id=$1 AND status='pending' AND action='send' AND authority->>'type'='automation'
+      AND turn_id IS NULL AND input_receipt IS NULL AND expires_at>NOW() RETURNING *`, [id]);
+  return result.rows[0] ? map(result.rows[0]) : null;
+}
+
 export async function pgCancelQueuedCommand(pool: pg.Pool, map: Mapper, id: string, authority?: CommandAuthority): Promise<CommandRecord | null> {
   const client = await pool.connect();
   try {
