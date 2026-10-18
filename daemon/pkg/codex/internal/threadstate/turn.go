@@ -27,7 +27,8 @@ func ExtractTurnOutput(turnMap map[string]any) (string, error) {
 	if !ok || items == nil {
 		return "", errors.New("turn output items unavailable")
 	}
-	var agentOutputs []string
+	var finalOutput, lastUnphasedOutput string
+	hasFinalOutput := false
 
 	for _, rawItem := range items {
 		item, ok := rawItem.(map[string]any)
@@ -44,18 +45,32 @@ func ExtractTurnOutput(turnMap map[string]any) (string, error) {
 				return "", errors.New("turn output text unavailable")
 			}
 			text = strings.TrimSpace(text)
-			if text != "" {
-				agentOutputs = append(agentOutputs, text)
+			phase := ""
+			if rawPhase := item["phase"]; rawPhase != nil {
+				phase, ok = rawPhase.(string)
+				if !ok {
+					return "", errors.New("turn output phase invalid")
+				}
+			}
+			switch phase {
+			case "final_answer":
+				finalOutput, hasFinalOutput = text, true
+			case "":
+				lastUnphasedOutput = text
+			case "commentary", "partial_answer":
+				// These messages are explicitly nonterminal.
+			default:
+				return "", errors.New("turn output phase invalid")
 			}
 		}
 	}
 
-	if len(agentOutputs) == 0 {
-		return "", nil
+	if hasFinalOutput {
+		return TruncateText(finalOutput, MaxReadLineLength), nil
 	}
 
-	combined := strings.Join(agentOutputs, "\n\n")
-	return TruncateText(combined, MaxReadLineLength), nil
+	// Older providers omit phase; retain only their last recorded message.
+	return TruncateText(lastUnphasedOutput, MaxReadLineLength), nil
 }
 
 // ExtractTurnError provides static sanitized error descriptions without leaking upstream error payloads or keys.

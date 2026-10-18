@@ -38,7 +38,7 @@ export async function submitTerminalPlan(store: IStore, commands: Pick<CommandSe
     data.commandIds.push(command.commandId);
     const status = command.status === "input-written" ? "输入已写入，执行未确认" :
       command.status === "failed" ? "终端输入投递失败，未确认执行" : "终端输入投递结果待核查，执行未确认";
-    return { text: `${status}。\n${TERMINAL_INPUT_WARNING}\n指令：${command.commandId}`, commandId: command.commandId };
+    return { text: `${status}。\n${TERMINAL_INPUT_WARNING}`, commandId: command.commandId };
   } catch (error) {
     if (error instanceof CommandError || error instanceof ConflictError) {
       return { text: `终端输入未确认执行，请核查已有指令；不会自动重发。\n${TERMINAL_INPUT_WARNING}` };

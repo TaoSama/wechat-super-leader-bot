@@ -3,7 +3,8 @@ import pg from "pg";
 import { MemoryStore } from "../../src/store/memory.js";
 import { PostgresStore } from "../../src/store/postgres.js";
 import { ConflictError, type IStore } from "../../src/store/interface.js";
-import { createExecution, type ExecutionRecord } from "../../src/leader/plans/execution.js";
+import { createExecution, executionRequestId, type ExecutionRecord } from "../../src/leader/plans/execution.js";
+import type { CommandRecord } from "../../src/types.js";
 import { normalizeNotification, NOTIFICATION_TTL_MS, NOTIFICATION_ATTEMPT_MS, type StoredNotification } from "../../src/notifications/contracts.js";
 
 vi.mock("pg", () => ({ default: { Pool: vi.fn() } }));
@@ -27,6 +28,7 @@ type NotificationRow = ReturnType<typeof notificationRow>;
 class NotificationPool {
   executions = new Map<string, ExecutionRow>();
   notifications = new Map<string, NotificationRow>();
+  commandRows = new Map<string, Record<string, unknown>>();
   queries: string[] = [];
   failInsert = false;
   corruptUpdate = false;
@@ -36,6 +38,10 @@ class NotificationPool {
   async query(sql: string, params: unknown[] = []) {
     const query = sql.replace(/\s+/g, " ").trim();
     this.queries.push(query);
+    if (query === "SELECT * FROM commands WHERE request_id = $1") {
+      const row = this.commandRows.get(String(params[0]));
+      return { rows: row ? [structuredClone(row)] : [] };
+    }
     if (query.startsWith("SELECT pg_advisory_xact_lock(") || query.startsWith("SELECT id FROM leader_goals WHERE chat_id=$1")) return this.result();
     if (/^(CREATE |ALTER |DELETE FROM node_sessions|UPDATE commands)/.test(query)) return this.result();
     if (query === "SELECT * FROM leader_notifications ORDER BY id FOR UPDATE") return this.result([...this.notifications.values()]);
@@ -143,8 +149,8 @@ for (const [name, factory] of [["memory", () => new MemoryStore()], ["postgres S
           expect(notification).toMatchObject({ id: record.id, source: { type: "plan", id: record.id }, chatId: record.chatId, kind: status,
             status: "pending", createdAt: NOW, expiresAt: NOW + NOTIFICATION_TTL_MS });
           expect(notification!.text.length).toBeLessThanOrEqual(2000);
-          expect(notification!.text).not.toContain("private prompt");
-          if (status !== "completed") expect(notification!.text).toContain("不表示已运行的原会话任务停止");
+          expect(notification!.text).toContain("**任务**：private prompt");
+          if (status !== "completed") expect(notification!.text).toContain("原会话中的任务可能仍在执行");
           await expect(store.compareAndSetExecution({ ...record, revision: 2, status }, 1, NOW + 1)).resolves.toBeNull();
           expect(await store.getNotification(record.id, NOW)).toEqual(notification);
         }
@@ -269,14 +275,14 @@ it("rolls back execution and outbox together when INSERT fails, then creates bot
   expect((await store.getNotification(record.id, NOW))!.status).toBe("pending");
 });
 
-it("rejects forged row metadata, arbitrary text and unknown fields without publishing", async () => {
+it("rejects forged row metadata, invalid text and unknown fields without publishing", async () => {
   const { store, pool } = postgres();
   const record = await terminal(store);
   const row = pool.notifications.get(record.id)!;
   row.chat_id = "forged";
   await expect(store.getNotification(record.id, NOW)).rejects.toThrow("metadata");
   row.chat_id = "allowed";
-  for (const invalid of [{ ...row.data, text: "raw secret output" }, { ...row.data, output: "secret" },
+  for (const invalid of [{ ...row.data, text: " " }, { ...row.data, text: "x".repeat(2001) }, { ...row.data, output: "secret" },
     { ...row.data, executionId: uuid(999) }, { ...row.data, attemptId: attempt }]) expect(() => normalizeNotification(invalid)).toThrow();
   pool.corruptUpdate = true;
   await expect(store.claimNotification(record.id, attempt, ["allowed"], NOW)).rejects.toThrow("metadata");
@@ -297,4 +303,51 @@ it("startup and stale CAS never backfill notifications for pre-existing terminal
     expect(await store.compareAndSetExecution({ ...record, revision: 2, status: "completed" }, 1, NOW)).toBeNull();
     expect(await store.getNotification(record.id, NOW)).toBeNull();
   }
+});
+
+it.each(["memory", "postgres"] as const)("%s terminal CAS captures only the bound command result in its outbox", async kind => {
+  const sql = postgres(), memory = new MemoryStore(), store = kind === "memory" ? memory : sql.store;
+  const record = execution();
+  await store.createExecutionIfAbsent(record);
+  const claimed = { ...record, revision: 2, attempts: [{ token: attempt, startedAt: NOW, expiresAt: NOW + 15_000 }] };
+  await store.compareAndSetExecution(claimed, 1, NOW);
+  const stamp = new Date(NOW).toISOString();
+  const command: CommandRecord = { commandId: "result-command", requestId: executionRequestId(record, 0), nodeId: "node", sessionId: "session",
+    prompt: "private prompt", action: "send", sendRoute: "control-socket", status: "pending", createdAt: stamp,
+    updatedAt: stamp, expiresAt: new Date(NOW + 60_000).toISOString() };
+  if (kind === "memory") {
+    await store.createCommandIfAbsent(command);
+    await store.updateCommandStatus(command.commandId, "accepted", undefined, undefined, "bound-turn");
+    await store.updateCommandStatus(command.commandId, "completed", "核验结果：所有订单金额一致", undefined, "bound-turn");
+  } else sql.pool.commandRows.set(command.requestId, { command_id: command.commandId, request_id: command.requestId,
+    node_id: command.nodeId, session_id: command.sessionId, prompt: command.prompt, action: "send", send_route: command.sendRoute,
+    status: "completed", turn_id: "bound-turn", output: "核验结果：所有订单金额一致", created_at: stamp, updated_at: stamp, expires_at: command.expiresAt });
+  await store.compareAndSetExecution({ ...claimed, revision: 3, status: "completed" }, 2, NOW);
+  const notification = (await store.getNotification(record.id, NOW))!;
+  expect(notification.text).toContain("**任务**：private prompt");
+  expect(notification.text).toContain("> 核验结果：所有订单金额一致");
+  if (kind === "postgres") {
+    const read = sql.pool.queries.lastIndexOf("SELECT * FROM commands WHERE request_id = $1");
+    expect(read).toBeGreaterThan(sql.pool.queries.lastIndexOf("BEGIN"));
+    expect(sql.pool.queries.findIndex((query, index) => index > read && query.startsWith("INSERT INTO leader_notifications"))).toBeGreaterThan(read);
+  }
+});
+
+it("memory completion rechecks CAS after awaiting its result and does not override cancellation", async () => {
+  const store = new MemoryStore(), record = execution();
+  await store.createExecutionIfAbsent(record);
+  const claimed = { ...record, revision: 2, attempts: [{ token: attempt, startedAt: NOW, expiresAt: NOW + 15_000 }] };
+  await store.compareAndSetExecution(claimed, 1, NOW);
+  let release!: () => void;
+  const entered = new Promise<void>(resolve => {
+    vi.spyOn(store, "findCommandByRequestId").mockImplementation(async () => {
+      resolve(); await new Promise<void>(done => { release = done; }); return null;
+    });
+  });
+  const completion = store.compareAndSetExecution({ ...claimed, revision: 3, status: "completed" }, 2, NOW);
+  await entered;
+  expect(await store.compareAndSetExecution({ ...claimed, revision: 3, status: "cancelled" }, 2, NOW)).not.toBeNull();
+  release(); expect(await completion).toBeNull();
+  expect((await store.getExecution(record.id))!.status).toBe("cancelled");
+  expect(await store.getNotification(record.id, NOW)).toBeNull();
 });

@@ -17,6 +17,7 @@ export async function verifyGoalNotifications({ base, token, request, store, res
   const { ControllerClient } = await import('../../../gateway/dist/controller/client.js');
   const { WeChatGateway } = await import('../../../gateway/dist/gateway.js');
   const { ILinkClient } = await import('../../../gateway/dist/wechat/client.js');
+  const { markdownToWeChat, DEFAULT_MESSAGE_MAX_CHARS } = await import('../../../gateway/dist/wechat/markdown.js');
   const dir = await mkdtemp(join(tmpdir(), 'super-leader-goal-notification-'));
   const credentials = join(dir, 'account.json'), statePath = join(dir, 'state.json');
   const sent = [], gateways = [];
@@ -27,13 +28,13 @@ export async function verifyGoalNotifications({ base, token, request, store, res
       const goal = await store.getGoal(id), notification = await store.getNotification(id, Date.now());
       if (goal.status === 'completed') {
         assert.equal(notification?.kind, 'completed');
-        assert.match(notification.text, /模型.*不是独立业务验收/);
+        assert.match(notification.text, /完成状态基于精确回执的条件判断/);
+        assert.match(notification.text, /PRIVATE_GOAL_RESULT/);
         uncertainId ??= id;
       } else if (goal.blockedReason) assert.equal(notification?.kind, 'blocked');
       else { assert.equal(goal.status, 'cancelled'); assert.equal(notification, null); continue; }
       assert.deepEqual(notification.source, { type: 'goal', id });
-      assert(!notification.text.includes('PRIVATE_GOAL_RESULT'));
-      assert(!notification.text.includes(goal.proposal.objective));
+      assert(notification.text.includes(goal.proposal.objective));
       assert.equal(notification.executionId, undefined);
       expected.push(id);
     }
@@ -54,7 +55,8 @@ export async function verifyGoalNotifications({ base, token, request, store, res
       const { body, status } = await request('/v1/notifications/' + id);
       assert.equal(status, 200); assert.equal(body.notification.status, 'claimed');
       assert.deepEqual(body.notification.source, { type: 'goal', id });
-      assert.deepEqual(msg.item_list, [{ type: 1, text_item: { text: body.notification.text } }]);
+      assert.deepEqual(msg.item_list, [{ type: 1,
+        text_item: { text: markdownToWeChat(body.notification.text, DEFAULT_MESSAGE_MAX_CHARS) } }]);
       sent.push(id);
       if (id === uncertainId) throw new TypeError('Synthetic response lost after submission');
       return Response.json({ ret: 0, errcode: 0 });

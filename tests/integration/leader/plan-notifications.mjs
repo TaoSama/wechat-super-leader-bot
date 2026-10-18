@@ -18,6 +18,7 @@ export async function verifyPlanNotifications({ base, token, request, store, res
   const { StateManager, writePrivateJsonSync } = await import('../../../gateway/dist/runtime/state.js');
   const { ControllerClient } = await import('../../../gateway/dist/controller/client.js');
   const { ILinkClient } = await import('../../../gateway/dist/wechat/client.js');
+  const { markdownToWeChat, DEFAULT_MESSAGE_MAX_CHARS } = await import('../../../gateway/dist/wechat/markdown.js');
   const { WeChatGateway } = await import('../../../gateway/dist/gateway.js');
   const { createExecution } = await import('../../../controller/dist/leader/plans/execution.js');
   const dir = await mkdtemp(join(tmpdir(), 'super-leader-notification-test-'));
@@ -39,8 +40,9 @@ export async function verifyPlanNotifications({ base, token, request, store, res
     assert(payload.msg.client_id.startsWith(CLIENT_ID_PREFIX));
     const persisted = await get(payload.msg.client_id.slice(CLIENT_ID_PREFIX.length));
     assert.equal(persisted.status, 'claimed', 'Provider send has no durable claim');
-    assert.deepEqual(payload.msg.item_list, [{ type: TEXT_ITEM_TYPE, text_item: { text: persisted.text } }],
-      'Provider text differs from the immutable persisted notification');
+    assert.deepEqual(payload.msg.item_list, [{ type: TEXT_ITEM_TYPE,
+      text_item: { text: markdownToWeChat(persisted.text, DEFAULT_MESSAGE_MAX_CHARS) } }],
+      'Provider text differs from the rendered persisted notification');
     sent.push(payload.msg);
     if (providerMode === 'drop') throw new TypeError('Synthetic send response lost after submission');
     return new Response(JSON.stringify(providerMode === 'empty' ? {} : providerMode === 'rejected' ? { ret: -14 } : { ret: 0, errcode: 0 }),

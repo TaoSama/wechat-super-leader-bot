@@ -329,10 +329,13 @@ export class PostgresStore implements IStore {
   getGoal(id: string): Promise<GoalRecord | null> { return pgGetGoal(this.pool, id); }
   getLatestGoal(chatId: string): Promise<GoalRecord | null> { return pgGetLatestGoal(this.pool, chatId); }
   compareAndSetGoal(next: GoalRecord, revision: number, now = Date.now): Promise<GoalRecord | null> {
-    return pgCompareAndSetGoal(this.pool, next, revision, client => ({ findCommandByRequestId: async requestId => {
+    return pgCompareAndSetGoal(this.pool, next, revision, client => this.notificationCommandReader(client), now);
+  }
+  private notificationCommandReader(client: pg.PoolClient): Pick<IStore, "findCommandByRequestId"> {
+    return { findCommandByRequestId: async requestId => {
       const result = await client.query("SELECT * FROM commands WHERE request_id = $1", [requestId]);
       return result.rows[0] ? this.mapCommandRow(result.rows[0]) : null;
-    } }), now);
+    } };
   }
   listRunnableGoals(limit?: number, afterId?: string): Promise<GoalRecord[]> { return pgListRunnableGoals(this.pool, limit, afterId); }
   listRecentGoals(chats: readonly string[], limit: number): Promise<GoalRecord[]> { return pgListRecentGoals(this.pool, chats, limit); }
@@ -346,7 +349,7 @@ export class PostgresStore implements IStore {
   }
 
   async compareAndSetExecution(next: ExecutionRecord, expectedRevision: number, now = Date.now()): Promise<ExecutionRecord | null> {
-    return pgCompareAndSetExecution(this.pool, next, expectedRevision, now);
+    return pgCompareAndSetExecution(this.pool, next, expectedRevision, now, client => this.notificationCommandReader(client));
   }
 
   async listActiveExecutions(limit?: number, afterId?: string): Promise<ExecutionRecord[]> {

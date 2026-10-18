@@ -8,7 +8,7 @@ import { readGoalView } from "../../src/leader/goals/view.js";
 import { createExecution } from "../../src/leader/plans/execution.js";
 import { pgCompareAndSetGoal } from "../../src/store/goal-postgres.js";
 import { pgGetNotification, pgListPendingNotifications, pgClaimNotification, pgRecordNotificationReceipt } from "../../src/store/notification-postgres.js";
-import { createTerminalNotification, normalizeNotification, goalNotificationText, NOTIFICATION_TTL_MS,
+import { createTerminalNotification, normalizeNotification, NOTIFICATION_TTL_MS,
   NOTIFICATION_ATTEMPT_MS, type StoredNotification } from "../../src/notifications/contracts.js";
 import { authorize, proposal, lease, commit, nextDecision } from "../fixtures/goals.js";
 
@@ -114,13 +114,15 @@ async function complete(f: Fixture) {
 }
 
 describe.each(["memory", "postgres"] as const)("%s goal notifications", kind => {
-  it.each(["blocked", "expired", "completed"] as const)("creates exactly one static %s event from an active goal", async status => {
+  it.each(["blocked", "expired", "completed"] as const)("creates exactly one named %s event with available results from an active goal", async status => {
     const f = await fixture(kind);
     const saved = status === "completed" ? await complete(f) : await f.cas(status === "blocked" ? blocked(f.goal) :
       { ...f.goal, revision: 2, status }, 1, f.goal.expiresAt);
     const event = (await f.get(status === "expired" ? f.goal.expiresAt : NOW))!;
     expect(event).toMatchObject({ id: f.goal.id, source: { type: "goal", id: f.goal.id }, kind: status, chatId: "allowed", status: "pending" });
-    expect(event.text).toBe(goalNotificationText(f.goal.id, status)); expect(event.text).not.toContain(SECRET);
+    expect(event.text).toContain(`**任务**：${SECRET}`);
+    expect(event.text).not.toContain(f.goal.id);
+    if (status === "completed") expect(event.text).toContain(`> ${SECRET}`);
     expect(event).not.toHaveProperty("executionId"); expect(event.expiresAt - event.createdAt).toBe(NOTIFICATION_TTL_MS);
     expect(await f.cas(saved!, saved!.revision - 1, event.createdAt)).toBeNull(); expect(await f.get(event.createdAt)).toEqual(event);
   });
@@ -190,14 +192,13 @@ it("goal and outbox rollback together on INSERT failure and retry publishes one 
   expect(await f.cas(blocked(f.goal), 1)).toBeNull();
 });
 
-it("strict source-kind union rejects legacy, mismatched IDs, mixed kinds and model-controlled prose", async () => {
+it("strict source-kind union rejects mismatched IDs, mixed kinds and invalid text while accepting old text", async () => {
   const f = await fixture("memory"); await f.cas(blocked(f.goal), 1); const n = (await f.get())!;
   for (const invalid of [{ ...n, executionId: n.id }, { ...n, source: undefined, executionId: n.id },
     { ...n, source: { type: "plan", id: n.id } }, { ...n, kind: "failed" }, { ...n, source: { type: "goal", id: randomUUID() } },
-    { ...n, source: { ...n.source, chatId: "allowed" } }, { ...n, text: SECRET }, { ...n, reason: SECRET }]) {
+    { ...n, source: { ...n.source, chatId: "allowed" } }, { ...n, text: "" }, { ...n, reason: SECRET }]) {
     expect(() => normalizeNotification(invalid)).toThrow();
   }
-  expect(goalNotificationText(n.id, "completed")).toBe(`持续目标 ${n.id}：模型根据精确完成记录判断条件已满足；这不是独立业务验收。可查询目标进展核对。`);
-  expect(goalNotificationText(n.id, "blocked")).toBe(`持续目标 ${n.id}：已停止自动推进，需要处理。请查询目标进展核对当前状态；这不表示原会话任务停止。`);
-  expect(goalNotificationText(n.id, "expired")).toBe(`持续目标 ${n.id}：授权已到期，已停止后续派发。请查询目标进展核对当前状态；这不表示原会话任务停止。`);
+  const oldText = `持续目标 ${n.id}：已停止自动推进，需要处理。请查询目标进展核对当前状态；这不表示原会话任务停止。`;
+  expect(normalizeNotification({ ...n, text: oldText }).text).toBe(oldText);
 });

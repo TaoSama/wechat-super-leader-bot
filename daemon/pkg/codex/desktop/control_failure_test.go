@@ -165,7 +165,7 @@ func TestDesktopControlCanonicalOutputUsesAgentMessageTextOnly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), desktopTestTimeout)
 	defer cancel()
 	result, err := NewDesktopController(path).InspectTurn(ctx, "session", "target")
-	if err != nil || result.Status != "completed" || result.Output != "first answer\n\nfinal answer" {
+	if err != nil || result.Status != "completed" || result.Output != "final answer" {
 		t.Fatalf("canonical output = %+v, %v", result, err)
 	}
 }

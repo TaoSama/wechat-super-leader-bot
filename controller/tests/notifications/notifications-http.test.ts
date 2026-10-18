@@ -6,7 +6,7 @@ import type { Config } from "../../src/runtime/config.js";
 import { createExecution } from "../../src/leader/plans/execution.js";
 import { createGoal } from "../../src/leader/goals/goal.js";
 import { authorize, proposal } from "../fixtures/goals.js";
-import { goalNotificationText, NOTIFICATION_TTL_MS, NOTIFICATION_ATTEMPT_MS } from "../../src/notifications/contracts.js";
+import { NOTIFICATION_TTL_MS, NOTIFICATION_ATTEMPT_MS } from "../../src/notifications/contracts.js";
 
 const NOW = 1_700_000_000_000;
 const ADMIN = "notification-admin";
@@ -62,7 +62,7 @@ it("only management Bearer can list, read, claim and receipt; Cookie/node creden
   expect(response.headers.get("cache-control")).toBe("no-store");
   expect(response.body.notification).toMatchObject({ id, source: { type: "plan", id }, chatId: "allowed", status: "pending" });
   expect(response.body.notification).not.toHaveProperty("executionId");
-  expect(response.body.notification.text).not.toContain("private prompt");
+  expect(response.body.notification.text).toContain("**任务**：private prompt");
 });
 
 it("intersects requested chats with the current allowlist before LIMIT and lists without consuming attempts", async () => {
@@ -140,8 +140,9 @@ it("goal notifications share management authorization, allowlist, claim and late
   expect((await call(path, undefined, { Authorization: `Bearer ${NODE}` })).status).toBe(403);
   const pending = await call("/v1/notifications/pending", { chatIds: ["allowed"] });
   expect(pending.body.items).toHaveLength(1);
-  expect(pending.body.items[0]).toMatchObject({ source: { type: "goal", id: goal.id }, kind: "blocked", text: goalNotificationText(goal.id, "blocked") });
-  expect(JSON.stringify(pending.body)).not.toContain("private"); expect(pending.body.items[0]).not.toHaveProperty("executionId");
+  expect(pending.body.items[0]).toMatchObject({ source: { type: "goal", id: goal.id }, kind: "blocked" });
+  expect(pending.body.items[0].text).toContain("**任务**：private objective");
+  expect(JSON.stringify(pending.body)).not.toContain("private model reason"); expect(pending.body.items[0]).not.toHaveProperty("executionId");
   expect((await call("/v1/notifications/pending", { chatIds: ["other"] })).body.items).toEqual([]);
   config.allowedChatIds.delete("allowed");
   expect((await call(`${path}/claim`, { attemptId: uuid(100) })).status).toBe(409);

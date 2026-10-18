@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { withTestCleanup } from '../../support/cleanup.mjs';
 
 const PREVIEW_MS = 60_000;
+const OBJECTIVE = '核对持续目标通知';
 const PRIVATE_REASON = 'private-goal-reason-not-for-notification';
 
 export async function verifyGoalNotificationStore({ stores, pool, reopenStore }) {
@@ -11,7 +12,7 @@ export async function verifyGoalNotificationStore({ stores, pool, reopenStore })
   let rejecting = false, reopened;
   const make = async () => {
     const chatId = 'goal-notice-' + randomUUID();
-    const proposal = { id: randomUUID(), expiresAt: now + PREVIEW_MS, objective: PRIVATE_REASON,
+    const proposal = { id: randomUUID(), expiresAt: now + PREVIEW_MS, objective: OBJECTIVE,
       criteria: [PRIVATE_REASON], constraints: PRIVATE_REASON, maxActions: 1, maxDecisions: 2, durationMinutes: 1,
       shareResults: true, targets: [{ nodeId: 'fixture-node', sessionId: 'fixture-session', sendRoute: 'desktop-owner' }] };
     const goal = createGoal(chatId, proposal, now), messageId = randomUUID(), inputHash = randomUUID();
@@ -35,7 +36,9 @@ export async function verifyGoalNotificationStore({ stores, pool, reopenStore })
     assert.equal(race.filter(Boolean).length, 1);
     const notice = await stores[1].getNotification(atomic.id, now);
     assert.deepEqual(notice.source, { type: 'goal', id: atomic.id }); assert.equal(notice.kind, 'blocked');
-    assert.equal(notice.status, 'pending'); assert(!JSON.stringify(notice).includes(PRIVATE_REASON));
+    assert.equal(notice.status, 'pending'); assert(notice.text.includes(OBJECTIVE), 'Goal notification omitted its task name');
+    assert(!JSON.stringify(notice).includes(PRIVATE_REASON), 'Goal notification included unrequested constraints or model reasoning');
+    assert(notice.text.includes('尚无已记录的任务结果'), 'Unstarted goal invented a task result');
     const row = (await pool.query('SELECT execution_id,goal_id FROM leader_notifications WHERE id=$1', [atomic.id])).rows[0];
     assert.deepEqual(row, { execution_id: null, goal_id: atomic.id });
     await assert.rejects(stores[0].claimNotification(atomic.id, randomUUID(), ['another-chat'], now));
