@@ -1,4 +1,3 @@
-import type { ControllerMessageRequest, ControllerMessageResponse } from "./types.js";
 import { StateManager } from "./runtime/state.js";
 import { ILinkClient } from "./wechat/client.js";
 import { ControllerClient, ChatNotAllowedError } from "./controller/client.js";
@@ -12,6 +11,8 @@ import { NotificationOutbox, NotificationDiagnosticError } from "./runtime/notif
 import { LocalSendDeferredError } from "./runtime/context-policy.js";
 import type { ControllerMessageResponse, DeliveryOutboxItem } from "./types.js";
 import { OutboxBackpressureError } from "./runtime/delivery-state.js";
+import { CONFLICT_REPLY, ReplyEngineBackpressureError, ReplyEngineConflictError, ReplyEngineUnavailableError, type GatewayReplyEngine } from "./leader/contracts.js";
+export type { GatewayReplyEngine } from "./leader/contracts.js";
 export { NotificationDiagnosticError } from "./runtime/notification-outbox.js";
 
 const MIN_NOTIFICATION_INTERVAL_MS = 1;
@@ -42,11 +43,6 @@ export interface BaselineSummary {
   rawMessagesSkipped: number;
   finalSyncBuf: string;
   establishedAt: string;
-}
-
-export interface GatewayReplyEngine {
-  readonly requestBudgetMs: number;
-  reply(accountId: string, request: ControllerMessageRequest, controller: Pick<ControllerClient, "forwardMessage">): Promise<ControllerMessageResponse>;
 }
 
 export class WeChatGateway {
@@ -197,11 +193,24 @@ export class WeChatGateway {
           }
           await this.ilink.sendTyping(msg.chatId);
           const request = { chatId: msg.chatId, messageId: msg.messageId, text: msg.text };
-          const controllerReply = this.replyEngine
-            ? await this.replyEngine.reply(this.stateManager.account!.accountId, request, this.controller)
-            : await this.controller.forwardMessage(request);
-
-          this.stateManager.putOutbox({ kind: "reply", chatId: msg.chatId, messageId: msg.messageId,
+          let source: DeliveryOutboxItem["source"] = this.replyEngine ? "engine" : "controller";
+          let controllerReply: ControllerMessageResponse;
+          try {
+            controllerReply = this.replyEngine
+              ? await this.replyEngine.reply(this.stateManager.account!.accountId, request, this.controller)
+              : await this.controller.forwardMessage(request);
+          } catch (error) {
+            if (error instanceof ReplyEngineBackpressureError && this.replyEngine) {
+              // This inbound may restore a window needed to release pinned replies.
+              await this.flushRepliesOnce();
+              controllerReply = await this.replyEngine.reply(this.stateManager.account!.accountId, request, this.controller);
+            } else {
+              if (!(error instanceof ReplyEngineConflictError)) throw error;
+              source = "codex-conflict";
+              controllerReply = error.reply;
+            }
+          }
+          this.stateManager.putOutbox({ kind: "reply", source, chatId: msg.chatId, messageId: msg.messageId,
             deliveryKey: msg.deliveryKey, splitMaxChars: this.splitMaxChars, splitMultiPart: this.splitMultiPart, status: "pending" });
           if (msg.deliveryKey) {
             this.stateManager.recordProcessedMessageKey(msg.deliveryKey, { preserveReplyEvidence: true });
@@ -268,16 +277,20 @@ export class WeChatGateway {
           maxCharsPerChunk: item.splitMaxChars, splitMultiPart: item.splitMultiPart, timeoutMs,
           shouldContinue: () => !this.stopped });
       }
+      if (item.source === "engine") this.stateManager.updateOutbox(item.deliveryKey, { status: "receipt", receiptStatus: "accepted" });
+      await this.ackEngineReply(item, "accepted");
       this.stateManager.removeOutbox(item.deliveryKey);
     } catch (error) {
       if (error instanceof LocalSendDeferredError) return;
       if (error instanceof PermanentImageDownloadError) {
         this.stateManager.recordReplyFailure(`image-reply:${item.deliveryKey}`, error.reason);
         this.stateManager.updateOutbox(item.deliveryKey, { status: "expired" });
+        await this.ackEngineReply(item, "expired");
         return;
       }
       if (this.hasQuarantinedInboundReply(item.deliveryKey)) {
         this.stateManager.updateOutbox(item.deliveryKey, { status: "uncertain" });
+        await this.ackEngineReply(item, "uncertain");
         return;
       }
       throw error;
@@ -290,27 +303,42 @@ export class WeChatGateway {
     this.flushingReplies = true;
     let firstError: unknown;
     try {
+      // Retry terminal journal acknowledgements after a prior journal save failure.
+      for (const item of Object.values(this.stateManager.outbox)) {
+        if (item.kind === "reply" && item.source === "engine" && item.status === "receipt" && item.receiptStatus === "accepted") {
+          try {
+            await this.ackEngineReply(item, "accepted");
+            this.stateManager.removeOutbox(item.deliveryKey);
+          } catch (error) { firstError ??= error; }
+        } else if (item.kind === "reply" && item.source === "engine" && (item.status === "uncertain" || item.status === "expired")) {
+          try { await this.ackEngineReply(item, item.status); }
+          catch (error) { firstError ??= error; }
+        }
+      }
       const items = Object.values(this.stateManager.outbox).filter(item => item.kind === "reply" && item.status === "pending" &&
         !this.activeReplyDeliveries.has(item.deliveryKey));
       const offset = this.replyOutboxCursor % Math.max(1, items.length);
       for (const item of [...items.slice(offset), ...items.slice(0, offset)]) {
         if (this.hasQuarantinedInboundReply(item.deliveryKey)) {
           this.stateManager.updateOutbox(item.deliveryKey, { status: "uncertain" });
+          await this.ackEngineReply(item, "uncertain");
           continue;
         }
         const text = this.stateManager.replyDeliveries[item.deliveryKey];
         if (text && text.acknowledgedChunks === text.totalChunks && !text.inFlight) {
+          await this.ackEngineReply(item, "accepted");
           this.stateManager.removeOutbox(item.deliveryKey);
           continue;
         }
         if (!this.stateManager.canSendToChat(item.chatId)) continue;
         this.replyOutboxCursor = (items.indexOf(item) + 1) % items.length;
-        try { await this.deliverReply(item, await this.controller.getMessageReply(item.chatId, item.messageId)); }
+        try { await this.deliverReply(item, await this.getFrozenReply(item)); }
         catch (error) {
           if (error instanceof PermanentReplyUnavailableError) {
             this.stateManager.updateOutbox(item.deliveryKey, {
               status: this.hasQuarantinedInboundReply(item.deliveryKey) ? "uncertain" : "expired",
             });
+            await this.ackEngineReply(item, this.hasQuarantinedInboundReply(item.deliveryKey) ? "uncertain" : "expired");
             break;
           }
           firstError ??= error;
@@ -320,6 +348,21 @@ export class WeChatGateway {
       }
     } finally { this.flushingReplies = false; }
     if (firstError) throw firstError;
+  }
+
+  private async getFrozenReply(item: DeliveryOutboxItem): Promise<ControllerMessageResponse> {
+    if (item.source === "codex-conflict") return { text: CONFLICT_REPLY };
+    if (item.source === "engine") {
+      if (!this.replyEngine) throw new ReplyEngineUnavailableError();
+      return this.replyEngine.getReply(this.stateManager.account!.accountId, item.chatId, item.messageId, this.controller);
+    }
+    return this.controller.getMessageReply(item.chatId, item.messageId);
+  }
+
+  private async ackEngineReply(item: DeliveryOutboxItem, status: "accepted" | "uncertain" | "expired"): Promise<void> {
+    if (item.source !== "engine") return;
+    if (!this.replyEngine) throw new ReplyEngineUnavailableError();
+    await this.replyEngine.ackReply(this.stateManager.account!.accountId, item.chatId, item.messageId, status);
   }
 
   private hasQuarantinedInboundReply(deliveryKey: string): boolean {

@@ -349,7 +349,57 @@ test("the durable outbox stores delivery references and receipts without message
   assert.deepEqual(stored, reload().outbox["notification-reference"]);
   assert.deepEqual(Object.keys(stored).sort(), [
     "attemptId", "chatId", "deliveryKey", "expiresAt", "kind", "messageId", "notificationKind",
-    "receiptStatus", "splitMaxChars", "splitMultiPart", "status",
+    "receiptStatus", "source", "splitMaxChars", "splitMultiPart", "status",
   ].sort());
   for (const bodyField of ["text", "body", "content", "images", "attachments"]) assert.equal(Object.hasOwn(stored, bodyField), false);
+});
+
+test("outbox source survives restart and legacy references default to controller", t => {
+  const { state, reload, statePath } = fixture(t);
+  for (const source of ["controller", "engine", "codex-conflict"] as const) {
+    state.putOutbox(reference(`reply-${source}`, { source }));
+    assert.equal(reload().outbox[`reply-${source}`].source, source);
+  }
+  state.putOutbox(reference("legacy-reference"));
+  assert.equal(state.outbox["legacy-reference"].source, "controller");
+  const disk = JSON.parse(fs.readFileSync(statePath, "utf8")) as { delivery_outbox: Record<string, DeliveryOutboxItem> };
+  delete disk.delivery_outbox["legacy-reference"].source;
+  fs.writeFileSync(statePath, JSON.stringify(disk));
+  const restarted = reload();
+  assert.equal(restarted.outbox["legacy-reference"].source, "controller");
+  restarted.updateOutbox("legacy-reference", { status: "defer", source: undefined });
+  assert.equal(reload().outbox["legacy-reference"].source, "controller");
+});
+
+test("outbox rejects unknown source values before storing or restoring them", t => {
+  const { state, reload, statePath } = fixture(t);
+  state.putOutbox(reference());
+  const expected = structuredClone(state.outbox);
+  const disk = JSON.parse(fs.readFileSync(statePath, "utf8")) as { delivery_outbox: Record<string, Record<string, unknown>> };
+  for (const source of [null, "", "fallback", "Controller", 1, {}, []]) {
+    assert.throws(() => state.putOutbox(reference("invalid", { source } as Partial<DeliveryOutboxItem>)), /Invalid delivery outbox source/);
+    assert.throws(() => state.updateOutbox("reply-reference", { source } as Partial<DeliveryOutboxItem>), /Invalid delivery outbox source/);
+    assert.deepEqual(state.outbox, expected);
+    disk.delivery_outbox["reply-reference"].source = source;
+    fs.writeFileSync(statePath, JSON.stringify(disk));
+    assert.throws(() => reload(), /Failed to load gateway state/);
+  }
+});
+
+test("the same outbox identity cannot switch reply stores through put or update", t => {
+  const { state, reload } = fixture(t);
+  for (const original of ["controller", "engine", "codex-conflict"] as const) {
+    const key = `reply-${original}`;
+    state.putOutbox(reference(key, { source: original }));
+    for (const replacement of [undefined, "controller", "engine", "codex-conflict"] as const) {
+      if ((replacement ?? "controller") === original) continue;
+      assert.throws(() => state.putOutbox(reference(key, { source: replacement })), /identity changed/);
+      assert.throws(() => state.updateOutbox(key, { source: replacement }), /identity changed/);
+      assert.equal(state.outbox[key].source, original);
+      assert.equal(reload().outbox[key].source, original);
+    }
+    assert.doesNotThrow(() => state.putOutbox(reference(key, { source: original })));
+    state.updateOutbox(key, { status: "defer" });
+    assert.equal(reload().outbox[key].source, original);
+  }
 });

@@ -185,6 +185,8 @@ test('local WeChat policy overrides reach only Gateway', () => {
     assert.equal(parsed.services.gateway.environment[name], value);
     assert.equal(parsed.services.controller.environment[name], undefined);
   }
+});
+
 test('Codex replies inherit private model credentials and permit an explicit Gateway override', () => {
   const render = env => JSON.parse(execCompose([
     '--env-file', '/dev/null', '--profile', 'wechat',

@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { CodexOptions, ThreadEvent, ThreadOptions } from "@openai/codex-sdk";
 import { CodexReplyEngine, type CodexReplyEngineOptions } from "../../src/leader/codex.js";
+import { ReplyEngineConflictError, ReplyEngineUnavailableError } from "../../src/leader/contracts.js";
 import { WorkspaceStore } from "../../src/leader/workspace.js";
 import { CONTROL_TOKEN_ENV } from "../../src/leader/control-mcp.js";
 import { StateManager } from "../../src/runtime/state.js";
@@ -100,8 +101,8 @@ test("completed message survives restart without rerunning; conflicting duplicat
   assert.equal(calls, 1);
   const workspace = await new WorkspaceStore(root).forChat("account", "chat");
   const originalJournal = workspace.getReplyJournal();
-  const conflict = await new CodexReplyEngine(options).reply("account", { ...request, text: "other" }, noController);
-  assert.match(conflict.text, /编号.*相同.*内容不同/);
+  await assert.rejects(new CodexReplyEngine(options).reply("account", { ...request, text: "other" }, noController),
+    ReplyEngineConflictError);
   assert.equal(calls, 1);
   assert.deepEqual(workspace.getReplyJournal(), originalJournal);
 });
@@ -129,9 +130,9 @@ test("conflicting message is replied without tools and later messages in the pol
     fetchImpl: async (url, init) => {
       if (String(url).endsWith("getupdates")) return new Response(JSON.stringify({ ret: 0,
         get_updates_buf: "past-conflict-and-followup", msgs: [
-          { message_type: 1, from_user_id: "chat", client_id: request.messageId, context_token: "ctx",
+          { message_type: 1, from_user_id: "chat", client_id: request.messageId, context_token: "ctx", create_time_ms: Date.now(),
             item_list: [{ type: 1, text_item: { text: "different message content" } }] },
-          { message_type: 1, from_user_id: "chat", client_id: "next-message", context_token: "ctx",
+          { message_type: 1, from_user_id: "chat", client_id: "next-message", context_token: "ctx", create_time_ms: Date.now(),
             item_list: [{ type: 1, text_item: { text: "正常新消息" } }] },
         ] }));
       if (String(url).endsWith("getconfig")) return new Response(JSON.stringify({ ret: 0, typing_ticket: "ticket" }));
@@ -167,7 +168,9 @@ test("failed turns retain early thread ID and started journal, sanitize stderr a
   const failed = await new CodexReplyEngine(options).reply("account", request, noController);
   assert.doesNotMatch(failed.text, /provider-secret-token|stderr/);
   const retry = await new CodexReplyEngine(options).reply("account", request, noController);
-  assert.match(retry.text, /没有自动重跑/);
+  assert.deepEqual(retry, failed);
+  assert.deepEqual(await new CodexReplyEngine(options).getReply("account", "chat", request.messageId,
+    { getMessageReply: async () => { throw new Error("Unexpected Controller recovery"); } }), failed);
   assert.equal(calls, 1);
   const workspace = await new WorkspaceStore(root).forChat("account", "chat");
   assert.equal(workspace.getThreadId(), "recoverable-thread");
@@ -203,10 +206,65 @@ test("Controller tool preserves attachments, command ID and original credential 
   assert.equal(calls, 1);
   const workspace = await new WorkspaceStore(root).forChat("account", "chat");
   assert.doesNotMatch(JSON.stringify(workspace.getReplyJournal()), /delivery-only-token/);
-  const replay = await engine.reply("account", request, noController);
-  assert.match(replay.text, /如需新链接，请重新请求/);
-  assert.doesNotMatch(replay.text, /#login/);
+  await assert.rejects(engine.reply("account", request, noController), ReplyEngineUnavailableError);
+  let lookups = 0;
+  const replay = await engine.getReply("account", "chat", request.messageId, { getMessageReply: async (chatId, messageId) => {
+    lookups++;
+    assert.equal(chatId, request.chatId);
+    assert.equal(messageId, request.messageId);
+    return reply;
+  } });
+  assert.deepEqual(replay, reply);
+  assert.equal(lookups, 1);
+  assert.equal(calls, 1);
+  assert.equal(Object.values(workspace.getReplyJournal())[0].provenance, "controller-console");
 });
+
+for (const useControl of [false, true]) {
+  test(`model credentials are redacted and never change recovery source (Controller called: ${useControl})`, async t => {
+    const root = fixture(t);
+    const secretRequest = { ...request, text: "检查这个链接 https://console.example/#login=user-supplied-secret" };
+    let runs = 0;
+    let controlCalls = 0;
+    const sdkFactory = fakeFactory(async function* (input, _settings, sdk) {
+      runs++;
+      assert.doesNotMatch(input, /user-supplied-secret|remembered-secret/);
+      assert.match(input, /REDACTED/);
+      if (useControl) {
+        const servers = sdk.config!.mcp_servers as Record<string, Record<string, string>>;
+        const response = await fetch(servers.wechat_control.url, { method: "POST", headers: {
+          Authorization: `Bearer ${sdk.env![CONTROL_TOKEN_ENV]}`, "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1,
+          method: "tools/call", params: { name: "control_current_request", arguments: {} } }) });
+        assert.equal(response.status, 200);
+        await response.text();
+      }
+      yield* complete("不要公开：https://console.example/#login=model-generated-secret");
+    });
+    const options = { root, model: "test-model", sdkFactory };
+    const workspace = await new WorkspaceStore(root).forChat("account", "chat");
+    fs.writeFileSync(path.join(workspace.workspacePath, "memory.md"), "旧链接 #login=remembered-secret\n");
+    const controller = { forwardMessage: async (input: typeof request) => {
+      controlCalls++;
+      assert.deepEqual(input, secretRequest, "Controller remains bound to the immutable original request");
+      return { text: "普通查询结果", commandId: "ordinary-command" };
+    } };
+    const reply = await new CodexReplyEngine(options).reply("account", secretRequest, controller);
+    assert.equal(reply.text, "不要公开：https://console.example/#login=[REDACTED]");
+    assert.equal(controlCalls, useControl ? 1 : 0);
+    const journal = workspace.getReplyJournal();
+    assert.equal(Object.values(journal)[0].provenance, undefined);
+    assert.deepEqual(Object.values(journal)[0].reply, reply);
+    assert.doesNotMatch(JSON.stringify(journal), /model-generated-secret|user-supplied-secret/);
+    let gets = 0;
+    const recovery = { getMessageReply: async () => { gets++; return { text: "wrong source" }; } };
+    const restarted = new CodexReplyEngine(options);
+    assert.deepEqual(await restarted.getReply("account", "chat", request.messageId, recovery), reply);
+    assert.deepEqual(await restarted.reply("account", secretRequest, noController), reply);
+    assert.equal(gets, 0);
+    assert.equal(runs, 1);
+  });
+}
 
 test("disconnected Controller call keeps lock and started journal until submission settles", async t => {
   const root = fixture(t);

@@ -22,8 +22,12 @@ export interface GatewaySyncState {
   delivery_outbox?: Record<string, DeliveryOutboxItem>;
 }
 
+export type DeliveryOutboxSource = "controller" | "engine" | "codex-conflict";
+
 export interface DeliveryOutboxItem {
   kind: "reply" | "notification";
+  /** Absent in legacy persisted references, which belong to Controller. */
+  source?: DeliveryOutboxSource;
   deliveryKey: string;
   chatId: string;
   messageId: string;

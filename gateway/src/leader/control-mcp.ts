@@ -14,6 +14,10 @@ export function hasConsoleCredential(text: string): boolean {
   return /#login=[A-Za-z0-9_.~%-]+/.test(text);
 }
 
+export function redactConsoleCredentials(text: string): string {
+  return text.replace(/#login=[A-Za-z0-9_.~%-]+/g, "#login=[REDACTED]");
+}
+
 /** A capability for exactly the current, immutable WeChat request. */
 export class ControlMcp {
   public readonly token = randomBytes(32).toString("hex");
@@ -104,7 +108,7 @@ export class ControlMcp {
         const result = await this.invocation;
         // One-time console credentials belong only on the WeChat delivery path,
         // never in Codex's persistent transcript or model context.
-        const visible = { ...result, text: result.text.replace(/#login=[A-Za-z0-9_.~%-]+/g, "#login=[REDACTED]") };
+        const visible = { ...result, text: redactConsoleCredentials(result.text) };
         return { content: [{ type: "text", text: JSON.stringify(visible) }] };
       } catch {
         return { isError: true, content: [{ type: "text", text: "Controller 调用未成功，执行结果待核实；请勿声称已完成，也不要自行重试。" }] };

@@ -4,7 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { WorkspaceStore, type MemoryFile, MEMORY_SNAPSHOT_BYTES } from "../../src/leader/workspace.js";
+import { WorkspaceStore, type MemoryFile, type ReplyJournal, MEMORY_SNAPSHOT_BYTES,
+  MAX_REPLY_JOURNAL_BYTES, MAX_REPLY_JOURNAL_ENTRIES, MAX_PINNED_REPLY_ENTRIES,
+  MAX_CLOSED_REPLY_ENTRIES } from "../../src/leader/workspace.js";
 
 function fixture(t: TestContext): { temporary: string; root: string; store: WorkspaceStore } {
   const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "leader-workspace-test-"));
@@ -14,6 +16,32 @@ function fixture(t: TestContext): { temporary: string; root: string; store: Work
 }
 
 const MEMORY_FILES: MemoryFile[] = ["task.md", "memory.md", "preference.md"];
+
+function replyJournal(count: number, entry: ReplyJournal[string]): ReplyJournal {
+  return Object.fromEntries(Array.from({ length: count }, (_, index) => [
+    createHash("sha256").update(String(index)).digest("hex"), { ...entry },
+  ]));
+}
+
+test("finding workspaces never creates or migrates files and validates existing directories", async (t) => {
+  const { root, store } = fixture(t);
+  assert.equal(await store.findChat("account", "chat"), undefined);
+  assert.equal(fs.existsSync(root), false);
+  await assert.rejects(store.findChat("", "chat"), /stable account ID/);
+  const workspace = await store.forChat("account", "chat");
+  const legacy = path.join(workspace.workspacePath, "profile.md");
+  fs.writeFileSync(legacy, "retained legacy preference");
+  fs.chmodSync(workspace.workspacePath, 0o755);
+  const found = await store.findChat("account", "chat");
+  assert.equal(found?.workspacePath, workspace.workspacePath);
+  assert.equal(fs.statSync(workspace.workspacePath).mode & 0o777, 0o755);
+  assert.equal(fs.readFileSync(legacy, "utf8"), "retained legacy preference");
+  assert.equal(await store.findChat("account", "unknown-chat"), undefined);
+  assert.equal(fs.readdirSync(root).length, 1);
+  fs.rmdirSync(workspace.codexHome);
+  fs.symlinkSync(root, workspace.codexHome);
+  await assert.rejects(store.findChat("account", "chat"), /symbolic links/);
+});
 
 test("creates private SDK directories and three initial templates with a stable tuple key", async (t) => {
   const { root, store } = fixture(t);
@@ -267,13 +295,17 @@ test("reply journal rejects corrupt states, oversized replies and unvalidated im
     [], { badKey: { inputHash, stage: "started" } },
     { [key]: { inputHash: "invalid", stage: "started" } },
     { [key]: { inputHash, stage: "completed" } },
-    { [key]: { inputHash, stage: "started", reply: { text: "premature" } } },
     { [key]: { inputHash, stage: "completed", reply: { text: "x".repeat(16001) } } },
     { [key]: { inputHash, stage: "completed", reply: { text: "x", images: [{ url: "https://unsafe" }] } } },
     { [key]: { inputHash, stage: "started", unexpected: "secret" } },
-    Object.fromEntries(Array.from({ length: 65 }, (_, index) => [
-      createHash("sha256").update(String(index)).digest("hex"), { inputHash, stage: "started" },
-    ])),
+    replyJournal(MAX_PINNED_REPLY_ENTRIES + 1, { inputHash, stage: "started" }),
+    replyJournal(MAX_REPLY_JOURNAL_ENTRIES + 1, { inputHash, stage: "completed", reply: { text: "x" }, delivery: "accepted" }),
+    { [key]: { inputHash, stage: "started", delivery: "invalid" } },
+    { [key]: { inputHash, stage: "started", delivery: 1 } },
+    { [key]: { inputHash, stage: "started", provenance: "invalid" } },
+    { [key]: { inputHash, stage: "started", provenance: "controller-console" } },
+    { [key]: { inputHash, stage: "completed", provenance: "controller-console", reply: { text: "placeholder", commandId: "secret" } } },
+    { [key]: { inputHash, stage: "completed", provenance: "controller-console", reply: { text: "placeholder", images: [] } } },
   ];
   for (const invalid of invalidStates) {
     fs.writeFileSync(file, JSON.stringify(invalid));
@@ -281,6 +313,62 @@ test("reply journal rejects corrupt states, oversized replies and unvalidated im
   }
   fs.writeFileSync(file, "{private-corrupted-value");
   assert.throws(() => workspace.getReplyJournal(), { message: "Invalid workspace reply journal" });
-  fs.writeFileSync(file, "x".repeat(2 * 1024 * 1024 + 1));
+  fs.writeFileSync(file, "x".repeat(MAX_REPLY_JOURNAL_BYTES + 1));
   assert.throws(() => workspace.getReplyJournal(), /size limit/);
+});
+
+test("reply journal retains delivery metadata and frozen started replies across reconstruction", async (t) => {
+  const { root, store } = fixture(t);
+  const workspace = await store.forChat("account", "chat");
+  const inputHash = "b".repeat(64);
+  const journal: ReplyJournal = {
+    ["a".repeat(64)]: { inputHash, stage: "started", delivery: "uncertain", provenance: "codex", reply: { text: "恢复固定文本" } },
+    ["c".repeat(64)]: { inputHash, stage: "completed", delivery: "pending", provenance: "controller-console", reply: { text: "Safe placeholder" } },
+    ["d".repeat(64)]: { inputHash, stage: "completed", delivery: "accepted", reply: { text: "accepted" } },
+    ["e".repeat(64)]: { inputHash, stage: "completed", delivery: "expired", provenance: "codex", reply: { text: "expired" } },
+  };
+  workspace.setReplyJournal(journal);
+  const found = await new WorkspaceStore(root).findChat("account", "chat");
+  assert.deepEqual(found?.getReplyJournal(), journal);
+  const legacy = replyJournal(64, { inputHash, stage: "completed", reply: { text: "legacy" } });
+  workspace.setReplyJournal(legacy);
+  assert.deepEqual(workspace.getReplyJournal(), legacy);
+  assert.equal(JSON.stringify(workspace.getReplyJournal()).includes("delivery"), false);
+});
+
+test("reply journal independently bounds pinned and closed entries without evicting either", async (t) => {
+  const { store } = fixture(t);
+  const workspace = await store.forChat("account", "chat");
+  const inputHash = "b".repeat(64);
+  workspace.setReplyJournal(replyJournal(65, { inputHash, stage: "started" }));
+  assert.equal(Object.keys(workspace.getReplyJournal()).length, 65);
+  const maximum = replyJournal(MAX_REPLY_JOURNAL_ENTRIES, { inputHash, stage: "completed", delivery: "accepted", reply: { text: "done" } });
+  for (const entry of Object.values(maximum).slice(0, MAX_PINNED_REPLY_ENTRIES)) {
+    entry.stage = "started";
+    entry.delivery = "accepted"; // Started remains pinned even if delivery metadata says accepted.
+  }
+  workspace.setReplyJournal(maximum);
+  assert.deepEqual(workspace.getReplyJournal(), maximum);
+  assert.throws(() => workspace.setReplyJournal(replyJournal(MAX_CLOSED_REPLY_ENTRIES + 1,
+    { inputHash, stage: "completed", delivery: "expired", reply: { text: "expired" } })), /Invalid workspace reply journal/);
+  for (const delivery of [undefined, "pending", "uncertain"] as const) {
+    assert.throws(() => workspace.setReplyJournal(replyJournal(MAX_PINNED_REPLY_ENTRIES + 1,
+      { inputHash, stage: "completed", reply: { text: "pending" }, ...(delivery ? { delivery } : {}) })), /Invalid workspace reply journal/);
+  }
+  assert.deepEqual(workspace.getReplyJournal(), maximum);
+});
+
+test("reply journal accepts worst-case escaped responses beyond the old file limit and enforces the byte budget", async (t) => {
+  const { store } = fixture(t);
+  const workspace = await store.forChat("account", "chat");
+  const inputHash = "b".repeat(64);
+  const reply = { text: "\u0000".repeat(16000), commandId: "x" + "\u0000".repeat(4095) };
+  const withinBudget = replyJournal(65, { inputHash, stage: "started", reply, delivery: "uncertain", provenance: "codex" });
+  workspace.setReplyJournal(withinBudget);
+  assert.deepEqual(workspace.getReplyJournal(), withinBudget);
+  const overBudget = replyJournal(MAX_REPLY_JOURNAL_ENTRIES, { inputHash, stage: "completed", reply, delivery: "accepted" });
+  for (const entry of Object.values(overBudget).slice(0, MAX_PINNED_REPLY_ENTRIES)) entry.delivery = "pending";
+  assert.ok(Buffer.byteLength(JSON.stringify(overBudget), "utf8") > MAX_REPLY_JOURNAL_BYTES);
+  assert.throws(() => workspace.setReplyJournal(overBudget), /Invalid workspace reply journal/);
+  assert.deepEqual(workspace.getReplyJournal(), withinBudget);
 });

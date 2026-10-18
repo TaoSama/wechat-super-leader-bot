@@ -27,7 +27,7 @@ for (const allowed of [true, false]) {
     const ilink = new ILinkClient({ stateManager: state, configuredBaseUrl: "https://ilink.example",
       fetchImpl: async (url, init) => {
         if (String(url).endsWith("getupdates")) return new Response(JSON.stringify({ ret: 0, get_updates_buf: "next", msgs: [{
-          message_type: 1, from_user_id: "chat", client_id: "message", context_token: "ctx",
+          message_type: 1, from_user_id: "chat", client_id: "message", context_token: "ctx", create_time_ms: Date.now() - 1000,
           item_list: [{ type: 1, text_item: { text: "记住我喜欢简短回复" } }],
         }] }));
         if (String(url).endsWith("getconfig")) return new Response(JSON.stringify({ ret: 0, typing_ticket: "ticket" }));
@@ -40,6 +40,8 @@ for (const allowed of [true, false]) {
       } });
     const gateway = new WeChatGateway({ stateManager: state, ilink, controller, replyEngine: {
       requestBudgetMs: 1000,
+      async getReply() { throw new Error("Unexpected recovery"); },
+      async ackReply() {},
       async reply(accountId, request, client) {
         calls.push("codex");
         assert.equal(accountId, "account");

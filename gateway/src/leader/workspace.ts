@@ -11,10 +11,15 @@ export type ReplyJournal = Record<string, {
   inputHash: string;
   stage: "started" | "completed";
   reply?: ControllerMessageResponse;
+  delivery?: "pending" | "accepted" | "uncertain" | "expired";
+  provenance?: "codex" | "controller-console";
 }>;
 const MAX_MIGRATION_BYTES = 1024 * 1024;
-const MAX_REPLY_JOURNAL_BYTES = 2 * 1024 * 1024;
-export const MAX_REPLY_JOURNAL_ENTRIES = 64;
+export const MAX_REPLY_JOURNAL_BYTES = 16 * 1024 * 1024;
+export const MAX_REPLY_ENTRY_BYTES = 128 * 1024;
+export const MAX_REPLY_JOURNAL_ENTRIES = 192;
+export const MAX_PINNED_REPLY_ENTRIES = 128;
+export const MAX_CLOSED_REPLY_ENTRIES = 64;
 export const MAX_REPLY_CHARS = 16000;
 const REPLY_JOURNAL_FILE = ".replies.json";
 const LEGACY_PREFERENCE_FILE = "profile.md";
@@ -81,32 +86,45 @@ function validateReplyJournal(value: unknown): ReplyJournal {
     typeof candidate === "object" && candidate !== null && !Array.isArray(candidate);
   if (!object(value) || Object.keys(value).length > MAX_REPLY_JOURNAL_ENTRIES) return invalid();
   const entries: [string, ReplyJournal[string]][] = [];
+  let pinned = 0;
+  let closed = 0;
   for (const [key, entry] of Object.entries(value)) {
     if (!/^[a-f0-9]{64}$/.test(key) || !object(entry) ||
-        Object.keys(entry).some(name => !["inputHash", "stage", "reply"].includes(name)) ||
+        Object.keys(entry).some(name => !["inputHash", "stage", "reply", "delivery", "provenance"].includes(name)) ||
         typeof entry.inputHash !== "string" || !/^[a-f0-9]{64}$/.test(entry.inputHash) ||
-        (entry.stage !== "started" && entry.stage !== "completed")) return invalid();
-    if (entry.stage === "started") {
-      if (entry.reply !== undefined) return invalid();
-      entries.push([key, { inputHash: entry.inputHash, stage: "started" }]);
-      continue;
-    }
+        (entry.stage !== "started" && entry.stage !== "completed") ||
+        (entry.delivery !== undefined && !["pending", "accepted", "uncertain", "expired"].includes(entry.delivery as string)) ||
+        (entry.provenance !== undefined && !["codex", "controller-console"].includes(entry.provenance as string)) ||
+        (entry.provenance === "controller-console" && entry.stage !== "completed") ||
+        Buffer.byteLength(JSON.stringify(entry), "utf8") > MAX_REPLY_ENTRY_BYTES) return invalid();
+    if (entry.stage === "started" || entry.delivery === undefined || entry.delivery === "pending" || entry.delivery === "uncertain") {
+      if (++pinned > MAX_PINNED_REPLY_ENTRIES) return invalid();
+    } else if (++closed > MAX_CLOSED_REPLY_ENTRIES) return invalid();
     const reply = entry.reply;
-    if (!object(reply) || Object.keys(reply).some(name => !["text", "commandId", "images"].includes(name)) ||
+    if (reply === undefined) {
+      if (entry.stage === "completed") return invalid();
+    } else if (!object(reply) || Object.keys(reply).some(name =>
+        !(entry.provenance === "controller-console" ? ["text"] : ["text", "commandId", "images"]).includes(name)) ||
         typeof reply.text !== "string" || reply.text.length > MAX_REPLY_CHARS ||
         (reply.commandId !== undefined && (typeof reply.commandId !== "string" ||
           !reply.commandId.trim() || reply.commandId.length > MAX_ID_BYTES))) return invalid();
     let images: ControllerMessageResponse["images"];
-    if (reply.images !== undefined) {
+    if (reply !== undefined && reply.images !== undefined) {
       try { images = validateImageAttachments(reply.images); } catch { return invalid(); }
     }
-    entries.push([key, { inputHash: entry.inputHash, stage: "completed", reply: {
-      text: reply.text,
-      ...(reply.commandId !== undefined ? { commandId: reply.commandId as string } : {}),
-      ...(images !== undefined ? { images } : {}),
-    } }]);
+    entries.push([key, { inputHash: entry.inputHash, stage: entry.stage,
+      ...(entry.delivery !== undefined ? { delivery: entry.delivery as ReplyJournal[string]["delivery"] } : {}),
+      ...(entry.provenance !== undefined ? { provenance: entry.provenance as ReplyJournal[string]["provenance"] } : {}),
+      ...(reply !== undefined ? { reply: {
+        text: reply.text as string,
+        ...(reply.commandId !== undefined ? { commandId: reply.commandId as string } : {}),
+        ...(images !== undefined ? { images } : {}),
+      } } : {}),
+    }]);
   }
-  return Object.fromEntries(entries);
+  const journal = Object.fromEntries(entries);
+  if (Buffer.byteLength(JSON.stringify(journal) + "\n", "utf8") > MAX_REPLY_JOURNAL_BYTES) return invalid();
+  return journal;
 }
 
 /** Check every ancestor as well as the leaf; recursive mkdir would follow links. */
@@ -350,13 +368,33 @@ export class WorkspaceStore {
     if (this.root === path.parse(this.root).root) throw new WorkspaceValidationError("Invalid workspace root");
   }
 
-  public async forChat(accountId: string, chatId: string): Promise<LeaderWorkspace> {
+  private chatKey(accountId: string, chatId: string): string {
     for (const id of [accountId, chatId]) {
       if (typeof id !== "string" || !id.trim() || Buffer.byteLength(id, "utf8") > MAX_ID_BYTES) {
         throw new WorkspaceValidationError("A stable account ID and chat ID are required");
       }
     }
-    const key = digest(JSON.stringify([accountId, chatId]));
+    return digest(JSON.stringify([accountId, chatId]));
+  }
+
+  public async findChat(accountId: string, chatId: string): Promise<LeaderWorkspace | undefined> {
+    const key = this.chatKey(accountId, chatId);
+    const workspace = new LeaderWorkspace(key, path.join(this.root, key), this.root);
+    return storageOperation(() => {
+      try {
+        for (const directory of [this.root, workspace.workspacePath, workspace.codexHome]) {
+          ensureDirectory(directory, false);
+        }
+      } catch (error: unknown) {
+        if (hasCode(error, "ENOENT")) return undefined;
+        throw error;
+      }
+      return workspace;
+    });
+  }
+
+  public async forChat(accountId: string, chatId: string): Promise<LeaderWorkspace> {
+    const key = this.chatKey(accountId, chatId);
     const workspace = new LeaderWorkspace(key, path.join(this.root, key), this.root);
     workspace.initialize();
     return workspace;
