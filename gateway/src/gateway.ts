@@ -5,7 +5,7 @@ import { PermanentImageDownloadError } from "./controller/image-client.js";
 import { PermanentReplyUnavailableError } from "./controller/reply-client.js";
 import { DEFAULT_MESSAGE_MAX_CHARS } from "./wechat/markdown.js";
 import { HealthTracker } from "./runtime/health.js";
-import { CHECKPOINT_MARGIN_MS, ENTRY_TYPING_BUDGET_MS, REPLY_TIMEOUT_MS } from "./runtime/budgets.js";
+import { CHECKPOINT_MARGIN_MS, REPLY_TIMEOUT_MS } from "./runtime/budgets.js";
 import { type NotificationDeliverySummary } from "./controller/notification-contract.js";
 import { NotificationOutbox, NotificationDiagnosticError } from "./runtime/notification-outbox.js";
 import { ResultClient } from "./controller/result-client.js";
@@ -221,7 +221,7 @@ export class WeChatGateway {
 
       for (const msg of batch.messages) {
         if (this.stopped) { interrupted = true; break; }
-        this.healthTracker?.recordMessageStart(this.controller.authorizationBudgetMs + ENTRY_TYPING_BUDGET_MS +
+        this.healthTracker?.recordMessageStart(this.controller.authorizationBudgetMs +
           (this.replyEngine?.requestBudgetMs ?? this.controller.requestBudgetMs) + REPLY_TIMEOUT_MS + CHECKPOINT_MARGIN_MS);
         this.activeInboundChats.add(msg.chatId);
         try {
@@ -247,7 +247,7 @@ export class WeChatGateway {
             await this.flushRepliesOnce();
             this.stateManager.assertOutboxCapacity(msg.deliveryKey);
           }
-          await this.ilink.sendTyping(msg.chatId);
+          this.ilink.sendTyping(msg.chatId);
           const request = { chatId: msg.chatId, messageId: msg.messageId, text: msg.text };
           let source: DeliveryOutboxItem["source"] = this.replyEngine ? "engine" : "controller";
           let controllerReply: ControllerMessageResponse;

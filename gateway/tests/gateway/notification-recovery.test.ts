@@ -380,16 +380,24 @@ test("a stale progress claim conflict cannot starve a final notification in the 
   assert.deepEqual(f.sends.map(send => send.text), [final.text]);
 });
 
-test("internal send timeout during typing defers a known idle claim without an uncertain receipt", async t => {
+test("a notification with little send time remaining is delivered while typing stays pending", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_800_000_000_000 });
   const item = { ...notification(), createdAt: Date.now() - 60_000 }, f = setup(t, [item]);
   f.hooks.claim = () => {
     const current = f.records.get(item.id)!;
     current.attemptedAt = Date.now() - 29_990;
     current.attemptExpiresAt = current.attemptedAt + 60_000;
   };
-  f.hooks.typing = () => new Promise(resolve => setTimeout(resolve, 50));
-  assert.equal((await f.create().deliverOnce()).skipped, 1);
-  assert.equal(f.sends.length, 0); assert.equal(f.calls.some(call => call.startsWith("receipt:")), false);
-  assert.equal(f.records.get(item.id)!.status, "pending");
-  assert.equal(f.records.get(item.id)!.lastDeferReason, "window_expired");
+  let release!: () => void, started!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const began = new Promise<void>(resolve => { started = resolve; });
+  f.hooks.typing = async () => { started(); await gate; };
+  const delivery = f.create().deliverOnce();
+  try {
+    await began;
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(f.sends.length, 1);
+    assert.equal(f.records.get(item.id)!.status, "accepted");
+  } finally { release(); await delivery; }
+  assert.equal((await delivery).accepted, 1);
 });

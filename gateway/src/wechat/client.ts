@@ -113,8 +113,9 @@ export class ILinkClient {
 
   public get pollBudgetMs(): number { return (this.pollTimeoutMs + POLL_NETWORK_MARGIN_MS) * MAX_POLL_ATTEMPTS; }
 
-  public async sendTyping(chatId: string, status: 1 | 2 = 1): Promise<boolean> {
-    return this.typing.send(chatId, status);
+  public sendTyping(chatId: string, status: 1 | 2 = 1): void {
+    // send() owns its timeout and error handling; indicators never gate real work.
+    void this.typing.send(chatId, status);
   }
 
   private async request(
@@ -357,7 +358,7 @@ export class ILinkClient {
     try {
       return await this.withChatSend(chatId, async () => {
         if (!shouldContinue()) throw new Error("WeChat image reply interrupted before completion");
-        await this.sendTyping(chatId);
+        this.sendTyping(chatId);
         return deliverImages({ stateManager: this.stateManager, chatId, deliveryKey: options.deliveryKey,
           images: attachments, getImageBytes: options.getImageBytes,
           uploadImage: bytes => {
@@ -417,7 +418,7 @@ export class ILinkClient {
     const replySignal = options?.signal ? AbortSignal.any([replyController.signal, options.signal]) : replyController.signal;
     const replyTimer = setTimeout(() => replyController.abort(new Error("WeChat reply timed out")), timeoutMs);
     try {
-      await this.sendTyping(chatId);
+      this.sendTyping(chatId);
       for (let idx = delivery.acknowledgedChunks; idx < chunks.length; idx++) {
         const deterministicClientId = `super-leader:${crypto.createHash("sha256")
           .update(JSON.stringify([this.stateManager.getLoginFingerprint(), chatId, deliveryKey, idx])).digest("hex").slice(0, 24)}`;
