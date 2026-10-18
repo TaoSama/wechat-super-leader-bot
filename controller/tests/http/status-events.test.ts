@@ -135,14 +135,41 @@ it("bounds connections, retains only the latest snapshot for slow clients and de
   expect(vi.getTimerCount()).toBe(0);
 });
 
-it("closes a client that never drains within the heartbeat interval", async () => {
+it("closes a client that never drains after a full interval from its blocked write", async () => {
   vi.useFakeTimers();
   const events = new StatusEvents(async () => ({ revision: 1 }));
   const client = new StreamResponse();
   client.slow = true;
   events.open(client.asResponse(), async () => true);
-  await vi.advanceTimersByTimeAsync(STATUS_AUTH_INTERVAL_MS);
+  await vi.advanceTimersByTimeAsync(STATUS_COALESCE_MS);
+  await vi.advanceTimersByTimeAsync(STATUS_AUTH_INTERVAL_MS - 1);
+  expect(client.destroyed).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
   expect(client.destroyed).toBe(true);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("lets a healthy client drain when its blocked write falls just before the global heartbeat", async () => {
+  vi.useFakeTimers();
+  let revision = 1;
+  const events = new StatusEvents(async () => ({ revision }));
+  const client = new StreamResponse();
+  events.open(client.asResponse(), async () => true);
+  await vi.advanceTimersByTimeAsync(STATUS_COALESCE_MS);
+  await vi.advanceTimersByTimeAsync(STATUS_AUTH_INTERVAL_MS - STATUS_COALESCE_MS * 2 - 1);
+  revision++;
+  client.slow = true;
+  events.changed();
+  await vi.advanceTimersByTimeAsync(STATUS_COALESCE_MS);
+  expect(client.frames.at(-1)).toContain('"revision":2');
+  await vi.advanceTimersByTimeAsync(1);
+  expect(client.ended).toBe(false);
+  client.slow = false;
+  client.emit("drain");
+  await vi.advanceTimersByTimeAsync(STATUS_AUTH_INTERVAL_MS);
+  expect(client.ended).toBe(false);
+  expect(client.frames.at(-1)).toBe(": heartbeat\n\n");
+  events.stop();
   expect(vi.getTimerCount()).toBe(0);
 });
 

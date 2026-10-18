@@ -98,9 +98,18 @@ export async function openPlanConsoleProbe({ base, request, waitFor }) {
       assert(plan, 'Confirmed execution missing from authenticated console');
       assert.equal(plan.status, expectedStatus);
       assert.deepEqual(plan.steps.map(step => step.status), expectedSteps);
-      await waitFor(() => {
+      await waitFor(async () => {
         if (errors.length) throw errors[0];
-        assert(!finished, 'Plan SSE closed before its expected update');
+        if (finished) {
+          const response = await get('/v1/status');
+          const body = await response.text();
+          const status = JSON.parse(body);
+          const sectionBytes = Object.fromEntries(Object.entries(status).map(([key,value]) => [key,Buffer.byteLength(JSON.stringify(value))]));
+          const largestCommands = (status.commands ?? []).map(command => ({commandId:command.commandId,
+            bytes:Buffer.byteLength(JSON.stringify(command)),promptLength:command.prompt?.length ?? 0}))
+            .sort((a,b) => b.bytes-a.bytes).slice(0,10);
+          throw new Error(`Plan SSE closed before ${expectedStatus} ${JSON.stringify(expectedSteps)} update; revoked=${revoked}; snapshots=${snapshots.length}; HTTP=${response.status}; bytes=${Buffer.byteLength(body)}; sections=${JSON.stringify(sectionBytes)}; commands=${JSON.stringify(largestCommands)}`);
+        }
         return snapshots.some(snapshot => snapshot.items.some(item => item.id === id && JSON.stringify(item) === JSON.stringify(plan)));
       }, 'SSE has the same exact plan projection as HTTP');
       return plan;
