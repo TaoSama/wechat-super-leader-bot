@@ -1,16 +1,24 @@
 import { CronExpressionParser } from "cron-parser";
 import type { Schedule, CreateSchedule } from "./contracts.js";
+import { AutomationValidationError } from "./errors.js";
 
 export function validateTiming(input: CreateSchedule, now: number): number {
   try { new Intl.DateTimeFormat("en", { timeZone: input.timezone }).format(now); }
-  catch { throw new Error("Invalid IANA timezone"); }
+  catch (error) {
+    if (!(error instanceof RangeError)) throw error;
+    throw new AutomationValidationError("Invalid IANA timezone", { cause: error });
+  }
   if (input.timing.type === "at") {
     const at = Date.parse(input.timing.at);
-    if (at <= now) throw new Error("Scheduled time must be in the future");
+    if (at <= now) throw new AutomationValidationError("Scheduled time must be in the future");
     return at;
   }
-  if (input.timing.expression.trim().split(/\s+/).length !== 5) throw new Error("Cron must contain five fields (minute precision)");
-  return CronExpressionParser.parse(input.timing.expression, { currentDate: new Date(now), tz: input.timezone }).next().getTime();
+  if (input.timing.expression.trim().split(/\s+/).length !== 5) throw new AutomationValidationError("Cron must contain five fields (minute precision)");
+  try {
+    return CronExpressionParser.parse(input.timing.expression, { currentDate: new Date(now), tz: input.timezone }).next().getTime();
+  } catch (error) {
+    throw new AutomationValidationError("Invalid cron expression or no future occurrence", { cause: error });
+  }
 }
 
 /** A downtime gap becomes one newest occurrence, never a replay of every missed tick. */

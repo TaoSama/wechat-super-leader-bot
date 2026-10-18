@@ -40,7 +40,7 @@ export function finishRun(schedule: Schedule, run: AutomationRun, outcome: Runne
     return;
   }
   delete schedule.activeRunId;
-  if (schedule.nextAt === null && schedule.status === "active") schedule.status = "completed";
+  if (schedule.nextAt === null && schedule.status !== "cancelled") schedule.status = "completed";
   run.result = structuredClone(outcome.result);
   const previousOutcome = schedule.lastOutcome;
   const fingerprint = outcome.result.fingerprint ?? createHash("sha256").update(outcome.result.text + "\0" + (outcome.result.error ?? "")).digest("hex");

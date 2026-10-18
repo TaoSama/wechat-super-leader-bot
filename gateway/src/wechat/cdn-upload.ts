@@ -1,4 +1,5 @@
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
+import { transferTimeoutMs } from "../runtime/transfer-budget.js";
 import { beforeAbort } from "../runtime/abort.js";
 
 export const MEDIA_UPLOAD_TIMEOUT_MS = 30_000;
@@ -33,16 +34,16 @@ class UploadFailure extends Error {
 export class CdnUploader {
   private readonly request: UploadRequest;
   private readonly fetchImpl: typeof fetch;
-  private readonly timeoutMs: number;
+  private readonly timeoutMs?: number;
   private readonly label: "image" | "file";
 
   constructor(options: { request: UploadRequest; fetchImpl?: typeof fetch; timeoutMs?: number;
     label: "image" | "file" }) {
     this.request = options.request;
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
-    this.timeoutMs = options.timeoutMs ?? MEDIA_UPLOAD_TIMEOUT_MS;
+    this.timeoutMs = options.timeoutMs;
     this.label = options.label;
-    if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs <= 0 || this.timeoutMs > MEDIA_UPLOAD_TIMEOUT_MS) {
+    if (this.timeoutMs !== undefined && (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs <= 0 || this.timeoutMs > MEDIA_UPLOAD_TIMEOUT_MS)) {
       throw new Error(`Invalid WeChat ${this.label} upload timeout budget`);
     }
   }
@@ -52,22 +53,33 @@ export class CdnUploader {
     if (!Buffer.isBuffer(bytes) || bytes.length === 0) throw new Error("WeChat media requires non-empty bytes");
     if (typeof chatId !== "string" || !chatId.trim()) throw new Error(`WeChat ${this.label} requires a chat ID`);
     parentSignal?.throwIfAborted();
-    // Snapshot before yielding so hashes, sizes and ciphertext always describe the same bytes.
-    const plaintext = Buffer.from(bytes);
+    // Capture hashes and encrypt before yielding, without retaining a second plaintext buffer.
+    const plaintextBytes = bytes.length;
+    const plaintextMd5 = createHash("md5").update(bytes).digest("hex");
     const key = randomBytes(AES_BLOCK_BYTES);
     const keyHex = key.toString("hex");
     const filekey = randomBytes(AES_BLOCK_BYTES).toString("hex");
     const cipher = createCipheriv("aes-128-ecb", key, null);
-    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const ciphertext = Buffer.concat([cipher.update(bytes), cipher.final()]);
+    const timeoutMs = this.timeoutMs ?? (this.label === "file"
+      ? transferTimeoutMs(plaintextBytes, MEDIA_UPLOAD_TIMEOUT_MS) : MEDIA_UPLOAD_TIMEOUT_MS);
     const controller = new AbortController();
     const signal = parentSignal ? AbortSignal.any([controller.signal, parentSignal]) : controller.signal;
-    const timer = setTimeout(() => controller.abort(new Error(`WeChat ${this.label} upload timed out`)), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(new Error(`WeChat ${this.label} upload timed out`)), timeoutMs);
     try {
-      const response = await beforeAbort(this.request("ilink/bot/getuploadurl", {
-        filekey, media_type: mediaType, to_user_id: chatId, rawsize: plaintext.length,
-        rawfilemd5: createHash("md5").update(plaintext).digest("hex"),
-        filesize: ciphertext.length, no_need_thumb: true, aeskey: keyHex,
-      }, this.timeoutMs, signal), signal);
+      const authorization = new AbortController();
+      const authorizationSignal = AbortSignal.any([signal, authorization.signal]);
+      const authorizationTimeoutMs = Math.min(timeoutMs, MEDIA_UPLOAD_TIMEOUT_MS);
+      const authorizationTimer = setTimeout(() => authorization.abort(
+        new Error(`WeChat ${this.label} upload authorization timed out`)), authorizationTimeoutMs);
+      let response: Record<string, unknown>;
+      try {
+        response = await beforeAbort(this.request("ilink/bot/getuploadurl", {
+          filekey, media_type: mediaType, to_user_id: chatId, rawsize: plaintextBytes,
+          rawfilemd5: plaintextMd5,
+          filesize: ciphertext.length, no_need_thumb: true, aeskey: keyHex,
+        }, authorizationTimeoutMs, authorizationSignal), authorizationSignal);
+      } finally { clearTimeout(authorizationTimer); authorization.abort(); }
       signal.throwIfAborted();
       for (const field of ["ret", "errcode"] as const) {
         if (Object.hasOwn(response, field) && response[field] !== 0) {
@@ -92,7 +104,7 @@ export class CdnUploader {
           try {
             uploaded = await beforeAbort(this.fetchImpl(uploadUrl, {
               method: "POST", headers: { "Content-Type": "application/octet-stream" },
-              body: new Uint8Array(ciphertext), redirect: "error", signal,
+              body: new Uint8Array(ciphertext.buffer as ArrayBuffer, ciphertext.byteOffset, ciphertext.byteLength), redirect: "error", signal,
             }), signal);
           } catch {
             signal.throwIfAborted();
@@ -109,7 +121,7 @@ export class CdnUploader {
           }
           return { media: { encrypt_query_param: downloadParam,
             aes_key: Buffer.from(keyHex).toString("base64"), encrypt_type: 1 },
-          plaintextBytes: plaintext.length, ciphertextBytes: ciphertext.length };
+          plaintextBytes, ciphertextBytes: ciphertext.length };
         } catch (error) {
           signal.throwIfAborted();
           if (!(error instanceof UploadFailure) || !error.retryable || attempt === MAX_UPLOAD_ATTEMPTS - 1) throw error;

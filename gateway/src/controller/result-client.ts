@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { transferTimeoutMs } from "../runtime/transfer-budget.js";
 import { beforeAbort } from "../runtime/abort.js";
 import { validateControllerUrl } from "./client.js";
 import { RESULT_FILE_BYTES, RESULT_PENDING_LIMIT, RESULT_RESPONSE_BYTES, RESULT_TIMEOUT_MS,
@@ -6,7 +7,7 @@ import { RESULT_FILE_BYTES, RESULT_PENDING_LIMIT, RESULT_RESPONSE_BYTES, RESULT_
 
 const RECEIPT_RETRIES = 2;
 const INTEREST_CHAT_LIMIT = 1000;
-class ResultHttpError extends Error {
+export class ResultHttpError extends Error {
   constructor(readonly status: number) { super(`Controller result request HTTP ${status}`); }
 }
 export interface ResultClientOptions {
@@ -19,6 +20,7 @@ export class ResultClient {
   private readonly publicOrigin: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly downloadTimeoutMs?: number;
   private readonly maxFileBytes: number;
   private readonly token: string;
   constructor(options: ResultClientOptions) {
@@ -27,6 +29,7 @@ export class ResultClient {
     if (!this.token) throw new Error("Missing Controller result token");
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
     this.timeoutMs = options.timeoutMs ?? RESULT_TIMEOUT_MS;
+    this.downloadTimeoutMs = options.timeoutMs;
     this.maxFileBytes = options.maxFileBytes ?? RESULT_FILE_BYTES;
     if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs < 1 || this.timeoutMs > RESULT_TIMEOUT_MS ||
       !Number.isSafeInteger(this.maxFileBytes) || this.maxFileBytes < 1) throw new Error("Invalid result client budgets");
@@ -55,18 +58,22 @@ export class ResultClient {
       } finally { clearTimeout(timer); abort.abort(); }
     }
   }
-  private async readBody(response: Response, maxBytes: number, signal: AbortSignal): Promise<Buffer> {
+  private async readBody(response: Response, maxBytes: number, signal: AbortSignal, exactSize?: number): Promise<Buffer> {
     if (!response.body) throw new Error("Controller result response body missing");
+    signal.throwIfAborted();
+    // Artifact size is validated before this allocation; never retain chunks plus a second full concat.
+    const destination = exactSize === undefined ? undefined : Buffer.allocUnsafe(exactSize);
     const reader = response.body.getReader(), chunks: Buffer[] = [];
     let size = 0;
     try {
       for (;;) {
         const part = await beforeAbort(reader.read(), signal);
         signal.throwIfAborted();
-        if (part.done) return Buffer.concat(chunks, size);
+        if (part.done) return destination ? destination.subarray(0, size) : Buffer.concat(chunks, size);
         size += part.value.byteLength;
         if (size > maxBytes) throw new Error("Controller result response exceeded byte budget");
-        chunks.push(Buffer.from(part.value));
+        if (destination) destination.set(part.value, size - part.value.byteLength);
+        else chunks.push(Buffer.from(part.value));
       }
     } finally { reader.releaseLock(); }
   }
@@ -161,7 +168,8 @@ export class ResultClient {
     const url = this.artifactUrl(artifact);
     if (!Number.isSafeInteger(artifact.size) || artifact.size < 1 || artifact.size > this.maxFileBytes) throw new Error("Result artifact exceeds local file budget");
     const abort = new AbortController(), signal = parent ? AbortSignal.any([abort.signal, parent]) : abort.signal;
-    const timer = setTimeout(() => abort.abort(new Error("Result artifact download timed out")), this.timeoutMs);
+    const timer = setTimeout(() => abort.abort(new Error("Result artifact download timed out")),
+      this.downloadTimeoutMs ?? transferTimeoutMs(artifact.size, RESULT_TIMEOUT_MS));
     try {
       signal.throwIfAborted();
       const response = await beforeAbort(this.fetchImpl(url, { method: "GET", redirect: "error", signal }), signal);
@@ -170,7 +178,7 @@ export class ResultClient {
       }
       const length = response.headers.get("content-length");
       if (length !== null && (!/^\d+$/.test(length) || Number(length) !== artifact.size)) throw new Error("Controller result download length mismatch");
-      const bytes = await this.readBody(response, artifact.size, signal);
+      const bytes = await this.readBody(response, artifact.size, signal, artifact.size);
       if (bytes.length !== artifact.size || createHash("sha256").update(bytes).digest("hex") !== artifact.sha256) {
         throw new Error("Controller result download integrity mismatch");
       }

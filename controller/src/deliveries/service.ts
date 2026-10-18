@@ -87,7 +87,13 @@ export class ResultDeliveryService {
       const artifact = await this.repository.getArtifact(plan.artifact.id);
       if (!artifact || artifact.expiresAt <= this.now()) throw new Error("Result artifact unavailable");
       const text = artifact.bytes.toString("utf8");
-      if (plan.mode === "text") return await this.repository.finishPreparation(plan.id, token, splitResultMessages(resultDisplayText(text)), undefined, this.now()) ?? claimed;
+      if (plan.mode === "text") {
+        // Text layout and boundaries were frozen before reserving catch-up sources.
+        // Re-rendering here could expand an older three-message plan past its mode's limit.
+        if (!plan.messages.length || plan.messages.length > RESULT_TEXT_MESSAGE_LIMIT ||
+          plan.messages.some(message => !message.length || message.length > RESULT_MESSAGE_CHARS)) throw new Error("Invalid frozen text delivery");
+        return await this.repository.finishPreparation(plan.id, token, plan.messages, undefined, this.now()) ?? claimed;
+      }
       if (!this.options.model) throw new Error("Summary model unavailable");
       const excerpt = text.length <= SUMMARY_INPUT_CHARS ? text : text.slice(0, SUMMARY_INPUT_CHARS / 2) +
         "\n[中间内容省略；完整内容在附件]\n" + text.slice(-SUMMARY_INPUT_CHARS / 2);

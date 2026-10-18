@@ -21,7 +21,7 @@ async function appFixture() {
   await new Promise<void>(resolve => server.once("listening", resolve));
   const address = server.address(); if (!address || typeof address === "string") throw new Error("No listening address");
   const origin = `http://127.0.0.1:${address.port}`;
-  const create = (chatId = "allowed", consent = true) => fetch(`${origin}/v1/automations`, { method: "POST", headers: { "content-type": "application/json", ...(consent ? { "x-test-user-action": "current" } : {}) },
+  const create = (chatId = "allowed", consent = true) => fetch(`${origin}/v1/automations`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": "test-create", ...(consent ? { "x-test-user-action": "current" } : {}) },
     body: JSON.stringify({ chatId, input: { kind: "reminder", title: "test reminder", text: "hello", timing: { type: "at", at: "2026-10-18T01:00:00Z" }, timezone: "Asia/Shanghai" } }),
   });
   return { origin, create };

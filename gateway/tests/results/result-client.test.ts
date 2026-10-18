@@ -105,3 +105,31 @@ test("notification interest includes all allowed chats while validating the inte
   assert.equal(url, "http://127.0.0.1:3000/v1/chats/notification-interest");
   await assert.rejects(client(async () => Response.json({ chatIds: ["chat"], interested: ["unauthorized"] })).notificationInterest(), /schema invalid/);
 });
+
+test("artifact transfer scales independently while control requests retain their 15s deadline", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const item = plan(); item.artifact.size = 32 * 1024 * 1024;
+  const signals: AbortSignal[] = [];
+  const c = client(async (_input, init) => {
+    signals.push(init!.signal! as AbortSignal);
+    return new Promise<Response>(() => {});
+  });
+  const download = assert.rejects(c.downloadArtifact(item.artifact), /download timed out/);
+  const control = assert.rejects(c.getDelivery(item.id), /request timed out/);
+  t.mock.timers.tick(15_000);
+  await control;
+  assert.equal(signals[0].aborted, false, "32MiB transfer outlives the control-request timeout");
+  assert.equal(signals[1].aborted, true);
+  t.mock.timers.tick(32_000);
+  await download;
+  assert.equal(signals[0].aborted, true);
+});
+
+test("short multi-chunk artifact never exposes unfilled preallocated bytes", async () => {
+  const item = plan();
+  const stream = new ReadableStream<Uint8Array>({ start(controller) {
+    controller.enqueue(bytes.subarray(0, 2)); controller.enqueue(bytes.subarray(2, bytes.length - 1)); controller.close();
+  } });
+  await assert.rejects(client(async () => new Response(stream, { headers: { "Content-Type": "text/markdown" } }))
+    .downloadArtifact(item.artifact), /integrity mismatch/);
+});

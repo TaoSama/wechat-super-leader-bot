@@ -1,6 +1,6 @@
 import { reportNotificationSendFailure } from "../runtime/notification-outbox.js";
 import { randomUUID } from "node:crypto";
-import type { ResultClient } from "../controller/result-client.js";
+import { ResultHttpError, type ResultClient } from "../controller/result-client.js";
 import type { ResultDelivery, MaterializedResultDelivery } from "./contracts.js";
 import { inspectResultStep, resultAcknowledgedSteps, selectResultDeliveries, type ResultDeliveryRunner, type ResultDeliveryOptions, type ResultSendKind } from "./delivery.js";
 import { RESULT_OUTBOX_LIMIT, resultIdentity, type ResultOutboxStore, type ResultReference } from "./outbox.js";
@@ -78,7 +78,13 @@ export class ResultDispatcher {
       for (const ref of this.options.store.references()) {
         if (!this.active()) break;
         try {
-          const item = await this.options.controller.getDelivery(ref.id, this.options.signal);
+          let item: ResultDelivery;
+          try { item = await this.options.controller.getDelivery(ref.id, this.options.signal); }
+          catch (error) {
+            if (!(error instanceof ResultHttpError) || error.status !== 404) throw error;
+            // Purged plans cannot be resumed or receipted; retire only their API reference.
+            this.options.store.remove(ref.id); summary.skipped++; continue;
+          }
           this.verify(ref, item);
           const sent = await this.process(ref, item, summary);
           if (sent) attempted.add(item.chatId);
@@ -150,14 +156,14 @@ export class ResultDispatcher {
       acknowledged(this.options.state, item) === totalSteps(item)) {
       await this.receipt(this.persistReceipt(ref, "accepted"), summary); return false;
     }
+    if (["uncertain", "superseded"].includes(item.status) || item.expiresAt <= this.now() || item.retainedUntil <= this.now()) {
+      this.options.store.remove(ref.id); summary.skipped++; return false;
+    }
     if (ref.status === "defer") {
       if (["waiting_for_user", "ready"].includes(item.status) && item.lastDeferredAttemptId === ref.attemptId && item.lastDeferReason === ref.deferReason &&
         (item.submittedMessages ?? 0) >= (ref.submittedMessages ?? 0)) { this.finishDefer(ref); return false; }
       if (item.status === "claimed" && item.attemptId === ref.attemptId) { await this.defer(ref); return false; }
       throw new Error("Controller result defer recovery attempt mismatch");
-    }
-    if (["uncertain", "superseded"].includes(item.status) || item.expiresAt <= this.now() || item.retainedUntil <= this.now()) {
-      this.options.store.remove(ref.id); summary.skipped++; return false;
     }
     if (item.status === "waiting_for_user") {
       if ((ref.submittedMessages ?? 0) > 0) this.options.store.update(ref.id, { status: "waiting" });

@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { CreateScheduleSchema, type AutomationRepository, type AutomationRunner, type CreateSchedule, type FrozenTarget, type RunnerOutcome, type Schedule } from "./contracts.js";
 import { validateTiming } from "./timing.js";
-import { automationId } from "./identity.js";
+import { assertSameCreation, automationId, automationRequestId } from "./identity.js";
 
 export interface CreationAuthority {
   chatId: string;
   currentMessageId: string;
+  /** HTTP-only stable creation key; model tools may create distinct tasks in one user turn. */
+  idempotencyKey?: string;
   /** Trusted caller derives this from the current user turn, never from a model tool argument. */
   explicitCurrentTurnAuthorization: boolean;
   assertCurrentAuthority?: () => Promise<void>;
@@ -30,9 +32,14 @@ export class AutomationService {
       throw new Error("Creating an automation requires explicit authorization in the current user turn");
     }
     const parsed = CreateScheduleSchema.parse(input);
-    const id = automationId(authority.chatId, authority.currentMessageId, parsed);
+    const id = authority.idempotencyKey === undefined ? automationId(authority.chatId, authority.currentMessageId, parsed)
+      : automationRequestId(authority.chatId, authority.idempotencyKey);
     const existing = await this.repository.get(id, authority.chatId);
-    if (existing) { await authority.assertCurrentAuthority?.(); return existing; }
+    if (existing) {
+      assertSameCreation(existing, { ...existing, ...parsed, authorizedMessageId: authority.currentMessageId });
+      await authority.assertCurrentAuthority?.();
+      return existing;
+    }
     const now = this.now();
     const nextAt = validateTiming(parsed, now);
     let target: FrozenTarget | undefined;

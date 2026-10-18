@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import type { StateManager } from "../runtime/state.js";
 import { beforeAbort } from "../runtime/abort.js";
-import { NOTIFICATION_REPLY_TIMEOUT_MS, REPLY_TIMEOUT_MS } from "../runtime/budgets.js";
+import { transferTimeoutMs } from "../runtime/transfer-budget.js";
+import { MEDIA_UPLOAD_TIMEOUT_MS } from "./cdn-upload.js";
+import { CHECKPOINT_MARGIN_MS, SEND_REQUEST_TIMEOUT_MS, NOTIFICATION_REPLY_TIMEOUT_MS, REPLY_TIMEOUT_MS } from "../runtime/budgets.js";
 import type { FileUploadMetadata, UploadedFileItem } from "./file-upload.js";
 import { ILinkSendReceiptError } from "./send-receipt.js";
 
@@ -32,7 +34,8 @@ export async function deliverFileReply(options: FileDeliveryOptions): Promise<nu
   if (typeof chatId !== "string" || !chatId.trim() || typeof deliveryKey !== "string" || !deliveryKey.trim()) {
     throw new Error("WeChat file delivery requires stable identity");
   }
-  const timeoutMs = options.timeoutMs ?? REPLY_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs ?? Math.max(REPLY_TIMEOUT_MS,
+    transferTimeoutMs(options.bytes.length, MEDIA_UPLOAD_TIMEOUT_MS) + SEND_REQUEST_TIMEOUT_MS + CHECKPOINT_MARGIN_MS);
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > NOTIFICATION_REPLY_TIMEOUT_MS) {
     throw new Error("Invalid WeChat file reply timeout budget");
   }

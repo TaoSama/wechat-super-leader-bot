@@ -85,6 +85,7 @@ test("local product limit is configurable and inclusive", async () => {
 test("upload-only retries preserve ciphertext, do not reauthorize and never send a message", async () => {
   let grants = 0;
   const encryptedBodies: Buffer[] = [];
+  const bodyViews: Uint8Array[] = [];
   const uploader = new FileUploader({
     request: async (endpoint) => {
       assert.equal(endpoint, "ilink/bot/getuploadurl");
@@ -92,6 +93,7 @@ test("upload-only retries preserve ciphertext, do not reauthorize and never send
       return { upload_param: "grant" };
     },
     fetchImpl: async (_input, init) => {
+      bodyViews.push(init?.body as Uint8Array);
       encryptedBodies.push(Buffer.from(init?.body as Uint8Array));
       return encryptedBodies.length === 1 ? new Response(null, { status: 503 }) :
         new Response(null, { headers: { "x-encrypted-param": "download" } });
@@ -101,6 +103,7 @@ test("upload-only retries preserve ciphertext, do not reauthorize and never send
   assert.equal(grants, 1);
   assert.equal(encryptedBodies.length, 2);
   assert.deepEqual(encryptedBodies[0], encryptedBodies[1]);
+  assert.equal(bodyViews[0].buffer, bodyViews[1].buffer, "retries reuse the encrypted backing store");
 });
 
 test("authorization rejection and untrusted CDN targets never upload", async () => {
@@ -127,4 +130,43 @@ test("cancelled or timed out uploads finish without sending messages", async () 
     });
     await assert.rejects(uploader.upload("chat", bytes, metadata()), /file upload timed out/);
   }
+});
+
+test("file transfer receives a size allowance while upload authorization stays bounded", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const content = Buffer.alloc(1024 * 1024), abort = new AbortController();
+  let grantTimeout = 0, transferSignal: AbortSignal | undefined;
+  const uploader = new FileUploader({
+    request: async (_endpoint, _payload, timeoutMs) => { grantTimeout = timeoutMs; return { upload_param: "grant" }; },
+    fetchImpl: async (_input, init) => {
+      transferSignal = init!.signal! as AbortSignal;
+      return new Promise<Response>(() => {});
+    },
+  });
+  const pending = assert.rejects(uploader.upload("chat", content, metadata(content), abort.signal), /file upload timed out/);
+  // Authorization awaits before the upload starts; no real elapsed time or large allocation is needed.
+  for (let count = 0; count < 8 && !transferSignal; count++) await Promise.resolve();
+  assert.ok(transferSignal);
+  assert.equal(grantTimeout, 30_000);
+  t.mock.timers.tick(30_000);
+  assert.equal(transferSignal.aborted, false);
+  t.mock.timers.tick(1000);
+  await pending;
+  assert.equal(transferSignal.aborted, true);
+});
+
+test("authorization cannot inherit the longer file transfer deadline", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const content = Buffer.alloc(1024 * 1024);
+  const uploader = new FileUploader({ request: async () => new Promise(() => {}) });
+  const pending = assert.rejects(uploader.upload("chat", content, metadata(content)), /upload authorization timed out/);
+  t.mock.timers.tick(30_000);
+  await pending;
+});
+
+test("parent cancellation interrupts an extended file transfer before any send", async () => {
+  const abort = new AbortController();
+  const uploader = new FileUploader({ request: async () => ({ upload_param: "grant" }),
+    fetchImpl: async () => { abort.abort(new Error("parent-stop")); return new Promise(() => {}); } });
+  await assert.rejects(uploader.upload("chat", bytes, metadata(), abort.signal), /parent-stop/);
 });

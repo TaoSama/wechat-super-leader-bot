@@ -1,11 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import express from "express";
 import type { AddressInfo } from "node:net";
 import { expect, it, vi } from "vitest";
 import { MemoryDeliveryRepository } from "../../src/deliveries/memory.js";
 import { ResultDeliveryService } from "../../src/deliveries/service.js";
 import type { LeaderModel } from "../../src/leader/model/contracts.js";
-import { MAX_CATCHUP_ARTIFACT_BYTES, MAX_CATCHUP_SOURCES } from "../../src/deliveries/contracts.js";
+import { MAX_CATCHUP_ARTIFACT_BYTES, MAX_CATCHUP_SOURCES, splitResultMessages } from "../../src/deliveries/contracts.js";
 import { createResultDeliveryRouter } from "../../src/deliveries/routes.js";
 
 const NOW = 1_800_000_000_000;
@@ -41,6 +41,29 @@ it("resumes several original outcomes as one complete delivery while preserving 
   const materialized = await service.materialize(pending[0].id);
   expect(materialized).not.toHaveProperty("catchupSourceIds");
   expect(materialized).not.toHaveProperty("resumeGeneration");
+});
+
+it("restores a legacy preparing catch-up with its frozen three messages when new layout would expand it", async () => {
+  const { service, repository, create, now } = fixture();
+  const firstText = "①甲②乙\n".repeat(100), secondText = "字".repeat(10900);
+  const first = await create(firstText), second = await create(secondText);
+  await repository.markChatWaiting(CHAT, "window_closed", now());
+  const raw = firstText + secondText, bytes = Buffer.from(raw);
+  expect(raw).toHaveLength(11400);
+  const id = randomUUID(), artifact = { ...first.artifact, id: randomUUID(), size: bytes.length,
+    sha256: createHash("sha256").update(bytes).digest("hex") };
+  const frozen = splitResultMessages(raw);
+  await repository.createIfAbsent({ ...first, id, key: randomUUID(), source: { type: "catchup", id },
+    status: "preparing", mode: "text", messages: frozen, artifact, catchupSourceIds: [first.id, second.id] },
+  { ...artifact, bytes }, now());
+  const restarted = new ResultDeliveryService(repository, { ...options, now });
+  const restored = await restarted.retryPreparation(id);
+  expect(restored).toMatchObject({ status: "ready", mode: "text", messages: frozen });
+  expect(restored?.messages).toHaveLength(3);
+  expect(restored?.messages.join("")).toBe(raw);
+  expect((await repository.getArtifact(artifact.id))?.bytes.toString("utf8")).toBe(raw);
+  for (const original of [first, second]) expect((await repository.get(original.id, now()))?.status).toBe("superseded");
+  expect(await service.retryPreparation(id)).toMatchObject({ status: "ready", messages: frozen });
 });
 
 it("holds original waiting results until the durable model summary atomically activates their combined attachment", async () => {

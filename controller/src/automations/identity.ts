@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { CreateSchedule, Schedule } from "./contracts.js";
+import { AutomationConflictError } from "./errors.js";
 
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
@@ -11,8 +12,15 @@ function canonical(value: unknown): unknown {
 const UUID_DNS_NAMESPACE = Buffer.from("6ba7b8109dad11d180b400c04fd430c8", "hex");
 /** Replaying the same authorized tool request cannot create another recurring job. */
 export function automationId(chatId: string, messageId: string, input: CreateSchedule): string {
+  return identity(["wechat-automation", chatId, messageId, canonical(input)]);
+}
+/** HTTP keys identify one creation attempt independently of its payload. */
+export function automationRequestId(chatId: string, key: string): string {
+  return identity(["wechat-automation-http", chatId, key]);
+}
+function identity(parts: unknown[]): string {
   const bytes = createHash("sha1").update(UUID_DNS_NAMESPACE)
-    .update(JSON.stringify(["wechat-automation", chatId, messageId, canonical(input)])).digest().subarray(0, 16);
+    .update(JSON.stringify(parts)).digest().subarray(0, 16);
   bytes[6] = (bytes[6] & 0x0f) | 0x50;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   const value = bytes.toString("hex");
@@ -28,6 +36,6 @@ function creationSpec(schedule: Schedule): CreateSchedule {
 export function assertSameCreation(existing: Schedule, incoming: Schedule): void {
   if (automationId(existing.chatId, existing.authorizedMessageId, creationSpec(existing)) !==
       automationId(incoming.chatId, incoming.authorizedMessageId, creationSpec(incoming))) {
-    throw new Error("Schedule identity conflicts with another creation request");
+    throw new AutomationConflictError("Schedule identity conflicts with another creation request");
   }
 }

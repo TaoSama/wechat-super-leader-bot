@@ -4,6 +4,7 @@ import { assertSameCreation } from "./identity.js";
 import { finishRun, newRun } from "./state.js";
 import { dueOccurrence } from "./timing.js";
 import { validateBodyRetention } from "./retention.js";
+import { AutomationConflictError } from "./errors.js";
 
 type Queryable = Pick<pg.PoolClient, "query">;
 export async function initAutomationTables(client: Queryable): Promise<void> {
@@ -66,7 +67,7 @@ export class PostgresAutomationRepository implements AutomationRepository {
       const result = await client.query<{ data: Schedule }>("SELECT data FROM automation_schedules WHERE id=$1 AND chat_id=$2 FOR UPDATE", [id, chatId]);
       const schedule = result.rows[0]?.data;
       if (!schedule) return null;
-      if (schedule.status === "cancelled" || schedule.status === "completed") throw new Error("Finished schedules cannot be resumed or modified");
+      if (schedule.status === "cancelled" || schedule.status === "completed") throw new AutomationConflictError("Finished schedules cannot be resumed or modified");
       schedule.status = status; schedule.updatedAt = now;
       await saveSchedule(client, schedule);
       if (status === "cancelled") await client.query("UPDATE automation_outbox SET state='superseded',data=jsonb_set(data,'{status}','\"superseded\"') WHERE schedule_id=$1 AND state='pending'", [id]);

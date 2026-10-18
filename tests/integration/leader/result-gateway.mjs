@@ -185,8 +185,16 @@ globalThis.fetch = async (input, init) => {
       const result = await controller.request('/v1/deliveries'); assert.equal(result.status, 200); return result.body.items;
     };
     const getPlan = async id => (await plans()).find(plan => plan.id === id);
+    const createSchedule = async body => {
+      const key = randomUUID();
+      const response = await fetch(`${controller.base}/v1/automations`, {
+        method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'idempotency-key': key },
+        body: JSON.stringify(body), signal: AbortSignal.timeout(HTTP_MS),
+      });
+      return { status: response.status, body: await response.json() };
+    };
     const prepare = async text => {
-      const result = await controller.request('/v1/automations', { chatId: CHAT, input: {
+      const result = await createSchedule({ chatId: CHAT, input: {
         kind: 'reminder', title: 'synthetic runtime result', text, timezone: 'UTC', retention: 'retain',
         timing: { type: 'at', at: new Date(Date.now() + 500).toISOString() },
       } });
@@ -274,7 +282,7 @@ globalThis.fetch = async (input, init) => {
     console.log('PASS lost send response and process killed after submission remain uncertain across real CLI restart without duplicate send');
 
     await input('新窗口供续期提醒测试');
-    const future = await controller.request('/v1/automations', { chatId: CHAT, input: {
+    const future = await createSchedule({ chatId: CHAT, input: {
       kind: 'reminder', title: 'synthetic future task', text: 'future-result', timezone: 'UTC',
       timing: { type: 'at', at: new Date(Date.now() + 60_000).toISOString() },
     } }); assert.equal(future.status, 201);

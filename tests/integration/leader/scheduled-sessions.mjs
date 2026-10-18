@@ -221,6 +221,7 @@ export async function verifyScheduledSessions({ postgres = false } = {}) {
     assert.equal((await runs(overlap)).length, 1, 'Cron overlapped its unfinished run');
     assert.equal(frames.filter(frame => frame.prompt === overlap.prompt).length, 1);
     await setStatus(overlap, 'cancelled'); await complete(overlap);
+    await delay(SETTLE_MS);
     assert.equal((await results(overlap)).length, 0);
     console.log('PASS advancing three cron occurrences while one turn remains active never overlaps or duplicates execution');
 

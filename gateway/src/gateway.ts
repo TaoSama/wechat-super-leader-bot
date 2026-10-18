@@ -134,17 +134,21 @@ export class WeChatGateway {
   /** One durable multipart delivery per claim; client IDs only correlate evidence. */
   public async deliverNotificationsOnce(): Promise<NotificationDeliverySummary> {
     if (!this.notifications || this.stopped || !this.stateManager.isReadyForActivePolling()) return { accepted: 0, uncertain: 0, skipped: 0 };
-    let replyError: unknown;
-    try { await this.flushRepliesOnce(); } catch (error) { replyError = error; }
-    let summary: NotificationDeliverySummary;
-    if (this.resultDispatcher && this.resultClient) {
-      if (!this.notificationInterest || Date.now() - this.notificationInterest.fetchedAt >= NOTIFICATION_INTEREST_CACHE_MS) {
-        this.notificationInterest = { ...await this.resultClient.notificationInterest(this.notificationAbort.signal), fetchedAt: Date.now() };
-      }
-      summary = await this.resultDispatcher.deliverOnce(this.notificationInterest.chatIds);
-      await this.renewalNotifier!.deliverOnce(this.notificationInterest.interested);
-    } else summary = await this.notificationOutbox!.deliverOnce();
-    if (replyError) throw replyError;
+    let firstError: unknown;
+    try { await this.flushRepliesOnce(); } catch (error) { firstError = error; }
+    let summary: NotificationDeliverySummary = { accepted: 0, uncertain: 0, skipped: 0 };
+    try {
+      if (this.resultDispatcher && this.resultClient) {
+        if (!this.notificationInterest || Date.now() - this.notificationInterest.fetchedAt >= NOTIFICATION_INTEREST_CACHE_MS) {
+          this.notificationInterest = { ...await this.resultClient.notificationInterest(this.notificationAbort.signal), fetchedAt: Date.now() };
+        }
+        try { summary = await this.resultDispatcher.deliverOnce(this.notificationInterest.chatIds); }
+        catch (error) { firstError ??= error; }
+        try { await this.renewalNotifier!.deliverOnce(this.notificationInterest.interested); }
+        catch (error) { firstError ??= error; }
+      } else summary = await this.notificationOutbox!.deliverOnce();
+    } catch (error) { firstError ??= error; }
+    if (firstError !== undefined) throw firstError;
     return summary;
   }
 

@@ -9,6 +9,7 @@ import { FileResultOutbox } from "../../src/results/outbox.js";
 import { ResultDeliveryRunner } from "../../src/results/delivery.js";
 import { ResultDispatcher, type ResultDispatcherOptions } from "../../src/results/dispatcher.js";
 import type { ResultDelivery, MaterializedResultDelivery } from "../../src/results/contracts.js";
+import { ResultHttpError } from "../../src/controller/result-client.js";
 
 function harness(t: { after(callback: () => void): void }) {
   const directory = mkdtempSync(join(tmpdir(), "result-dispatch-test-"));
@@ -101,6 +102,48 @@ test("defer response loss recognizes exact lastDeferredAttemptId rather than mar
   await f.restart().deliverOnce(["chat"]);
   assert.equal(f.sends, 0); assert.equal(f.store.references().length, 0);
   assert.equal(f.records.get(f.id)?.status, "waiting_for_user");
+});
+for (const terminal of ["superseded", "purged"] as const) test(`a ${terminal} deferred plan cannot starve later results for the same chat`, async t => {
+  const f = harness(t); f.loss = "defer"; f.allowRunner = false;
+  await assert.rejects(f.dispatcher().deliverOnce(["chat"]), /defer response lost/);
+  assert.equal(f.store.references()[0].status, "defer");
+  const original = f.records.get(f.id)!, nextId = randomUUID();
+  f.records.set(nextId, { ...original, id: nextId, key: nextId, status: "ready", lastDeferredAttemptId: undefined,
+    lastDeferReason: undefined, lastDeferredAt: undefined, submittedMessages: undefined });
+  if (terminal === "superseded") f.records.set(f.id, { ...original, status: "superseded" });
+  else {
+    f.records.delete(f.id);
+    const get = f.controller.getDelivery;
+    f.controller.getDelivery = async (id, signal) => {
+      if (id === f.id) throw new ResultHttpError(404);
+      return get(id, signal);
+    };
+  }
+  f.now += 60_000; f.allowRunner = true;
+  assert.deepEqual(await f.restart().deliverOnce(["chat"]), { accepted: 1, uncertain: 0, skipped: 1 });
+  assert.equal(f.records.get(nextId)?.status, "accepted");
+  assert.equal(f.sends, 1); assert.equal(f.claims, 2); assert.equal(f.store.references().length, 0);
+});
+test("a matching receipt intent reconciles an expired uncertain plan without another send", async t => {
+  const f = harness(t), receipt = f.controller.recordReceipt;
+  f.controller.recordReceipt = async () => { throw new Error("receipt unavailable before commit"); };
+  await assert.rejects(f.dispatcher().deliverOnce(["chat"]), /receipt unavailable before commit/);
+  assert.equal(f.store.references()[0].status, "receipt");
+  const item = f.records.get(f.id)!;
+  f.records.set(f.id, { ...item, status: "uncertain" });
+  f.now += 500_001;
+  f.controller.recordReceipt = receipt;
+  assert.deepEqual(await f.restart().deliverOnce(["chat"]), { accepted: 1, uncertain: 0, skipped: 0 });
+  assert.equal(f.sends, 1); assert.equal(f.claims, 1); assert.equal(f.receipts, 1);
+  assert.equal(f.store.references().length, 0);
+});
+test("a receipt request 404 keeps its intent and never qualifies as a purged GET", async t => {
+  const f = harness(t);
+  f.controller.recordReceipt = async () => { throw new ResultHttpError(404); };
+  await assert.rejects(f.dispatcher().deliverOnce(["chat"]), /HTTP 404/);
+  await assert.rejects(f.restart().deliverOnce(["chat"]), /HTTP 404/);
+  assert.equal(f.store.references()[0].status, "receipt");
+  assert.equal(f.sends, 1); assert.equal(f.claims, 1);
 });
 test("unknown transport send writes uncertain receipt and is never automatically replayed", async t => {
   const f = harness(t); f.unknown = true;

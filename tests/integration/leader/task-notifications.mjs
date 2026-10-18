@@ -129,9 +129,9 @@ export async function verifyTaskNotifications({ postgres = false } = {}) {
 
     assert.equal((await request('/v1/automations?chatId=' + CHAT, undefined, { auth: false })).status, 401);
     assert.equal((await request('/v1/deliveries/pending', { chatIds: [CHAT] }, { auth: false })).status, 401);
-    assert.equal((await request('/v1/automations', { chatId: 'blocked', input: {} })).status, 400);
+    assert.equal((await request('/v1/automations', { chatId: 'blocked', input: {} }, { key: 'malformed-input-probe' })).status, 400);
     const invalid = { kind: 'reminder', title: 'blocked', text: 'not sent', timing: { type: 'at', at: new Date(Date.now() + 60_000).toISOString() }, timezone: 'Asia/Shanghai' };
-    assert.equal((await request('/v1/automations', { chatId: 'blocked', input: invalid })).status, 403);
+    assert.equal((await request('/v1/automations', { chatId: 'blocked', input: invalid }, { key: 'blocked-chat-probe' })).status, 403);
     console.log('PASS HTTP authentication, malformed input and chat allowlist rejection');
 
     const threeText = '甲'.repeat(11_400);

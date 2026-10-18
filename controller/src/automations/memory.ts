@@ -4,6 +4,7 @@ import { assertSameCreation } from "./identity.js";
 import { finishRun, newRun } from "./state.js";
 import { dueOccurrence } from "./timing.js";
 import { clearRunBody, validateBodyRetention } from "./retention.js";
+import { AutomationConflictError } from "./errors.js";
 
 const copy = <T>(value: T): T => structuredClone(value);
 export class MemoryAutomationRepository implements AutomationRepository {
@@ -26,7 +27,7 @@ export class MemoryAutomationRepository implements AutomationRepository {
   async setStatus(id: string, chatId: string, status: "active" | "paused" | "cancelled", now: number): Promise<Schedule | null> {
     const schedule = this.schedules.get(id);
     if (!schedule || schedule.chatId !== chatId) return null;
-    if (schedule.status === "cancelled" || schedule.status === "completed") throw new Error("Finished schedules cannot be resumed or modified");
+    if (schedule.status === "cancelled" || schedule.status === "completed") throw new AutomationConflictError("Finished schedules cannot be resumed or modified");
     schedule.status = status;
     schedule.updatedAt = now;
     if (status === "cancelled") for (const item of this.outbox.values()) if (item.scheduleId === id && item.status === "pending") item.status = "superseded";
