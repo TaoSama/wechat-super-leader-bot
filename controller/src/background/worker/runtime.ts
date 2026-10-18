@@ -155,7 +155,7 @@ export class CodexWorkerRuntime implements WorkerRuntime {
 
   private drain(): void {
     if (this.processState.stopping) return;
-    for (const receipt of this.store.queued()) {
+    for (const receipt of this.store.queued(error => this.report(error.message, error))) {
       if (this.active.has(receipt.workerId)) continue;
       const slot = this.store.slot(this.maxConcurrent, receipt.workerId, receipt.invocationId);
       if (!slot) break;

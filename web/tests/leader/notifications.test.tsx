@@ -79,6 +79,10 @@ describe("task notification console", () => {
     expect(screen.getByText(/每轮独立执行；会话默认保留 24 小时/)).toBeInTheDocument();
     expect(screen.getByText("本轮正在执行")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "暂停" })).toBeEnabled();
+    expect(screen.getByText("暂停只影响后续安排；取消还会停止本轮后台会话的后续检查与追问。")).toBeInTheDocument();
+    expect(screen.queryByText("暂停或取消只影响后续安排；本轮结果仍会保存。")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "取消任务" }));
+    expect(screen.getByText("停止后续安排，并停止后台会话的后续检查与追问？")).toBeInTheDocument();
   });
 
   it("treats expired notification freshness independently of saved artifact retention", () => {

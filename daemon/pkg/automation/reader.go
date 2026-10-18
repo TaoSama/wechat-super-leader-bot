@@ -254,30 +254,26 @@ func (r Reader) Inspect(ctx context.Context, id string, expectedAt, notAfter int
 		if err = checkSchema(ctx, db, "automation_runs", []string{"thread_id", "automation_id", "created_at"}); err != nil {
 			return fail(err)
 		}
-		// Native schemas have no automation_id index. Bound work by the rowid index,
-		// rather than scanning the entire runs table for every monitor check.
-		rows, err := db.QueryContext(ctx, "select thread_id,automation_id,created_at from automation_runs order by rowid desc limit ?", maxRunRows+1)
+		// Filter the complete occurrence window before bounding returned evidence.
+		// Row insertion order cannot establish timestamp order or window uniqueness.
+		// QueryContext also bounds an unindexed native table scan by cancellation.
+		rows, err := db.QueryContext(ctx, "select thread_id from automation_runs where automation_id=? and created_at>=? and created_at<=? limit ?", id, expectedAt, notAfter, maxRunRows+1)
 		if err != nil {
 			return fail(err)
 		}
 		ids := []string{}
-		count := 0
 		for rows.Next() {
-			var sid, aid string
-			var created int64
-			if err = rows.Scan(&sid, &aid, &created); err != nil {
+			var sid string
+			if err = rows.Scan(&sid); err != nil {
 				return fail(errors.Join(err, rows.Close()))
 			}
-			count++
-			if aid == id && created >= expectedAt && created <= notAfter {
-				ids = append(ids, sid)
-			}
+			ids = append(ids, sid)
 		}
 		err = errors.Join(rows.Err(), rows.Close())
 		if err != nil {
 			return fail(err)
 		}
-		if count > maxRunRows {
+		if len(ids) > maxRunRows {
 			out.Reason = "automation_run_scan_limit"
 			return out, nil
 		}

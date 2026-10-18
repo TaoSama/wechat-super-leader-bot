@@ -100,7 +100,7 @@ func TestConfigurationMismatchAndMissingRolloutRemainUnknown(t *testing.T) {
 		t.Fatalf("missing thread %+v %v", out, err)
 	}
 }
-func TestCronRunMappingRejectsAmbiguityAndScanOverflow(t *testing.T) {
+func TestCronRunMappingRejectsAmbiguity(t *testing.T) {
 	r, db := readerFixture(t, "cron")
 	out, err := r.Inspect(context.Background(), "target", 1000, 2000)
 	if err != nil || out.Status != "waiting" {
@@ -113,14 +113,85 @@ func TestCronRunMappingRejectsAmbiguityAndScanOverflow(t *testing.T) {
 	if err != nil || out.Status != "unknown" || out.Reason != "ambiguous_run" {
 		t.Fatalf("ambiguous %+v %v", out, err)
 	}
-	for i := 0; i < 513; i++ {
+	// Insertion order and unrelated runs cannot hide either matching row.
+	for i := 0; i <= maxRunRows; i++ {
 		if _, err = db.Exec("insert into automation_runs values(?, 'other', 500)", fmt.Sprintf("run-%d", i)); err != nil {
 			t.Fatal(err)
 		}
 	}
 	out, err = r.Inspect(context.Background(), "target", 1000, 2000)
-	if err != nil || out.Status != "unknown" || out.Reason != "automation_run_scan_limit" {
-		t.Fatalf("overflow %+v %v", out, err)
+	if err != nil || out.Status != "unknown" || out.Reason != "ambiguous_run" {
+		t.Fatalf("buried ambiguity %+v %v", out, err)
+	}
+	if _, err = db.Exec("delete from automation_runs where automation_id='target'"); err != nil {
+		t.Fatal(err)
+	}
+	out, err = r.Inspect(context.Background(), "target", 1000, 2000)
+	if err != nil || out.Status != "waiting" || out.Reason != "no_matching_run" {
+		t.Fatalf("unrelated history without match %+v %v", out, err)
+	}
+}
+
+func TestCronRunMappingLimitsOnlyMatchingWindow(t *testing.T) {
+	r, db := readerFixture(t, "cron")
+	for i := 0; i <= maxRunRows; i++ {
+		if _, err := db.Exec("insert into automation_runs values(?, 'target', 1500)", fmt.Sprintf("run-%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err := r.Inspect(context.Background(), "target", 1000, 2000)
+	if err != nil || out.Status != "unknown" || out.Reason != "automation_run_scan_limit" || out.SessionID != "" {
+		t.Fatalf("matching window overflow %+v %v", out, err)
+	}
+}
+
+func TestCronRunMappingIgnoresUnrelatedHistoryAndRowOrder(t *testing.T) {
+	at, err := time.Parse(time.RFC3339, fixtureTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, end := at.Add(-time.Minute).UnixMilli(), at.Add(time.Minute).UnixMilli()
+	for _, created := range []int64{start, at.UnixMilli(), end} {
+		t.Run(fmt.Sprint(created), func(t *testing.T) {
+			r, db := readerFixture(t, "cron")
+			if _, err := db.Exec("insert into automation_runs values('thread','target',?)", created); err != nil {
+				t.Fatal(err)
+			}
+			// All recent rowids are unrelated, with timestamps both before and
+			// after the window. They must not truncate the matching evidence.
+			for i := 0; i <= maxRunRows; i++ {
+				if _, err := db.Exec("insert into automation_runs values(?, 'target', ?),(?, 'target', ?),(?, 'other', ?)",
+					fmt.Sprintf("future-%d", i), end+1, fmt.Sprintf("past-%d", i), start-1, fmt.Sprintf("other-%d", i), created); err != nil {
+					t.Fatal(err)
+				}
+			}
+			path := filepath.Join(r.Home, "sessions", "cron.jsonl")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			rollout := fixtureRecord("event_msg", map[string]any{"type": "task_started", "turn_id": "run", "turn_attribution": map[string]string{"turn_trigger": "automation_cron_scheduled"}})
+			rollout += fixtureFinal("run", "exact result") + fixtureComplete("run")
+			if err := os.WriteFile(path, []byte(rollout), 0600); err != nil {
+				t.Fatal(err)
+			}
+			state := dbFixture(t, filepath.Join(r.Home, "state_5.sqlite"), "")
+			if _, err := state.Exec("insert into threads values('thread',?)", path); err != nil {
+				t.Fatal(err)
+			}
+			out, err := r.Inspect(context.Background(), "target", start, end)
+			if err != nil || out.Status != "completed" || out.SessionID != "thread" || out.TurnID != "run" || out.Text != "exact result" {
+				t.Fatalf("unrelated history %+v %v", out, err)
+			}
+			// A late insertion can represent an older timestamp in the same
+			// window. It makes the complete window ambiguous regardless of rowid.
+			if _, err := db.Exec("insert into automation_runs values('late','target',?)", start); err != nil {
+				t.Fatal(err)
+			}
+			out, err = r.Inspect(context.Background(), "target", start, end)
+			if err != nil || out.Status != "unknown" || out.Reason != "ambiguous_run" || out.SessionID != "" {
+				t.Fatalf("late duplicate %+v %v", out, err)
+			}
+		})
 	}
 }
 func TestInspectionRejectsBadWindowsAndUnsupportedSchema(t *testing.T) {

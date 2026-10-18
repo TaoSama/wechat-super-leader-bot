@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { CodexWorkerRuntime, type WorkerExecutor, type WorkerInput, type WorkerRuntimeStatus } from "../../../src/background/worker/index.js";
+import { hash } from "../../../src/background/worker/storage.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
@@ -30,6 +31,53 @@ function completing(): WorkerExecutor {
 }
 
 describe("isolated resumable worker runtime", () => {
+  it.each(["invalid-name", "missing-state", "missing-invocations", "malformed-state", "worker-symlink", "dangling-symlink",
+    "receipt-json", "receipt-identity", "receipt-input", "receipt-shape", "receipt-symlink", "receipt-hash"])(
+    "keeps healthy workers dispatching while retaining damaged metadata (%s) for inspection", async kind => {
+      const f = fixture(completing());
+      const diagnostics: Error[] = [];
+      const runtime = new CodexWorkerRuntime({ ...f.options, onError: error => diagnostics.push(error) });
+      const badId = kind === "invalid-name" ? "untrusted-private-text\nworker" : f.input.workerId;
+      const badDir = path.join(f.options.root, "workers", badId);
+      const store = (runtime as any).store;
+      const external = path.join(f.root, "untouched-external");
+      fs.mkdirSync(external);
+      if (kind === "invalid-name" || kind === "missing-state") fs.mkdirSync(badDir);
+      else if (kind === "worker-symlink" || kind === "dangling-symlink") {
+        fs.symlinkSync(kind === "worker-symlink" ? external : path.join(external, "absent"), badDir);
+      }
+      else {
+        store.worker(badId, true);
+        if (kind === "missing-invocations") fs.rmdirSync(path.join(badDir, "invocations"));
+        else if (kind === "malformed-state") fs.writeFileSync(path.join(badDir, "state.json"), "{private-state");
+        else {
+          const receiptFile = path.join(badDir, "invocations", `${f.input.invocationId}.json`);
+          const receipt = { ...f.input, workerId: badId, inputHash: hash(JSON.stringify(f.input)), ownerPid: process.pid,
+            status: "queued", summary: "private-receipt", attachments: [], pendingInput: f.input };
+          if (kind === "receipt-json") fs.writeFileSync(receiptFile, "{private-receipt");
+          else if (kind === "receipt-symlink") {
+            fs.writeFileSync(path.join(external, "receipt.json"), JSON.stringify(receipt));
+            fs.symlinkSync(path.join(external, "receipt.json"), receiptFile);
+          } else {
+            if (kind === "receipt-identity") receipt.workerId = randomUUID();
+            if (kind === "receipt-input") receipt.pendingInput = { ...f.input, invocationId: randomUUID() };
+            if (kind === "receipt-hash") receipt.pendingInput = { ...f.input, task: "tampered task" };
+            fs.writeFileSync(receiptFile, JSON.stringify(kind === "receipt-shape" ? { status: "queued" } : receipt));
+          }
+        }
+      }
+      const healthy = { ...f.input, workerId: randomUUID(), invocationId: randomUUID() };
+      await runtime.start(healthy);
+      expect((await terminal(runtime, healthy)).status).toBe("completed");
+      expect(f.options.executor.execute).toHaveBeenCalledTimes(1);
+      expect(diagnostics.length).toBeGreaterThan(0);
+      expect(diagnostics.every(error => error.message.includes("retained for inspection"))).toBe(true);
+      expect(JSON.stringify(diagnostics.map(error => error.message))).not.toMatch(/private|untrusted/);
+      await expect(runtime.inspect(badId, f.input.invocationId)).rejects.toThrow();
+      expect(fs.lstatSync(badDir)).toBeDefined();
+      if (kind === "missing-invocations") expect(fs.existsSync(path.join(badDir, "invocations"))).toBe(false);
+      if (kind === "worker-symlink") expect(fs.readdirSync(external)).toEqual([]);
+    });
   it("returns immediately, persists receipts, deduplicates starts and resumes the same workspace and thread", async () => {
     const executor = completing();
     const f = fixture(executor);

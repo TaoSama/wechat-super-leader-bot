@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { z } from "zod";
 import type { WorkerInput, WorkerRuntimeStatus } from "./contracts.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -18,6 +19,16 @@ export interface Receipt extends WorkerRuntimeStatus {
 }
 interface WorkerState { workerId: string; threadId?: string }
 interface LaunchClaim { ownerPid: number; decision?: "launch" | "cancel" }
+const receiptSchema = z.object({
+  workerId: z.string().regex(UUID), invocationId: z.string().regex(UUID),
+  inputHash: z.string(), ownerPid: z.number().int().positive(),
+  processPid: z.number().int().positive().optional(),
+  status: z.enum(["queued", "running", "completed", "waiting", "needs_attention", "failed", "unknown"]),
+  summary: z.string(), attachments: z.array(z.string()),
+  queuedAt: z.number().int().nonnegative().optional(),
+  pendingInput: z.object({ workerId: z.string().regex(UUID), invocationId: z.string().regex(UUID),
+    task: z.string().trim().min(1), input: z.unknown() }).passthrough().optional(),
+}).passthrough();
 
 export function validId(id: string): void {
   if (!UUID.test(id)) throw new Error("Worker and invocation IDs must be UUIDs");
@@ -64,8 +75,8 @@ function claimJson(file: string, value: unknown): boolean {
     throw error;
   } finally { fs.unlinkSync(temporary); }
 }
-function directory(file: string): string {
-  fs.mkdirSync(file, { recursive: true, mode: 0o700 });
+function directory(file: string, create = true): string {
+  if (create) fs.mkdirSync(file, { recursive: true, mode: 0o700 });
   if (fs.lstatSync(file).isSymbolicLink() || !fs.lstatSync(file).isDirectory()) throw new Error("Unsafe runtime directory");
   return fs.realpathSync(file);
 }
@@ -121,15 +132,18 @@ export class WorkerStorage {
       return undefined;
     }
     const dir = path.join(this.root, "workers", workerId);
-    if (!fs.existsSync(dir) && !create) return undefined;
-    if (directory(dir) !== dir) throw new Error("Worker path must not contain symlinks");
+    if (!create) {
+      try { fs.lstatSync(dir); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+    }
+    if (directory(dir, create) !== dir) throw new Error("Worker path must not contain symlinks");
     const state = this.state(dir);
     if (!state) {
       if (!create) throw new Error("Missing worker ownership marker");
       writeJson(path.join(dir, "state.json"), { workerId });
     } else if (state.workerId !== workerId) throw new Error("Invalid worker ownership marker");
     for (const subdir of ["workspace", "home", "invocations"]) {
-      if (directory(path.join(dir, subdir)) !== path.join(dir, subdir)) throw new Error("Unsafe worker directory");
+      if (directory(path.join(dir, subdir), create && !state) !== path.join(dir, subdir)) throw new Error("Unsafe worker directory");
     }
     return dir;
   }
@@ -147,7 +161,19 @@ export class WorkerStorage {
   receiptPath(dir: string, invocationId: string): string {
     validId(invocationId); return path.join(dir, "invocations", `${invocationId}.json`);
   }
-  receipt(dir: string, invocationId: string): Receipt | undefined { return readJson<Receipt>(this.receiptPath(dir, invocationId)); }
+  receipt(dir: string, invocationId: string): Receipt | undefined {
+    const value = readJson<Receipt>(this.receiptPath(dir, invocationId));
+    if (value === undefined) return undefined;
+    const parsed = receiptSchema.safeParse(value);
+    if (!parsed.success || value.workerId !== path.basename(dir) || value.invocationId !== invocationId) {
+      throw new Error("Invalid worker receipt metadata");
+    }
+    if (value.status === "queued" && (!value.pendingInput || value.pendingInput.workerId !== value.workerId ||
+      value.pendingInput.invocationId !== invocationId || hash(JSON.stringify(value.pendingInput)) !== value.inputHash)) {
+      throw new Error("Invalid queued worker input metadata");
+    }
+    return value;
+  }
   save(dir: string, receipt: Receipt): void { writeJson(this.receiptPath(dir, receipt.invocationId), receipt); }
   claim(dir: string, invocationId: string): void {
     if (!claimJson(path.join(dir, "active.json"), { invocationId })) throw new Error("Worker already has active ownership");
@@ -183,16 +209,28 @@ export class WorkerStorage {
     }
     return undefined;
   }
-  queued(): Receipt[] {
+  queued(onError?: (error: Error) => void): Receipt[] {
     const receipts: Receipt[] = [];
     for (const workerId of fs.readdirSync(path.join(this.root, "workers"))) {
-      validId(workerId);
-      const dir = this.worker(workerId);
-      if (!dir) continue;
-      for (const file of fs.readdirSync(path.join(dir, "invocations"))) {
-        if (!file.endsWith(".json")) continue;
-        const receipt = readJson<Receipt>(path.join(dir, "invocations", file));
-        if (receipt?.status === "queued" && receipt.pendingInput) receipts.push(receipt);
+      try {
+        validId(workerId);
+        const dir = this.worker(workerId);
+        if (!dir) continue;
+        const workerReceipts: Receipt[] = [];
+        for (const file of fs.readdirSync(path.join(dir, "invocations"))) {
+          if (!file.endsWith(".json")) continue;
+          const receipt = this.receipt(dir, file.slice(0, -".json".length));
+          if (receipt?.status === "queued") workerReceipts.push(receipt);
+        }
+        // A damaged receipt quarantines this worker's queue, while other
+        // workers can continue. No metadata or untrusted directory is repaired.
+        receipts.push(...workerReceipts);
+      } catch {
+        // Never echo directory names, JSON contents or raw filesystem errors:
+        // they may contain control characters, task text or private paths.
+        const id = UUID.test(workerId) ? workerId : `unrecognized-${hash(workerId)}`;
+        const diagnostic = new Error(`Background worker queue metadata is invalid or unreadable: ${id}; retained for inspection`);
+        if (onError) onError(diagnostic); else console.error(diagnostic.message);
       }
     }
     return receipts.sort((left, right) => (left.queuedAt ?? 0) - (right.queuedAt ?? 0));
