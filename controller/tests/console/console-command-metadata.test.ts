@@ -111,7 +111,7 @@ it("does not accept a completed source whose output was never recorded", async (
   fullReads.forEach(read => expect(read).not.toHaveBeenCalled());
 });
 
-it("keeps completed goal actions visible but leaves criterion support unverified without output hashes", async () => {
+it.each(["valid", "commandId", "turnId", "hasOutput"] as const)("preserves completed goal actions and verifies frozen criterion evidence with %s metadata", async variant => {
   const store = new MemoryStore();
   const goal = createGoal(CHAT, { id: uuid(10), expiresAt: NOW + 60_000, objective: "verify goal",
     criteria: ["test passes"], targets: [{ nodeId: "node", sessionId: "goal-thread", sendRoute: "control-socket" }],
@@ -132,10 +132,15 @@ it("keeps completed goal actions visible but leaves criterion support unverified
   await store.createCommandIfAbsent(command);
   expect((await readConsoleGoals(store, [CHAT], NOW)).items[0].criteria[0]).toMatchObject({ supported: true, actions: [1] });
   const fullReads = blockFullReads(store);
-  const metadata = vi.spyOn(store, "findCommandMetadataByRequestId");
+  const original = store.findCommandMetadataByRequestId.bind(store);
+  const metadata = vi.spyOn(store, "findCommandMetadataByRequestId").mockImplementation(async id => {
+    const result = await original(id);
+    if (!result || variant === "valid") return result;
+    return { ...result, [variant]: variant === "hasOutput" ? false : "changed-evidence-identity" };
+  });
   const result = await readConsoleGoals(store, [CHAT], NOW, true);
-  expect(result.items[0]).toMatchObject({ status: "completed", actions: [{ status: "completed", commandId: "goal-command", turnId: "goal-turn" }],
-    criteria: [{ supported: false, actions: [] }] });
+  expect(result.items[0]).toMatchObject({ status: "completed", actions: [{ status: "completed" }],
+    criteria: [{ supported: variant === "valid", actions: variant === "valid" ? [1] : [] }] });
   expect(metadata).toHaveBeenCalledWith(command.requestId);
   fullReads.forEach(read => expect(read).not.toHaveBeenCalled());
   for (const secret of [CHAT, output, "private constraints", '"input"', '"authority"']) expect(JSON.stringify(result)).not.toContain(secret);

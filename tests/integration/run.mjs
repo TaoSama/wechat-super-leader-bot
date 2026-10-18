@@ -218,8 +218,6 @@ async function main() {
       const command = JSON.parse(raw.toString());
       if (command.type === 'inspect_command') {
         inspections.push(command);
-        assert.equal(command.sessionId, 'pending-session');
-        assert.equal(command.prompt, 'leave-pending');
         socket.send(JSON.stringify({ type: 'result', commandId: command.commandId,
           status: 'uncertain', error: 'Synthetic journal has no immutable terminal receipt' }));
         return;
@@ -319,6 +317,9 @@ async function main() {
       heartbeat();
       return inspections.some(query => query.type === 'inspect_command' && query.commandId === pending.body.commandId);
     }, 'Unknown command journal inspection without replay');
+    const unknownInspection = inspections.find(query => query.type === 'inspect_command' && query.commandId === pending.body.commandId);
+    assert.equal(unknownInspection.sessionId, 'pending-session');
+    assert.equal(unknownInspection.prompt, 'leave-pending');
     assert.equal((await request(`/v1/commands/${pending.body.commandId}`)).body.status, 'uncertain');
     assert.equal(deliveries, 4, 'Unknown journal inspection replayed a mutation');
     socket.send(JSON.stringify({ type: 'result', commandId: send.body.commandId, turnId: tracked.turnId, status: 'accepted', output: 'late acceptance' }));
