@@ -176,6 +176,24 @@ assert.equal(markdownToWeChat(followedByBadUrl, Number.MAX_SAFE_INTEGER), follow
   assert.equal(result.status, 0, result.stderr);
 });
 
+test("adjacent valid URL and path links avoid eagerly consuming each remaining destination suffix", () => {
+  const moduleUrl = import.meta.resolve("@super-leader/wechat-text");
+  const script = `import assert from 'node:assert/strict';
+import { markdownToWeChat, markdownForWeChat } from ${JSON.stringify(moduleUrl)};
+for (const [source, display, compact] of [
+  ['[x](http://a)', 'x (http://a)', 'x: http://a'],
+  ['[x](/tmp/a)', 'x (/tmp/a)', 'x: /tmp/a'],
+  ['![x](http://a)', 'x', 'x'],
+]) {
+  const repetitions = 64_000;
+  assert.equal(markdownToWeChat(source.repeat(repetitions), Number.MAX_SAFE_INTEGER), display.repeat(repetitions));
+  assert.equal(markdownForWeChat(source.repeat(repetitions), Number.MAX_SAFE_INTEGER), compact.repeat(repetitions));
+}`;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 5_000 });
+  assert.equal(result.error, undefined, result.error?.message ?? "");
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test("preserves one-time login credentials in bare URLs exactly", () => {
   const tokens = ["_" + "a".repeat(41) + "_", "a-_" + "b".repeat(36) + "_-cd"];
   for (const token of tokens) {

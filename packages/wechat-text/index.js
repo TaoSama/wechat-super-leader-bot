@@ -166,8 +166,15 @@ function protectInline(text, pattern, token, layout) {
         match = pattern.exec(text);
       }
     } else if (match) {
-      parts.push(text.slice(cursor, match.index), token(match[1] !== void 0 ? match[2] : match[3] ?? match[4]));
-      cursor = pattern.lastIndex;
+      let end = pattern.lastIndex;
+      if (match[1] === void 0) {
+        // Only expand the winning URL/path. Expanding a destination hidden inside a link
+        // before choosing that link would repeatedly read an entire adjacent-link suffix.
+        while (end < text.length && !/[\s<>`]/u.test(text[end])) end++;
+      }
+      parts.push(text.slice(cursor, match.index), token(match[1] !== void 0 ? match[2] : text.slice(match.index, end)));
+      cursor = end;
+      pattern.lastIndex = cursor;
       match = pattern.exec(text);
     } else break;
   }
@@ -178,7 +185,7 @@ function renderMarkdown(text, maxChars = DEFAULT_MESSAGE_MAX_CHARS, layout = tru
   if (!Number.isSafeInteger(maxChars) || maxChars < 0) {
     throw new RangeError("maxChars must be a nonnegative safe integer");
   }
-  const pattern = /(?:(?<!`)(`+)(?!`)([\s\S]*?)(?<!`)\1(?!`)|(https?:\/\/[^\s<>`]+)|((?<![\w*])(?:~?\/|\.{1,2}\/|[A-Za-z]:\\)[^\s<>`]+))/gm;
+  const pattern = /(?:(?<!`)(`+)(?!`)([\s\S]*?)(?<!`)\1(?!`)|(https?:\/\/)(?=[^\s<>`])|((?<![\w*])(?:~?\/|\.{1,2}\/|[A-Za-z]:\\))(?=[^\s<>`]))/gm;
   const opaque = [];
   let tokenPrefix = "\uE000wechat:";
   while (text.includes(tokenPrefix)) tokenPrefix += ":";
