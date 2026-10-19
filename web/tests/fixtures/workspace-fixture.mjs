@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { createPlanFixture, PLAN_MODES } from "./plan-fixture.mjs";
 import { createTerminalFixture, TERMINAL_MODES } from "./terminal-fixture.mjs";
 import { createGoalFixture, GOAL_MODES } from "./goal-fixture.mjs";
+import { createToolHistoryFixture, TOOL_HISTORY_MODES } from "./tool-history-fixture.mjs";
 
 const { values } = parseArgs({ options: { port: { type: "string", default: "0" }, help: { type: "boolean", short: "h" } } });
 if (values.help) {
@@ -30,6 +31,7 @@ const sessions = [
 ].map((s) => ({ ...s, provider: "codex-app", modelProvider: "openai_http", reasoningEffort: "high", capabilities: ["read", "send"], loaded: true, observedAt: now(), updatedAt: now() }));
 const plans = createPlanFixture(sessions);
 const goals = createGoalFixture(sessions);
+const toolHistory = createToolHistoryFixture(sessions[0].id);
 const commands = ["uncertain", "accepted", "completed", "failed"].map((status, i) => ({
   commandId: `fixture-command-${i}`, requestId: `fixture-request-${i}`, nodeId: "macair", sessionId: sessions[i % 3].id,
   action: "send", prompt: ["检查实时刷新是否正常", "复核查询预算与重试边界", "阅读测试结果并总结", "确认节点连接状态"][i], status,
@@ -76,6 +78,18 @@ async function handle(req, res) {
     return;
   }
   if (path === "/fixture/metrics") return json(res, { ...metrics, ...terminal.metrics() });
+  if (path === "/fixture/tools" && req.method === "POST") {
+    const mode = url.searchParams.get("mode") ?? "showcase";
+    if (!TOOL_HISTORY_MODES.includes(mode)) return json(res, { error: "unknown tool history fixture mode", synthetic: true }, 400);
+    const historyReset = toolHistory.setMode(mode);
+    if (historyReset) {
+      const expiredContexts = new Set([...historyContexts].filter(([, context]) => context.sessionId === sessions[0].id).map(([id]) => id));
+      for (const id of expiredContexts) historyContexts.delete(id);
+      for (const [id, cursor] of historyCursors) if (expiredContexts.has(cursor.historyContext)) historyCursors.delete(id);
+      for (const anchor of cursorByAnchor.keys()) if (expiredContexts.has(JSON.parse(anchor)[0])) cursorByAnchor.delete(anchor);
+    }
+    return json(res, { mode, sessionId: sessions[0].id, synthetic: true, historyReset });
+  }
   if (path === "/fixture/large-history" && req.method === "POST") {
     desktopHistoryTooLarge = true;
     return json(res, { synthetic: true, desktopHistoryTooLarge });
@@ -166,8 +180,9 @@ async function handle(req, res) {
     }
     if (desktopHistoryTooLarge && context.source === "codex-desktop") return json(res, { code: "history_too_large" }, 413);
     if (cursor && failOlder) return json(res, { error: "synthetic older failure" }, 503);
-    const end = cursor ? pageCursor.end : items.length;
-    if (!Number.isInteger(end) || end < 0 || end > items.length) return json(res, { error: "bad cursor" }, 400);
+    const historyItems = toolHistory.items(session.id) ?? items;
+    const end = cursor ? pageCursor.end : historyItems.length;
+    if (!Number.isInteger(end) || end < 0 || end > historyItems.length) return json(res, { error: "bad cursor" }, 400);
     const start = Math.max(0, end - limit);
     let nextCursor = null;
     if (start) {
@@ -176,7 +191,8 @@ async function handle(req, res) {
       cursorByAnchor.set(anchor, nextCursor);
       historyCursors.set(nextCursor, { historyContext, end: start });
     }
-    return json(res, { session, historyContext, source: context.source, items: items.slice(start, end), nextCursor, fetchedAt: now(), truncated: false });
+    const pageItems = historyItems.slice(start, end);
+    return json(res, { session, historyContext, source: context.source, items: pageItems, nextCursor, fetchedAt: now(), truncated: pageItems.some(item => item.truncated) });
   }
   const commandMatch = path.match(/^\/v1\/commands\/([^/]+)$/);
   if (commandMatch) {
