@@ -10,12 +10,15 @@ import { selectSendRoute } from "../sessions/send-eligibility.js";
 import { queueSendRoute } from "../commands/queue.js";
 import { readinessFailure, waitForSendReadiness, type ReadinessHub } from "../sessions/send-readiness.js";
 import { failureReply, modelDiagnostic } from "./model/errors.js";
+import { MAX_LEADER_DATA_BYTES } from "./state.js";
+import { authorizationConversation, invalidateConversationPreview, retainConversation } from "./conversation-history.js";
 import { classifyUserAuthorization } from "./model/user-authorization.js";
 import { createExecution, hasTerminalTarget, matchesExecutionCommand, validatePlanDependencies } from "./plans/execution.js";
 import { assertTerminalSingleStep, submitTerminalPlan, TERMINAL_INPUT_WARNING } from "./plans/terminal.js";
 import { ExecutionScheduler } from "./plans/scheduler.js";
 import { executionSummary, sessionLabels } from "./plans/presentation.js";
 import { readSessionHistory } from "./queries/session-history.js";
+import { SessionTitles } from "./queries/session-titles.js";
 import { authorizeImageDelivery, sendSessionImages } from "./queries/session-images.js";
 import type { MediaHub } from "../sessions/message-images.js";
 import { GoalConversation, goalConfirmation, goalCancellation } from "./goals/conversation.js";
@@ -33,7 +36,7 @@ import { classifyBackgroundAuthorization } from "./model/background-authorizatio
 import { assertBackgroundSourcesDiscovered, BACKGROUND_INSTRUCTIONS, BACKGROUND_TOOLS, BACKGROUND_TOOL_NAMES,
   confirmBackgroundMutations, executeBackgroundTool, recoverBackgroundFollowups, type BackgroundToolAuthority, type BackgroundToolService, type BackgroundTurn } from "./background-tools.js";
 import {
-  CLAIM_TTL_MS, ConsoleLinkIssued, ConsoleLinkIssuer, LEADER_TOOLS, LeaderData, LeaderDataSchema, LeaderReply, MAX_HISTORY_ITEMS,
+  CLAIM_TTL_MS, ConsoleLinkIssued, ConsoleLinkIssuer, LEADER_TOOLS, LeaderData, LeaderDataSchema, LeaderReply,
   MAX_MODEL_STEPS, MAX_RECEIPTS, MAX_REPLY_CHARS, MAX_RESULT_CODE_POINTS, MAX_RESULT_JSON_CHARS, MAX_TOOL_CALLS, PLAN_TTL_MS, Plan,
   SYSTEM_PROMPT, TURN_TIMEOUT_MS, ToolArguments,
 } from "./contracts.js";
@@ -46,6 +49,7 @@ const clip = (text: string, length: number) => {
   return /[\uD800-\uDBFF]$/.test(value) ? value.slice(0, -1) : value;
 };
 const confirmation = /^(?:请)?(?:确认|执行|开始|开始执行|确认执行|确认开始|按这个计划执行|就按这个执行|确认这个计划)[。！!]?$/;
+const naturalConfirmation = /^(?:是|是的|对|对的|没错|好的|好|可以|就这样|就这个|就是这个|就是它|嗯|嗯嗯)[。！!]?$/;
 const cancellation = /^(?:请|帮我)?(?:取消计划|不用执行|取消执行|停止后续任务|停止后续执行|先别跑后面的任务)[。！!]?$/;
 type Hub = Pick<NodeHub, "getAllSessions" | "getNodeStatusList" | "getNodeSession" | "isNodeConnected" | "getAllSkills" | "getNodeSkills" | "readHistory"> & ReadinessHub & Partial<MediaHub>
   & Partial<Pick<NodeHub, "listAutomations" | "inspectAutomation">>;
@@ -141,7 +145,12 @@ export class LeaderOrchestrator {
     const confirmationTime = this.now();
     const livePlan = previousPlan && previousPlan.expiresAt > confirmationTime ? previousPlan : undefined;
     const liveGoal = data.pendingGoal && data.pendingGoal.expiresAt > confirmationTime ? data.pendingGoal : undefined;
-    const confirms = confirmation.test(text.trim());
+    if (previousPlan && !livePlan) invalidateConversationPreview(data.history, previousPlan.id);
+    if (data.pendingGoal && !liveGoal) invalidateConversationPreview(data.history, data.pendingGoal.id);
+    const displayedPreview = data.history.at(-1)?.role === "assistant" ? data.history.at(-1)?.confirmationFor : undefined;
+    const confirmsDisplayedPreview = !!displayedPreview && (displayedPreview === livePlan?.id || displayedPreview === liveGoal?.id);
+    const onlyExpiredPreview = !livePlan && !liveGoal && !!(previousPlan || data.pendingGoal);
+    const confirms = confirmation.test(text.trim()) || naturalConfirmation.test(text.trim()) && (confirmsDisplayedPreview || onlyExpiredPreview);
     const goalId = goalConfirmation(text.trim());
     const ambiguous = confirms && !!livePlan && !!liveGoal;
     const plan = confirms && !ambiguous ? livePlan ?? (liveGoal ? undefined : previousPlan) : undefined;
@@ -152,18 +161,21 @@ export class LeaderOrchestrator {
     data.inflight = { messageId, inputHash, expiresAt: this.now() + CLAIM_TTL_MS, plan, goal };
     let claimed = await this.save(chatId, saved?.revision ?? 0, data);
     let reply: LeaderReply;
+    let invalidatedConfirmation = false;
     const linkContext: LinkContext = {
       requestId: `console_link_${hash([chatId, messageId])}`,
     };
     if (ambiguous) {
       reply = { text: "当前同时有计划和持续目标待确认，请先取消其中一项，再确认要执行的内容。" };
     } else if (goalCancellation(text.trim())) {
+      invalidatedConfirmation = true;
       data.pendingGoal = undefined;
       reply = await this.goals.cancel(chatId);
     } else if (goal || goalId || text.trim().startsWith("确认目标")) {
       reply = goal ? await this.confirmGoal(chatId, claimed.revision, goal, data)
         : { text: "没有该ID的待确认目标；未派发。请先核对目标预览，并回复‘确认目标 <UUID>’。" };
     } else if (cancellation.test(text.trim())) {
+      invalidatedConfirmation = true;
       data.pending = undefined;
       const hadPendingGoal = !!data.pendingGoal;
       data.pendingGoal = undefined;
@@ -175,7 +187,7 @@ export class LeaderOrchestrator {
         reply = { text: cancelled ? `已取消待确认计划；以下已确认计划停止后续派发。\n${executionSummary(cancelled)}`
           : "已取消待确认计划；当前没有活动执行计划。没有新增派发，不会停止原会话已有任务。" };
       }
-    } else if (confirms) {
+    } else if (confirms && (plan || !authorizationConversation(data.history).length)) {
       reply = plan ? await this.executePlan(chatId, claimed.revision, plan, data)
         : { text: "当前没有待确认计划。请告诉我希望哪些会话完成什么任务。" };
     } else {
@@ -224,22 +236,31 @@ export class LeaderOrchestrator {
     if ((data.pending && data.pending !== previousPlan || data.pendingGoal && data.pendingGoal !== pendingGoalBefore) && reply.text.length > MAX_REPLY_CHARS) {
       data.pending = undefined;
       data.pendingGoal = undefined;
+      invalidatedConfirmation = true;
       reply = { text: this.attachConsoleLink("计划内容过长，无法完整展示供确认，未保存待确认计划，也未派发。请缩短任务内容或分批提出。", linkContext) };
     }
     reply.text = clip(reply.text, MAX_REPLY_CHARS);
     data.inflight = undefined;
     data.receipts.push({ messageId, inputHash, ...reply });
-    const userHistory = sanitizeConsoleLinkSecrets(clip(text, 1500));
-    const assistantHistory = sanitizeConsoleLinkSecrets(clip(reply.text, 1500), linkContext.issuedLink?.url);
-    data.history.push({ role: "user", content: userHistory }, { role: "assistant", content: assistantHistory });
+    const userHistory = sanitizeConsoleLinkSecrets(text);
+    const assistantHistory = sanitizeConsoleLinkSecrets(reply.text, linkContext.issuedLink?.url);
+    const confirmationFor = data.pending && data.pending !== previousPlan ? data.pending.id
+      : data.pendingGoal && data.pendingGoal !== pendingGoalBefore ? data.pendingGoal.id : undefined;
+    data.history.push({ role: "user", content: userHistory, complete: true }, {
+      role: "assistant", content: assistantHistory, complete: true, ...(confirmationFor ? { confirmationFor } : {}),
+      ...(invalidatedConfirmation ? { invalidatedConfirmation: true } : {}),
+    });
     await this.save(chatId, claimed.revision, data);
     return reply;
   }
 
   private async save(chatId: string, revision: number, data: LeaderData) {
-    data.history = data.history.slice(-MAX_HISTORY_ITEMS);
+    data.history = retainConversation(data.history);
     data.receipts = data.receipts.slice(-MAX_RECEIPTS);
     data.commandIds = [...new Set(data.commandIds)].slice(-64);
+    while (data.history.length && Buffer.byteLength(JSON.stringify(data), "utf8") > MAX_LEADER_DATA_BYTES) {
+      data.history = data.history.slice(2);
+    }
     const saved = await this.store.compareAndSetLeaderState(chatId, revision, data);
     if (!saved) throw new CommandError(409, "聊天状态发生变化，本次操作已停止，请重新查询");
     return saved;
@@ -370,10 +391,11 @@ export class LeaderOrchestrator {
     const backgroundAuthority: BackgroundToolAuthority = { chatId, currentMessageId: data.inflight!.messageId,
       operations: new Set(), discoveredRunIds: new Set(), discoveredSources: new Map(), assertCurrentAuthority,
       onMutationAttempt: mutation => { backgroundTurn.mutations.push(mutation); } };
+    const sessionTitles = new SessionTitles();
     const messages: ModelMessage[] = [
       { role: "system", content: this.automations ? `${SYSTEM_PROMPT}\n定时任务工具已配置。当前时间：${formatDisplayTime(this.now())}；默认时区Asia/Shanghai，用户明确指定时区时使用该时区。仅用户本轮明确要求才创建、暂停、恢复或取消定时任务；查询使用list_automations/automation_runs。时间、会话或意图含糊时先澄清，已有提醒不能因查询而重建。创建成功仅表示已保存等待调度，未来触发不等于已启动会话；不要对同一请求反复创建。开始默认静默，监控无变化不通知。` : SYSTEM_PROMPT },
       ...(this.background ? [{ role: "system" as const, content: `${BACKGROUND_INSTRUCTIONS}\nkind=background 的任务参数放入 background 对象。立即后台执行使用 timing.type=at 和当前时间，不转换为向源会话派发的计划。` }] : []),
-      ...data.history,
+      ...data.history.map(({ role, content }) => ({ role, content })),
       ...(previousPlan ? [{ role: "assistant" as const, content: JSON.stringify({ previousUnconfirmedPlan: previousPlan }) }] : []),
       { role: "user", content: sanitizedUserPrompt },
     ];
@@ -381,6 +403,18 @@ export class LeaderOrchestrator {
     let authorization: ReturnType<typeof classifyUserAuthorization> | undefined;
     let automationAuthorization: ReturnType<typeof classifyAutomationAuthorization> | undefined;
     let backgroundAuthorization: ReturnType<typeof classifyBackgroundAuthorization> | undefined;
+    const currentUserIntent = async () => {
+      if (!authorization) {
+        const authorizationStartedAt = Date.now();
+        authorization = classifyUserAuthorization(this.model, sanitizedUserPrompt, signal, data.history);
+        try { await authorization; }
+        finally {
+          trace.lastModelMs = Date.now() - authorizationStartedAt;
+          trace.totalModelMs += trace.lastModelMs;
+        }
+      }
+      return authorization;
+    };
     const memoryChanges: string[] = [];
     for (let step = 0; step < MAX_MODEL_STEPS; step++) {
       signal.throwIfAborted();
@@ -397,7 +431,7 @@ export class LeaderOrchestrator {
       signal.throwIfAborted();
       if (!answer.toolCalls.length) {
         const textContent = `${clip(answer.content || "请进一步说明目标会话和希望完成的任务。", 4500)}${memoryChanges.length ? `\n记忆更新：${memoryChanges.join("、")}` : ""}`;
-        return { text: this.attachConsoleLink(textContent, linkContext) };
+        return { text: this.attachConsoleLink(sessionTitles.render(textContent), linkContext) };
       }
       if (toolCount + answer.toolCalls.length > MAX_TOOL_CALLS) throw new Error("Tool limit exceeded");
       messages.push({ role: "assistant", content: answer.content, tool_calls: answer.toolCalls, responseOutput: answer.responseOutput });
@@ -455,8 +489,7 @@ export class LeaderOrchestrator {
           const backgroundCreation = call.function.name === "create_automation" && raw !== null && typeof raw === "object" && "kind" in raw && raw.kind === "background";
           const sessionCreation = call.function.name === "create_automation" && raw !== null && typeof raw === "object" && "kind" in raw && raw.kind === "session";
           if (this.background && sessionCreation) {
-            if (!backgroundAuthorization) backgroundAuthorization = classifyBackgroundAuthorization(this.model, sanitizedUserPrompt, signal);
-            if ((await backgroundAuthorization).size) {
+            if (await currentUserIntent() === "isolated_background") {
               messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error:
                 "本轮要求隔离后台执行或读取已有任务结果；不得新建向源会话发送指令的session定时任务。请使用kind=background及已发现的sources。" }) });
               continue;
@@ -516,8 +549,7 @@ export class LeaderOrchestrator {
           continue;
         }
         if (this.background && ["execute_plan", "execute_goal", "propose_plan", "propose_goal"].includes(call.function.name)) {
-          if (!backgroundAuthorization) backgroundAuthorization = classifyBackgroundAuthorization(this.model, sanitizedUserPrompt, signal);
-          if ((await backgroundAuthorization).size) {
+          if (await currentUserIntent() === "isolated_background") {
             messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error:
               "用户本轮要求隔离后台执行、跟踪或追问；不得转换为向源会话派发计划或持续目标。新任务请使用create_automation(kind=background)，既有任务请查询后使用后台追问或延期工具。" }) });
             continue;
@@ -536,16 +568,7 @@ export class LeaderOrchestrator {
           return sendSessionImages(this.hub as Hub & MediaHub, this.store, chatId, data.inflight!.messageId, target.data, signal, this.now);
         }
         if (call.function.name === "execute_plan" || call.function.name === "execute_goal") {
-          if (!authorization) {
-            const authorizationStartedAt = Date.now();
-            authorization = classifyUserAuthorization(this.model, sanitizedUserPrompt, signal);
-            try { await authorization; }
-            finally {
-              trace.lastModelMs = Date.now() - authorizationStartedAt;
-              trace.totalModelMs += trace.lastModelMs;
-            }
-          }
-          const intent = await authorization;
+          const intent = await currentUserIntent();
           const requiredIntent = call.function.name === "execute_plan" ? "task" : "goal";
           if (intent !== requiredIntent) return { text: this.attachConsoleLink(
             intent === "query" ? "这条消息只是在查询，没有派发任务。请说明想查看哪个会话的状态或结果。"
@@ -554,7 +577,7 @@ export class LeaderOrchestrator {
         }
         const priorPlan = data.pending;
         const priorGoal = data.pendingGoal;
-        const output = await this.callTool(call, chatId, data, memoryChanges, linkContext, signal);
+        const output = await this.callTool(call, chatId, data, memoryChanges, linkContext, signal, sessionTitles);
         signal.throwIfAborted();
         if (call.function.name === "execute_plan" && data.pending && data.pending !== priorPlan) {
           return { text: "", execution: { plan: data.pending } };
@@ -579,7 +602,7 @@ export class LeaderOrchestrator {
     return `${content.trim()}${notice}`;
   }
 
-  private async callTool(call: ModelToolCall, chatId: string, data: LeaderData, memoryChanges: string[], linkContext: LinkContext, signal: AbortSignal): Promise<unknown> {
+  private async callTool(call: ModelToolCall, chatId: string, data: LeaderData, memoryChanges: string[], linkContext: LinkContext, signal: AbortSignal, sessionTitles: SessionTitles): Promise<unknown> {
     const name = call.function.name;
     if (!Object.hasOwn(ToolArguments, name)) return { error: "Unsupported tool" };
     let raw: unknown;
@@ -606,6 +629,10 @@ export class LeaderOrchestrator {
         }
       }
       case "list_nodes": return this.hub.getNodeStatusList();
+      case "focus_session_candidates": {
+        const { targets } = ToolArguments.focus_session_candidates.parse(raw);
+        return sessionTitles.candidates(targets);
+      }
       case "list_skills": {
         const args = ToolArguments.list_skills.parse(raw);
         const query = args.query?.toLowerCase();
@@ -645,7 +672,7 @@ export class LeaderOrchestrator {
         }
         observations.sort((a, b) => Date.parse(a) - Date.parse(b));
         const nodes = this.hub.getNodeStatusList().filter(item => !args.nodeId || item.nodeId === args.nodeId);
-        return { sessions: sessions.slice(args.offset, args.offset + 50), total: sessions.length,
+        return sessionTitles.listing({ sessions: sessions.slice(args.offset, args.offset + 50), total: sessions.length,
           nextOffset: args.offset + 50 < sessions.length ? args.offset + 50 : null,
           snapshot: { scope: "online_observed_sessions", capturedAt: new Date(capturedAt).toISOString(),
             reportedNodeCount: nodes.length, onlineNodeCount: nodes.filter(item => item.connected).length,
@@ -653,11 +680,13 @@ export class LeaderOrchestrator {
             statusCounts, unknownStatusCount, notLoadedCount, unknownLoadedCount, missingObservationCount,
             oldestObservedAt: observations[0] ?? null, newestObservedAt: observations.at(-1) ?? null,
             completeTaskCoverage: false,
-          } };
+          } });
       }
       case "read_session": {
         const args = ToolArguments.read_session.parse(raw);
-        return readSessionHistory(this.hub, args, signal);
+        const history = await readSessionHistory(this.hub, args, signal);
+        const session = this.hub.getNodeSession(args.nodeId, args.sessionId);
+        return session ? { ...history, displayLabel: sessionTitles.add({ ...session, nodeId: args.nodeId }, true) } : history;
       }
       case "get_command": {
         const { commandId, planId, goalId } = ToolArguments.get_command.parse(raw);
@@ -667,20 +696,34 @@ export class LeaderOrchestrator {
           const executionOwns = !!execution && execution.chatId === chatId && !!command && execution.plan.actions.some((_, index) =>
             execution.attempts[index] && matchesExecutionCommand(execution, index, command));
           if (!executionOwns && !await this.goals.ownsCommand(chatId, commandId, goalId)) {
+            sessionTitles.independent();
             return { error: "Command does not belong to this chat" };
           }
         }
         await this.store.markExpiredActiveCommandsUncertain();
-        return this.store.getCommand(commandId);
+        const command = await this.store.getCommand(commandId);
+        if (!command) sessionTitles.independent();
+        return command ? sessionTitles.focus([command], (node, session) => this.hub.getNodeSession(node, session)?.title)[0] : null;
       }
       case "get_plan_progress": {
         const { planId } = ToolArguments.get_plan_progress.parse(raw);
         const id = planId ?? (await this.store.getLatestExecution(chatId))?.id;
-        return id ? (await this.executions.view(id, chatId) ?? { error: "Plan does not belong to this chat" }) : { plan: null };
+        if (!id) { sessionTitles.independent(); return { plan: null }; }
+        const view = await this.executions.view(id, chatId);
+        if (!view) sessionTitles.independent();
+        return view ? { ...view, steps: sessionTitles.focus(view.steps, (node, session) => this.hub.getNodeSession(node, session)?.title) }
+          : { error: "Plan does not belong to this chat" };
       }
       case "get_goal_progress": {
         const { goalId } = ToolArguments.get_goal_progress.parse(raw);
-        return this.goals.progress(chatId, goalId);
+        const view = await this.goals.progress(chatId, goalId);
+        if (view && typeof view === "object" && "proposal" in view) {
+          const goal = view as Awaited<ReturnType<typeof readGoalView>>;
+          return { ...goal, proposal: { ...goal.proposal,
+            targets: sessionTitles.focus(goal.proposal.targets, (node, session) => this.hub.getNodeSession(node, session)?.title) } };
+        }
+        sessionTitles.independent();
+        return view;
       }
       case "execute_goal":
       case "propose_goal": {

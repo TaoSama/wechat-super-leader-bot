@@ -24,7 +24,7 @@ export async function verifyReliableDelivery(harness) {
   const { controller, input, runGateway, pending, sent, incoming, deliveries, sendFrame, statePath,
     fault, wireEvents, evidence, healthy, chatId, contextToken, directTask, nodeId, sessionId,
     restartController, setSessionStatus, fullResult, artifactText, resultClientId, getDelivery,
-    elapseDispatchInterval, waitForAccepted } = harness;
+    elapseDispatchInterval, waitForAccepted, waitForTyping } = harness;
   assert(Buffer.byteLength(RAW_REPLY, 'utf8') > 128 * 1_024, 'Large-result fixture must exceed 128KiB');
   assert(RESUMABLE_REPLY.length <= 4_500 && RESUMABLE_DISPLAY.length > 3_800 && RESUMABLE_DISPLAY.length <= 7_600,
     'Ordinary report must fit model raw limit and require multiple displayed chunks');
@@ -64,14 +64,14 @@ export async function verifyReliableDelivery(harness) {
   assert.equal(parts[1].client_id, resultClientId(notification.id, 1, 'file'));
   assert.equal(await artifactText(parts[1]), full, 'Decrypted uploaded file changed the full raw Markdown');
   assert.equal(sha256(await artifactText(parts[1])), notification.artifact.sha256);
-  assert.equal(wireEvents[eventStart].kind, 'typing', 'Long notification did not begin with typing');
+  await waitForTyping(eventStart);
   assert(!/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/u.test(text(parts[0])), 'Summary broke a Unicode surrogate pair');
   const sentAfter = sent.length;
   await runGateway('--poll-once');
   assert.equal(sent.length, sentAfter, 'Restart replayed confirmed notification parts');
   evidence('large-markdown-delivery', { originalBytes: Buffer.byteLength(RAW_REPLY), parts: parts.length,
     summaryMessages: 1, completeRawAttachments: 1, fullResultSha256: notification.artifact.sha256,
-    exactReconstruction: true, markdownTableAndCode: true, typingBeforeSend: true, restartResends: 0 });
+    exactReconstruction: true, markdownTableAndCode: true, backgroundTypingCompleted: true, restartResends: 0 });
 
   const rawMessageId = randomUUID(), rawKey = JSON.stringify(['synthetic-account', chatId, rawMessageId]);
   const enqueueRaw = () => incoming.push({ message_type: TEXT_TYPE, from_user_id: chatId, client_id: rawMessageId,
@@ -209,7 +209,7 @@ async function verifyUnknownOrdinaryReply(harness) {
 
 async function verifyProgressDelivery(harness, complete) {
   const { input, runGateway, pending, sent, deliveries, wireEvents, healthy, evidence, databaseUrl, chatId,
-    directTask, fullResult, getDelivery, elapseDispatchInterval } = harness;
+    directTask, fullResult, getDelivery, elapseDispatchInterval, waitForTyping } = harness;
   const require = createRequire(new URL('../../../controller/package.json', import.meta.url));
   const { Pool } = require('pg');
   const pool = new Pool({ connectionString: databaseUrl });
@@ -247,7 +247,7 @@ async function verifyProgressDelivery(harness, complete) {
       assert.equal(notification.mode, 'text');
       assert.deepEqual(sent.slice(start).map(text), notification.messages,
         'Actual progress/final messages differ from their frozen display plan');
-      assert.equal(wireEvents[eventStart].kind, 'typing', 'Progress/final send did not begin with typing');
+      await waitForTyping(eventStart);
       return sent.length - start;
     };
     const start = deliveries.length;
@@ -297,7 +297,7 @@ async function verifyProgressDelivery(harness, complete) {
     await deliver(preferred);
     assert(!sent.slice(beforeTerminal).some(message => text(message) === stale.text), 'Stale progress preceded terminal result');
     evidence('real-process-progress', { progressNotifications: 3, unchangedFactNotifications: 0,
-      fourthFactNotifications: 0, exactFinalResults: 4, typingBeforeEveryNotification: true,
+      fourthFactNotifications: 0, exactFinalResults: 4, backgroundTypingCompleted: true,
       pendingProgressSuppressedByTerminal: true, acceleratedSyntheticPersistedTimes: true });
     return { delivered: 3, unchangedFactNotifications: 0, fourthFactNotifications: 0, terminalPriority: true };
   } finally { await pool.end(); }

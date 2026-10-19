@@ -4,10 +4,9 @@ import { waitFor } from '../../support/control-plane-fixture.mjs';
 import { RAW_REPLY } from './reliable-delivery.mjs';
 
 const SEND_BUDGET = 10;
-const ACKNOWLEDGEMENT = '本次指令已接收，执行情况待后续核查。';
 const PENDING_ACKNOWLEDGEMENT = '本次指令已保存，接收执行待后续核查。';
-const ACKNOWLEDGEMENT_CHARS = 2;
-const ACKNOWLEDGEMENT_PARTS = ACKNOWLEDGEMENT.length / ACKNOWLEDGEMENT_CHARS;
+const ACKNOWLEDGEMENT_CHARS = 8;
+const ACKNOWLEDGEMENT_PARTS = SEND_BUDGET - 1;
 const EMPTY_RESTART_POLLS = 2;
 const THREE_PART_OUTPUT = '预算正文 😀\n' + '甲'.repeat(8_000) + '\n**终段完整**';
 const text = message => message.item_list[0].text_item?.text;
@@ -16,7 +15,7 @@ const text = message => message.item_list[0].text_item?.text;
 export async function verifyBudgetNotifications(harness) {
   const { runGateway, pending, sent, deliveries, sendFrame, statePath, evidence, healthy,
     chatId, directTask, resultClientId, refreshContext, getDelivery, fullResult,
-    elapseDispatchInterval, artifactText, waitForAccepted } = harness;
+    elapseDispatchInterval, artifactText, waitForAccepted, sessionLabel } = harness;
   const state = async () => JSON.parse(await readFile(statePath, 'utf8'));
   assert.equal((await pending()).length, 0, 'Budget fixture starts with pending results');
   assert.equal(Object.keys((await state()).delivery_outbox).length, 0,
@@ -29,9 +28,9 @@ export async function verifyBudgetNotifications(harness) {
     'Budget result task reaches the exact native session');
   assert.equal(ordinary.summary.processedCount, 1);
   assert.equal(ordinary.replies.length, ACKNOWLEDGEMENT_PARTS);
-  assert.equal(PENDING_ACKNOWLEDGEMENT.length, ACKNOWLEDGEMENT.length);
-  assert([ACKNOWLEDGEMENT, PENDING_ACKNOWLEDGEMENT].includes(ordinary.replies.map(text).join('')),
-    'Budget confirmation did not reflect a validated accepted or pending receipt');
+  assert.equal(sessionLabel, '[synthetic-wechat-interaction-node] 合成统计会话');
+  assert.equal(ordinary.replies.map(text).join(''), `${sessionLabel}\n\n${PENDING_ACKNOWLEDGEMENT}`,
+    'Budget confirmation lost the exact original title or deterministic pending receipt body');
   assert.equal(sent.length - ordinaryStart, ACKNOWLEDGEMENT_PARTS,
     'Model confirmation did not consume the real shared send budget');
   assert.equal((await state()).context_budgets[chatId].remaining, SEND_BUDGET - ACKNOWLEDGEMENT_PARTS);

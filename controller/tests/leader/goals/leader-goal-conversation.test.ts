@@ -87,6 +87,7 @@ it.each(["确认", "执行", "开始"])("confirms a single pending goal on %s wi
   expect((await f.store.getGoal(pending.id))?.status).toBe("active");
   expect(f.model.complete).toHaveBeenCalledTimes(2);
   expect(await f.create().handle("chat", "short-confirm", text)).toEqual(reply);
+  f.responses.push(final("当前没有待确认计划，既有目标仍按原授权执行"));
   await f.create().handle("chat", "repeat-short", "确认");
   expect(await f.store.listRecentGoals(["chat"], 10)).toHaveLength(1);
 });
@@ -352,4 +353,17 @@ it("scopes goal progress and exact command payloads to their owning chat", async
   f.responses.push(tool("get_command", { goalId: pending.id, commandId: command.commandId }), final());
   await f.create().handle("chat", "tampered-command", "查看目标命令");
   expect(f.messages.at(-1)?.some(message => message.role === "tool" && message.content?.includes("does not belong"))).toBe(true);
+});
+
+it("binds discovered original titles to goal progress rather than keeping a renamed summary", async () => {
+  const f = fixture();
+  f.sessions[0].title = "🟢 [研究] 持续核查原题 | GPT-6-Astra";
+  const { pending } = await f.propose();
+  await f.leader.handle("chat", "confirm", `确认目标 ${pending.id}`);
+  f.responses.push(tool("list_sessions", {}), tool("get_goal_progress", { goalId: pending.id }), final("目标已保存，等待后台核查。"));
+  const reply = await f.leader.handle("chat", "goal-original-title", "查一下当前目标进度");
+  expect(reply.text).toBe(`[air] ${f.sessions[0].title}\n\n目标已保存，等待后台核查。`);
+  const projection = JSON.parse(f.messages.at(-1)!.filter(message => message.role === "tool").at(-1)!.content!);
+  expect(projection.proposal.targets[0].displayLabel).toMatch(/^⟦session:/);
+  expect(f.commands.submit).not.toHaveBeenCalled();
 });

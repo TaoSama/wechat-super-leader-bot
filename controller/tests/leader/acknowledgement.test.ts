@@ -35,7 +35,7 @@ describe("model-generated execution acknowledgements", () => {
   it("reads the dispatched target before generating prose and excludes old turns", async () => {
     const f = fixture();
     const reply = await generateAcknowledgement(f.model, f.store, f.hub, input());
-    expect(reply).toBe("我读取了研究会话本轮记录，已经看到资料核对的进展；结果还在等待中。");
+    expect(reply).toBe("[node] 研究会话\n\n我读取了研究会话本轮记录，已经看到资料核对的进展；结果还在等待中。");
     expect(f.readHistory.mock.invocationCallOrder[0]).toBeLessThan(f.complete.mock.invocationCallOrder[0]);
     expect(f.store.getCommand).toHaveBeenCalledExactlyOnceWith("command");
     const [messages, tools, signal] = f.complete.mock.calls[0];
@@ -146,7 +146,7 @@ it.each(["confirm", "direct"])("persists the generated %s acknowledgement and re
   if (mode === "confirm") await leader().handle("chat", "preview", "先给我看计划");
   const text = mode === "confirm" ? "确认" : "让研究会话只读核查资料，直接执行";
   const reply = await leader().handle("chat", "submit", text);
-  expect(reply.text).toBe("研究会话已接收本次检查。我已读到它正在核对资料，完成后会更新。");
+  expect(reply.text).toBe("[node] 研究会话\n\n研究会话已接收本次检查。我已读到它正在核对资料，完成后会更新。");
   expect(acknowledgements).toHaveLength(1);
   expect(f.readHistory).toHaveBeenCalledTimes(1);
   expect(submit).toHaveBeenCalledTimes(1);

@@ -279,7 +279,7 @@ for (const useControl of [false, true]) {
       return { text: "普通查询结果", commandId: "ordinary-command" };
     } };
     const reply = await new CodexReplyEngine(options).reply("account", secretRequest, controller);
-    assert.equal(reply.text, "不要公开：https://console.example/#login=[REDACTED]");
+    assert.equal(reply.text, useControl ? "普通查询结果" : "不要公开：https://console.example/#login=[REDACTED]");
     assert.equal(controlCalls, useControl ? 1 : 0);
     const journal = workspace.getReplyJournal();
     assert.equal(Object.values(journal)[0].provenance, undefined);

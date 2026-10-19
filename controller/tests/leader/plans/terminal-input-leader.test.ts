@@ -23,7 +23,8 @@ function fixture(actions: unknown[] = [{ nodeId: "node", sessionId, prompt: "syn
     sendAvailability: { route: "terminal-pane", mode: "non-atomic", state: "ready", observedAt: new Date(clock).toISOString(), validUntil: new Date(clock + 45000).toISOString() } };
   const hub = { getAllSkills: () => [], getNodeSkills: () => [], getAllSessions: async () => [session], getNodeStatusList: () => [],
     getNodeSession: (node: string, id: string) => node === "node" && id === sessionId ? session : null, isNodeConnected: () => true };
-  const replies = [tool(actions), { content: "终端多步不能派发", toolCalls: [] } satisfies ModelReply];
+  const replies = [tool(actions), { content: "没有待确认计划；终端多步不能派发", toolCalls: [] } satisfies ModelReply,
+    { content: "没有待确认计划", toolCalls: [] } satisfies ModelReply];
   const model: LeaderModel = { complete: vi.fn(async messages => { const acknowledgement = acknowledgementFixture(messages); if (acknowledgement) return acknowledgement; const next = replies.shift(); if (!next) throw new Error("No synthetic reply"); return next; }) };
   const dispatched = vi.fn();
   const commands = { submit: vi.fn(async (request: PostCommandRequest, _wait?: number, guard?: () => Promise<void>, sendRoute?: SendRoute) => {

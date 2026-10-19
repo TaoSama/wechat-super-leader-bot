@@ -8,8 +8,20 @@ const labels: Record<string, string> = {
 
 export type SessionTitle = (nodeId: string, sessionId: string) => string | undefined;
 
+/** The transport renderer treats code contents as literal, including real Markdown in a title. */
+function literalTitle(title: string): string {
+  if (!/[*_`~#\r\n①-⑳]|^\s|\s$|\[[^\]]+\]\(/u.test(title)) return title;
+  const longest = Math.max(0, ...[...title.matchAll(/`+/gu)].map(match => match[0].length));
+  if (!title.includes("\n") && !title.startsWith("`") && !title.endsWith("`")) {
+    const delimiter = "`".repeat(longest + 1);
+    return `${delimiter}${title}${delimiter}`;
+  }
+  const delimiter = "`".repeat(Math.max(3, longest + 1));
+  return `\n${delimiter}\n${title}\n${delimiter}\n`;
+}
+
 export function sessionLabel(nodeId: string, sessionId: string, title?: string): string {
-  return `[${nodeId}] ${title?.trim() || `会话 ${sessionId.slice(0, 8)}`}`;
+  return `[${nodeId}] ${title?.trim() ? literalTitle(title) : `会话 ${sessionId.slice(0, 8)}`}`;
 }
 
 export function sessionLabels(targets: { nodeId: string; sessionId: string }[], title?: SessionTitle): string[] {
