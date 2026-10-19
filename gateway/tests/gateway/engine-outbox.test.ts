@@ -18,7 +18,7 @@ const ACCOUNT = "synthetic-account";
 const CHAT = "synthetic-chat";
 const MESSAGE = "synthetic-message";
 const REQUEST = "请记住本轮结果，等待继续";
-const CONTROLLER_DRAFT = "controller intermediate result";
+const CONTROLLER_REPLY = "Controller 原始会话标题：保留换行\n与标点。";
 const FINAL_TEXT = "SDK 最终原文：保留换行\n与标点。";
 const usage = { input_tokens: 0, cached_input_tokens: 0, cache_write_input_tokens: 0,
   output_tokens: 0, reasoning_output_tokens: 0 };
@@ -46,7 +46,7 @@ function fixture(t: TestContext, tool = false, sendBudget = 1) {
         Accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1,
         method: "tools/call", params: { name: "control_current_request", arguments: {} } }) });
       assert.equal(response.status, 200);
-      assert.match(await response.text(), /controller intermediate result/);
+      assert.ok((await response.text()).includes("Controller 原始会话标题"));
     }
     yield { type: "item.completed", item: { type: "agent_message", id: "final", text: FINAL_TEXT } };
     yield { type: "turn.completed", usage };
@@ -61,7 +61,7 @@ function fixture(t: TestContext, tool = false, sendBudget = 1) {
       assert.equal(url.pathname, "/v1/messages");
       counts.controllerPosts++;
       assert.deepEqual(JSON.parse(String(init?.body)), { chatId: CHAT, messageId: MESSAGE, text: REQUEST });
-      return Response.json({ text: CONTROLLER_DRAFT });
+      return Response.json({ text: CONTROLLER_REPLY });
     } });
   const gateway = (current: StateManager, replyEngine: GatewayReplyEngine | undefined = engine(), splitMaxChars = 3) => {
     const ilink = new ILinkClient({ stateManager: current, configuredBaseUrl: "https://synthetic.invalid",
@@ -158,25 +158,26 @@ for (const remainsFull of [false, true]) {
 }
 
 for (const tool of [false, true]) {
-  test(`${tool ? "tool-backed" : "pure chat"} engine outbox resumes SDK final text after budget exhaustion and process restart`, async t => {
+  test(`${tool ? "tool-backed" : "pure chat"} engine outbox resumes the frozen reply after budget exhaustion and process restart`, async t => {
     const f = fixture(t, tool);
+    const frozenText = tool ? CONTROLLER_REPLY : FINAL_TEXT;
     await f.gateway(f.start).pollOnce();
     assert.equal(f.counts.models, 1);
-    assert.deepEqual(f.sends, [FINAL_TEXT.slice(0, 3)]);
+    assert.deepEqual(f.sends, [frozenText.slice(0, 3)]);
     assert.equal(f.start.outbox[f.key].source, "engine");
     assert.equal(f.start.outbox[f.key].status, "pending");
     assert.equal(f.start.replyDeliveries[f.key].acknowledgedChunks, 1);
     assert.equal(Object.values(await f.journal())[0].delivery, "pending");
-    assert.equal(fs.readFileSync(f.statePath, "utf8").includes(FINAL_TEXT), false);
+    assert.equal(fs.readFileSync(f.statePath, "utf8").includes(frozenText), false);
     const restarted = f.state(100);
     f.refresh(restarted);
     await f.gateway(restarted, f.engine(), 1).flushRepliesOnce();
-    assert.equal(f.sends.join(""), FINAL_TEXT, "restart must preserve SDK final text, not Controller draft or changed chunk size");
+    assert.equal(f.sends.join(""), frozenText, "restart must preserve the selected reply and its original chunk size");
     assert.equal(restarted.outbox[f.key], undefined);
     assert.equal(Object.values(await f.journal())[0].delivery, "accepted");
     assert.deepEqual(f.counts, { models: 1, controllerPosts: tool ? 1 : 0, controllerGets: 0 });
     await f.gateway(f.state(100)).pollOnce();
-    assert.equal(f.sends.join(""), FINAL_TEXT);
+    assert.equal(f.sends.join(""), frozenText);
     assert.equal(f.counts.models, 1);
   });
 }
@@ -218,7 +219,7 @@ for (const fault of ["ack-save", "outbox-remove"] as const) {
     }
     await assert.rejects(f.gateway(f.start, f.engine(), 100).pollOnce(), /synthetic (ack persistence|outbox cleanup) failure/);
     assert.equal(injected, true);
-    assert.deepEqual(f.sends, [FINAL_TEXT]);
+    assert.deepEqual(f.sends, [CONTROLLER_REPLY]);
     assert.equal(f.start.outbox[f.key].status, "receipt");
     assert.equal(f.start.outbox[f.key].receiptStatus, "accepted");
     const text = f.start.replyDeliveries[f.key];
@@ -228,7 +229,7 @@ for (const fault of ["ack-save", "outbox-remove"] as const) {
     await f.gateway(restarted).pollOnce();
     assert.equal(restarted.outbox[f.key], undefined);
     assert.equal(Object.values(await f.journal())[0].delivery, "accepted");
-    assert.deepEqual(f.sends, [FINAL_TEXT]);
+    assert.deepEqual(f.sends, [CONTROLLER_REPLY]);
     assert.deepEqual(f.counts, { models: 1, controllerPosts: 1, controllerGets: 0 });
   });
 }

@@ -11,7 +11,7 @@ const fixture = (reply: ModelReply) => {
 };
 
 describe("isolated user authorization classifier", () => {
-  it.each(["task", "goal", "preview", "query", "unclear"] as const)("returns the strict %s classification from exactly one model call", async intent => {
+  it.each(["task", "goal", "preview", "query", "isolated_background", "unclear"] as const)("returns the strict %s classification from exactly one model call", async intent => {
     const f = fixture(classification(intent));
     const message = "CURRENT_USER: 只判断这一条用户消息";
     expect(await classifyUserAuthorization(f.model, message, f.signal)).toBe(intent);
@@ -22,7 +22,7 @@ describe("isolated user authorization classifier", () => {
     expect(tools).toHaveLength(1);
     expect(tools[0]).toMatchObject({ type: "function", function: { name: AUTHORIZATION_TOOL_NAME, parameters: {
       type: "object", required: ["intent"], additionalProperties: false,
-      properties: { intent: { enum: ["task", "goal", "preview", "query", "unclear"] } },
+      properties: { intent: { enum: ["task", "goal", "preview", "query", "isolated_background", "unclear"] } },
     } } });
   });
 

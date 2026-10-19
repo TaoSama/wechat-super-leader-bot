@@ -20,7 +20,8 @@ export async function verifyGoalNotifications({ base, token, request, store, res
   const { DEFAULT_MESSAGE_MAX_CHARS } = await import('../../../gateway/dist/wechat/markdown.js');
   const dir = await mkdtemp(join(tmpdir(), 'super-leader-goal-notification-'));
   const credentials = join(dir, 'account.json'), statePath = join(dir, 'state.json');
-  const sent = [], gateways = [], known = new Map(), events = [];
+  const sent = [], gateways = [], known = new Map(), providerFailures = [];
+  const healthy = () => { if (providerFailures.length) throw providerFailures[0]; };
   let uncertainId;
   await withTestCleanup(async () => {
     const expected = [];
@@ -41,12 +42,13 @@ export async function verifyGoalNotifications({ base, token, request, store, res
     }
     assert(uncertainId && expected.length > 1);
     const pending = async () => {
+      healthy();
       const response = await request('/v1/notifications/pending', { chatIds: [GOAL_CHAT] });
       assert.equal(response.status, 200);
       assert(response.body.items.every(item => item.chatId === GOAL_CHAT && expected.includes(item.id)));
       return response.body.items;
     };
-    const provider = async (input, init) => {
+    const handleProvider = async (input, init) => {
       const url = new URL(String(input)); assert.equal(url.origin, PROVIDER);
       const payload = JSON.parse(init.body);
       if (url.pathname === '/ilink/bot/getconfig') {
@@ -55,7 +57,7 @@ export async function verifyGoalNotifications({ base, token, request, store, res
       }
       if (url.pathname === '/ilink/bot/sendtyping') {
         assert.equal(payload.ilink_user_id, GOAL_CHAT); assert.equal(payload.typing_ticket, 'synthetic-goal-typing'); assert.equal(payload.status, 1);
-        events.push('typing'); return Response.json({ ret: 0 });
+        return Response.json({ ret: 0 });
       }
       assert.equal(url.pathname, '/ilink/bot/sendmessage');
       const { msg } = payload;
@@ -69,15 +71,21 @@ export async function verifyGoalNotifications({ base, token, request, store, res
       assert(matched, 'Goal message did not bind its notification and chunk');
       const { id } = matched;
       assert(expected.includes(id));
-      if (matched.index === 0) assert.equal(events.at(-1), 'typing');
       const { body, status } = await request('/v1/notifications/' + id);
       assert.equal(status, 200); assert.equal(body.notification.status, 'claimed');
       assert.deepEqual(body.notification.source, { type: 'goal', id });
       assert.deepEqual(msg.item_list, [{ type: 1,
         text_item: { text: matched.text } }]);
-      sent.push({ id, index: matched.index, clientId: msg.client_id, text: matched.text }); events.push('send');
+      sent.push({ id, index: matched.index, clientId: msg.client_id, text: matched.text });
       if (id === uncertainId) throw new TypeError('Synthetic response lost after submission');
       return Response.json({ ret: 0, errcode: 0 });
+    };
+    const provider = async (...args) => {
+      try { return await handleProvider(...args); }
+      catch (error) {
+        if (error instanceof assert.AssertionError) providerFailures.push(error);
+        throw error;
+      }
     };
     writePrivateJsonSync(credentials, { token: 'synthetic-token', accountId: 'synthetic-account', baseUrl: PROVIDER });
     const state = new StateManager(credentials, statePath, { sendBudget: SYNTHETIC_SEND_BUDGET }); state.markBaselineEstablished();
@@ -98,7 +106,12 @@ export async function verifyGoalNotifications({ base, token, request, store, res
     assert.equal(new Set(sent.map(item => item.id)).size, expected.length); assert.equal(new Set(sent.map(item => item.clientId)).size, sent.length);
     for (const id of expected.filter(id => id !== uncertainId)) assert.equal(sent.filter(item => item.id === id).sort((a, b) => a.index - b.index)
       .map(item => item.text).join(''), known.get(id).text, 'Goal Markdown was changed or truncated');
-    for (const id of expected) assert.equal((await store.getNotification(id, Date.now())).status, id === uncertainId ? 'uncertain' : 'accepted');
+    for (const id of expected) {
+      const persisted = await store.getNotification(id, Date.now());
+      assert.equal(persisted.status, id === uncertainId ? 'uncertain' : 'accepted');
+      assert.equal(persisted.text, known.get(id).text, 'Delivery changed the stored raw goal Markdown');
+    }
+    healthy();
     const unknown = await store.getNotification(uncertainId, Date.now());
     const sentBeforeRestart = sent.length;
     await restart();

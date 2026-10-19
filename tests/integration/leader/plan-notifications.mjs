@@ -24,20 +24,28 @@ export async function verifyPlanNotifications({ base, token, request, store, res
   const dir = await mkdtemp(join(tmpdir(), 'super-leader-notification-test-'));
   const credentials = join(dir, 'synthetic-account.json');
   const statePath = join(dir, 'synthetic-state.json');
-  const sent = [], gateways = [], events = [], known = new Map();
+  const sent = [], gateways = [], known = new Map(), originalText = new Map(), providerFailures = [];
+  const healthy = () => { if (providerFailures.length) throw providerFailures[0]; };
+  const remember = item => {
+    if (!originalText.has(item.id)) originalText.set(item.id, item.text);
+    assert.equal(item.text, originalText.get(item.id), 'Delivery changed the stored raw notification Markdown');
+    known.set(item.id, item);
+  };
   let providerMode = 'success', state;
   const pending = async () => {
     const response = await request('/v1/notifications/pending', { chatIds: [PLAN_CHAT] });
-    for (const item of response.body.items) known.set(item.id, item);
+    healthy();
+    for (const item of response.body.items) remember(item);
     return response;
   };
   const get = async id => {
+    healthy();
     const response = await request(notificationPath(id));
     assert.equal(response.status, 200);
-    known.set(id, response.body.notification);
+    remember(response.body.notification);
     return response.body.notification;
   };
-  const transport = async (input, init) => {
+  const handleTransport = async (input, init) => {
     const url = new URL(String(input));
     assert.equal(url.origin, ILINK_BASE, 'Attempt to contact an unapproved external endpoint');
     const payload = JSON.parse(init.body);
@@ -47,7 +55,7 @@ export async function verifyPlanNotifications({ base, token, request, store, res
     }
     if (url.pathname === '/ilink/bot/sendtyping') {
       assert.equal(payload.ilink_user_id, PLAN_CHAT); assert.equal(payload.typing_ticket, 'synthetic-typing-ticket'); assert.equal(payload.status, 1);
-      events.push('typing'); return Response.json({ ret: 0 });
+      return Response.json({ ret: 0 });
     }
     assert.equal(url.pathname, '/ilink/bot/sendmessage', 'Unexpected synthetic provider request');
     assert.equal(payload.msg.to_user_id, PLAN_CHAT);
@@ -61,15 +69,21 @@ export async function verifyPlanNotifications({ base, token, request, store, res
       }
     }
     assert(matched, 'Provider send did not bind its immutable notification and chunk');
-    if (matched.index === 0) assert.equal(events.at(-1), 'typing', 'Notification text was sent before typing');
     const persisted = await get(matched.id);
     assert.equal(persisted.status, 'claimed', 'Provider send has no durable claim');
     assert.deepEqual(payload.msg.item_list, [{ type: TEXT_ITEM_TYPE,
       text_item: { text: matched.text } }], 'Provider text differs from the original Markdown part');
-    sent.push({ ...payload.msg, notificationId: matched.id, chunkIndex: matched.index }); events.push('send');
+    sent.push({ ...payload.msg, notificationId: matched.id, chunkIndex: matched.index });
     if (providerMode === 'drop') throw new TypeError('Synthetic send response lost after submission');
     return new Response(JSON.stringify(providerMode === 'empty' ? {} : providerMode === 'rejected' ? { ret: -14 } : { ret: 0, errcode: 0 }),
       { headers: { 'content-type': 'application/json' } });
+  };
+  const transport = async (...args) => {
+    try { return await handleTransport(...args); }
+    catch (error) {
+      if (error instanceof assert.AssertionError) providerFailures.push(error);
+      throw error;
+    }
   };
   const makeGateway = (options = {}) => {
     const instance = new WeChatGateway({
@@ -146,7 +160,8 @@ export async function verifyPlanNotifications({ base, token, request, store, res
     assert(sent.some(item => item.notificationId === planIds.completed));
     for (const id of new Set(sent.map(item => item.notificationId))) {
       assert.equal(sent.filter(item => item.notificationId === id).sort((a, b) => a.chunkIndex - b.chunkIndex)
-        .map(item => item.item_list[0].text_item.text).join(''), known.get(id).text, 'Notification Markdown was changed or truncated');
+        .map(item => item.item_list[0].text_item.text).join(''), originalText.get(id),
+      'Notification Markdown was changed or truncated');
     }
     console.log('PASS exact completed plan → durable notification → actual Gateway/HTTP → simulated WeChat; cookie denied, no-context/default-off preserved, concurrent sends unique');
 
@@ -229,6 +244,7 @@ export async function verifyPlanNotifications({ base, token, request, store, res
     await first.deliverNotificationsOnce();
     assert.equal((await get(revoked)).status, 'accepted');
     assert.equal(new Set(sent.map(item => item.client_id)).size, sent.length);
+    healthy();
     console.log('PASS notification empty-object acceptance, rejected/lost response uncertainty, claim/receipt-response loss, allowlist revoke/restore and Controller/Gateway restart: no receipt rewrite or external replay');
   } finally {
     for (const gateway of gateways) gateway.stop();

@@ -17,11 +17,14 @@ import { createControllerFixture, createPostgresFixture, waitFor } from '../../s
 import { PROGRESS_TASK, RAW_REPLY_TASK, RESUMABLE_REPLY, verifyReliableDelivery } from './reliable-delivery.mjs';
 import { BUDGET_REPLY, BUDGET_REPLY_TASK, verifyWechatBudget } from './wechat-budget.mjs';
 import { fixtureHistory } from './confirmation-fixture.mjs';
+import { PostgresStore } from '../../../controller/dist/store/postgres.js';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const CHAT = 'synthetic-wechat-interaction-chat';
 const NODE = 'synthetic-wechat-interaction-node';
 const SESSION = 'synthetic-wechat-interaction-session';
+const SESSION_TITLE = '合成统计会话';
+const SESSION_LABEL = `[${NODE}] ${SESSION_TITLE}`;
 const CONTEXT = 'synthetic-wechat-context';
 const PROPOSAL = '请先给合成会话制定一个统计记录的单步计划，暂不执行';
 const DIRECT_TASK = '请直接统计合成会话中的待办记录，并把最终结果告诉我';
@@ -36,6 +39,7 @@ const FINAL = '**验收最终结果**：共 17 条记录，其中 3 条需要复
 const FINAL_DISPLAY = '验收最终结果：共 17 条记录，其中 3 条需要复核。';
 const RESULT_SUMMARY = '模型摘要：完整成果已生成，请查看附件。';
 const PENDING_ACKNOWLEDGEMENT = '本次指令已保存，接收执行待后续核查。';
+const ACCEPTED_ACKNOWLEDGEMENT = '本次指令已接收，执行情况待后续核查。';
 const RECEIPT_RACE_OUTPUT = 'SYNTHETIC_LOCAL_OUTPUT_BEFORE_RECEIPT：本地输出不能提升尚未接收的持久回执。';
 const HTTP_MS = 5_000;
 const PROCESS_MS = 30_000;
@@ -107,7 +111,7 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
     }
   };
   const authorizationCalls = [], controllerRequests = [], validContexts = new Set([CONTEXT]);
-  let controller, model, wechat, proxy, gatewayControllerUrl, socket, heartbeat, gatewayChild, cursor = 0;
+  let controller, authorizationStore, model, wechat, proxy, gatewayControllerUrl, socket, heartbeat, gatewayChild, cursor = 0;
   const healthy = () => { if (errors.length) throw errors[0]; };
   const evidence = (step, data) => console.log(JSON.stringify({ step, ...data }, (_key, value) =>
     typeof value === 'string' ? value.replace(/#login=[A-Za-z0-9_.~%-]+/gu, '#login=[synthetic-redacted]') : value));
@@ -125,8 +129,21 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
         const body = await jsonBody(request);
         const last = body.input.at(-1);
         if (body.tools?.length === 1 && body.tools[0].name === 'classify_user_authorization') {
-          assert.equal(body.input.length, 2, 'Authorization included planner history or tool results');
-          assert.deepEqual(body.input.map(item => item.role), ['system', 'user']);
+          const persisted = await authorizationStore.getLeaderState(CHAT);
+          const history = persisted?.data.history ?? [];
+          let boundary = 0;
+          for (let index = 0; index < history.length; index += 2) {
+            const pair = history.slice(index, index + 2);
+            if (pair.length !== 2 || pair[0].role !== 'user' || pair[1].role !== 'assistant' ||
+                pair.some(item => item.invalidatedConfirmation || item.complete === false ||
+                  item.complete !== true && item.content.length >= 1499)) boundary = index + 2;
+          }
+          const expectedConversation = history.slice(boundary).map(({ role, content }) => ({ role, content }));
+          assert.deepEqual(body.input.slice(1, -1), expectedConversation,
+            'Authorization did not receive the complete persisted user/assistant conversation suffix');
+          assert.equal(body.input[0].role, 'system');
+          assert.deepEqual(last, { role: 'user', content: inputs.at(-1).text },
+            'Authorization changed the current user input or included unrelated context');
           assert([DIRECT_TASK, PROGRESS_TASK, MISROUTED_QUERY].includes(last.content), 'Unexpected authorization input: ' + JSON.stringify(last));
           for (const history of [PROPOSAL, DIRECT_PROMPT, PROGRESS, FINAL]) {
             assert(!JSON.stringify(body.input[0]).includes(history), 'Authorization system input included planner history');
@@ -145,6 +162,7 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
           const evidence = JSON.parse(last.content);
           const observations = await Promise.all(evidence.targets.map(async (target, index) => {
             assert.equal(target.nodeId, NODE); assert.equal(target.sessionId, SESSION);
+            assert.equal(target.title, SESSION_TITLE, 'Confirmation rewrote the original session title');
             if (!target.exactReceipt) {
               assert.equal(target.historyError, '尚无本次派发指令，未声称会话已经接收或执行');
               assert.deepEqual(target.exactTurnHistory, [], 'Undispatched dependency manufactured execution history');
@@ -198,7 +216,7 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
             }
             if (target.exactReceipt.status === 'accepted') {
               assert.equal(matching.length, 0, 'Accepted receipt manufactured execution output');
-              return '本次指令已接收，执行情况待后续核查。';
+              return ACCEPTED_ACKNOWLEDGEMENT;
             }
             assert.equal(target.exactReceipt.status, 'completed');
             return '本次指令已完成。';
@@ -226,6 +244,22 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
         } else if ([RAW_REPLY_TASK, BUDGET_REPLY_TASK].includes(last.content)) {
           output = [{ type: 'message', role: 'assistant', status: 'completed',
             content: [{ type: 'output_text', text: last.content === BUDGET_REPLY_TASK ? BUDGET_REPLY : RESUMABLE_REPLY }] }];
+        } else if (last.content === '执行') {
+          assert(body.input.slice(0, -1).some(item => item.role === 'assistant' &&
+            typeof item.content === 'string' && item.content.includes(PENDING_ACKNOWLEDGEMENT)),
+          'Repeated confirmation did not receive the already-dispatched conversation history');
+          assert(body.tools.some(tool => tool.name === 'get_plan_progress'));
+          output = [{ type: 'function_call', call_id: 'synthetic-repeated-confirmation', name: 'get_plan_progress',
+            arguments: JSON.stringify({ planId: confirmationCalls.at(-1).durableState.planId }) }];
+        } else if (last.type === 'function_call_output' && last.call_id === 'synthetic-repeated-confirmation') {
+          const progress = JSON.parse(last.output);
+          assert.equal(progress.id, confirmationCalls.at(-1).durableState.planId);
+          assert.equal(progress.status, 'active'); assert.equal(progress.steps.length, 1);
+          assert.equal(progress.steps[0].commandId, deliveries[0].commandId);
+          assert.equal(progress.steps[0].status, 'accepted');
+          assert.equal(progress.steps[0].turnId, 'synthetic-turn-' + deliveries[0].commandId);
+          output = [{ type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text',
+            text: `${progress.steps[0].displayLabel}\n\n${ACCEPTED_ACKNOWLEDGEMENT}` }] }];
         } else {
           assert([QUERY, NEGATIVE].includes(last.content), 'Unexpected model input: ' + JSON.stringify(last));
           output = [{ type: 'message', role: 'assistant', status: 'completed',
@@ -244,6 +278,7 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
     });
     const modelPort = await listen(model);
     const databaseUrl = await postgres.start();
+    authorizationStore = new PostgresStore(databaseUrl);
     controller = await createControllerFixture({ logs, secrets: [token, nodeToken, postgres.password], env: {
       ...env, PERSISTENCE_MODE: 'postgres', DATABASE_URL: databaseUrl, CONTROLLER_TOKEN: token,
       NODE_TOKENS: JSON.stringify({ [NODE]: nodeToken }), ALLOWED_CHAT_IDS: CHAT, LEADER_MODE: 'model',
@@ -280,7 +315,7 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
       socket.send(JSON.stringify(message), error => { if (error) errors.push(error); });
     };
     const frame = type => ({ type, ...(type === 'hello' ? { version: 1, nodeId: NODE } : {}), sessions: [{
-      id: SESSION, title: '合成统计会话', provider: 'codex-app', cwd: '/synthetic', status: sessionStatus, loaded: true,
+      id: SESSION, title: SESSION_TITLE, provider: 'codex-app', cwd: '/synthetic', status: sessionStatus, loaded: true,
       capabilities: ['read', 'send'], observedAt: new Date().toISOString(),
     }], skills: [] });
     const connectDaemon = async () => {
@@ -451,6 +486,9 @@ globalThis.fetch = async (input, init) => {
       resultPlans.body.items.forEach(registerDeliveryIds);
       return expectedExit === 0 ? JSON.parse(output.trim()) : { exit, stderr };
     };
+    const waitForTyping = eventStart => waitFor(() => {
+      healthy(); return wireEvents.slice(eventStart).some(event => event.kind === 'typing');
+    }, 'Background typing completes independently of model and body delivery');
     const input = async (text, messageId = randomUUID(), contextToken = CONTEXT, gatewayOptions) => {
       const before = sent.length;
       const eventsBefore = wireEvents.length;
@@ -461,11 +499,7 @@ globalThis.fetch = async (input, init) => {
       const summary = await runGateway('--poll-once', gatewayOptions);
       const replies = sent.slice(before).filter(message => !notificationClientIds.has(message.client_id));
       if (summary.processedCount > 0) {
-        const events = wireEvents.slice(eventsBefore);
-        const typing = events.findIndex(event => event.kind === 'typing');
-        const model = events.findIndex(event => event.kind === 'model');
-        assert(typing >= 0, 'New input did not send a typing indicator');
-        if (model >= 0) assert(typing < model, 'Input reached model before its typing indicator');
+        await waitForTyping(eventsBefore);
       }
       evidence('wechat-input', { input: text, reply: replies.map(message => message.item_list[0].text_item?.text ?? '[文件]').join('\n'), summary });
       return { messageId, summary, replies };
@@ -515,12 +549,14 @@ globalThis.fetch = async (input, init) => {
       await verifyWechatBudget({ controller, input, runGateway, pending, sent, incoming, deliveries, sendFrame,
         statePath, wireEvents, evidence, healthy, chatId: CHAT, contextToken: CONTEXT, directTask: DIRECT_TASK,
         query: QUERY, clientId, controllerRequests, validContexts, restartController, setSessionStatus, databaseUrl,
-        getDelivery, fullResult, artifactText, elapseDispatchInterval, resultClientId, waitForAccepted });
+        getDelivery, fullResult, artifactText, elapseDispatchInterval, resultClientId, waitForAccepted,
+        sessionLabel: SESSION_LABEL });
       healthy();
       assert(confirmationCalls.length > 0, 'Budget interaction did not exercise model-generated confirmation');
       assert(receiptRace.verified, 'Budget interaction did not exercise the pending confirmation race');
       evidence('pending-budget-confirmation', { exactReceiptStatus: 'pending', newerLocalHistoryExcluded: true,
-        confirmationChars: PENDING_ACKNOWLEDGEMENT.length, sharedQuotaParts: 9 });
+        confirmationChars: `${SESSION_LABEL}\n\n${PENDING_ACKNOWLEDGEMENT}`.length,
+        originalTitlePreserved: true, sharedQuotaParts: 9 });
       return;
     }
     await input(PROPOSAL);
@@ -528,8 +564,13 @@ globalThis.fetch = async (input, init) => {
     await input(NEGATIVE);
     assert.equal(deliveries.length, 0, 'Preview/query/negative wording dispatched a command');
     await input('不用执行');
-    await input('执行');
+    const confirmationCallsAfterCancel = confirmationCalls.length;
+    const afterCancel = await input('执行');
+    assert.equal(afterCancel.replies.map(message => message.item_list[0].text_item.text).join(''),
+      '当前没有待确认计划。请告诉我希望哪些会话完成什么任务。');
+    assert.equal(confirmationCalls.length, confirmationCallsAfterCancel, 'Cancelled preview produced an execution acknowledgement');
     assert.equal(deliveries.length, 0, 'Cancellation left a dispatchable pending plan');
+    evidence('cancelled-preview-confirmation', { daemonCommands: 0, executionAcknowledgements: 0, exactNoPendingReply: true });
 
     const preview = await input(PROPOSAL);
     assert(preview.replies.some(message => message.item_list[0].text_item.text.includes('尚未派发')));
@@ -546,7 +587,8 @@ globalThis.fetch = async (input, init) => {
     const commandPath = '/v1/commands/' + command.commandId;
     const accepted = await controller.request(commandPath);
     assert(receiptRace.verified, 'Pending receipt/history race was not exercised deterministically');
-    assert.equal(confirmation.replies.map(message => message.item_list[0].text_item.text).join(''), PENDING_ACKNOWLEDGEMENT);
+    assert.equal(confirmation.replies.map(message => message.item_list[0].text_item.text).join(''),
+      `${SESSION_LABEL}\n\n${PENDING_ACKNOWLEDGEMENT}`);
     evidence('pending-receipt-history-race', { exactCommandPersistedPending: true, receiptTurnAbsent: true,
       newerLocalHistoryExcluded: true, modelClaimedAcceptedOrCompleted: false, acceptedReleasedAfterModelCheck: true });
     assert.equal(accepted.body.status, 'accepted');
@@ -558,7 +600,9 @@ globalThis.fetch = async (input, init) => {
     assert.equal(sameInput.replies.length, 0, 'Repeated poll input sent another reply');
     const replay = await controller.request('/v1/messages', { chatId: CHAT, messageId: confirmation.messageId, text: '执行' });
     assert.equal(replay.status, 200);
-    await input('执行');
+    const repeatedConfirmation = await input('执行');
+    assert.equal(repeatedConfirmation.replies.map(message => message.item_list[0].text_item.text).join(''),
+      `${SESSION_LABEL}\n\n${ACCEPTED_ACKNOWLEDGEMENT}`);
     assert.equal(deliveries.length, 1, 'Repeated confirmation dispatched the plan twice');
 
     const receipt = (turnId, output) => sendFrame({ type: 'result', commandId: command.commandId, turnId, status: 'completed', output });
@@ -578,6 +622,7 @@ globalThis.fetch = async (input, init) => {
     assert.equal(notification.kind, 'completed');
     assert(notification.text.includes('17 条记录'), 'Persisted notification omitted the actual result');
     assert(!notification.text.includes(PROGRESS), 'Notification substituted accepted progress for the completed result');
+    const notificationEventStart = wireEvents.length;
     const summary = await runGateway('--poll-once');
     assert.equal(summary.notifications.accepted, 1);
     assert.equal(notificationMessages().length, 1, 'Completion did not result in exactly one outbound notification');
@@ -586,7 +631,7 @@ globalThis.fetch = async (input, init) => {
     assert.equal(actual, notification.text, 'Actual WeChat send changed persisted Markdown');
     assert(actual.includes(FINAL_DISPLAY), 'Actual WeChat send omitted or corrupted the completed result: ' + actual);
     assert((await fullResult(notification.id)).includes(FINAL), 'Raw completed result lost its Markdown artifact');
-    assert.equal(wireEvents[wireEvents.findIndex(event => event.message === outbound) - 1]?.kind, 'typing');
+    await waitForTyping(notificationEventStart);
     assert(!actual.includes(PROGRESS), 'Actual WeChat notification contains progress instead of the result');
     evidence('exact-completion', { commandStatus: complete.body.status, daemonOutput: complete.body.output,
       notificationKind: notification.kind, actualWeChatText: actual, outboundCount: notificationMessages().length });
@@ -643,6 +688,9 @@ globalThis.fetch = async (input, init) => {
       'Direct task was not independently authorized exactly once');
     assert(directInput.replies.length > 0, 'Direct task did not acknowledge its dispatch');
     const directReplyText = directInput.replies.map(message => message.item_list[0].text_item.text).join('\n');
+    assert([PENDING_ACKNOWLEDGEMENT, ACCEPTED_ACKNOWLEDGEMENT]
+      .map(body => `${SESSION_LABEL}\n\n${body}`).includes(directReplyText),
+    'Direct acknowledgement lost the exact original title or validated receipt body');
     assert.doesNotMatch(directReplyText.replaceAll('无需再次确认', ''),
       /确认|尚未派发|(?:回复|发送|输入|等待)[^\n。；]*(?:执行|开始)/u,
       'Direct task reply asked for confirmation or reported an undispatched preview: ' + directReplyText);
@@ -707,7 +755,7 @@ globalThis.fetch = async (input, init) => {
       sendFrame, statePath, fault, wireEvents, evidence, healthy, chatId: CHAT, contextToken: CONTEXT,
       directTask: DIRECT_TASK, nodeId: NODE, sessionId: SESSION, clientId,
       restartController, setSessionStatus, databaseUrl, query: QUERY,
-      getDelivery, fullResult, artifactText, elapseDispatchInterval, resultClientId, waitForAccepted });
+      getDelivery, fullResult, artifactText, elapseDispatchInterval, resultClientId, waitForAccepted, waitForTyping });
     healthy();
     assert(confirmationCalls.length > 0, 'Interaction did not exercise model-generated confirmation');
     evidence('PASS', { realControllerProcess: true, realGatewayCli: true, disposablePostgres: true,
@@ -721,7 +769,7 @@ globalThis.fetch = async (input, init) => {
         'duplicate confirmation and input', 'wrong turn ignored', 'accepted progress is not completion',
         'duplicate completion and poll', 'direct task executes in original message without confirmation',
         'direct messageId replay and empty polls do not dispatch or send', 'direct accepted-to-completed automatic notification',
-        'duplicate direct completion and poll', 'authorization sees only current user text',
+        'duplicate direct completion and poll', 'authorization sees complete persisted chat pairs and current user text',
         'independent authorization rejects planner execute_plan on a query'] });
   }, [
     { label: 'gateway child', cleanup: () => stopTestProcess(gatewayChild) },
@@ -731,6 +779,7 @@ globalThis.fetch = async (input, init) => {
     { label: 'Controller proxy', cleanup: () => closeServer(proxy) },
     { label: 'WeChat HTTPS shim', cleanup: () => closeServer(wechat) },
     { label: 'model HTTP shim', cleanup: () => closeServer(model) },
+    { label: 'authorization history reader', cleanup: () => authorizationStore?.close() },
     { label: 'disposable PostgreSQL', cleanup: () => postgres.stop() },
     { label: 'owned temporary fixture files', cleanup: () => rm(dir, { recursive: true, force: true }) },
   ]).catch(error => {
