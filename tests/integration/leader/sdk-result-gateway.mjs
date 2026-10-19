@@ -17,16 +17,13 @@ const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const ACCOUNT = 'synthetic-sdk-account';
 const CHAT = 'synthetic-sdk-chat';
 const CONTEXT = 'synthetic-sdk-context';
-const CONTROLLER_ACK = 'Controller 工具中间确认；这不是 SDK 最终回复。';
+const CONTROLLER_ACK = '[synthetic-sdk-node] 原始会话标题\n\n**Controller 真实回复，保留原题与核查结果。**' +
+  '已核查的持久会话信息甲乙丙丁戊己庚辛壬癸。'.repeat(18);
 const FINAL_TEXT = '**SDK 最终原文，保留换行与标点。**\n' + '原始完整成果甲乙丙丁戊己庚辛壬癸。'.repeat(18);
 const DISPLAY_TEXT = 'SDK 最终原文，保留换行与标点。\n' + '原始完整成果甲乙丙丁戊己庚辛壬癸。'.repeat(18);
 const RENEW_TEXT = 'renew-sdk-fixture';
 const RENEW_REPLY = 'SDK 已收到续期消息。';
 const CHUNK_CHARS = 64;
-const FIRST_LINE_END = DISPLAY_TEXT.indexOf('\n') + 1;
-const EXPECTED_CHUNKS = [DISPLAY_TEXT.slice(0, FIRST_LINE_END),
-  ...Array.from({ length: Math.ceil((DISPLAY_TEXT.length - FIRST_LINE_END) / CHUNK_CHARS) }, (_, index) =>
-    DISPLAY_TEXT.slice(FIRST_LINE_END + index * CHUNK_CHARS, FIRST_LINE_END + (index + 1) * CHUNK_CHARS))];
 const HTTP_MS = 5_000;
 const PROCESS_MS = 30_000;
 const hash = text => createHash('sha256').update(text).digest('hex');
@@ -82,7 +79,8 @@ async function main() {
       'Content-Type': 'application/json', Accept: 'application/json, text/event-stream',
     }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'control_current_request', arguments: {} } }) });
     assert.equal(response.status, 200); const body = await response.text();
-    assert(body.includes(settings.controllerAck));
+    const result = JSON.parse(body).result;
+    assert.equal(JSON.parse(result.content[0].text).text, settings.controllerAck);
     fs.appendFileSync(settings.toolLog, JSON.stringify({ input, sawControllerAck: true }) + '\\n');
   }
   emit({ type: 'item.completed', item: { type: 'agent_message', id: 'final', text: input === settings.renewText ? settings.renewReply : settings.finalText } });
@@ -94,10 +92,16 @@ main().catch(error => { console.error(error); process.exitCode = 1; });
 
 export async function verifySdkResultGateway() {
   for (const tool of [false, true]) await verifyScenario(tool);
-  console.log('PASS real Gateway CLI + real Codex SDK process: pure chat and tool-backed engine-source recovery preserve SDK final text, frozen chunks and native execution identity');
+  console.log('PASS real Gateway CLI + real Codex SDK process: pure chat preserves SDK final and tool-backed recovery preserves exact Controller reply, frozen chunks and native execution identity');
 }
 
 async function verifyScenario(tool) {
+  const originalReply = tool ? CONTROLLER_ACK : FINAL_TEXT;
+  const displayedReply = tool ? CONTROLLER_ACK.replaceAll('**', '') : DISPLAY_TEXT;
+  const headerEnd = displayedReply.lastIndexOf('\n', CHUNK_CHARS - 1) + 1;
+  const expectedChunks = [displayedReply.slice(0, headerEnd),
+    ...Array.from({ length: Math.ceil((displayedReply.length - headerEnd) / CHUNK_CHARS) }, (_, index) =>
+      displayedReply.slice(headerEnd + index * CHUNK_CHARS, headerEnd + (index + 1) * CHUNK_CHARS))];
   const env = verificationEnvironment(), token = randomUUID();
   const directory = await mkdtemp(join(await realpath(tmpdir()), `super-leader-sdk-${tool ? 'tool' : 'chat'}-`));
   const accountPath = join(directory, 'account.json'), statePath = join(directory, 'state.json');
@@ -196,11 +200,11 @@ globalThis.fetch = (input, init) => {
     assert.equal(initialState.reply_deliveries[deliveryKey].acknowledgedChunks, 1);
     assert.equal(initialState.context_budgets[CHAT].remaining, 0);
     assert.equal(initialJournal.stage, 'completed'); assert.equal(initialJournal.delivery, 'pending');
-    assert.equal(initialJournal.reply.text, FINAL_TEXT);
-    assert.equal(sent.length, 1); assert.equal(textOf(sent[0]), EXPECTED_CHUNKS[0]);
+    assert.equal(initialJournal.reply.text, originalReply);
+    assert.equal(sent.length, 1); assert.equal(textOf(sent[0]), expectedChunks[0]);
     assert.equal((await readLines(nativeLog)).length, 1);
     assert.equal(modelCalls.length, tool ? 1 : 0);
-    assert.equal((await readFile(statePath, 'utf8')).includes(FINAL_TEXT), false, 'Gateway reference state copied full SDK response');
+    assert.equal((await readFile(statePath, 'utf8')).includes(originalReply), false, 'Gateway reference state copied full engine response');
 
     // Both calls start a fresh Gateway process. A different chunk option and a
     // higher configured ceiling cannot reset an already exhausted user grant.
@@ -213,9 +217,10 @@ globalThis.fetch = (input, init) => {
     incoming.push(inbound(RENEW_TEXT, randomUUID()));
     await run('--poll-once', { budget: 100, maxChars: 1000 });
     const originalChunks = sent.map(textOf).filter(text => text !== RENEW_REPLY);
-    assert.equal(originalChunks.join(''), DISPLAY_TEXT, 'Restart substituted Controller text or changed rendered SDK content');
-    assert.deepEqual(originalChunks, EXPECTED_CHUNKS, 'Recovery changed frozen chunk boundaries');
-    assert.equal(sent.some(message => textOf(message).includes(CONTROLLER_ACK)), false, 'Controller tool acknowledgement was sent as SDK final answer');
+    assert.equal(originalChunks.join(''), displayedReply, 'Restart changed the authoritative original reply');
+    assert.deepEqual(originalChunks, expectedChunks, 'Recovery changed frozen chunk boundaries');
+    if (tool) assert.equal(originalChunks.join('').includes('SDK 最终原文'), false,
+      'Native SDK text rewrote the authoritative Controller reply');
     assert.equal(sent.some(message => textOf(message) === RENEW_REPLY), true);
     assert.equal((await state()).delivery_outbox[deliveryKey], undefined);
     assert.equal((await journal())[hash(initialId)].delivery, 'accepted');
@@ -230,7 +235,7 @@ globalThis.fetch = (input, init) => {
     if (tool) assert.deepEqual(await readLines(toolLog), [{ input: initialText, sawControllerAck: true }]);
     const sentBeforeFinalRestart = sent.length; await run('--poll-once', { budget: 100 });
     assert.equal(sent.length, sentBeforeFinalRestart); assert.equal((await readLines(nativeLog)).length, 2);
-    console.log(`PASS ${tool ? 'tool-backed' : 'pure-chat'} actual SDK CLI: engine source, one original native execution, exhausted-budget restart and replay blocked, true inbound resumes full rendered SDK final SHA ${hash(DISPLAY_TEXT)}, raw Markdown journal retained, accepted, zero Controller GET fallback`);
+    console.log(`PASS ${tool ? 'tool-backed exact Controller reply' : 'pure-chat SDK final'} actual SDK CLI: engine source, one original native execution, exhausted-budget restart and replay blocked, true inbound resumes full rendered reply SHA ${hash(displayedReply)}, raw Markdown journal retained, accepted, zero Controller GET fallback`);
   }, [
     { label: 'synthetic SDK Gateway CLI', cleanup: () => stopTestProcess(child) },
     { label: 'synthetic Controller process', cleanup: () => controller?.stop() },
