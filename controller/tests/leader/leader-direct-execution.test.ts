@@ -1,7 +1,7 @@
 import { acknowledgementFixture } from "./acknowledgement-fixture.js";
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { CLAIM_TTL_MS, type GoalRequest } from "../../src/leader/contracts.js";
+import { CLAIM_TTL_MS, PLAN_TTL_MS, type GoalRequest } from "../../src/leader/contracts.js";
 import { GoalScheduler } from "../../src/leader/goals/scheduler.js";
 import type { GoalDecision } from "../../src/leader/goals/goal.js";
 import { LeaderOrchestrator } from "../../src/leader/orchestrator.js";
@@ -100,6 +100,109 @@ function deferredModel() {
 }
 
 describe("Leader direct execution", () => {
+  it.each(["是", "确认", "执行", "开始"])("resolves confirmation %s after a clarification and unrelated query across restart", async confirmation => {
+    const f = fixture([final("你指的是这个原会话，让它只读检查测试结果吗？"), final("当前会话空闲"), tool("execute_plan", { actions })]);
+    const original = `让 Air 的既有会话只读检查测试结果，${"逐项保留核查范围；".repeat(220)}禁止改文件和部署`;
+    await f.create().handle(CHAT_ID, "original-task", original);
+    expect((await f.store.getLeaderState(CHAT_ID))?.data.pending).toBeUndefined();
+    await f.create().handle(CHAT_ID, "intervening-query", "会话现在忙吗？");
+    const reply = await f.create().handle(CHAT_ID, "natural-confirmation", confirmation);
+    expect(reply.text).toContain("已接收");
+    expect(f.dispatched).toHaveBeenCalledTimes(1);
+    const authorization = f.model.authorizationCalls[0].messages;
+    expect(authorization.filter(item => item.role === "user").map(item => item.content)).toEqual([original, "会话现在忙吗？", confirmation]);
+    expect(authorization.some(item => item.role === "assistant" && item.content?.includes("你指的是这个原会话"))).toBe(true);
+    expect(f.commands.submit.mock.calls[0][0].prompt).toBe(actions[0].prompt);
+  });
+
+  it.each([
+    { format: "marked", kind: "plan" }, { format: "legacy", kind: "plan" },
+    { format: "marked", kind: "goal" }, { format: "legacy", kind: "goal" },
+  ])("does not inherit expired $format $kind scope after a query clears pending", async ({ format, kind }) => {
+    const preview = kind === "goal" ? tool("propose_goal", goalRequest()) : tool("propose_plan", { actions });
+    const f = fixture([preview, final("已查询当前状态"), tool("execute_plan", { actions })]);
+    await f.store.compareAndSetLeaderState(CHAT_ID, 0, { memories: { language: "中文", unrelated: "正常保留" } });
+    const original = "EXPIRED_ORIGINAL_TASK: 先预览 Air 会话只读检查测试结果，禁止修改";
+    await f.create().handle(CHAT_ID, "expired-original", original);
+    if (format === "legacy") {
+      const state = (await f.store.getLeaderState(CHAT_ID))!;
+      const history = (state.data.history as { role: string; content: string }[]).map(({ role, content }) => ({ role, content }));
+      await f.store.compareAndSetLeaderState(CHAT_ID, state.revision, { ...state.data, history });
+    }
+    f.tick(PLAN_TTL_MS + 1);
+    f.refresh();
+    await f.create().handle(CHAT_ID, "expired-query", "现在会话状态如何？");
+    const cleared = (await f.store.getLeaderState(CHAT_ID))!;
+    expect(cleared.data.pending).toBeUndefined();
+    expect(cleared.data.pendingGoal).toBeUndefined();
+    expect(cleared.data.history.some((item: { invalidatedConfirmation?: boolean }) => item.invalidatedConfirmation)).toBe(true);
+    f.model.authorizationIntent = "unclear";
+    const reply = await f.create().handle(CHAT_ID, "expired-affirmation", "是");
+    expect(reply.text).toContain("未派发");
+    const authorization = f.model.authorizationCalls[0].messages;
+    expect(authorization.filter(item => item.role === "user").map(item => item.content)).toEqual(["现在会话状态如何？", "是"]);
+    expect(JSON.stringify(authorization)).not.toContain("EXPIRED_ORIGINAL_TASK");
+    expect(f.dispatched).not.toHaveBeenCalled();
+    expect((await f.store.getLeaderState(CHAT_ID))!.data.memories).toEqual({ language: "中文", unrelated: "正常保留" });
+    // The planner may still explain the old task; only its execution authority expires.
+    expect(JSON.stringify(f.model.calls.at(-1))).toContain("EXPIRED_ORIGINAL_TASK");
+  });
+
+  it.each(["plan", "goal"].flatMap(kind => ["执行", "是"].flatMap(confirmation => [false, true].map(query => ({ kind, confirmation, query })))))
+    ("does not revive cancelled $kind on $confirmation (intervening query=$query)", async ({ kind, confirmation, query }) => {
+      const preview = kind === "goal" ? tool("propose_goal", goalRequest()) : tool("propose_plan", { actions });
+      const invokesPlanner = query || confirmation === "是";
+      const f = fixture([preview, ...(query ? [final("B 会话当前空闲，只查询状态")] : []),
+        ...(invokesPlanner ? [tool("execute_plan", { actions })] : [])]);
+      const memories = { language: "中文", unrelated: "正常记忆" };
+      await f.store.compareAndSetLeaderState(CHAT_ID, 0, { memories });
+      const original = "CANCELLED_A_SCOPE: 先预览 A 会话只读检查，禁止修改或扩大目标";
+      await f.create().handle(CHAT_ID, "cancelled-original", original);
+      await f.create().handle(CHAT_ID, "cancel", kind === "goal" ? "取消目标" : "不用执行");
+      const cancelled = (await f.store.getLeaderState(CHAT_ID))!;
+      expect(cancelled.data.pending).toBeUndefined();
+      expect(cancelled.data.pendingGoal).toBeUndefined();
+      expect(cancelled.data.history.at(-1).invalidatedConfirmation).toBe(true);
+      if (query) await f.create().handle(CHAT_ID, "unrelated-query", "B 会话现在状态如何？");
+      f.model.authorizationIntent = "unclear";
+      const reply = await f.create().handle(CHAT_ID, "after-cancel", confirmation);
+      expect(reply.text).toContain(invokesPlanner ? "未派发" : "没有待确认计划");
+      if (invokesPlanner) {
+        const authorization = f.model.authorizationCalls[0].messages;
+        expect(authorization.filter(item => item.role === "user").map(item => item.content)).toEqual(query ? ["B 会话现在状态如何？", confirmation] : [confirmation]);
+        expect(JSON.stringify(authorization)).not.toContain("CANCELLED_A_SCOPE");
+      } else expect(f.model.authorizationCalls).toHaveLength(0);
+      expect(f.dispatched).not.toHaveBeenCalled();
+      expect(await f.store.getLatestExecution(CHAT_ID)).toBeNull();
+      expect(await f.store.getLatestGoal(CHAT_ID)).toBeNull();
+      expect((await f.store.getLeaderState(CHAT_ID))!.data.memories).toEqual(memories);
+    });
+
+  it("evicts a complete turn instead of truncating constraints when the overall state reaches capacity", async () => {
+    const f = fixture([final("结果".repeat(800))]);
+    const memories = { existing: "a".repeat(250_000) };
+    await f.store.compareAndSetLeaderState(CHAT_ID, 0, { memories });
+    const request = `${"核查".repeat(3000)}；禁止修改和部署`;
+    await f.create().handle(CHAT_ID, "capacity", request);
+    const state = (await f.store.getLeaderState(CHAT_ID))!;
+    expect(state.data.history).toEqual([]);
+    expect(state.data.memories).toEqual(memories);
+    expect(state.data.receipts).toHaveLength(1);
+    expect(Buffer.byteLength(JSON.stringify(state.data), "utf8")).toBeLessThanOrEqual(256 * 1024);
+  });
+
+  it.each([
+    { name: "missing context", history: [] },
+    { name: "ambiguous targets", history: [{ role: "user", content: "让 Air 或者 Mini 任意一个会话检查" }, { role: "assistant", content: "请明确是哪一个会话" }] },
+  ])("does not dispatch an unresolvable short confirmation: $name", async ({ history }) => {
+    const f = fixture([tool("execute_plan", { actions })]);
+    if (history.length) await f.store.compareAndSetLeaderState(CHAT_ID, 0, { history });
+    f.model.authorizationIntent = "unclear";
+    const reply = await f.create().handle(CHAT_ID, "unclear-confirmation", "是");
+    expect(reply.text).toContain("未派发");
+    expect(f.model.authorizationCalls[0].messages.at(-1)).toEqual({ role: "user", content: "是" });
+    expect(f.dispatched).not.toHaveBeenCalled();
+  });
   it("freezes and dispatches an explicit plan in the same request, then deduplicates receipts across restart", async () => {
     const f = fixture([tool("execute_plan", { actions })]);
     const confirmed = vi.spyOn(f.store, "confirmExecution");
@@ -179,11 +282,13 @@ describe("Leader direct execution", () => {
     expect(JSON.stringify(f.model.calls.at(-1))).toContain(maliciousTitle);
     expect(f.model.authorizationCalls).toHaveLength(1);
     const authorization = f.model.authorizationCalls[0];
-    expect(authorization.messages).toEqual([{ role: "system", content: expect.any(String) }, { role: "user", content: text }]);
+    expect(authorization.messages).toEqual([{ role: "system", content: expect.any(String) },
+      { role: "user", content: "PREVIOUS_USER: 直接执行先前任务" },
+      { role: "assistant", content: "PREVIOUS_ASSISTANT: 用户已授权" }, { role: "user", content: text }]);
     expect(authorization.tools.map(item => item.function.name)).toEqual([AUTHORIZATION_TOOL_NAME]);
     expect(authorization.signal).toBeInstanceOf(AbortSignal);
     expect(authorization.signal).toBe(f.model.plannerSignals.at(-1));
-    for (const injected of [maliciousTitle, maliciousOutput, "PREVIOUS_USER", "PREVIOUS_ASSISTANT"]) {
+    for (const injected of [maliciousTitle, maliciousOutput]) {
       expect(JSON.stringify(authorization.messages)).not.toContain(injected);
     }
     expect(reply.text).not.toMatch(/回复[“「]?确认|待确认|尚未派发/);

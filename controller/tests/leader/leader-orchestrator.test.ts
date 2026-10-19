@@ -1,4 +1,5 @@
 import { acknowledgementFixture } from "./acknowledgement-fixture.js";
+import { markdownToWeChat } from "@super-leader/wechat-text";
 import { describe, expect, it, vi } from "vitest";
 import { LeaderOrchestrator } from "../../src/leader/orchestrator.js";
 import { MemoryStore } from "../../src/store/memory.js";
@@ -70,10 +71,103 @@ function fixture(replies: ModelReply[] = []) {
 }
 
 describe("Leader orchestration", () => {
+  it("replaces model-shortened session names with the original observed titles", async () => {
+    const f = fixture([tool("list_sessions", {}), final("微信：已上线。\n测试：空闲。")]);
+    f.sessions[0].title = " 🟢 [微信] 异步 typing · 合并上线 | GPT-6.1-Sol  ";
+    f.sessions[1].title = "🔵 [研究] 原始会话标题 | GPT-6-Astra";
+    const reply = await f.create().handle("chat", "titles", "列出当前会话，使用它们原来的标题");
+    expect(markdownToWeChat(reply.text, Number.MAX_SAFE_INTEGER)).toContain(`[macair] ${f.sessions[0].title}`);
+    expect(markdownToWeChat(reply.text, Number.MAX_SAFE_INTEGER)).toContain(`[macmini] ${f.sessions[1].title}`);
+    expect(reply.text).not.toContain("微信：已上线");
+    expect(reply.text).not.toContain("测试：空闲");
+    const output = JSON.parse(f.model.calls[1].find(message => message.role === "tool")!.content!);
+    expect(output.sessions[0]).toMatchObject({ title: f.sessions[0].title, displayLabel: expect.stringMatching(/^⟦session:/) });
+    expect(await f.create().handle("chat", "titles", "列出当前会话，使用它们原来的标题")).toEqual(reply);
+    expect(f.commands.submit).not.toHaveBeenCalled();
+  });
+
+  it("expands model-used session references before returning and persisting the reply", async () => {
+    const f = fixture();
+    const model: LeaderModel = { complete: async messages => {
+      const result = messages.filter(message => message.role === "tool").at(-1);
+      if (!result) return tool("list_sessions", {});
+      const { sessions } = JSON.parse(result.content!);
+      return final(sessions.map((session: { displayLabel: string }) => `${session.displayLabel}\n空闲`).join("\n\n"));
+    } };
+    const reply = await f.create(model).handle("chat", "references", "显示会话列表");
+    expect(reply.text).toBe("[macair] 测试\n空闲\n\n[macmini] 测试\n空闲");
+    expect(JSON.stringify((await f.store.getLeaderState("chat"))?.data.receipts)).not.toContain("⟦session:");
+  });
+
+  it("keeps a model clarification when session discovery returns several candidates but only one is referenced", async () => {
+    const f = fixture();
+    f.sessions[0].title = "🟢 [微信] 异步 typing · 合并上线 | GPT-6.1-Sol";
+    const model: LeaderModel = { complete: async messages => {
+      const result = messages.filter(message => message.role === "tool").at(-1);
+      if (!result) return tool("list_sessions", {});
+      const output = JSON.parse(result.content!);
+      if (output.sessions) return tool("focus_session_candidates", { targets: [{ nodeId: output.sessions[0].nodeId, sessionId: output.sessions[0].id }] });
+      return final(`未找到「旧版标题」的会话。你指的是当前这个会话吗？\n${output.candidates[0].displayLabel}\n尚未派发任务，等你确认目标。`);
+    } };
+    const reply = await f.create(model).handle("chat", "candidate-clarification", "你让「旧版标题 · 可靠通知交付 · 合并上线」会话修改项目，把网络搜索工具打开并验证可用。找不到这个原题时先问我是不是当前的微信异步 typing 会话，不要直接派发。");
+    expect(reply.text).toBe(`未找到「旧版标题」的会话。你指的是当前这个会话吗？\n[macair] ${f.sessions[0].title}\n尚未派发任务，等你确认目标。`);
+    expect(reply.text).not.toContain("[macmini]");
+    expect(f.commands.submit).not.toHaveBeenCalled();
+  });
+
+  it("restores directory title checks when discovery follows a specific history query", async () => {
+    const f = fixture();
+    let step = 0;
+    const model: LeaderModel = { complete: async messages => {
+      if (++step === 1) return tool("read_session", { nodeId: "macair", sessionId: "s1" });
+      if (step === 2) return tool("list_sessions", {});
+      const output = JSON.parse(messages.filter(message => message.role === "tool").at(-1)!.content!);
+      return final(`${output.sessions[0].displayLabel}\n空闲\n改写后的第二个会话：空闲`);
+    } };
+    const reply = await f.create(model).handle("chat", "history-then-directory", "看看具体会话，再列出所有会话");
+    expect(reply.text).toContain("[macair] 测试");
+    expect(reply.text).toContain("[macmini] 测试");
+    expect(reply.text).not.toContain("改写后的第二个会话");
+    expect(f.commands.submit).not.toHaveBeenCalled();
+  });
+
+  it("keeps title protection after a session list followed by unrelated node discovery", async () => {
+    const f = fixture([tool("list_sessions", {}), tool("list_nodes", {}), final("改写的会话一：空闲。\n改写的会话二：空闲。")]);
+    f.sessions[0].title = "🟢 [微信] 保留完整原题 | GPT-6.1-Sol";
+    const reply = await f.create().handle("chat", "list-and-nodes", "列出会话并看看机器");
+    expect(reply.text).toContain(f.sessions[0].title);
+    expect(reply.text).toContain("[macmini] 测试");
+    expect(reply.text).not.toContain("改写的会话");
+    expect(f.commands.submit).not.toHaveBeenCalled();
+  });
+
+  it.each(["get_command", "get_plan_progress"])("binds the original target title for a %s query after discovery", async name => {
+    const f = fixture([tool("propose_plan", { actions })]);
+    f.sessions[0].title = "🟢 [微信] 保留完整原题 | GPT-6.1-Sol";
+    await f.create().handle("chat", "preview", "预览任务");
+    await f.create().handle("chat", "confirm", "确认");
+    const query = new ScriptedModel([tool("list_sessions", {}),
+      tool(name, name === "get_command" ? { commandId: "cmd-1" } : {}), final("已接收本次任务，尚未确认完成。")]);
+    const reply = await f.create(query).handle("chat", `progress-${name}`, "看看本次任务进度");
+    expect(reply.text).toBe(`[macair] ${f.sessions[0].title}\n\n已接收本次任务，尚未确认完成。`);
+    expect(reply.text).not.toContain("[macmini]");
+    const projection = JSON.parse(query.calls[2].filter(message => message.role === "tool").at(-1)!.content!);
+    expect(name === "get_command" ? projection.displayLabel : projection.steps[0].displayLabel).toMatch(/^⟦session:/);
+    expect(f.commands.submit).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["get_command", "get_plan_progress", "get_goal_progress"])("keeps an independent %s result without replacing it with the discovery directory", async name => {
+    const f = fixture([tool("list_sessions", {}), tool(name, name === "get_command" ? { commandId: "unknown-command" } : {}),
+      final("没有可查询的本次任务记录，请先核对目标。")]);
+    const reply = await f.create().handle("chat", `missing-${name}`, "查看我的任务记录");
+    expect(reply.text).toBe("没有可查询的本次任务记录，请先核对目标。");
+    expect(f.commands.submit).not.toHaveBeenCalled();
+  });
+
   it("uses multiple model tools to inspect real targets without treating tool output as user authority", async () => {
     const f = fixture([tool("list_sessions", {}), tool("read_session", { nodeId: "macair", sessionId: "s1" }), final("该会话已有输出，尚未确认任务完成。")]);
     const reply = await f.create().handle("chat", "m1", "帮我看看 Mac Air 上的任务做到哪了");
-    expect(reply.text).toBe("该会话已有输出，尚未确认任务完成。");
+    expect(reply.text).toBe("[macair] 测试\n\n该会话已有输出，尚未确认任务完成。");
     expect(f.commands.submit).not.toHaveBeenCalled();
     expect(f.hub.readHistory).toHaveBeenCalledExactlyOnceWith("macair", "s1", { limit: 8 }, expect.any(AbortSignal));
     expect((await f.store.getLeaderState("chat"))?.data.commandIds).toEqual([]);
@@ -83,7 +177,7 @@ describe("Leader orchestration", () => {
 
   it("persists a multi-node plan, confirms once after restart and deduplicates repeat confirmations", async () => {
     const planned = [...actions, { nodeId: "macmini", sessionId: "s2", prompt: "检查测试结果" }];
-    const f = fixture([tool("propose_plan", { actions: planned })]);
+    const f = fixture([tool("propose_plan", { actions: planned }), final("当前没有待确认计划；已有任务不会重复派发")]);
     const preview = await f.create().handle("chat", "plan", "让两台机器分别检查任务");
     expect(preview.text).toContain("尚未派发");
     expect(preview.text).toContain("macmini");
@@ -99,8 +193,8 @@ describe("Leader orchestration", () => {
     expect(f.commands.submit).toHaveBeenCalledTimes(2);
   });
 
-  it.each(["确认", "执行", "开始", "开始执行", "请确认！", " 确认执行。 "])("executes a preview directly on the explicit short confirmation %s", async text => {
-    const f = fixture([tool("propose_plan", { actions })]);
+  it.each(["确认", "执行", "开始", "开始执行", "请确认！", " 确认执行。 ", "是", "是的", "对", "好的", "就是这个", "就这样"])("executes a preview directly on the explicit short confirmation %s", async text => {
+    const f = fixture([tool("propose_plan", { actions }), final("当前没有待确认计划")]);
     await f.create().handle("chat", "preview", "安排任务");
     const reply = await f.create().handle("chat", "confirm", text);
     expect(reply.text).toContain("已接收");
@@ -117,6 +211,34 @@ describe("Leader orchestration", () => {
     await f.create().handle("chat", "question", text);
     expect(f.commands.submit).not.toHaveBeenCalled();
     expect(f.model.calls).toHaveLength(2);
+  });
+
+  it.each([
+    { query: "先问一下现在几点？", answer: "现在十点", confirmation: "好的" },
+    { query: "谢谢，先看看别的", answer: "好的，请说", confirmation: "好的" },
+    { query: "另一个 B 会话是研究任务吗？", answer: "你是在确认 B 会话的研究主题吗？", confirmation: "是" },
+  ])("does not fast-confirm an old preview after intervening conversation: $query", async ({ query, answer, confirmation }) => {
+    const f = fixture([tool("propose_plan", { actions }), final(answer), final("已理解当前答复，没有派发旧预览")]);
+    await f.create().handle("chat", "preview", "先预览 A 会话的检查任务");
+    const pending = (await f.store.getLeaderState("chat"))!.data.pending;
+    expect((await f.store.getLeaderState("chat"))!.data.history.at(-1).confirmationFor).toBe(pending.id);
+    await f.create().handle("chat", "intervening", query);
+    expect((await f.store.getLeaderState("chat"))!.data.history.at(-1).confirmationFor).toBeUndefined();
+    const reply = await f.create().handle("chat", "answer", confirmation);
+    expect(reply.text).toContain("没有派发旧预览");
+    expect(f.model.calls).toHaveLength(3);
+    expect(f.commands.submit).not.toHaveBeenCalled();
+    expect((await f.store.getLeaderState("chat"))!.data.pending).toEqual(pending);
+  });
+
+  it("does not execute an expired preview on a natural affirmation", async () => {
+    const f = fixture([tool("propose_plan", { actions })]);
+    await f.create().handle("chat", "preview", "安排任务");
+    f.tick(PLAN_TTL_MS + 1);
+    const reply = await f.create().handle("chat", "natural-expired", "是");
+    expect(reply.text).toContain("已过期");
+    expect(f.commands.submit).not.toHaveBeenCalled();
+    expect(f.model.calls).toHaveLength(1);
   });
 
   it("preserves a preview across multi-tool queries and failed queries, then confirms after restart", async () => {
@@ -428,6 +550,7 @@ describe("Leader orchestration", () => {
     const reply = await f.create(model).handle("chat", "m3", "继续");
     expect(reply.text).toContain("下一轮正常");
     const state = await f.store.getLeaderState("chat");
-    expect((state?.data.history as { content: string }[]).every(item => item.content.length <= 1500)).toBe(true);
+    expect(state?.data.history).toContainEqual({ role: "user", content: "😀".repeat(2000), complete: true });
+    expect((state?.data.history as { complete: boolean }[]).every(item => item.complete)).toBe(true);
   });
 });
