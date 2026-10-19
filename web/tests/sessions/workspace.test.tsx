@@ -120,9 +120,8 @@ describe("会话工作台交互与安全", () => {
     expect(container.querySelector("img")).toBeNull();
     expect(container.querySelector('a[href^="javascript:"]')).toBeNull();
     expect(screen.queryByText("tool secret details")).toBeNull();
-    const tool = container.querySelector("details.tool-message") as HTMLDetailsElement;
-    tool.open = true;
-    fireEvent(tool, new Event("toggle"));
+    const tool = container.querySelector(".tool-message button") as HTMLButtonElement;
+    fireEvent.click(tool);
     await screen.findByText("tool secret details");
     fireEvent.click(screen.getByRole("button", { name: "加载更早的消息" }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes("cursor=older%2Fcursor"))).toBe(true));
