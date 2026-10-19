@@ -1,8 +1,9 @@
-import { memo, useState } from "react";
+import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { HistoryItem } from "../../../types";
-import { formatClock } from "../../../format";
+import { CopyMessageButton, MessageTimestamp } from "./MessageActions";
+import { ToolMessage } from "./ToolMessage";
 
 const ROLE_NAMES = { user: "你", assistant: "助手", tool: "工具", system: "系统" };
 
@@ -14,15 +15,11 @@ const Markdown = memo(function Markdown({ text }: { text: string }) {
 });
 
 export const HistoryMessage = memo(function HistoryMessage({ item }: { item: HistoryItem }) {
-  const [expanded, setExpanded] = useState(false);
   const transcriptChunk = item.type === "transcript_chunk";
-  if (item.kind === "tool") return <details className="tool-message" data-history-id={item.id} onToggle={(event) => setExpanded(event.currentTarget.open)}>
-    <summary><span>工具 · {item.title || item.type}</span><span className="muted">{item.status || "查看详情"}</span></summary>
-    {expanded && <div className="markdown"><Markdown text={item.text} />{item.truncated && <p className="muted">内容已裁剪</p>}</div>}
-  </details>;
+  if (item.kind === "tool") return <ToolMessage item={item} />;
   return <article className={`history-message role-${item.kind}`} data-history-id={item.id}>
-    <div className={`message-meta ${!transcriptChunk && item.kind !== "system" ? "sr-only" : ""}`}><span>{transcriptChunk ? `${ROLE_NAMES[item.kind]} · 文本片段（非完整轮次）` : ROLE_NAMES[item.kind]}</span>{item.timestamp && <time dateTime={item.timestamp}>{formatClock(item.timestamp)}</time>}</div>
-    <div className="markdown"><Markdown text={item.text} /></div>
-    {item.truncated && <p className="muted">内容已裁剪</p>}
+    {(transcriptChunk || item.kind === "system") && <div className="message-meta"><span>{transcriptChunk ? `${ROLE_NAMES[item.kind]} · 文本片段（非完整轮次）` : ROLE_NAMES[item.kind]}</span></div>}
+    <div className="message-body">{item.kind === "user" ? <div className="user-message-text">{item.text}</div> : <div className="markdown"><Markdown text={item.text} /></div>}{item.truncated && <p className="muted">内容已裁剪</p>}</div>
+    {(item.kind !== "system" || item.timestamp) && <div className="message-actions">{item.timestamp && <MessageTimestamp timestamp={item.timestamp} />}{item.kind !== "system" && item.text && <CopyMessageButton text={item.text} />}</div>}
   </article>;
 });
