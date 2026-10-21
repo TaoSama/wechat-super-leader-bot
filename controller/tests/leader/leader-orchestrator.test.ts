@@ -99,7 +99,7 @@ describe("Leader orchestration", () => {
     expect(JSON.stringify((await f.store.getLeaderState("chat"))?.data.receipts)).not.toContain("⟦session:");
   });
 
-  it("keeps discovery compact without previews or duplicate model observations", async () => {
+  it("omits previews while preserving raw and selected model observations", async () => {
     const f = fixture([tool("list_sessions", {}), final("列表")]);
     Object.assign(f.sessions[0], { preview: "private-preview-".repeat(10000), model: "control-model",
       desktopObservation: { source: "codex-desktop", availability: "available", status: "idle",
@@ -108,8 +108,8 @@ describe("Leader orchestration", () => {
     const content = f.model.calls[1].find(message => message.role === "tool")!.content!;
     const output = JSON.parse(content);
     expect(content).not.toContain("private-preview-");
-    expect(output.sessions[0]).not.toHaveProperty("desktopObservation");
-    expect(output.sessions[0]).not.toHaveProperty("model");
+    expect(output.sessions[0].desktopObservation).toEqual(f.sessions[0].desktopObservation);
+    expect(output.sessions[0].model).toBe("control-model");
     expect(output.sessions[0]).toMatchObject({ nodeId: "macair", id: "s1", title: "测试", status: "idle",
       executionStatus: "idle", capabilities: ["read", "send"], modelView: { model: "desktop-model" },
       displayLabel: expect.stringMatching(/^⟦session:/) });

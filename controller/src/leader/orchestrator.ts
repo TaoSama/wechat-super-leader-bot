@@ -689,11 +689,13 @@ export class LeaderOrchestrator {
             oldestObservedAt: observations[0] ?? null, newestObservedAt: observations.at(-1) ?? null,
             completeTaskCoverage: false,
           } });
-        // Keep the full directory on the server; model discovery needs identities and selected observations only.
-        const compact = listing.sessions.map(({ nodeId, id, title, cwd, status, capabilities, loaded,
-          executionStatus, statusSource, observedAt, updatedAt, modelView, sendAvailability }) => ({
-          nodeId, id, title, cwd, status, capabilities, loaded, executionStatus, statusSource,
-          observedAt, updatedAt, modelView, sendAvailability,
+        // Keep the full directory on the server; omit previews while preserving raw and selected observations.
+        const compact = listing.sessions.map(({ nodeId, id, provider, title, cwd, status, capabilities, loaded,
+          executionStatus, statusSource, observedAt, updatedAt, model, modelProvider, reasoningEffort,
+          desktopObservation, modelView, sendAvailability, historySource }) => ({
+          nodeId, id, provider, title, cwd, status, capabilities, loaded, executionStatus, statusSource,
+          observedAt, updatedAt, model, modelProvider, reasoningEffort, desktopObservation,
+          modelView, sendAvailability, historySource,
           displayLabel: sessionTitles.add({ nodeId, id, title }),
         }));
         const result = { ...listing, sessions: [] as typeof compact, nextOffset: null as number | null,
