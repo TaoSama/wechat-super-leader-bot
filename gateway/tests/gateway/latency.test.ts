@@ -1,6 +1,6 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import * as fs from "node:fs";
+import fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { StateManager } from "../../src/runtime/state.js";
@@ -18,7 +18,11 @@ const CONTEXT_TOKEN = "private-context-token";
 
 function capture(t: TestContext): Event[] {
   const events: Event[] = [];
-  t.mock.method(console, "info", (value: string) => { events.push(JSON.parse(value)); });
+  t.mock.method(fs, "writeSync", (fd: number, value: string | ArrayBufferView) => {
+    assert.equal(fd, 2);
+    events.push(JSON.parse(String(value)));
+    return Buffer.byteLength(String(value));
+  });
   return events;
 }
 
@@ -132,8 +136,7 @@ test("a failed Controller request retains the cursor and does not falsely record
 });
 
 test("a throwing telemetry sink preserves real Gateway success and failure semantics", async t => {
-  t.mock.method(console, "info", () => { throw new Error("private-sink-failure"); });
-  t.mock.method(process.stderr, "write", () => true);
+  t.mock.method(fs, "writeSync", () => { throw new Error("private-sink-failure"); });
   const success = fixture(t, ["valid"], async () => Response.json({ text: PRIVATE_REPLY }));
   assert.equal((await success.gateway.pollOnce()).processedCount, 1);
   assert.deepEqual(success.sent, ["valid"]);

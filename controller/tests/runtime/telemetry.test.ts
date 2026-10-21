@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createMessageTrace, currentTrace, runWithTrace, traceEvent, traceSpan } from "../../src/runtime/telemetry.js";
 
@@ -45,10 +47,44 @@ describe("Controller message telemetry", () => {
   });
 
   it("does not let broken logging affect the action or error identity", async () => {
-    vi.spyOn(process.stderr, "write").mockImplementation(() => { throw new Error("broken stderr"); });
+    vi.spyOn(fs, "writeSync").mockImplementation(() => { throw new Error("broken stderr"); });
     const trace = createMessageTrace("a", "b", () => { throw new Error("broken sink"); });
     expect(await runWithTrace(trace, () => traceSpan("test.operation", async () => "delivered"))).toBe("delivered");
     const failure = new Error("original");
     await expect(runWithTrace(trace, () => traceSpan("test.operation", async () => { throw failure; }))).rejects.toBe(failure);
   });
 });
+
+
+for (const closedStderr of [false, true]) {
+  it(`keeps stdout machine-readable${closedStderr ? " with a closed stderr descriptor" : " while logging JSON to stderr"}`, () => {
+    const moduleUrl = new URL("../../src/runtime/telemetry.js", import.meta.url);
+    if (!fs.existsSync(moduleUrl)) moduleUrl.pathname = moduleUrl.pathname.replace(/\.js$/, ".ts");
+    const child = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+      import fs from "node:fs";
+      import { createMessageTrace, runWithTrace, traceSpan } from ${JSON.stringify(moduleUrl.href)};
+      if (${closedStderr}) fs.closeSync(2);
+      const trace = createMessageTrace("chat", "message");
+      let result;
+      let originalErrorPreserved = false;
+      await runWithTrace(trace, async () => {
+        result = await traceSpan("success", async () => "accepted");
+        const original = new Error("private-action-failure");
+        try { await traceSpan("failure", async () => { throw original; }); }
+        catch (error) { if (error !== original) throw error; originalErrorPreserved = true; }
+      });
+      process.stdout.write(JSON.stringify({ result, originalErrorPreserved }));
+    `], { encoding: "utf8", timeout: 5000 });
+    expect(child.error).toBeUndefined();
+    expect(child.status, child.stderr).toBe(0);
+    expect(child.signal).toBeNull();
+    expect(JSON.parse(child.stdout)).toEqual({ result: "accepted", originalErrorPreserved: true });
+    if (closedStderr) expect(child.stderr).toBe("");
+    else {
+      const events = child.stderr.trim().split("\n").map(line => JSON.parse(line));
+      expect(events.map(event => event.stage)).toEqual(["success.start", "success.end", "failure.start", "failure.end"]);
+      expect(events.every(event => event.service === "controller")).toBe(true);
+      expect(child.stderr).not.toContain("private-action-failure");
+    }
+  });
+}

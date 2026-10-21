@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ControllerServer } from "../../src/http/server.js";
 import { MemoryStore } from "../../src/store/memory.js";
@@ -12,7 +13,11 @@ describe("message HTTP latency trace", () => {
   let events: Record<string, unknown>[];
   beforeEach(() => {
     events = [];
-    vi.spyOn(console, "info").mockImplementation((message: string) => { events.push(JSON.parse(message)); });
+    vi.spyOn(fs, "writeSync").mockImplementation((fd: number, message: string | ArrayBufferView) => {
+      expect(fd).toBe(2);
+      events.push(JSON.parse(String(message)));
+      return Buffer.byteLength(String(message));
+    });
   });
   afterEach(async () => {
     if (server) await server.stop();
@@ -107,7 +112,7 @@ describe("message HTTP latency trace", () => {
 
   it("keeps successful replies available when the log sink throws", async () => {
     const post = await start();
-    vi.spyOn(console, "info").mockImplementation(() => { throw new Error("broken logger"); });
+    vi.spyOn(fs, "writeSync").mockImplementation(() => { throw new Error("broken logger"); });
     expect((await post()).status).toBe(200);
     expect((await post({ authorization: "Bearer wrong" })).status).toBe(403);
   });

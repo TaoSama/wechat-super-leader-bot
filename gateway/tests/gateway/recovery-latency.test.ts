@@ -1,6 +1,6 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import * as fs from "node:fs";
+import fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { StateManager } from "../../src/runtime/state.js";
@@ -21,7 +21,11 @@ function fixture(t: TestContext) {
   state.markBaselineEstablished();
   state.recordInboundContext("window", "chat", Date.now(), true, "private-context");
   const events: Event[] = [];
-  t.mock.method(console, "info", (line: string) => events.push(JSON.parse(line)));
+  t.mock.method(fs, "writeSync", (fd: number, line: string | ArrayBufferView) => {
+    assert.equal(fd, 2);
+    events.push(JSON.parse(String(line)));
+    return Buffer.byteLength(String(line));
+  });
   const ilink = new ILinkClient({ stateManager: state, fetchImpl: async (input) => {
     assert.ok(String(input).endsWith("sendmessage"));
     traceEvent("fixture.wechat.send");

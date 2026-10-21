@@ -178,7 +178,7 @@ globalThis.fetch = (input, init) => {
       try { [exit] = await once(gatewayChild, 'exit'); } finally { clearTimeout(timeout); }
       gatewayChild = undefined; gatewayOutput += output + stderr; healthy();
       assert.equal(exit, 0, `Actual Gateway CLI failed: ${stderr}${output}`);
-      return latencyEvents(output);
+      return latencyEvents(output + stderr);
     };
     await runGateway('--establish-baseline');
     incoming.push(...QUERIES.map((text, index) => ({ message_type: 1, from_user_id: CHAT, client_id: messageIds[index],

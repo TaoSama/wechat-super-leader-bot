@@ -1,6 +1,6 @@
 # 微信消息延迟分析
 
-Gateway 与 Controller 自动向容器标准输出写入 `event=message_latency` 的 JSON 日志，无需开启调试或修改数据库。现有 Docker 日志按每个容器 10 MB × 3 轮转，排查时应及时采集。
+Gateway 与 Controller 自动向标准错误日志通道写入 `event=message_latency` 的 JSON 日志，Docker logs 会收集这些记录，无需开启调试或修改数据库。CLI 标准输出保留原来的 JSON 结果格式。现有 Docker 日志按每个容器 10 MB × 3 轮转，排查时应及时采集。
 
 ## 采集与分析
 

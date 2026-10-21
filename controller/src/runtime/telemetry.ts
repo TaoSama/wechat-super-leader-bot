@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
+import fs from "node:fs";
 
 export type TraceFields = Record<string, string | number | boolean | null | undefined>;
 export interface MessageTrace {
@@ -12,6 +13,7 @@ export interface MessageTrace {
 }
 const context = new AsyncLocalStorage<MessageTrace>();
 const instanceId = randomUUID();
+const STDERR_FD = 2;
 const FIELD_NAMES = new Set([
   "durationMs", "outcome", "spanId", "threadId", "turnId", "itemId", "itemType", "tool",
   "status", "exitCode", "timingCoverage", "inputTokens", "cachedInputTokens", "outputTokens",
@@ -27,7 +29,7 @@ const FIELD_NAMES = new Set([
 let warned = false;
 
 export function createMessageTrace(chatId: string, messageId: string,
-  sink: MessageTrace["sink"] = event => console.info(JSON.stringify(event)),
+  sink: MessageTrace["sink"] = event => { fs.writeSync(STDERR_FD, JSON.stringify(event) + "\n"); },
   parentAttemptId?: string): MessageTrace {
   return { traceId: createHash("sha256").update(JSON.stringify([chatId, messageId])).digest("hex"),
     attemptId: randomUUID(), started: performance.now(), sink,
@@ -57,7 +59,7 @@ export function traceEvent(stage: string, fields: TraceFields = {}): void {
   } catch {
     if (!warned) {
       warned = true;
-      try { process.stderr.write("[telemetry] event sink failed\n"); } catch { /* No logging failure can affect delivery. */ }
+      try { fs.writeSync(STDERR_FD, "[telemetry] event sink failed\n"); } catch { /* No logging failure can affect delivery. */ }
     }
   }
 }

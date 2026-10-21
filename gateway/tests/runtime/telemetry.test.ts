@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import { createMessageTrace, currentTrace, runWithTrace, traceEvent, traceSpan } from "../../src/runtime/telemetry.js";
 
 test("message identity remains stable across attempts without logging chat or message contents", () => {
@@ -83,7 +85,7 @@ test("spans pair success and failure without swallowing the original error", asy
 
 test("a throwing logger cannot turn a successful action into failure or replace an action failure", async t => {
   const warnings: string[] = [];
-  t.mock.method(process.stderr, "write", (value: string | Uint8Array) => { warnings.push(String(value)); return true; });
+  t.mock.method(fs, "writeSync", (_fd: number, value: string | ArrayBufferView) => { warnings.push(String(value)); return Buffer.byteLength(String(value)); });
   const trace = createMessageTrace("chat", "message", () => { throw new Error("private-sink-error"); });
   const failure = new Error("original-action-failure");
   await runWithTrace(trace, async () => {
@@ -100,8 +102,7 @@ test("failed event and diagnostic sinks cannot interrupt actions or replace thei
   const moduleUrl = new URL("../../src/runtime/telemetry.js", import.meta.url);
   moduleUrl.searchParams.set("fixture", "broken-event-and-diagnostic-sinks");
   const telemetry: typeof import("../../src/runtime/telemetry.js") = await import(moduleUrl.href);
-  const sink = t.mock.method(console, "info", () => { throw new Error("private-event-sink-error"); });
-  const diagnostic = t.mock.method(process.stderr, "write", () => { throw new Error("private-stderr-error"); });
+  const writes = t.mock.method(fs, "writeSync", () => { throw new Error("private-stderr-error"); });
   const trace = telemetry.createMessageTrace("chat", "message");
   const failure = new Error("original-action-error");
   let completedActions = 0;
@@ -111,14 +112,49 @@ test("failed event and diagnostic sinks cannot interrupt actions or replace thei
     await assert.rejects(telemetry.traceSpan("failure", async () => { throw failure; }), error => error === failure);
   });
   assert.equal(completedActions, 1);
-  assert.equal(sink.mock.callCount(), 5, "all event attempts remain best effort");
-  assert.equal(diagnostic.mock.callCount(), 1, "a broken fallback must not create a warning loop");
-  assert.equal(diagnostic.mock.calls[0].arguments[0], "[telemetry] event sink failed\n");
+  assert.equal(writes.mock.callCount(), 6, "five events and one fallback remain best effort");
+  assert.ok(writes.mock.calls.every(call => call.arguments[0] === 2));
+  assert.equal(writes.mock.calls.filter(call => call.arguments[1] === "[telemetry] event sink failed\n").length, 1,
+    "a broken fallback must not create a warning loop");
   assert.equal(telemetry.currentTrace(), undefined);
 });
 
 test("calling telemetry without a context produces no event", t => {
-  const output = t.mock.method(console, "info", () => {});
+  const output = t.mock.method(fs, "writeSync", () => 0);
   traceEvent("outside-context", { chars: 1 });
   assert.equal(output.mock.callCount(), 0);
 });
+
+
+for (const closedStderr of [false, true]) {
+  test(`default telemetry preserves stdout JSON${closedStderr ? " with stderr closed" : " and writes JSON events to stderr"}`, () => {
+    const moduleUrl = new URL("../../src/runtime/telemetry.js", import.meta.url);
+    if (!fs.existsSync(moduleUrl)) moduleUrl.pathname = moduleUrl.pathname.replace(/\.js$/, ".ts");
+    const child = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+      import fs from "node:fs";
+      import { createMessageTrace, runWithTrace, traceSpan } from ${JSON.stringify(moduleUrl.href)};
+      if (${closedStderr}) fs.closeSync(2);
+      const trace = createMessageTrace("chat", "message");
+      let result;
+      let originalErrorPreserved = false;
+      await runWithTrace(trace, async () => {
+        result = await traceSpan("success", async () => "accepted");
+        const original = new Error("private-action-failure");
+        try { await traceSpan("failure", async () => { throw original; }); }
+        catch (error) { if (error !== original) throw error; originalErrorPreserved = true; }
+      });
+      process.stdout.write(JSON.stringify({ result, originalErrorPreserved }));
+    `], { encoding: "utf8", timeout: 5000 });
+    assert.equal(child.error, undefined);
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(child.signal, null);
+    assert.deepEqual(JSON.parse(child.stdout), { result: "accepted", originalErrorPreserved: true });
+    if (closedStderr) assert.equal(child.stderr, "");
+    else {
+      const events = child.stderr.trim().split("\n").map(line => JSON.parse(line));
+      assert.deepEqual(events.map(event => event.stage), ["success.start", "success.end", "failure.start", "failure.end"]);
+      assert.ok(events.every(event => event.service === "gateway"));
+      assert.ok(!child.stderr.includes("private-action-failure"));
+    }
+  });
+}

@@ -394,8 +394,7 @@ test("closed real stderr pipe exits CLI with code 2 after uncertainty, without r
     child.once("close", (code, signal) => resolve({ code, signal }));
   });
   assert.deepEqual(result, { code: NOTIFICATION_DIAGNOSTIC_EXIT_CODE, signal: null }, output);
-  const lines = output.trim().split("\n").map(line => JSON.parse(line))
-    .filter(line => line.event !== "message_latency");
+  const lines = output.trim().split("\n").map(line => JSON.parse(line));
   assert.equal(lines.length, 2);
   assert.deepEqual({ ...lines[0], polls: undefined },
     { code: NOTIFICATION_DIAGNOSTIC_EXIT_CODE, sends: 1, polls: undefined, status: "uncertain", stopped: "stopped" });
