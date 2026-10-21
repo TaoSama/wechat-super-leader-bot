@@ -4,11 +4,16 @@ Gateway 与 Controller 自动向标准错误日志通道写入 `event=message_la
 
 ## 采集与分析
 
-在生产主机的仓库目录运行（容器名以实际部署为准）：
+先在生产主机采集日志（容器名以实际部署为准）：
 
 ```sh
 docker logs --since 1h --timestamps super-leader-gateway > /tmp/message-latency.log 2>&1
 docker logs --since 1h --timestamps super-leader-controller-1 >> /tmp/message-latency.log 2>&1
+```
+
+将日志文件传到本地相同路径，在已更新的本地仓库运行分析器；仅发布镜像不会更新生产主机的源码和分析脚本。
+
+```sh
 node scripts/analyze-message-latency.mjs --input /tmp/message-latency.log
 node scripts/analyze-message-latency.mjs --input /tmp/message-latency.log --json --limit 50
 node scripts/analyze-message-latency.mjs --input /tmp/message-latency.log --trace-id <traceId> --json
