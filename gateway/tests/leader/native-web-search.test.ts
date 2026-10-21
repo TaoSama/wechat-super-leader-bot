@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { CodexReplyEngine } from "../../src/leader/codex.js";
 import { WorkspaceStore } from "../../src/leader/workspace.js";
 
-test("real pinned SDK enables live native search on new and resumed chats without widening account permissions", async t => {
+test("real pinned SDK carries headless tools into new and resumed chats without widening account permissions", async t => {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "native-search-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const cli = path.join(root, "codex.cjs");
@@ -45,6 +45,21 @@ process.stdin.on("end", () => {
       assert.ok(call.args.includes('web_search="live"'), "SDK must pass explicit live search to CLI");
       assert.ok(call.args.includes("model_providers.leader_openai.supports_standalone_web_search=true"),
         "Responses Lite needs the custom provider capability to expose native web.run");
+      for (const feature of ["shell_tool", "unified_exec", "shell_snapshot", "skill_search", "view_image", "sleep_tool",
+        "multi_agent", "multi_agent_v2", "goals"]) {
+        assert.ok(call.args.includes(`features.${feature}=true`), `${feature} must reach the native CLI`);
+      }
+      for (const feature of ["browser_use", "browser_use_external", "browser_use_full_cdp_access",
+        "browser_annotation_api", "in_app_browser", "in_app_local_automation", "computer_use"]) {
+        assert.ok(call.args.includes(`features.${feature}=false`), `${feature} must remain unavailable on headless hosts`);
+      }
+      assert.ok(call.args.includes("agents.max_concurrent_threads_per_session=2"));
+      assert.ok(call.args.includes("skills.bundled.enabled=false"));
+      assert.ok(call.args.includes('mcp_servers.openaiDeveloperDocs.url="https://developers.openai.com/mcp"'));
+      assert.ok(call.args.includes("mcp_servers.openaiDeveloperDocs.required=false"));
+      assert.ok(call.args.some(arg => arg.startsWith("mcp_servers.wechat_control.url=")),
+        "Adding Docs must not replace the authenticated Controller bridge");
+      assert.equal(call.args.some(arg => /features\.(skills|collaboration_modes|js_repl|context_management)[=.]/.test(arg)), false);
       assert.ok(call.args.includes('default_permissions="wechat_memory"'));
       assert.ok(call.args.includes('approval_policy="never"'));
       const permission = call.args.find(arg => arg.startsWith("permissions.wechat_memory="));
