@@ -199,7 +199,7 @@ describe("Leader list-only and explicit-output tool guidance", () => {
       result = JSON.parse(messages.find(item => item.role === "tool")!.content!);
       return { content: "已观测到一个执行中会话。", toolCalls: [] };
     } };
-    await new LeaderOrchestrator(store, hub, commands, model, () => NOW).handle("chat", "list", "列出正在运行的任务");
+    await new LeaderOrchestrator(store, hub, commands, model, () => NOW).handle("chat", "list", "列出正在运行的任务，并核对观测来源");
     expect(prompt).toBe(SYSTEM_PROMPT);
     expect(prompt).toContain("不为列举任务额外调用 read_session");
     expect(prompt).toContain("只有用户明确询问具体会话的进度或最新输出时才调用 read_session");

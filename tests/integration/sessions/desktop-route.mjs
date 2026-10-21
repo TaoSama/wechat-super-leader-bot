@@ -209,9 +209,10 @@ export async function verifyDesktopRoute({ base, request, nodeToken, waitFor, mo
     assert.equal(observed.desktopObservation.model, model);
     assert.equal(observed.desktopObservation.reasoningEffort, effort);
     assert(response.body.text.includes(`${basename(directory)}（${NODE_ID}）`), 'Directory lost Project/machine identity');
-    assert(response.body.text.includes(`[${state.threadRuntimeStatus.type === 'active' ? '运行中' : '空闲'}]`),
+    assert(response.body.text.includes(`1. [${state.threadRuntimeStatus.type === 'active' ? '忙' : '闲'}]`),
       'Directory lost the selected execution state');
-    assert(response.body.text.includes(`模型：${model}`), 'Directory lost the selected desktop model');
+    assert(!response.body.text.includes('模型：'), 'Compact directory leaked the independent model line');
+    assert(!response.body.text.includes(model), 'Compact directory leaked selected model metadata');
   };
   const assertHealthy = () => {
     if (errors.length) throw new AggregateError(errors, `Desktop fixture protocol error: ${errors.map(error => error.message).join('; ')}`);

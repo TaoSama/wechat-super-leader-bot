@@ -75,14 +75,14 @@ describe("Leader orchestration", () => {
     const f = fixture([tool("list_sessions", {}), final("微信：已上线。\n测试：空闲。")]);
     f.sessions[0].title = " 🟢 [微信] 异步 typing · 合并上线 | GPT-6.1-Sol  ";
     f.sessions[1].title = "🔵 [研究] 原始会话标题 | GPT-6-Astra";
-    const reply = await f.create().handle("chat", "titles", "列出当前会话，使用它们原来的标题");
-    expect(markdownToWeChat(reply.text, Number.MAX_SAFE_INTEGER)).toContain(`[空闲] ${f.sessions[0].title}`);
-    expect(markdownToWeChat(reply.text, Number.MAX_SAFE_INTEGER)).toContain(`[空闲] ${f.sessions[1].title}`);
+    const reply = await f.create().handle("chat", "titles", "列出当前会话，使用它们原来的标题，并核对观测来源");
+    expect(markdownToWeChat(reply.text, Number.MAX_SAFE_INTEGER)).toContain(`1. [闲] ${f.sessions[0].title}`);
+    expect(markdownToWeChat(reply.text, Number.MAX_SAFE_INTEGER)).toContain(`2. [闲] ${f.sessions[1].title}`);
     expect(reply.text).not.toContain("微信：已上线");
     expect(reply.text).not.toContain("测试：空闲");
     const output = JSON.parse(f.model.calls[1].find(message => message.role === "tool")!.content!);
     expect(output.sessions[0]).toMatchObject({ title: f.sessions[0].title, displayLabel: expect.stringMatching(/^⟦session:/) });
-    expect(await f.create().handle("chat", "titles", "列出当前会话，使用它们原来的标题")).toEqual(reply);
+    expect(await f.create().handle("chat", "titles", "列出当前会话，使用它们原来的标题，并核对观测来源")).toEqual(reply);
     expect(f.commands.submit).not.toHaveBeenCalled();
   });
 
@@ -94,8 +94,8 @@ describe("Leader orchestration", () => {
       const { sessions } = JSON.parse(result.content!);
       return final(sessions.map((session: { displayLabel: string }) => `${session.displayLabel}\n空闲`).join("\n\n"));
     } };
-    const reply = await f.create(model).handle("chat", "references", "显示会话列表");
-    expect(reply.text).toBe("已观测会话：\n\ntest（demoair）\n[空闲] 测试\n模型：未知\n\ntest（demomini）\n[空闲] 测试\n模型：未知\n\n仅展示在线节点已观测的会话。");
+    const reply = await f.create(model).handle("chat", "references", "显示会话列表，并核对观测来源");
+    expect(reply.text).toBe("已观测会话：\n\ntest（demoair）\n1. [闲] 测试\n\ntest（demomini）\n2. [闲] 测试\n\n仅展示在线节点已观测的会话。");
     expect(JSON.stringify((await f.store.getLeaderState("chat"))?.data.receipts)).not.toContain("⟦session:");
   });
 
@@ -104,7 +104,7 @@ describe("Leader orchestration", () => {
     Object.assign(f.sessions[0], { preview: "private-preview-".repeat(10000), model: "control-model",
       desktopObservation: { source: "codex-desktop", availability: "available", status: "idle",
         model: "desktop-model", observedAt: f.sessions[0].observedAt } });
-    const reply = await f.create().handle("chat", "compact-directory", "列出全部会话");
+    const reply = await f.create().handle("chat", "compact-directory", "列出全部会话，并核对观测来源");
     const content = f.model.calls[1].find(message => message.role === "tool")!.content!;
     const output = JSON.parse(content);
     expect(content).not.toContain("private-preview-");
@@ -115,7 +115,9 @@ describe("Leader orchestration", () => {
       displayLabel: expect.stringMatching(/^⟦session:/) });
     expect(output.modelSummary).toMatchObject({ truncated: false, omittedSessions: 0, directoryRetainedOnServer: true });
     expect(output.nextOffset).toBeNull();
-    expect(reply.text).toContain("模型：desktop-model");
+    expect(reply.text).toContain("1. [闲] 测试");
+    expect(reply.text).not.toContain("模型：");
+    expect(reply.text).not.toContain("desktop-model");
     expect(f.hub.readHistory).not.toHaveBeenCalled();
   });
 
@@ -125,7 +127,7 @@ describe("Leader orchestration", () => {
     f.sessions.splice(0, f.sessions.length, ...Array.from({ length: 80 }, (_, index) => ({
       ...template, id: `session-${index}`, title: `完整原题-${index}`, preview: "unneeded-preview-".repeat(100),
     })));
-    const reply = await f.create().handle("chat", "large-directory", "列出全部会话");
+    const reply = await f.create().handle("chat", "large-directory", "列出全部会话，并核对观测来源");
     const content = f.model.calls[1].find(message => message.role === "tool")!.content!;
     const output = JSON.parse(content);
     expect(content.length).toBeLessThanOrEqual(12000);
@@ -172,7 +174,7 @@ describe("Leader orchestration", () => {
     f.sessions[0].cwd = "/" + "字".repeat(20000);
     f.sessions[0].updatedAt = "2026-10-21T02:00:00Z";
     f.sessions[1].updatedAt = "2026-10-21T01:00:00Z";
-    const reply = await f.create().handle("chat", "oversized-model-entry", "列出全部会话");
+    const reply = await f.create().handle("chat", "oversized-model-entry", "列出全部会话，并核对观测来源");
     const content = f.model.calls[1].find(message => message.role === "tool")!.content!;
     const output = JSON.parse(content);
     expect(content.length).toBeLessThanOrEqual(12000);
@@ -208,8 +210,8 @@ describe("Leader orchestration", () => {
       return final(`${output.sessions[0].displayLabel}\n空闲\n改写后的第二个会话：空闲`);
     } };
     const reply = await f.create(model).handle("chat", "history-then-directory", "看看具体会话，再列出所有会话");
-    expect(reply.text).toContain("test（demoair）\n[空闲] 测试");
-    expect(reply.text).toContain("test（demomini）\n[空闲] 测试");
+    expect(reply.text).toContain("test（demoair）\n1. [闲] 测试");
+    expect(reply.text).toContain("test（demomini）\n2. [闲] 测试");
     expect(reply.text).not.toContain("改写后的第二个会话");
     expect(f.commands.submit).not.toHaveBeenCalled();
   });
@@ -219,7 +221,7 @@ describe("Leader orchestration", () => {
     f.sessions[0].title = "🟢 [微信] 保留完整原题 | GPT-6.1-Sol";
     const reply = await f.create().handle("chat", "list-and-nodes", "列出会话并看看机器");
     expect(reply.text).toContain(f.sessions[0].title);
-    expect(reply.text).toContain("test（demomini）\n[空闲] 测试");
+    expect(reply.text).toContain("test（demomini）\n2. [闲] 测试");
     expect(reply.text).not.toContain("改写的会话");
     expect(f.commands.submit).not.toHaveBeenCalled();
   });
@@ -467,8 +469,8 @@ describe("Leader orchestration", () => {
     let release!: (reply: ModelReply) => void;
     const model: LeaderModel = { complete: vi.fn(() => new Promise<ModelReply>(r => { release = r; })) };
     const leader = f.create(model);
-    const a = leader.handle("chat", "m", "查询任务");
-    const b = leader.handle("chat", "m", "查询任务");
+    const a = leader.handle("chat", "m", "查询任务的最新进度");
+    const b = leader.handle("chat", "m", "查询任务的最新进度");
     await vi.waitFor(() => expect(release).toBeDefined());
     await expect(leader.handle("chat", "other", "不同任务")).rejects.toThrow("处理中");
     release(final("未找到执行证据"));

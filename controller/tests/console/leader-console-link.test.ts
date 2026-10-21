@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { acknowledgementFixture } from "../leader/acknowledgement-fixture.js";
 import { describe, expect, it, vi } from "vitest";
 import { LeaderOrchestrator } from "../../src/leader/orchestrator.js";
@@ -62,6 +63,58 @@ function fixture(replies: (ModelReply | (() => never))[] = [], issuer?: (request
 }
 
 describe("Leader console link integration", () => {
+  it.each(["给我控制端链接", "给我控制台链接", "控制台入口"])("issues a plain %s request without model reasoning and replays its exact durable receipt", async text => {
+    const chatId = "direct-console-chat", messageId = "direct-console-message";
+    const requestId = `console_link_${createHash("sha256").update(JSON.stringify([chatId, messageId])).digest("hex")}`;
+    const url = `https://leader.example.com/#login=direct-private-token-${requestId}`;
+    const issuer = vi.fn(async (_requestId: string) => ({ url, expiresAt: "2026-10-11T12:00:00.000Z" }));
+    const f = fixture([], issuer);
+    const inventory = vi.spyOn(f.hub, "getAllSessions");
+    const reply = await f.create().handle(chatId, messageId, text);
+    expect(reply.text).toBe(`控制台\n\n控制台登录链接（1小时内有效，仅可使用一次，打开后地址栏会自动隐藏登录凭证）：\n${url}`);
+    expect(f.model.calls).toEqual([]);
+    expect(issuer).toHaveBeenCalledExactlyOnceWith(requestId);
+    expect(inventory).not.toHaveBeenCalled();
+    expect(f.commands.submit).not.toHaveBeenCalled();
+
+    const state = await f.store.getLeaderState(chatId);
+    const history = state!.data.history as Array<{ role: string; content: string }>;
+    expect(history).toHaveLength(2);
+    expect(history[0]).toMatchObject({ role: "user", content: text });
+    expect(history[1].content).toContain("[一次性控制台登录链接已生成，有效期1小时]");
+    expect(JSON.stringify(history)).not.toContain("direct-private-token");
+    expect(JSON.stringify(history)).not.toContain("https://leader.example.com");
+    expect(state!.data.receipts).toEqual([expect.objectContaining({ messageId, text: reply.text })]);
+
+    // A fresh orchestrator must replay the persisted delivery receipt without issuing another token.
+    expect(await f.create().handle(chatId, messageId, text)).toEqual(reply);
+    expect(issuer).toHaveBeenCalledTimes(1);
+    expect(f.model.calls).toEqual([]);
+    expect((await f.store.getLeaderState(chatId))!.data.history).toEqual(history);
+  });
+
+  it.each(["unconfigured", "issuer-error"])("returns a fixed safe direct reply when the console issuer is %s", async mode => {
+    const privateError = "https://private.invalid/#login=secret_database_password_987654321";
+    const failingIssuer = vi.fn(async (_requestId: string): Promise<{ url: string; expiresAt: string }> => {
+      throw new Error(privateError);
+    });
+    const f = fixture([], mode === "issuer-error" ? failingIssuer : undefined);
+    const text = "给我控制端链接";
+    const reply = await f.create().handle("direct-failure-chat", "direct-failure-message", text);
+    expect(reply.text).toBe("暂时无法获取控制台链接，请稍后再试。");
+    expect(f.model.calls).toEqual([]);
+    expect(failingIssuer).toHaveBeenCalledTimes(mode === "issuer-error" ? 1 : 0);
+    expect(f.commands.submit).not.toHaveBeenCalled();
+    const state = await f.store.getLeaderState("direct-failure-chat");
+    const persisted = JSON.stringify(state!.data);
+    expect(persisted).not.toContain(privateError);
+    expect(persisted).not.toContain("secret_database_password");
+    expect(persisted).not.toContain("https://");
+    expect(await f.create().handle("direct-failure-chat", "direct-failure-message", text)).toEqual(reply);
+    expect(failingIssuer).toHaveBeenCalledTimes(mode === "issuer-error" ? 1 : 0);
+    expect(f.model.calls).toEqual([]);
+  });
+
   it("issues one-time link, appends URL with updated notice, and keeps model trace and history completely sanitized", async () => {
     const issuer = vi.fn(async (requestId: string) => ({
       url: `https://leader.example.com/#login=secret-otp-token-for-${requestId}`,
@@ -70,7 +123,7 @@ describe("Leader console link integration", () => {
     const f = fixture([tool("get_console_link", {}), final("已为你生成控制台链接。")], issuer);
     const leader = f.create();
 
-    const reply = await leader.handle("chat-1", "msg-1", "帮我打开控制台");
+    const reply = await leader.handle("chat-1", "msg-1", "帮我打开控制台，并说明链接有效期");
 
     // 1. 用户收到的回复包含真实链接，且文案为“打开后地址栏会自动隐藏登录凭证”
     expect(reply.text).toContain("已为你生成控制台链接");
@@ -103,7 +156,7 @@ describe("Leader console link integration", () => {
     expect(history[1].content).not.toContain("https://leader.example.com");
 
     // 4. 重复消息（相同 messageId 与相同文本）幂等返回已有的 receipt，绝不重新调用 issuer
-    const repeatReply = await leader.handle("chat-1", "msg-1", "帮我打开控制台");
+    const repeatReply = await leader.handle("chat-1", "msg-1", "帮我打开控制台，并说明链接有效期");
     expect(repeatReply).toEqual(reply);
     expect(issuer).toHaveBeenCalledTimes(1);
   });
@@ -114,14 +167,14 @@ describe("Leader console link integration", () => {
       expiresAt: "2026-10-11T12:00:00.000Z",
     }));
     const f = fixture([tool("get_console_link", {}), tool("get_console_link", {}), final("链接已备妥")], issuer);
-    const reply = await f.create().handle("chat-1", "msg-dup-tool", "我需要控制台链接");
+    const reply = await f.create().handle("chat-1", "msg-dup-tool", "我需要控制台链接，并说明链接有效期");
     expect(reply.text).toContain("https://leader.example.com/#login=token-");
     expect(issuer).toHaveBeenCalledTimes(1);
   });
 
   it("returns error when console link issuer is not configured", async () => {
     const f = fixture([tool("get_console_link", {}), final("当前控制台链接暂未启用")]);
-    const reply = await f.create().handle("chat-1", "msg-no-issuer", "给我控制台链接");
+    const reply = await f.create().handle("chat-1", "msg-no-issuer", "给我控制台链接，并说明链接有效期");
     expect(f.model.calls.length).toBe(2);
     const toolMsg = f.model.calls[1].find(m => m.role === "tool");
     expect(toolMsg?.content).toContain("控制台链接发行功能未配置或未启用");
