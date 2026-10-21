@@ -35,7 +35,8 @@ process.stdin.on('end', () => {
  if (mode !== 'incomplete') console.log(JSON.stringify({type:'turn.completed'}));
 });
 `, { mode: 0o700 });
-  const options = { root: path.join(root, "runtime"), artifactRoot: path.join(root, "artifacts"), codexPath: script, model: "test", apiKey: "provider-secret", timeoutMs };
+  const options = { root: path.join(root, "runtime"), artifactRoot: path.join(root, "artifacts"), codexPath: script,
+    model: "test", baseUrl: "https://worker-provider.example.test/v1", apiKey: "provider-secret", timeoutMs };
   const input = { workerId: randomUUID(), invocationId: randomUUID(), task: "Check sources without writing", input: { status: "running" } };
   return { root, options, input, runtime: new CodexWorkerRuntime(options), workspace: path.join(options.root, "workers", input.workerId, "workspace") };
 }
@@ -57,6 +58,19 @@ describe("Codex CLI process contract", () => {
       expect(observed.args).not.toContain("--ephemeral");
       expect(observed.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
       expect(observed.args.join(" ")).toContain('shell_environment_policy.inherit="none"');
+      expect(observed.args).toContain('web_search="live"');
+      expect(observed.args).toContain('skills.bundled.enabled=false');
+      expect(observed.args.find((value: string) => value.startsWith('model_providers.background_api=')))
+        .toContain('supports_standalone_web_search=true');
+      expect(observed.args.find((value: string) => value.startsWith('mcp_servers.openaiDeveloperDocs=')))
+        .toContain('url="https://developers.openai.com/mcp",required=false');
+      for (const feature of ["shell_tool", "unified_exec", "shell_snapshot", "skill_search", "view_image", "sleep_tool"]) {
+        expect(observed.args).toContain(`features.${feature}=true`);
+      }
+      for (const feature of ["multi_agent", "multi_agent_v2", "goals", "hooks", "browser_use", "browser_use_external",
+        "browser_use_full_cdp_access", "browser_annotation_api", "in_app_browser", "in_app_local_automation", "computer_use"]) {
+        expect(observed.args).toContain(`features.${feature}=false`);
+      }
       expect(observed.args.join(" ")).toContain('network={enabled=true}');
       expect(observed.args.join(" ")).toContain('"/proc"="deny"');
       const profile = observed.args.find((value: string) => value.startsWith('permissions.background_worker='));

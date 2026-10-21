@@ -6,6 +6,8 @@ import type { WorkerExecutionRequest, WorkerExecutor, WorkerRuntimeOptions } fro
 const MAX_STREAM_BYTES = 16 * 1024 * 1024;
 const KILL_GRACE_MS = 3000;
 const HARD_STOP_MS = KILL_GRACE_MS + 1000;
+const DOCS_STARTUP_TIMEOUT_SECONDS = 10;
+const DOCS_TOOL_TIMEOUT_SECONDS = 30;
 const ENV_ALLOWLIST = ["PATH", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"] as const;
 
 export class WorkerExecutionFailure extends Error {
@@ -49,7 +51,17 @@ export class CodexCliExecutor implements WorkerExecutor {
     const config = [
       `permissions.background_worker={filesystem={${filesystem}},network={enabled=true}}`,
       'default_permissions="background_worker"', 'approval_policy="never"',
+      'web_search="live"',
+      'features.shell_tool=true', 'features.unified_exec=true', 'features.shell_snapshot=true',
+      'features.skill_search=true', 'features.view_image=true', 'features.sleep_tool=true',
+      // Bundled skill files are inside the worker home denied to shell tools.
+      'skills.bundled.enabled=false',
+      'features.browser_use=false', 'features.browser_use_external=false',
+      'features.browser_use_full_cdp_access=false', 'features.browser_annotation_api=false',
+      'features.in_app_browser=false', 'features.in_app_local_automation=false', 'features.computer_use=false',
+      `mcp_servers.openaiDeveloperDocs={url="https://developers.openai.com/mcp",required=false,startup_timeout_sec=${DOCS_STARTUP_TIMEOUT_SECONDS},tool_timeout_sec=${DOCS_TOOL_TIMEOUT_SECONDS}}`,
       'shell_environment_policy.inherit="none"',
+      // Controller owns worker concurrency, continuation and expiry.
       'features.multi_agent=false', 'features.multi_agent_v2=false', 'features.goals=false', 'features.hooks=false',
       `shell_environment_policy.set=${JSON.stringify({ PATH: shellPath, HOME: request.workspace,
         ...(process.platform === "darwin" ? { OPENSSL_CONF: "/dev/null" } : {}) })
@@ -57,7 +69,7 @@ export class CodexCliExecutor implements WorkerExecutor {
       'shell_environment_policy.exclude=["CODEX_API_KEY","OPENAI_API_KEY"]',
     ];
     if (this.options.baseUrl) config.push('model_provider="background_api"',
-      `model_providers.background_api={name="Background API",base_url=${JSON.stringify(this.options.baseUrl)},env_key="CODEX_API_KEY",wire_api="responses"}`);
+      `model_providers.background_api={name="Background API",base_url=${JSON.stringify(this.options.baseUrl)},env_key="CODEX_API_KEY",wire_api="responses",supports_standalone_web_search=true}`);
     const args = ["exec", "--json", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",
       "--model", this.options.model, "--output-schema", request.schemaPath,
       ...config.flatMap(value => ["--config", value]),

@@ -12,6 +12,7 @@ import { ReplyEngineBackpressureError, ReplyEngineConflictError, ReplyEngineUnav
   type GatewayReplyEngine } from "./contracts.js";
 import { ControlMcp, CONTROL_TOKEN_ENV, hasConsoleCredential, redactConsoleCredentials } from "./control-mcp.js";
 import { DEFAULT_CONTROLLER_TIMEOUT_MS, DEFAULT_CONTROLLER_MAX_RETRIES } from "../runtime/budgets.js";
+import { HEADLESS_CODEX_CONFIG } from "./headless-config.js";
 
 const DEFAULT_TIMEOUT_MS = 300000;
 const MAX_TIMEOUT_MS = 315000;
@@ -60,7 +61,6 @@ function permissionOverrides(workspace: LeaderWorkspace, codexPath?: string): st
     [":minimal", "read"],
     [workspace.workspacePath, "write"],
     [workspace.codexHome, "deny"],
-    [path.join(workspace.codexHome, "skills"), "read"],
     [path.join(workspace.workspacePath, ".replies.json"), "deny"],
     [path.join(workspace.workspacePath, ".thread.json"), "deny"],
     [path.join(workspace.workspacePath, "AGENTS.md"), "read"],
@@ -237,9 +237,11 @@ export class CodexReplyEngine implements GatewayReplyEngine {
         [CONTROL_TOKEN_ENV]: control.token };
       for (const name of ENV_ALLOWLIST) if (process.env[name] !== undefined) env[name] = process.env[name]!;
       const config: NonNullable<CodexOptions["config"]> = {
+        ...HEADLESS_CODEX_CONFIG,
         default_permissions: "wechat_memory",
         shell_environment_policy: { exclude: ["CODEX_API_KEY", "OPENAI_API_KEY", CONTROL_TOKEN_ENV] },
-        mcp_servers: { wechat_control: { url: control.url, bearer_token_env_var: CONTROL_TOKEN_ENV,
+        mcp_servers: { ...HEADLESS_CODEX_CONFIG.mcp_servers,
+          wechat_control: { url: control.url, bearer_token_env_var: CONTROL_TOKEN_ENV,
           enabled_tools: ["control_current_request"],
           tools: { control_current_request: { approval_mode: "approve" } },
           tool_timeout_sec: Math.ceil(this.timeoutMs / 1000) } },
