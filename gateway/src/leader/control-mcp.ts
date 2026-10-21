@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema, McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import type { ControllerClient } from "../controller/client.js";
 import type { ControllerMessageRequest, ControllerMessageResponse } from "../types.js";
+import { currentTrace, runWithTrace, traceEvent, traceSpan } from "../runtime/telemetry.js";
 
 const BODY_LIMIT = 16 * 1024;
 const TOOL_NAME = "control_current_request";
@@ -26,8 +27,10 @@ export class ControlMcp {
   private invocation?: Promise<ControllerMessageResponse>;
   private shutdown?: Promise<void>;
   private readonly sessions = new Set<Server>();
+  private readonly trace = currentTrace();
   private readonly server = createServer((request, response) => {
-    void this.handle(request, response).catch(() => {
+    void runWithTrace(this.trace, () => this.handle(request, response)).catch(() => {
+      runWithTrace(this.trace, () => traceEvent("codex.mcp.http.failed"));
       if (!response.headersSent) response.writeHead(500);
       response.end();
     });
@@ -72,7 +75,7 @@ export class ControlMcp {
     // A disconnected MCP caller does not cancel an already-submitted command.
     // Keep the per-chat turn lock until that command has a terminal result.
     if (this.invocation) {
-      try { await this.invocation; }
+      try { await traceSpan("codex.mcp.invocation.drain", () => this.invocation!); }
       catch {
         // A called tool without a result is an explicit uncertain outcome. The
         // engine keeps its journal started and returns a recovery instruction.
@@ -101,8 +104,10 @@ export class ControlMcp {
         throw new McpError(ErrorCode.InvalidParams, "This tool accepts no arguments");
       }
       if (!this.invocation) {
-        this.invocation = Promise.resolve().then(() => this.controller.forwardMessage(this.request))
+        this.invocation = traceSpan("codex.mcp.controller", () => this.controller.forwardMessage(this.request))
           .then(result => { this.response = result; return result; });
+      } else {
+        traceEvent("codex.mcp.invocation.reused");
       }
       try {
         const result = await this.invocation;

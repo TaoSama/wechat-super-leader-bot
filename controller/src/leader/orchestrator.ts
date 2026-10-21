@@ -1,3 +1,4 @@
+import { traceEvent, traceSpan } from "../runtime/telemetry.js";
 import { createHash, randomUUID } from "node:crypto";
 import { formatDisplayTime } from "../display-time.js";
 import { CommandError, CommandService } from "../commands/service.js";
@@ -44,6 +45,7 @@ import {
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const MAX_BACKGROUND_TOOL_ARGUMENT_CHARS = 160_000;
 const MAX_STANDARD_TOOL_ARGUMENT_CHARS = 8_000;
+const MAX_SESSION_TOOL_RESULT_CHARS = 12000;
 const clip = (text: string, length: number) => {
   const value = text.slice(0, length);
   return /[\uD800-\uDBFF]$/.test(value) ? value.slice(0, -1) : value;
@@ -70,7 +72,8 @@ interface LinkContext {
   issuedLink?: ConsoleLinkIssued;
 }
 interface QueryTrace { modelSteps: number; toolCalls: number; lastTool?: string; lastModelMs?: number; totalModelMs: number }
-type ReasonedReply = LeaderReply & { execution?: { plan: Plan } | { goal: GoalProposal } };
+const MAX_DIRECTORY_REPLY_CHARS = 16000;
+type ReasonedReply = LeaderReply & { directory?: boolean; execution?: { plan: Plan } | { goal: GoalProposal } };
 
 export class LeaderOrchestrator {
   private active = new Map<string, { messageId: string; inputHash: string; promise: Promise<LeaderReply> }>();
@@ -161,6 +164,7 @@ export class LeaderOrchestrator {
     data.inflight = { messageId, inputHash, expiresAt: this.now() + CLAIM_TTL_MS, plan, goal };
     let claimed = await this.save(chatId, saved?.revision ?? 0, data);
     let reply: LeaderReply;
+    let directory = false;
     let invalidatedConfirmation = false;
     const linkContext: LinkContext = {
       requestId: `console_link_${hash([chatId, messageId])}`,
@@ -201,6 +205,7 @@ export class LeaderOrchestrator {
       try {
         const reasoned = await this.reason(chatId, text, data, linkContext, trace, previousPlan, automationTurn, claimed.revision, backgroundTurn);
         execution = reasoned.execution;
+        directory = reasoned.directory ?? false;
         reply = { text: reasoned.text, commandId: reasoned.commandId, ...(reasoned.images ? { images: reasoned.images } : {}) };
       } catch (error) {
         if (error instanceof ConflictError) throw error;
@@ -239,7 +244,7 @@ export class LeaderOrchestrator {
       invalidatedConfirmation = true;
       reply = { text: this.attachConsoleLink("计划内容过长，无法完整展示供确认，未保存待确认计划，也未派发。请缩短任务内容或分批提出。", linkContext) };
     }
-    reply.text = clip(reply.text, MAX_REPLY_CHARS);
+    reply.text = clip(reply.text, directory ? MAX_DIRECTORY_REPLY_CHARS : MAX_REPLY_CHARS);
     data.inflight = undefined;
     data.receipts.push({ messageId, inputHash, ...reply });
     const userHistory = sanitizeConsoleLinkSecrets(text);
@@ -251,6 +256,7 @@ export class LeaderOrchestrator {
       ...(invalidatedConfirmation ? { invalidatedConfirmation: true } : {}),
     });
     await this.save(chatId, claimed.revision, data);
+    traceEvent("leader.completed", { outputChars: reply.text.length, commandId: reply.commandId });
     return reply;
   }
 
@@ -422,8 +428,8 @@ export class LeaderOrchestrator {
       const modelStartedAt = Date.now();
       let answer;
       try {
-        answer = await this.model.complete(messages, [...LEADER_TOOLS, ...(this.automations ? AUTOMATION_TOOLS : []),
-          ...(this.background ? BACKGROUND_TOOLS : [])], signal);
+        answer = await traceSpan("leader.model", () => this.model.complete(messages,
+          [...LEADER_TOOLS, ...(this.automations ? AUTOMATION_TOOLS : []), ...(this.background ? BACKGROUND_TOOLS : [])], signal), { purpose: "reason", attempt: step });
       } finally {
         trace.lastModelMs = Date.now() - modelStartedAt;
         trace.totalModelMs += trace.lastModelMs;
@@ -431,7 +437,7 @@ export class LeaderOrchestrator {
       signal.throwIfAborted();
       if (!answer.toolCalls.length) {
         const textContent = `${clip(answer.content || "请进一步说明目标会话和希望完成的任务。", 4500)}${memoryChanges.length ? `\n记忆更新：${memoryChanges.join("、")}` : ""}`;
-        return { text: this.attachConsoleLink(sessionTitles.render(textContent), linkContext) };
+        return { text: this.attachConsoleLink(sessionTitles.render(textContent), linkContext), directory: sessionTitles.rendersDirectory() };
       }
       if (toolCount + answer.toolCalls.length > MAX_TOOL_CALLS) throw new Error("Tool limit exceeded");
       messages.push({ role: "assistant", content: answer.content, tool_calls: answer.toolCalls, responseOutput: answer.responseOutput });
@@ -577,7 +583,8 @@ export class LeaderOrchestrator {
         }
         const priorPlan = data.pending;
         const priorGoal = data.pendingGoal;
-        const output = await this.callTool(call, chatId, data, memoryChanges, linkContext, signal, sessionTitles);
+        const output = await traceSpan("leader.tool", () => this.callTool(call, chatId, data, memoryChanges, linkContext, signal, sessionTitles),
+          { tool: Object.hasOwn(ToolArguments, call.function.name) ? call.function.name : "unsupported" });
         signal.throwIfAborted();
         if (call.function.name === "execute_plan" && data.pending && data.pending !== priorPlan) {
           return { text: "", execution: { plan: data.pending } };
@@ -588,7 +595,7 @@ export class LeaderOrchestrator {
         if (data.pending && data.pending !== priorPlan) return { text: this.attachConsoleLink(this.preview(data.pending), linkContext) };
         if (data.pendingGoal && data.pendingGoal !== priorGoal) return { text: this.attachConsoleLink(goalPreview(data.pendingGoal, node => this.hub.getNodeSkills(node), (node, session) => this.hub.getNodeSession(node, session)?.title), linkContext) };
         const content = JSON.stringify(output);
-        messages.push({ role: "tool", tool_call_id: call.id, content: content.length > 12000
+        messages.push({ role: "tool", tool_call_id: call.id, content: call.function.name !== "list_sessions" && content.length > 12000
           ? JSON.stringify({ truncated: true, data: clip(content, 12000) }) : content });
       }
       if (automationTurn.attempted || backgroundTurn.mutations.length) return this.confirmMutations(chatId, data.inflight!.messageId, automationTurn, backgroundTurn);
@@ -654,7 +661,8 @@ export class LeaderOrchestrator {
         const capturedAt = this.now();
         const observed = (await this.hub.getAllSessions()).filter(item => !args.nodeId || item.nodeId === args.nodeId)
           .map(item => ({ ...item, ...selectExecutionObservation(item, capturedAt), modelView: selectModelObservation(item, capturedAt) }));
-        const sessions = observed.filter(item => !args.status || item.executionStatus === args.status);
+        const sessions = observed.filter(item => !args.status || item.executionStatus === args.status)
+          .sort((a, b) => (Date.parse(b.updatedAt ?? "") || 0) - (Date.parse(a.updatedAt ?? "") || 0));
         const statusCounts: Record<string, number> = Object.create(null);
         let unknownStatusCount = 0;
         let notLoadedCount = 0;
@@ -672,8 +680,8 @@ export class LeaderOrchestrator {
         }
         observations.sort((a, b) => Date.parse(a) - Date.parse(b));
         const nodes = this.hub.getNodeStatusList().filter(item => !args.nodeId || item.nodeId === args.nodeId);
-        return sessionTitles.listing({ sessions: sessions.slice(args.offset, args.offset + 50), total: sessions.length,
-          nextOffset: args.offset + 50 < sessions.length ? args.offset + 50 : null,
+        const listing = sessionTitles.listing({ sessions: sessions.map(item => ({ ...item, nodeName: item.nodeId })), total: sessions.length,
+          nextOffset: null,
           snapshot: { scope: "online_observed_sessions", capturedAt: new Date(capturedAt).toISOString(),
             reportedNodeCount: nodes.length, onlineNodeCount: nodes.filter(item => item.connected).length,
             observedNodeCount: new Set(observed.map(item => item.nodeId)).size, observedSessionCount: observed.length,
@@ -681,6 +689,37 @@ export class LeaderOrchestrator {
             oldestObservedAt: observations[0] ?? null, newestObservedAt: observations.at(-1) ?? null,
             completeTaskCoverage: false,
           } });
+        // Keep the full directory on the server; model discovery needs identities and selected observations only.
+        const compact = listing.sessions.map(({ nodeId, id, title, cwd, status, capabilities, loaded,
+          executionStatus, statusSource, observedAt, updatedAt, modelView, sendAvailability }) => ({
+          nodeId, id, title, cwd, status, capabilities, loaded, executionStatus, statusSource,
+          observedAt, updatedAt, modelView, sendAvailability,
+          displayLabel: sessionTitles.add({ nodeId, id, title }),
+        }));
+        const result = { ...listing, sessions: [] as typeof compact, nextOffset: null as number | null,
+          snapshot: { ...listing.snapshot, statusCounts: listing.snapshot.statusCounts as Record<string, number> | undefined,
+            statusCountsTruncated: false },
+          modelSummary: { truncated: true, omittedSessions: listing.total, skippedOversizedSessions: 0,
+            directoryRetainedOnServer: true } };
+        if (JSON.stringify(result).length > MAX_SESSION_TOOL_RESULT_CHARS) {
+          result.snapshot.statusCounts = undefined;
+          result.snapshot.statusCountsTruncated = true;
+        }
+        let offset = args.offset;
+        for (; offset < compact.length; offset++) {
+          const nextOffset = offset + 1 < compact.length ? offset + 1 : null;
+          const candidate = { ...result, sessions: [...result.sessions, compact[offset]], nextOffset };
+          if (JSON.stringify(candidate).length > MAX_SESSION_TOOL_RESULT_CHARS) {
+            if (result.sessions.length) break;
+            result.modelSummary.skippedOversizedSessions++;
+            continue;
+          }
+          result.sessions.push(compact[offset]);
+        }
+        result.nextOffset = offset < compact.length ? offset : null;
+        result.modelSummary.omittedSessions = listing.total - result.sessions.length;
+        result.modelSummary.truncated = result.modelSummary.omittedSessions > 0;
+        return result;
       }
       case "read_session": {
         const args = ToolArguments.read_session.parse(raw);

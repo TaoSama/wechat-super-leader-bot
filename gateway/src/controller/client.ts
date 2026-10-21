@@ -1,3 +1,5 @@
+import { performance } from "node:perf_hooks";
+import { currentTrace, traceEvent } from "../runtime/telemetry.js";
 import { ControllerMessageRequest, ControllerMessageResponse } from "../types.js";
 import { FetchLike } from "../wechat/client.js";
 import { CHAT_AUTHORIZATION_TIMEOUT_MS, DEFAULT_CONTROLLER_TIMEOUT_MS, DEFAULT_CONTROLLER_MAX_RETRIES } from "../runtime/budgets.js";
@@ -152,6 +154,9 @@ export class ControllerClient {
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+      const started = performance.now();
+      let outcome = "error";
+      traceEvent("controller.http.start", { attempt });
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.timeoutMs);
       try {
@@ -160,6 +165,7 @@ export class ControllerClient {
           headers: {
             "Content-Type": "application/json",
             "Authorization": `Bearer ${this.token}`,
+            ...(currentTrace() ? { "X-Latency-Attempt": currentTrace()!.attemptId } : {}),
           },
           body: JSON.stringify({
             chatId: req.chatId,
@@ -170,6 +176,7 @@ export class ControllerClient {
           signal: controller.signal,
         });
 
+        traceEvent("controller.http.headers", { attempt, httpStatus: response.status, durationMs: performance.now() - started });
         if (response.status === 403) {
           let errCode = "";
           try {
@@ -190,6 +197,7 @@ export class ControllerClient {
         }
 
         if (response.status >= 500 && attempt < this.maxRetries) {
+          outcome = "retry";
           lastError = new Error(`Controller temporary server error (HTTP ${response.status})`);
           continue;
         }
@@ -200,7 +208,9 @@ export class ControllerClient {
         }
 
         const data: unknown = await response.json();
-        return parseControllerReply(data, "/v1/messages");
+        const reply = parseControllerReply(data, "/v1/messages");
+        outcome = "ok";
+        return reply;
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         // Do not retry poison chats, auth, or schema validation errors
@@ -215,6 +225,7 @@ export class ControllerClient {
           throw lastError;
         }
       } finally {
+        traceEvent("controller.http.end", { attempt, outcome, durationMs: performance.now() - started });
         clearTimeout(timer);
       }
     }
