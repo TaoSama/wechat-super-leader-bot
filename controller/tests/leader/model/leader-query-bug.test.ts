@@ -46,7 +46,7 @@ describe("active-task query regression", () => {
     const pending = f.leader.handle("private-chat", "private-message", "看看现在有什么 active 的任务");
     await vi.advanceTimersByTimeAsync(38001);
     const reply = await pending;
-    expect(reply.text).toContain("[node] active\n运行中");
+    expect(reply.text).toContain("workspace（node）\n[运行中] active");
     expect(reply.text).not.toContain("确认执行");
     expect(f.commands.submit).not.toHaveBeenCalled();
     const input = payloads[1].input as Record<string, unknown>[];
@@ -159,7 +159,7 @@ describe("active-task query regression", () => {
       .mockResolvedValueOnce(response([tool]))
       .mockResolvedValueOnce(response([answer]));
     const f = fixture(fetcher);
-    expect((await f.leader.handle("chat", "message", "查询 active 任务")).text).toContain("[node] active\n运行中");
+    expect((await f.leader.handle("chat", "message", "查询 active 任务")).text).toContain("workspace（node）\n[运行中] active");
     expect(fetcher.mock.calls[0][1]?.body).toBe(fetcher.mock.calls[1][1]?.body);
     expect(f.commands.submit).not.toHaveBeenCalled();
     expect(warning).toHaveBeenCalledWith("Leader model temporary HTTP failure; retry scheduled", expect.objectContaining({ httpStatus: 500, attempt: 1 }));

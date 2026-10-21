@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
+import { createMessageTrace, currentTrace, runWithTrace, traceEvent, traceSpan } from "./runtime/telemetry.js";
 import { StateManager } from "./runtime/state.js";
 import { ILinkClient } from "./wechat/client.js";
 import { ControllerClient, ChatNotAllowedError } from "./controller/client.js";
@@ -214,87 +217,113 @@ export class WeChatGateway {
 
     this.healthTracker?.recordPollStart(this.ilink.pollBudgetMs + CHECKPOINT_MARGIN_MS);
     try {
-      const batch = await this.ilink.pollBatch();
+      const batchId = randomUUID();
+      const batch = await runWithTrace(createMessageTrace("poll", batchId), () =>
+        traceSpan("wechat.poll", () => this.ilink.pollBatch()));
+      const receivedAt = Date.now();
+      const receivedClock = performance.now();
+      const traces = batch.messages.map((msg, batchIndex) => {
+        const trace = createMessageTrace(msg.chatId, msg.messageId);
+        runWithTrace(trace, () => traceEvent("message.received", {
+          batchId, batchIndex, batchCount: batch.messages.length, chars: msg.text.length,
+          platformCreatedAtMs: msg.createdAtMs,
+          platformToReceivedMs: Number.isFinite(msg.createdAtMs) ? receivedAt - msg.createdAtMs! : undefined,
+          clockSkew: Number.isFinite(msg.createdAtMs) && msg.createdAtMs! > receivedAt,
+        }));
+        return trace;
+      });
       let processedCount = 0;
       let skippedCount = 0;
       let interrupted = false;
 
-      for (const msg of batch.messages) {
+      for (const [batchIndex, msg] of batch.messages.entries()) {
         if (this.stopped) { interrupted = true; break; }
         this.healthTracker?.recordMessageStart(this.controller.authorizationBudgetMs +
           (this.replyEngine?.requestBudgetMs ?? this.controller.requestBudgetMs) + REPLY_TIMEOUT_MS + CHECKPOINT_MARGIN_MS);
         this.activeInboundChats.add(msg.chatId);
-        try {
-          if (this.hasQuarantinedInboundReply(msg.deliveryKey)) {
-            this.quarantineInboundReply(msg.deliveryKey);
-            skippedCount++;
-            continue;
-          }
-          await this.controller.assertChatAllowed(msg.chatId);
-          const fresh = this.stateManager.recordInboundContext(msg.deliveryKey, msg.chatId, msg.createdAtMs, Boolean(msg.contextToken?.trim()), msg.contextToken);
-          const retryingAdmission = this.stateManager.contextBudgets[msg.chatId]?.lastInboundKey === msg.deliveryKey &&
-            !this.stateManager.isMessageProcessed(msg.deliveryKey);
-          if ((fresh || retryingAdmission) && msg.contextToken?.trim()) this.resultDispatcher?.noteInbound(msg.chatId, msg.deliveryKey);
-          if (this.stateManager.outbox[msg.deliveryKey]) {
-            this.stateManager.recordProcessedMessageKey(msg.deliveryKey, { preserveReplyEvidence: true });
-            processedCount++;
-            continue;
-          }
-          try { this.stateManager.assertOutboxCapacity(msg.deliveryKey); }
-          catch (error) {
-            if (!(error instanceof OutboxBackpressureError)) throw error;
-            // The new inbound may have restored the budget needed to drain a full queue.
-            await this.flushRepliesOnce();
-            this.stateManager.assertOutboxCapacity(msg.deliveryKey);
-          }
-          this.ilink.sendTyping(msg.chatId);
-          const request = { chatId: msg.chatId, messageId: msg.messageId, text: msg.text };
-          let source: DeliveryOutboxItem["source"] = this.replyEngine ? "engine" : "controller";
-          let controllerReply: ControllerMessageResponse;
+        await runWithTrace(traces[batchIndex], async () => {
+          traceEvent("message.processing.start", { batchId, batchIndex, batchWaitMs: performance.now() - receivedClock });
+          let outcome = "error";
           try {
-            controllerReply = this.replyEngine
-              ? await this.replyEngine.reply(this.stateManager.account!.accountId, request, this.controller)
-              : await this.controller.forwardMessage(request);
-          } catch (error) {
-            if (error instanceof ReplyEngineBackpressureError && this.replyEngine) {
-              // This inbound may restore a window needed to release pinned replies.
+            if (this.hasQuarantinedInboundReply(msg.deliveryKey)) {
+              this.quarantineInboundReply(msg.deliveryKey);
+              skippedCount++;
+              outcome = "skipped";
+              return;
+            }
+            await traceSpan("message.authorization", () => this.controller.assertChatAllowed(msg.chatId));
+            const fresh = await traceSpan("message.context.persist", async () => this.stateManager.recordInboundContext(msg.deliveryKey, msg.chatId, msg.createdAtMs, Boolean(msg.contextToken?.trim()), msg.contextToken));
+            const retryingAdmission = this.stateManager.contextBudgets[msg.chatId]?.lastInboundKey === msg.deliveryKey &&
+              !this.stateManager.isMessageProcessed(msg.deliveryKey);
+            if ((fresh || retryingAdmission) && msg.contextToken?.trim()) this.resultDispatcher?.noteInbound(msg.chatId, msg.deliveryKey);
+            if (this.stateManager.outbox[msg.deliveryKey]) {
+              this.stateManager.recordProcessedMessageKey(msg.deliveryKey, { preserveReplyEvidence: true });
+              processedCount++;
+              outcome = "processed";
+              return;
+            }
+            try { this.stateManager.assertOutboxCapacity(msg.deliveryKey); }
+            catch (error) {
+              if (!(error instanceof OutboxBackpressureError)) throw error;
+              // The new inbound may have restored the budget needed to drain a full queue.
               await this.flushRepliesOnce();
-              controllerReply = await this.replyEngine.reply(this.stateManager.account!.accountId, request, this.controller);
-            } else {
-              if (!(error instanceof ReplyEngineConflictError)) throw error;
-              source = "codex-conflict";
-              controllerReply = error.reply;
+              this.stateManager.assertOutboxCapacity(msg.deliveryKey);
             }
-          }
-          this.stateManager.putOutbox({ kind: "reply", source, chatId: msg.chatId, messageId: msg.messageId,
-            deliveryKey: msg.deliveryKey, splitMaxChars: this.splitMaxChars, splitMultiPart: this.splitMultiPart, status: "pending" });
-          if (msg.deliveryKey) {
-            this.stateManager.recordProcessedMessageKey(msg.deliveryKey, { preserveReplyEvidence: true });
-          }
-          await this.deliverReply(this.stateManager.outbox[msg.deliveryKey], controllerReply);
-          processedCount++;
-          this.healthTracker?.recordMessageProgress();
-        } catch (err) {
-          if (err instanceof PermanentImageDownloadError) {
-            this.stateManager.recordReplyFailure(`image-reply:${msg.deliveryKey}`, err.reason);
-          }
-          if (this.hasQuarantinedInboundReply(msg.deliveryKey)) {
-            this.quarantineInboundReply(msg.deliveryKey);
-            skippedCount++;
-            continue;
-          }
-          if (err instanceof ChatNotAllowedError) {
-            // Poison batch protection: unauthorized chat is rejected by Controller allowlist.
-            // Mark message processed so the cursor advances and subsequent messages are not starved.
+            this.ilink.sendTyping(msg.chatId);
+            const request = { chatId: msg.chatId, messageId: msg.messageId, text: msg.text };
+            let source: DeliveryOutboxItem["source"] = this.replyEngine ? "engine" : "controller";
+            let controllerReply: ControllerMessageResponse;
+            try {
+              controllerReply = this.replyEngine
+                ? await traceSpan("message.leader", () => this.replyEngine!.reply(this.stateManager.account!.accountId, request, this.controller))
+                : await traceSpan("message.controller", () => this.controller.forwardMessage(request));
+            } catch (error) {
+              if (error instanceof ReplyEngineBackpressureError && this.replyEngine) {
+                // This inbound may restore a window needed to release pinned replies.
+                await this.flushRepliesOnce();
+                controllerReply = await this.replyEngine.reply(this.stateManager.account!.accountId, request, this.controller);
+              } else {
+                if (!(error instanceof ReplyEngineConflictError)) throw error;
+                source = "codex-conflict";
+                controllerReply = error.reply;
+              }
+            }
+            await traceSpan("message.outbox.persist", async () => this.stateManager.putOutbox({ kind: "reply", source, chatId: msg.chatId, messageId: msg.messageId,
+              deliveryKey: msg.deliveryKey, splitMaxChars: this.splitMaxChars, splitMultiPart: this.splitMultiPart, status: "pending" }));
             if (msg.deliveryKey) {
-              this.stateManager.recordProcessedMessageKey(msg.deliveryKey);
+              this.stateManager.recordProcessedMessageKey(msg.deliveryKey, { preserveReplyEvidence: true });
             }
-            skippedCount++;
+            await this.deliverReply(this.stateManager.outbox[msg.deliveryKey], controllerReply);
+            processedCount++;
+            outcome = "processed";
             this.healthTracker?.recordMessageProgress();
-            continue;
+          } catch (err) {
+            if (err instanceof PermanentImageDownloadError) {
+              this.stateManager.recordReplyFailure(`image-reply:${msg.deliveryKey}`, err.reason);
+            }
+            if (this.hasQuarantinedInboundReply(msg.deliveryKey)) {
+              this.quarantineInboundReply(msg.deliveryKey);
+              skippedCount++;
+              outcome = "skipped";
+              return;
+            }
+            if (err instanceof ChatNotAllowedError) {
+              // Poison batch protection: unauthorized chat is rejected by Controller allowlist.
+              // Mark message processed so the cursor advances and subsequent messages are not starved.
+              if (msg.deliveryKey) {
+                this.stateManager.recordProcessedMessageKey(msg.deliveryKey);
+              }
+              skippedCount++;
+              outcome = "skipped";
+              this.healthTracker?.recordMessageProgress();
+              return;
+            }
+            throw err;
+          } finally {
+            traceEvent("message.processing.end", { outcome });
+            this.activeInboundChats.delete(msg.chatId);
           }
-          throw err;
-        } finally { this.activeInboundChats.delete(msg.chatId); }
+        });
       }
 
       if (interrupted) this.healthTracker?.recordProcessingEnd();
@@ -324,38 +353,51 @@ export class WeChatGateway {
   private async deliverReply(item: DeliveryOutboxItem, reply: ControllerMessageResponse): Promise<void> {
     if (this.stopped || item.status !== "pending" || this.activeReplyDeliveries.has(item.deliveryKey)) return;
     this.activeReplyDeliveries.add(item.deliveryKey);
-    try {
-      const deadline = Date.now() + REPLY_TIMEOUT_MS;
-      if (reply.images?.length) {
-        await this.ilink.sendImageReply(item.chatId, reply.images, { deliveryKey: `image-reply:${item.deliveryKey}`,
-          timeoutMs: REPLY_TIMEOUT_MS, shouldContinue: () => !this.stopped,
-          getImageBytes: (image, signal) => this.controller.downloadImage({ chatId: item.chatId, messageId: item.messageId, image }, signal) });
+    const deliveryTrace = createMessageTrace(item.chatId, item.messageId);
+    const inherited = currentTrace();
+    await runWithTrace(inherited?.traceId === deliveryTrace.traceId ? inherited : deliveryTrace, async () => {
+      const deliveryStarted = performance.now();
+      let receiptStatus = "error";
+      traceEvent("delivery.start", { source: item.source });
+      try {
+        const deadline = Date.now() + REPLY_TIMEOUT_MS;
+        if (reply.images?.length) {
+          await this.ilink.sendImageReply(item.chatId, reply.images, { deliveryKey: `image-reply:${item.deliveryKey}`,
+            timeoutMs: REPLY_TIMEOUT_MS, shouldContinue: () => !this.stopped,
+            getImageBytes: (image, signal) => traceSpan("delivery.image.download", () => this.controller.downloadImage({ chatId: item.chatId, messageId: item.messageId, image }, signal)) });
+        }
+        if (reply.text.length) {
+          const timeoutMs = deadline - Date.now();
+          if (timeoutMs <= 0) throw new Error("WeChat reply timed out before completion");
+          await this.ilink.sendMarkdownReply(item.chatId, reply.text, { deliveryKey: item.deliveryKey,
+            maxCharsPerChunk: item.splitMaxChars, splitMultiPart: item.splitMultiPart, timeoutMs,
+            shouldContinue: () => !this.stopped });
+        }
+        if (item.source === "engine") this.stateManager.updateOutbox(item.deliveryKey, { status: "receipt", receiptStatus: "accepted" });
+        await traceSpan("delivery.journal.ack", () => this.ackEngineReply(item, "accepted"));
+        await traceSpan("delivery.outbox.remove", async () => this.stateManager.removeOutbox(item.deliveryKey));
+        receiptStatus = "wechat_api_accepted";
+      } catch (error) {
+        if (error instanceof LocalSendDeferredError) { receiptStatus = "deferred"; return; }
+        if (error instanceof PermanentImageDownloadError) {
+          this.stateManager.recordReplyFailure(`image-reply:${item.deliveryKey}`, error.reason);
+          receiptStatus = "expired";
+          this.stateManager.updateOutbox(item.deliveryKey, { status: "expired" });
+          await this.ackEngineReply(item, "expired");
+          return;
+        }
+        if (this.hasQuarantinedInboundReply(item.deliveryKey)) {
+          receiptStatus = "uncertain";
+          this.stateManager.updateOutbox(item.deliveryKey, { status: "uncertain" });
+          await this.ackEngineReply(item, "uncertain");
+          return;
+        }
+        throw error;
+      } finally {
+        traceEvent("delivery.end", { receiptStatus, durationMs: performance.now() - deliveryStarted });
+        this.activeReplyDeliveries.delete(item.deliveryKey);
       }
-      if (reply.text.length) {
-        const timeoutMs = deadline - Date.now();
-        if (timeoutMs <= 0) throw new Error("WeChat reply timed out before completion");
-        await this.ilink.sendMarkdownReply(item.chatId, reply.text, { deliveryKey: item.deliveryKey,
-          maxCharsPerChunk: item.splitMaxChars, splitMultiPart: item.splitMultiPart, timeoutMs,
-          shouldContinue: () => !this.stopped });
-      }
-      if (item.source === "engine") this.stateManager.updateOutbox(item.deliveryKey, { status: "receipt", receiptStatus: "accepted" });
-      await this.ackEngineReply(item, "accepted");
-      this.stateManager.removeOutbox(item.deliveryKey);
-    } catch (error) {
-      if (error instanceof LocalSendDeferredError) return;
-      if (error instanceof PermanentImageDownloadError) {
-        this.stateManager.recordReplyFailure(`image-reply:${item.deliveryKey}`, error.reason);
-        this.stateManager.updateOutbox(item.deliveryKey, { status: "expired" });
-        await this.ackEngineReply(item, "expired");
-        return;
-      }
-      if (this.hasQuarantinedInboundReply(item.deliveryKey)) {
-        this.stateManager.updateOutbox(item.deliveryKey, { status: "uncertain" });
-        await this.ackEngineReply(item, "uncertain");
-        return;
-      }
-      throw error;
-    } finally { this.activeReplyDeliveries.delete(item.deliveryKey); }
+    });
   }
 
   /** Recovery reads immutable responses only; an old command is never POSTed again. */
@@ -369,11 +411,16 @@ export class WeChatGateway {
         if (this.activeReplyDeliveries.has(item.deliveryKey)) continue;
         if (item.kind === "reply" && item.source === "engine" && item.status === "receipt" && item.receiptStatus === "accepted") {
           try {
-            await this.ackEngineReply(item, "accepted");
-            this.stateManager.removeOutbox(item.deliveryKey);
+            await this.withRecoveryTrace(item, async () => {
+              await traceSpan("delivery.recovery.ack", () => this.ackEngineReply(item, "accepted"));
+              await traceSpan("delivery.recovery.outbox.remove", async () => this.stateManager.removeOutbox(item.deliveryKey));
+            });
           } catch (error) { firstError ??= error; }
         } else if (item.kind === "reply" && item.source === "engine" && (item.status === "uncertain" || item.status === "expired")) {
-          try { await this.ackEngineReply(item, item.status); }
+          const status = item.status;
+          try {
+            await this.withRecoveryTrace(item, () => traceSpan("delivery.recovery.ack", () => this.ackEngineReply(item, status)));
+          }
           catch (error) { firstError ??= error; }
         }
       }
@@ -382,34 +429,52 @@ export class WeChatGateway {
       const offset = this.replyOutboxCursor % Math.max(1, items.length);
       for (const item of [...items.slice(offset), ...items.slice(0, offset)]) {
         if (this.hasQuarantinedInboundReply(item.deliveryKey)) {
-          this.stateManager.updateOutbox(item.deliveryKey, { status: "uncertain" });
-          await this.ackEngineReply(item, "uncertain");
+          await this.withRecoveryTrace(item, async () => {
+            this.stateManager.updateOutbox(item.deliveryKey, { status: "uncertain" });
+            await traceSpan("delivery.recovery.ack", () => this.ackEngineReply(item, "uncertain"));
+          });
           continue;
         }
         const text = this.stateManager.replyDeliveries[item.deliveryKey];
         if (text && text.acknowledgedChunks === text.totalChunks && !text.inFlight) {
-          await this.ackEngineReply(item, "accepted");
-          this.stateManager.removeOutbox(item.deliveryKey);
+          await this.withRecoveryTrace(item, async () => {
+            await traceSpan("delivery.recovery.ack", () => this.ackEngineReply(item, "accepted"));
+            await traceSpan("delivery.recovery.outbox.remove", async () => this.stateManager.removeOutbox(item.deliveryKey));
+          });
           continue;
         }
         if (!this.stateManager.canSendToChat(item.chatId)) continue;
         this.replyOutboxCursor = (items.indexOf(item) + 1) % items.length;
-        try { await this.deliverReply(item, await this.getFrozenReply(item)); }
-        catch (error) {
-          if (error instanceof PermanentReplyUnavailableError) {
-            this.stateManager.updateOutbox(item.deliveryKey, {
-              status: this.hasQuarantinedInboundReply(item.deliveryKey) ? "uncertain" : "expired",
+        await this.withRecoveryTrace(item, async () => {
+          try {
+            await traceSpan("delivery.recovery.attempt", async () => {
+              const reply = await traceSpan("delivery.recovery.read", () => this.getFrozenReply(item));
+              await this.deliverReply(item, reply);
             });
-            await this.ackEngineReply(item, this.hasQuarantinedInboundReply(item.deliveryKey) ? "uncertain" : "expired");
-            break;
+          } catch (error) {
+            if (error instanceof PermanentReplyUnavailableError) {
+              this.stateManager.updateOutbox(item.deliveryKey, {
+                status: this.hasQuarantinedInboundReply(item.deliveryKey) ? "uncertain" : "expired",
+              });
+              await traceSpan("delivery.recovery.ack", () => this.ackEngineReply(item,
+                this.hasQuarantinedInboundReply(item.deliveryKey) ? "uncertain" : "expired"));
+              return;
+            }
+            firstError ??= error;
           }
-          firstError ??= error;
-        }
+        });
         // One resumed reply per turn keeps getupdates and independent chats moving.
         break;
       }
     } finally { this.flushingReplies = false; }
     if (firstError) throw firstError;
+  }
+
+  private withRecoveryTrace<T>(item: DeliveryOutboxItem, action: () => Promise<T>): Promise<T> {
+    // Outbox recovery is its own attempt even when admission of a new message
+    // triggers it. Its reads, sends and receipts must never inherit that message.
+    return runWithTrace(createMessageTrace(item.chatId, item.messageId), () =>
+      traceSpan("delivery.recovery", action, { recovery: true, source: item.source, status: item.status }));
   }
 
   private async getFrozenReply(item: DeliveryOutboxItem): Promise<ControllerMessageResponse> {

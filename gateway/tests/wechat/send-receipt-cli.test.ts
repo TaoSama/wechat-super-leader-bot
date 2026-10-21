@@ -29,6 +29,74 @@ const UPSTREAM_ERROR = "synthetic private upstream errmsg";
 const MESSAGE_ID = "synthetic-inbound-message";
 const CLI_PATH = fileURLToPath(new URL("../../src/index.js", import.meta.url));
 const PRIVATE_VALUES = [CHAT, CONTEXT, TYPING_TICKET, WECHAT_TOKEN, CONTROLLER_TOKEN, INBOUND_TEXT, REPLY_TEXT, NOTICE_TEXT, UPSTREAM_ERROR];
+const UUID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+const TELEMETRY_FIELDS = new Set([
+  "schema", "event", "service", "instanceId", "traceId", "attemptId", "stage", "timestamp", "elapsedMs",
+  "durationMs", "outcome", "spanId", "threadId", "turnId", "itemId", "itemType", "tool",
+  "status", "exitCode", "timingCoverage", "inputTokens", "cachedInputTokens", "outputTokens",
+  "batchId", "batchIndex", "batchCount", "batchWaitMs", "platformCreatedAtMs", "platformToReceivedMs",
+  "clockSkew", "chars", "chunkIndex", "chunkCount", "acknowledgedChunks", "attempt", "httpStatus",
+  "source", "receiptStatus", "recovery", "firstEventMs", "firstAgentMessageMs", "streamDrainMs",
+  "eventCount", "itemCount", "reason", "model", "purpose", "toolCalls", "inputChars", "outputChars",
+  "nativeTurnIdAvailable", "ttftAvailable", "usageAvailable", "pendingItems", "coverage", "commandId",
+  "cacheWriteInputTokens", "reasoningOutputTokens", "queued", "isTool", "startObserved",
+  "turnCompletedObserved", "firstEventObserved", "untrackedItemStarts", "cliExitTimeAvailable",
+  "aborted", "emptyReply", "failed",
+]);
+
+function parseTelemetry(line: string): Record<string, unknown> | undefined {
+  if (!line.startsWith("{")) return undefined;
+  const event = JSON.parse(line) as Record<string, unknown>;
+  if (event.event !== "message_latency") return undefined;
+  assert.equal(event.schema, 1);
+  assert.equal(event.service, "gateway");
+  for (const key of ["instanceId", "attemptId"]) {
+    assert.equal(typeof event[key], "string", key);
+    assert.match(event[key] as string, UUID_PATTERN);
+  }
+  assert.equal(typeof event.traceId, "string");
+  assert.match(event.traceId as string, /^[a-f0-9]{64}$/);
+  assert.equal(typeof event.stage, "string");
+  assert.match(event.stage as string, /^[a-z][a-z0-9_.]*$/);
+  assert.equal(typeof event.timestamp, "string");
+  assert.equal(new Date(event.timestamp as string).toISOString(), event.timestamp);
+  assert.equal(typeof event.elapsedMs, "number");
+  assert.ok(Number.isFinite(event.elapsedMs) && Number(event.elapsedMs) >= 0);
+  if (event.durationMs !== undefined) {
+    assert.equal(typeof event.durationMs, "number");
+    assert.ok(Number.isFinite(event.durationMs) && Number(event.durationMs) >= 0);
+  }
+  if (event.spanId !== undefined) {
+    assert.equal(typeof event.spanId, "string");
+    assert.match(event.spanId as string, UUID_PATTERN);
+  }
+  for (const [key, value] of Object.entries(event)) {
+    assert.ok(TELEMETRY_FIELDS.has(key), `unexpected telemetry field: ${key}`);
+    assert.ok(value === null || ["string", "number", "boolean"].includes(typeof value), key);
+    if (typeof value === "number") assert.ok(Number.isFinite(value), key);
+    if (typeof value === "string") assert.ok(value.length <= 128, key);
+  }
+  return event;
+}
+
+function diagnosticLines(stderr: string): string[] {
+  return stderr.trim().split("\n").filter(Boolean).filter(line => parseTelemetry(line) === undefined);
+}
+
+test("CLI diagnostics exclude only validated telemetry and retain unrelated JSON and plain errors", () => {
+  const event = { schema: 1, event: "message_latency", service: "gateway",
+    instanceId: "00000000-0000-4000-8000-000000000001", traceId: "a".repeat(64),
+    attemptId: "00000000-0000-4000-8000-000000000002", stage: "message.received",
+    timestamp: "2026-10-21T00:00:00.000Z", elapsedMs: 0 };
+  const warning = JSON.stringify({ event: "notification_send_failed", errorType: "UncertainSend" });
+  const plain = "[gateway] poll cycle error: ControllerAuth401";
+  assert.deepEqual(diagnosticLines([JSON.stringify(event), warning, plain].join("\n")), [warning, plain]);
+  for (const invalid of [{ schema: 2 }, { service: "controller" }, { traceId: "invalid" },
+    { elapsedMs: -1 }, { durationMs: -1 }, { spanId: "invalid" }, { unexpected: "private" }]) {
+    assert.throws(() => diagnosticLines(JSON.stringify({ ...event, ...invalid })));
+  }
+  assert.throws(() => diagnosticLines('{"event":"message_latency"'));
+});
 
 type Options = {
   sendBody?: unknown;
@@ -303,7 +371,7 @@ for (const sendBody of [{}, { errmsg: "" }, { ret: 0 }, { message_id: "184467440
     const initialPolls = f.counts().polls, second = f.start();
     await f.waitFor(second, () => f.counts().polls >= initialPolls + 3);
     await f.stop(second); f.assertPrivate(second);
-    assert.equal(first.output.stderr + second.output.stderr, "");
+    assert.deepEqual(diagnosticLines(first.output.stderr + second.output.stderr), []);
     assert.deepEqual([f.counts().claims, f.counts().receipts, f.sends.length, f.forwards.length], [1, 1, 2, 1]);
   });
 }
@@ -328,14 +396,14 @@ for (const failure of failures) {
     const evidence = new StateManager(f.accountPath, f.statePath).replyDeliveries[`result:${item.id}:step:0`];
     assert.equal(evidence.acknowledgedChunks, 0);
     assert.equal(Boolean(evidence.inFlight), !rejected);
-    const diagnostics = first.output.stderr.trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
+    const diagnostics = diagnosticLines(first.output.stderr).map(line => JSON.parse(line));
     assert.deepEqual(diagnostics, rejected ? [] : [{ event: "notification_send_failed", notificationId: item.id,
       attemptId: item.attemptId, errorType: "UncertainSend" }]);
     if (rejected) assert.equal(item.lastDeferReason, "rejected");
     const initialPolls = f.counts().polls, second = f.start();
     await f.waitFor(second, () => f.counts().polls >= initialPolls + 3);
     await f.stop(second); f.assertPrivate(second);
-    assert.equal(second.output.stderr, "");
+    assert.deepEqual(diagnosticLines(second.output.stderr), []);
     assert.deepEqual([f.counts().claims, f.counts().receipts, f.counts().defers, f.sends.length, f.forwards.length],
       rejected ? [1, 0, 1, 1, 0] : [1, 1, 0, 1, 0]);
   });
@@ -351,7 +419,9 @@ for (const endpoint of ["pending", "messages"] as const) {
       await f.waitFor(running, () => f.counts().polls >= 3 && running.output.stderr.includes(expected));
       await f.stop(running); f.assertPrivate(running);
       const prefix = endpoint === "pending" ? "notification" : "poll";
-      assert.ok(running.output.stderr.trim().split("\n").every(line => line === `[gateway] ${prefix} cycle error: ${expected}`));
+      const diagnostics = diagnosticLines(running.output.stderr);
+      assert.ok(diagnostics.length > 0);
+      assert.ok(diagnostics.every(line => line === `[gateway] ${prefix} cycle error: ${expected}`));
       assert.deepEqual([f.counts().claims, f.counts().receipts, f.sends.length], [0, 0, 0]);
       if (endpoint === "messages") {
         assert.ok(f.forwards.length >= 2);

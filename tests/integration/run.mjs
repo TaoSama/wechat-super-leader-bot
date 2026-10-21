@@ -7,7 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
 import { verifyNodeIsolation } from './sessions/node-isolation.mjs';
 import { verifyNodeSessionStore } from './sessions/node-session-store.mjs';
-import { verifyDesktopRoute } from './sessions/desktop-route.mjs';
+import { createDesktopModelFixture, verifyDesktopRoute } from './sessions/desktop-route.mjs';
 import { createLeaderHistoryModelFixture, verifyLeaderSessionHistory } from './sessions/leader-session-history.mjs';
 import { verifyTerminalObservation, terminalModelCall, TERMINAL_NODE } from './terminal/terminal-observation.mjs';
 import { verifyTerminalControl, terminalInputModelCall, TERMINAL_INPUT_NODE } from './terminal/terminal-control.mjs';
@@ -65,6 +65,7 @@ async function main() {
   const received = [];
   const recordedResults = [];
   const inspections = [];
+  const desktopModel = createDesktopModelFixture();
   const leaderHistoryModel = createLeaderHistoryModelFixture({ nodeId: 'desktop-fixture-node',
     sessionId: '11111111-2222-4333-8444-555555555555' });
   await withTestCleanup(async () => {
@@ -83,10 +84,12 @@ async function main() {
         const terminalInputCall = terminalInputModelCall(last.content);
         const goalCall = goalModelCall(last, request.tools);
         const historyReply = leaderHistoryModel.respond(last);
+        const desktopReply = desktopModel.respond(last);
         const acknowledgement = acknowledgementModelReply(request);
         if (acknowledgement) { message = acknowledgement; confirmationReplies++; }
         else if (goalCall) message = call(goalCall.name, goalCall.args);
         else if (historyReply) message = historyReply;
+        else if (desktopReply) message = desktopReply;
         else if (last.type === 'function_call_output') message.content = `Tool evidence: ${last.output}`;
         else if (planCall) message = call(planCall.name, planCall.args);
         else if (resultCall) message = call(resultCall.name, resultCall.args);
@@ -94,7 +97,6 @@ async function main() {
         else if (terminalInputCall) message = call(terminalInputCall.name, terminalInputCall.args);
         else if (last.content === '请记住测试偏好') message = call('remember', { key: 'test-preference', value: '中文' });
         else if (last.content === '查询已记住的偏好') message = call('recall', {});
-        else if (last.content === '查询桌面模型') message = call('list_sessions', { nodeId: 'desktop-fixture-node' });
         else if (last.content === '请给测试会话制定计划') message = call('propose_plan', { actions: [{ nodeId: 'test-node', sessionId: 'test-session', prompt: 'mock-plan-input', skills: skillRefs }] });
         else if (last.content === '请制定超长组合计划') message = call('propose_plan', { actions: fixtureSkills.map((_, index) => ({
           nodeId: 'test-node', sessionId: 'test-session', prompt: '任务'.repeat(500),
@@ -210,7 +212,7 @@ async function main() {
     let desktopReceipt, leaderHistoryVerified = false;
     const desktopHistoryPool = new Pool({ connectionString: env.DATABASE_URL });
     await withTestCleanup(async () => {
-      desktopReceipt = await verifyDesktopRoute({ base, request, nodeToken: desktopToken, waitFor,
+      desktopReceipt = await verifyDesktopRoute({ base, request, nodeToken: desktopToken, waitFor, modelEvidence: desktopModel.outputs,
         onSkillReceipt: receipt => { desktopSkillReceipt = receipt; },
         onHistoryReady: async fixture => {
           await verifyLeaderSessionHistory({ request, pool: desktopHistoryPool, model: leaderHistoryModel, ...fixture });

@@ -1,3 +1,5 @@
+import { performance } from "node:perf_hooks";
+import { traceEvent, traceSpan } from "../runtime/telemetry.js";
 import * as crypto from "node:crypto";
 import { InboundWeChatMessage } from "../types.js";
 import { StateManager } from "../runtime/state.js";
@@ -133,6 +135,12 @@ export class ILinkClient {
     const signal = parentSignal ? AbortSignal.any([controller.signal, parentSignal]) : controller.signal;
     signal.throwIfAborted();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const started = performance.now();
+    const purpose = endpoint === "ilink/bot/sendmessage" ? "sendmessage"
+      : endpoint === "ilink/bot/getupdates" ? "getupdates"
+      : endpoint === "ilink/bot/getconfig" ? "getconfig" : endpoint === "ilink/bot/sendtyping" ? "sendtyping" : "media";
+    let outcome = "error";
+    traceEvent("wechat.http.start", { purpose });
     try {
       const response = await beforeAbort(this.fetchImpl(url, {
         method: "POST",
@@ -146,6 +154,7 @@ export class ILinkClient {
         redirect: "error",
         signal,
       }), signal);
+      traceEvent("wechat.http.headers", { purpose, httpStatus: response.status, durationMs: performance.now() - started });
       if (!response.ok) {
         throw new Error(`WeChat iLink HTTP ${response.status} on ${endpoint}`);
       }
@@ -156,8 +165,10 @@ export class ILinkClient {
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
         throw new Error("WeChat iLink returned a non-object JSON response");
       }
+      outcome = "ok";
       return parsed as Record<string, unknown>;
     } finally {
+      traceEvent("wechat.http.end", { purpose, outcome, durationMs: performance.now() - started });
       clearTimeout(timer);
       controller.abort();
     }
@@ -287,10 +298,12 @@ export class ILinkClient {
     void current.then(() => {
       if (this.chatSends.get(chatId) === current) this.chatSends.delete(chatId);
     });
+    const queueStarted = performance.now();
     try {
       if (signal) await beforeAbort(previous, signal);
       else await previous;
       signal?.throwIfAborted();
+      traceEvent("wechat.send.lock.acquired", { durationMs: performance.now() - queueStarted });
       return await send();
     } finally {
       release();
@@ -331,7 +344,8 @@ export class ILinkClient {
       signal
     );
 
-    validateSendReceipt(response);
+    await traceSpan("wechat.send.receipt.validate", async () => validateSendReceipt(response));
+    traceEvent("wechat.send.accepted");
   }
 
   public async sendImageReply(chatId: string, images: ImageAttachment[], options: {
@@ -395,6 +409,7 @@ export class ILinkClient {
       /** Controller result messages are already split and must keep their frozen boundaries. */
       verbatim?: boolean }
   ): Promise<number> {
+    const renderStarted = performance.now();
     const maxChars = options?.maxCharsPerChunk ?? DEFAULT_MESSAGE_MAX_CHARS;
     const deliveryKey = options?.deliveryKey || `reply:${crypto.randomUUID()}`;
     const hash = (value: unknown) => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -412,8 +427,15 @@ export class ILinkClient {
       throw new Error("Invalid WeChat reply timeout budget");
     }
     options?.signal?.throwIfAborted();
-    const delivery = this.stateManager.prepareReplyDelivery(deliveryKey, digest, chunks.length);
-    if (delivery.acknowledgedChunks === chunks.length) return chunks.length;
+    traceEvent("wechat.reply.rendered", { chars: rendered.length, chunkCount: chunks.length,
+      durationMs: performance.now() - renderStarted });
+    const delivery = await traceSpan("wechat.reply.plan.persist", async () =>
+      this.stateManager.prepareReplyDelivery(deliveryKey, digest, chunks.length));
+    traceEvent("wechat.reply.plan", { chunkCount: chunks.length, acknowledgedChunks: delivery.acknowledgedChunks });
+    if (delivery.acknowledgedChunks === chunks.length) {
+      traceEvent("wechat.reply.reused", { outcome: "replayed" });
+      return chunks.length;
+    }
     const replyController = new AbortController();
     const replySignal = options?.signal ? AbortSignal.any([replyController.signal, options.signal]) : replyController.signal;
     const replyTimer = setTimeout(() => replyController.abort(new Error("WeChat reply timed out")), timeoutMs);
@@ -428,17 +450,22 @@ export class ILinkClient {
           if (options?.shouldContinue && !options.shouldContinue()) throw new Error("WeChat reply interrupted before completion");
           this.stateManager.consumeSendBudget(chatId, options?.kind ?? "final");
           // Persist intent before the network call. A crash or ambiguous response cannot trigger a replay.
-          this.stateManager.beginReplyChunk(deliveryKey, idx);
+          traceEvent("wechat.chunk.start", { chunkIndex: idx, chunkCount: chunks.length });
+          await traceSpan("wechat.chunk.intent.persist", async () => this.stateManager.beginReplyChunk(deliveryKey, idx), { chunkIndex: idx });
           try {
-            await this.sendSingleTextNow(chatId, chunks[idx], deterministicClientId, replySignal);
+            await traceSpan("wechat.chunk.send", () => this.sendSingleTextNow(chatId, chunks[idx], deterministicClientId, replySignal), { chunkIndex: idx });
           } catch (error) {
             if (error instanceof ILinkSendReceiptError &&
                 (error.reason === "RejectedRet" || error.reason === "RejectedErrcode")) {
               this.stateManager.rejectReplyChunk(deliveryKey, idx);
+              traceEvent("wechat.chunk.rejected", { chunkIndex: idx });
             }
+            traceEvent("wechat.chunk.failed", { chunkIndex: idx,
+              receiptStatus: this.stateManager.hasUncertainReply(deliveryKey) ? "uncertain" : "rejected" });
             throw error;
           }
-          this.stateManager.confirmReplyChunk(deliveryKey, idx);
+          await traceSpan("wechat.chunk.receipt.persist", async () => this.stateManager.confirmReplyChunk(deliveryKey, idx), { chunkIndex: idx });
+          traceEvent("wechat.chunk.accepted", { chunkIndex: idx, chunkCount: chunks.length });
         }, replySignal);
       }
       return chunks.length;

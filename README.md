@@ -403,6 +403,8 @@ Linux 宿主机必须允许非特权 user namespace，容器使用
 
 ## 验证与结果边界
 
+微信消息链路埋点、按消息查看各阶段耗时及观测边界见 [微信消息延迟分析](MESSAGE_LATENCY.md)。
+
 ```sh
 node scripts/verify.mjs                     # 完整验证
 node scripts/verify.mjs --suite unit        # 单测、构建、Go race/vet，无需 Docker
