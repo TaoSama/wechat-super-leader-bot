@@ -52,7 +52,7 @@ it("gives the actual planner a Beijing current time and concise display guidance
   const { service } = automations();
   const leader = new LeaderOrchestrator(new MemoryStore(), hub, { submit: vi.fn() }, { complete }, () => NOW,
     undefined, undefined, undefined, service);
-  await leader.handle("chat", "query", "现在有哪些任务");
+  await leader.handle("chat", "query", "现在有哪些任务，并核对观测来源");
   const prompt = complete.mock.calls[0][0][0].content;
   expect(prompt).toContain("当前时间：2026-10-18 23:14:05（北京时间）");
   expect(prompt).toContain(DISPLAY_TIME_GUIDANCE);

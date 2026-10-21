@@ -1,5 +1,31 @@
 const DEFAULT_MESSAGE_MAX_CHARS = 3800;
 const TRUNCATION_NOTICE = "\n\n[\u5185\u5BB9\u8FC7\u957F\uFF0C\u5DF2\u622A\u65AD]";
+const DIRECTORY_NOUN = "(?:会话|任务|sessions?|tasks?|agents?)";
+const DIRECTORY_STATUS = "(?<status>运行中(?:的)?|正在运行(?:的)?|活跃(?:的)?|空闲(?:的)?)?";
+const DIRECTORY_SCOPE = "(?:(?:当前|现在)(?:的)?)?(?:(?:所有|全部)(?:的)?)?(?:都)?(?:有哪些)?";
+const DIRECTORY_QUERY_PATTERNS = [
+  new RegExp(`^(?:请)?(?:帮我|给我)?(?:查看|查询|列出|看看|看一下|看下|查一下|查下|展示|显示)(?:我)?${DIRECTORY_SCOPE}${DIRECTORY_STATUS}${DIRECTORY_NOUN}(?:列表)?[？?。!！]?$`, "iu"),
+  new RegExp(`^(?:(?:当前|现在))?(?:都)?有哪些${DIRECTORY_STATUS}${DIRECTORY_NOUN}[？?。!！]?$`, "iu"),
+  new RegExp(`^${DIRECTORY_SCOPE}${DIRECTORY_STATUS}${DIRECTORY_NOUN}列表[？?。!！]?$`, "iu"),
+];
+const CONSOLE_LINK_QUERY = /^(?:请)?(?:(?:给我|发我|提供|获取|帮我获取)(?:一个|一下)?(?:控制台|控制端)(?:登录)?(?:链接|入口)|(?:打开|访问)(?:一下)?(?:控制台|控制端)(?:登录)?(?:页面|链接|入口)?|(?:控制台|控制端)(?:登录)?(?:链接|入口))[？?。!！]?$/u;
+/** Only standalone directory requests bypass native reasoning; any extra intent falls through. */
+function parseSessionDirectoryQuery(text) {
+  if (typeof text !== "string" || /[\r\n\u2028\u2029]/u.test(text)) return undefined;
+  const normalized = text.trim().replace(/[ \t]+/gu, "");
+  for (const pattern of DIRECTORY_QUERY_PATTERNS) {
+    const match = pattern.exec(normalized);
+    if (!match) continue;
+    const status = match.groups?.status;
+    return status ? { status: status.startsWith("空闲") ? "idle" : "active" } : {};
+  }
+  return undefined;
+}
+/** A console request must not silently absorb any other task or delivery instruction. */
+function isConsoleLinkQuery(text) {
+  return typeof text === "string" && !/[\r\n\u2028\u2029]/u.test(text) &&
+    CONSOLE_LINK_QUERY.test(text.trim().replace(/[ \t]+/gu, ""));
+}
 function unicodeSafeBoundary(text, end) {
   const last = text.charCodeAt(end - 1);
   const next = text.charCodeAt(end);
@@ -219,8 +245,10 @@ function markdownForWeChat(text, maxChars = DEFAULT_MESSAGE_MAX_CHARS) {
 export {
   DEFAULT_MESSAGE_MAX_CHARS,
   TRUNCATION_NOTICE,
+  isConsoleLinkQuery,
   markdownForWeChat,
   markdownToWeChat,
+  parseSessionDirectoryQuery,
   renderMarkdown,
   unicodeSafeBoundary
 };

@@ -24,16 +24,22 @@ const CONTEXT = 'latency-private-context';
 const MODEL_KEY = 'latency-private-model-secret';
 const ILINK_KEY = 'latency-private-ilink-secret';
 const FINAL = 'latency-private-model-final-must-be-replaced';
-const QUERIES = ['列出所有会话 latency-private-first-query', '再列出全部会话 latency-private-second-query'];
 const HTTP_MS = 5_000;
 const PROCESS_MS = 30_000;
 const MODEL_DELAY_MS = 80;
 const CHUNK_CHARS = 72;
 const MAX_DIAGNOSTIC_CHARS = 160;
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const { values } = parseArgs({ options: { run: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } });
+const { values } = parseArgs({ options: { run: { type: 'boolean' }, 'direct-directory': { type: 'boolean' }, 'direct-console': { type: 'boolean' },
+  help: { type: 'boolean', short: 'h' } } });
+const DIRECT_DIRECTORY = values['direct-directory'] ?? false;
+const DIRECT_CONSOLE = values['direct-console'] ?? false;
+assert(!(DIRECT_DIRECTORY && DIRECT_CONSOLE), 'Choose only one direct mode');
+const DIRECT = DIRECT_DIRECTORY || DIRECT_CONSOLE;
+const QUERIES = DIRECT_CONSOLE ? ['给我控制端链接', '控制台链接'] : DIRECT_DIRECTORY ? ['看一下我当前有哪些会话', '会话列表']
+  : ['列出所有会话 latency-private-first-query', '再列出全部会话 latency-private-second-query'];
 if (!values.run || values.help) {
-  console.log('Usage: node tests/integration/leader/message-latency.mjs --run\nRequires built Controller/Gateway, installed controller dependencies, Node >=24 and OpenSSL. Runs actual CLI processes with a loopback synthetic Responses model, HTTPS iLink, authenticated WSS daemon inventory and private temporary state. Verifies two-message batch timing, cross-service trace linkage, Project/status sorting, API-accepted chunk receipts and log privacy. No production endpoints, credentials or native sessions are used.');
+  console.log('Usage: node tests/integration/leader/message-latency.mjs --run [--direct-directory | --direct-console]\n--direct-console verifies one-time console login issuance and durable delivery without SDK or model HTTP calls.\n--direct-directory uses the actual Codex reply engine and verifies plain session lists bypass both SDK and model HTTP calls.\nRequires built Controller/Gateway, installed controller dependencies, Node >=24 and OpenSSL. Runs actual CLI processes with a loopback synthetic Responses model, HTTPS iLink, authenticated WSS daemon inventory and private temporary state. Verifies two-message batch timing, cross-service trace linkage, Project/status sorting, API-accepted chunk receipts and log privacy. No production endpoints, credentials or native sessions are used.');
 } else {
   await verifyMessageLatency().catch(error => { console.error(error); process.exitCode = 1; });
 }
@@ -169,8 +175,11 @@ globalThis.fetch = (input, init) => {
       healthy(); let output = '', stderr = '';
       gatewayChild = spawn(process.execPath, ['--import', preloadPath, 'gateway/dist/index.js', mode,
         '--controller-url', controller.base, '--credentials-path', accountPath, '--state-path', statePath,
-        '--leader-mode', 'controller', '--max-chars', String(CHUNK_CHARS)], {
-        cwd: ROOT, env: { ...env, CONTROLLER_TOKEN: token, NODE_EXTRA_CA_CERTS: certPath, GATEWAY_SEND_BUDGET: '100' },
+        '--leader-mode', DIRECT ? 'codex' : 'controller',
+        '--leader-root', join(directory, 'leader'), '--leader-model', 'fixture-model', '--max-chars', String(CHUNK_CHARS)], {
+        cwd: ROOT, env: { ...env, CONTROLLER_TOKEN: token, NODE_EXTRA_CA_CERTS: certPath, GATEWAY_SEND_BUDGET: '100',
+          GATEWAY_LEADER_API_KEY: MODEL_KEY, GATEWAY_LEADER_BASE_URL: `${modelOrigin}/v1`,
+          ...(DIRECT ? { GATEWAY_CODEX_PATH: join(directory, 'native-cli-must-not-run') } : {}) },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       gatewayChild.stdout.on('data', bytes => { output += bytes; });
@@ -189,12 +198,24 @@ globalThis.fetch = (input, init) => {
       create_time_ms: Date.now() - 300 + index, context_token: CONTEXT, item_list: [{ type: 1, text_item: { text } }] })));
     const gatewayEvents = await runGateway('--poll-once');
     const controllerEvents = latencyEvents(controllerOutput);
-    const expectedReply = `已观测会话：\n\nproject-zulu（${NODE}）\n[空闲] Zulu最近会话\n模型：fixture-model\n\n` +
-      `[运行中] Zulu较早会话\n模型：fixture-model\n\nproject-alpha（${NODE}）\n[空闲] Alpha完整会话\n模型：fixture-model\n\n仅展示在线节点已观测的会话。`;
-    assert.equal(sent.map(message => message.item_list[0].text_item.text).join(''), expectedReply.repeat(2),
-      'Actual WeChat content lost Project/status grouping, update ordering or an original title');
+    const expectedReply = `已观测会话：\n\nproject-zulu（${NODE}）\n1. [闲] Zulu最近会话\n` +
+      `2. [忙] Zulu较早会话\n\nproject-alpha（${NODE}）\n3. [闲] Alpha完整会话\n\n仅展示在线节点已观测的会话。`;
+    const delivered = sent.map(message => message.item_list[0].text_item.text).join('');
+    const consoleTokens = [...delivered.matchAll(/#login=([A-Za-z0-9_.~%-]+)/gu)].map(match => match[1]);
+    if (DIRECT_CONSOLE) {
+      assert.equal(consoleTokens.length, 2, 'Both direct console messages need a real issued link');
+      assert.notEqual(consoleTokens[0], consoleTokens[1]);
+      assert(delivered.includes(`${controller.base}/#login=`));
+      const journal = await readFile(join(directory, 'leader', hash([ACCOUNT, CHAT]), '.replies.json'), 'utf8');
+      for (const token of consoleTokens) assert(!journal.includes(token), 'Console token persisted in native reply journal');
+      assert(Object.values(JSON.parse(journal)).every(entry => entry.provenance === 'controller-console'));
+    } else {
+      assert.equal(delivered, expectedReply.repeat(2),
+        'Actual WeChat content lost Project/status grouping, update ordering or an original title');
+    }
     assert(sent.length > 2, 'Fixture did not exercise multipart API delivery');
-    assert.equal(requests.length, 4); assert.equal(requests.filter(request => request.final).length, 2);
+    assert.equal(requests.length, DIRECT ? 0 : 4);
+    assert.equal(requests.filter(request => request.final).length, DIRECT ? 0 : 2);
     const traceIds = messageIds.map(messageId => hash([CHAT, messageId]));
     const received = gatewayEvents.filter(event => event.stage === 'message.received');
     const processing = gatewayEvents.filter(event => event.stage === 'message.processing.start');
@@ -202,15 +223,25 @@ globalThis.fetch = (input, init) => {
     assert.equal(received[0].batchId, received[1].batchId);
     assert.deepEqual(received.map(event => event.batchIndex), [0, 1]);
     assert(gatewayEvents.indexOf(received[1]) < gatewayEvents.indexOf(processing[0]), 'Second inbound was observed after first processing');
-    assert(processing[1].batchWaitMs >= MODEL_DELAY_MS, 'Second-message batch wait is missing or understated');
+    assert(processing[1].batchWaitMs >= (DIRECT ? 0 : MODEL_DELAY_MS),
+      'Second-message batch wait is missing or understated');
     for (const traceId of traceIds) {
       const gatewayTrace = gatewayEvents.filter(event => event.traceId === traceId);
       const controllerTrace = controllerEvents.filter(event => event.traceId === traceId);
       assert(controllerTrace.length, 'Controller trace cannot be correlated by stable hashed message identity');
       assert(controllerTrace.every(event => event.parentAttemptId === gatewayTrace[0].attemptId && event.attemptId !== event.parentAttemptId));
       for (const stage of ['controller.received', 'controller.dedupe.end', 'controller.leader.end', 'controller.persist.end',
-        'controller.response.finish', 'model.complete.end', 'model.http.headers.end', 'model.http.body.end', 'model.http.parse.end']) {
+        'controller.response.finish', ...(DIRECT ? [] :
+          ['model.complete.end', 'model.http.headers.end', 'model.http.body.end', 'model.http.parse.end'])]) {
         assert(controllerTrace.some(event => event.stage === stage), `Missing Controller stage: ${stage}`);
+      }
+      if (DIRECT) {
+        assert(gatewayTrace.some(event => event.stage === (DIRECT_CONSOLE ? 'codex.console.controller.end' : 'codex.directory.controller.end') && event.outcome === 'ok'),
+          'Plain directory did not reach Controller through the Codex reply engine fast path');
+        assert(controllerTrace.some(event => event.stage === 'leader.tool.end' && event.tool === (DIRECT_CONSOLE ? 'get_console_link' : 'list_sessions') &&
+          event.source === (DIRECT_CONSOLE ? 'direct_console' : 'direct_directory') && event.outcome === 'ok'), 'Controller did not use the direct inventory tool');
+        assert(!controllerTrace.some(event => event.stage.startsWith('model.')), 'Plain directory invoked the Controller model');
+        assert(!gatewayTrace.some(event => event.stage.startsWith('codex.stream.')), 'Plain directory invoked the native SDK stream');
       }
       assert(gatewayTrace.some(event => event.stage === 'wechat.chunk.accepted'));
       assert(gatewayTrace.some(event => event.stage === 'wechat.send.accepted'));
@@ -219,13 +250,13 @@ globalThis.fetch = (input, init) => {
     }
     const allLogs = controllerOutput + gatewayOutput;
     for (const privateValue of [CHAT, CONTEXT, token, nodeToken, MODEL_KEY, ILINK_KEY, FINAL, ...QUERIES, ...messageIds,
-      ...sessions.map(session => session.title)]) assert(!allLogs.includes(privateValue), 'Synthetic content or secret leaked into CLI logs');
+      ...sessions.map(session => session.title), ...consoleTokens]) assert(!allLogs.includes(privateValue), 'Synthetic content or secret leaked into CLI logs');
     const state = JSON.parse(await readFile(statePath, 'utf8'));
     assert.equal(Object.keys(state.delivery_outbox).length, 0);
     assert.equal(Object.values(state.reply_deliveries).filter(delivery => !delivery.inFlight && delivery.acknowledgedChunks === delivery.totalChunks).length, 2);
     healthy();
-    console.log(JSON.stringify({ result: 'PASS', scenario: 'actual-cli-message-latency', messages: 2, projects: 2,
-      transport: 'HTTPS iLink + authenticated WSS', modelHttpRequests: requests.length, sentChunks: sent.length,
+    console.log(JSON.stringify({ result: 'PASS', scenario: DIRECT_CONSOLE ? 'actual-cli-direct-console-latency' : DIRECT_DIRECTORY ? 'actual-cli-direct-directory-latency' : 'actual-cli-message-latency', messages: 2, projects: 2,
+      transport: 'HTTPS iLink + authenticated WSS', modelHttpRequests: requests.length, direct: DIRECT, processingMs: traceIds.map(traceId => gatewayEvents.find(event => event.traceId === traceId && event.stage === 'message.processing.end').elapsedMs), sentChunks: sent.length,
       secondBatchWaitMs: processing[1].batchWaitMs, gatewayEvents: gatewayEvents.length,
       controllerEvents: controllerEvents.length, receivedBeforeProcessing: true, correlatedAttempts: 2,
       receipts: 'wechat_api_accepted', privacy: 'no input/output bodies, original IDs or secrets in CLI logs',

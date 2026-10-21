@@ -145,11 +145,13 @@ describe("message HTTP latency trace", () => {
     expect(body).toContain("other（mini）");
     expect(body.indexOf("app（macair）")).toBeLessThan(body.indexOf("other（mini）"));
     expect(body.indexOf("最新会话原标题")).toBeLessThan(body.indexOf("旧会话原标题"));
-    expect(body).toContain("[运行中] 最新会话原标题");
-    expect(body).toContain("[空闲] 旧会话原标题\n模型：desktop-model");
-    expect(body).toContain("[状态未知] 其他项目原标题\n模型：未知");
+    expect(body).toContain("1. [忙] 最新会话原标题");
+    expect(body).toContain("2. [闲] 旧会话原标题");
+    expect(body).toContain("3. [未知] 其他项目原标题");
     expect(body).not.toContain("[macair]");
     expect(body).not.toContain("stale-model");
+    expect(body).not.toContain("模型：");
+    expect(body).not.toContain("desktop-model");
     expect(listing).toHaveBeenCalledTimes(1);
     expect(sessions[0].status).toBe("notLoaded");
   });
