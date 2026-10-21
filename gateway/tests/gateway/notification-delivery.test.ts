@@ -423,8 +423,14 @@ test("run loop reports a sanitized send failure even without consuming the deliv
   t.mock.method(nodeFs, "writeSync", (_fd: number, chunk: string) => { diagnostics.push(chunk); return Buffer.byteLength(chunk); });
   await f.gateway.runLoop(0, error => cycleErrors.push(error), error => cycleErrors.push(error));
   assert.equal(cycleErrors.length, 0);
-  assert.equal(diagnostics.length, 1);
-  assert.equal(JSON.parse(diagnostics[0]).errorType, "NetworkError");
+  const events = diagnostics.map(line => JSON.parse(line));
+  const telemetry = events.filter(event => event.event === "message_latency");
+  assert.ok(telemetry.length > 0);
+  assert.ok(telemetry.every(event => event.schema === 1 && event.service === "gateway" && typeof event.stage === "string"));
+  const failures = events.filter(event => event.event !== "message_latency");
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].errorType, "NetworkError");
+  assert.ok(!diagnostics.join("").includes("private token/context/text/chatId"));
   assert.equal([...f.records.values()][0].status, "uncertain");
   assert.equal(f.sends.length, 1);
 });

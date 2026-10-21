@@ -1,9 +1,12 @@
 import { URL } from "node:url";
+import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
+import { traceEvent, traceSpan } from "../../runtime/telemetry.js";
 import { responsePayload } from "./responses.js";
 import { parseAndValidateResponse } from "./response-parser.js";
 import { cancelBodySafely, readBoundedStream, sleepWithAbort } from "./transport.js";
 import type { LeaderModel, ModelMessage, ModelTool, ModelReply } from "./contracts.js";
-import { ModelFailure, ModelTransportFailure, isQuotaError, providerErrorCode, retryDelay, transportFailure } from './errors.js';
+import { ModelFailure, ModelTransportFailure, isQuotaError, providerErrorCode, retryDelay, transportFailure, modelDiagnostic } from './errors.js';
 
 export interface HttpLeaderModelOptions {
   /**
@@ -160,6 +163,26 @@ export class HttpLeaderModel implements LeaderModel {
     tools: ModelTool[],
     signal?: AbortSignal
   ): Promise<ModelReply> {
+    const completionId = randomUUID();
+    return traceSpan("model.complete", async () => {
+      try {
+        const reply = await this.completeRequest(messages, tools, completionId, signal);
+        traceEvent("model.reply", { completionId, toolCalls: reply.toolCalls.length,
+          outputChars: reply.content?.length ?? 0 });
+        return reply;
+      } catch (error) {
+        const diagnostic = modelDiagnostic(error);
+        traceEvent("model.failure", { completionId, category: diagnostic.category,
+          httpStatus: diagnostic.httpStatus, attempt: diagnostic.attempts,
+          transportPhase: diagnostic.transportPhase });
+        throw error;
+      }
+    }, { completionId, model: this.model, inputChars: messages.reduce((total, message) => total + (message.content?.length ?? 0), 0) });
+  }
+
+  private async completeRequest(
+    messages: ModelMessage[], tools: ModelTool[], completionId: string, signal?: AbortSignal
+  ): Promise<ModelReply> {
     if (signal?.aborted) {
       throw signal.reason instanceof Error ? signal.reason : new Error("Model request aborted");
     }
@@ -184,7 +207,8 @@ export class HttpLeaderModel implements LeaderModel {
         throw new ModelFailure(`${failure.message}; retry exceeds request budget`, failure.diagnostic);
       }
       console.warn("Leader model temporary transport failure; retry scheduled", { ...failure.diagnostic, delayMs });
-      await sleepWithAbort(delayMs, combinedSignal);
+      await traceSpan("model.http.backoff", () => sleepWithAbort(delayMs, combinedSignal),
+        { completionId, attempt: attempt + 1, delayMs });
     };
 
     try {
@@ -195,96 +219,122 @@ export class HttpLeaderModel implements LeaderModel {
             : new Error("Model request aborted");
         }
 
-        let response: Response;
+        const attemptStarted = performance.now();
+        const attemptSpanId = randomUUID();
+        const attemptFields = { completionId, attempt: attempt + 1 };
+        traceEvent("model.http.attempt.start", { ...attemptFields, spanId: attemptSpanId });
+        let ended = false;
+        let status: number | undefined;
+        const finishAttempt = (outcome: string) => {
+          if (ended) return;
+          ended = true;
+          traceEvent("model.http.attempt.end", { ...attemptFields, spanId: attemptSpanId,
+            httpStatus: status, durationMs: performance.now() - attemptStarted, outcome });
+        };
         try {
-          response = await this.fetchImpl(this.endpoint, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${this.apiKey}`,
-            },
-            body: bodyString,
-            redirect: "error",
-            signal: combinedSignal,
-          });
-        } catch (fetchErr: unknown) {
-          if (combinedSignal.aborted) {
-            throw combinedSignal.reason instanceof Error
-              ? combinedSignal.reason
-              : new Error("Model request aborted");
-          }
-          await retryTransport(transportFailure(fetchErr, "fetch", attempt + 1), attempt);
-          continue;
-        }
-
-        if (!response || typeof response.status !== "number") {
-          throw new ModelFailure("Invalid model transport response", { category: "invalid_response", attempts: attempt + 1 });
-        }
-
-        if (!response.ok) {
-          const isJson = response.headers.get("content-type")?.includes("json");
-          let code: string | undefined;
-          if (response.status === 429 || isJson) {
-            try {
-              code = providerErrorCode(await readBoundedStream(response.body, this.maxResponseBytes, combinedSignal));
-            } catch {
-              // The HTTP failure is already known; optional diagnostics must not replace it.
-              // Do not retry when an unreadable body could conceal a quota failure.
-              throw new ModelFailure(`Model request failed with HTTP status ${response.status}; error details unavailable`, {
-                category: "http", httpStatus: response.status, attempts: attempt + 1,
-              });
+          let response: Response;
+          try {
+            response = await traceSpan("model.http.headers", () => this.fetchImpl(this.endpoint, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${this.apiKey}`,
+              },
+              body: bodyString,
+              redirect: "error",
+              signal: combinedSignal,
+            }), attemptFields);
+          } catch (fetchErr: unknown) {
+            if (combinedSignal.aborted) {
+              throw combinedSignal.reason instanceof Error
+                ? combinedSignal.reason
+                : new Error("Model request aborted");
             }
-          } else {
-            cancelBodySafely(response.body);
+            finishAttempt("transport_error");
+            await retryTransport(transportFailure(fetchErr, "fetch", attempt + 1), attempt);
+            continue;
           }
-          if (RETRYABLE_STATUS_CODES.has(response.status) && !isQuotaError(code) && attempt < MAX_MODEL_ATTEMPTS - 1) {
-            const delayMs = retryDelay(response, this.retryDelayMs, attempt);
-            if (delayMs >= completionDeadline - Date.now()) {
-              console.warn("Leader model temporary HTTP failure; retry exceeds request budget", {
-                category: "http", httpStatus: response.status, providerCode: code, attempt: attempt + 1, delayMs,
-              });
-              throw new ModelFailure(`Model request failed with HTTP status ${response.status}; retry exceeds request budget`, {
-                category: "http", httpStatus: response.status, providerCode: code, attempts: attempt + 1,
-              });
+
+          if (!response || typeof response.status !== "number") {
+            throw new ModelFailure("Invalid model transport response", { category: "invalid_response", attempts: attempt + 1 });
+          }
+
+          status = response.status;
+          traceEvent("model.http.response_headers", { ...attemptFields, httpStatus: status });
+          if (!response.ok) {
+            const isJson = response.headers.get("content-type")?.includes("json");
+            let code: string | undefined;
+            if (response.status === 429 || isJson) {
+              try {
+                code = providerErrorCode(await traceSpan("model.http.error_body", () =>
+                  readBoundedStream(response.body, this.maxResponseBytes, combinedSignal), attemptFields));
+              } catch {
+                // The HTTP failure is already known; optional diagnostics must not replace it.
+                // Do not retry when an unreadable body could conceal a quota failure.
+                throw new ModelFailure(`Model request failed with HTTP status ${response.status}; error details unavailable`, {
+                  category: "http", httpStatus: response.status, attempts: attempt + 1,
+                });
+              }
+            } else {
+              cancelBodySafely(response.body);
             }
-            console.warn("Leader model temporary HTTP failure; retry scheduled", {
-              category: "http", httpStatus: response.status, providerCode: code, attempt: attempt + 1, delayMs,
-            });
-            try {
-              await sleepWithAbort(delayMs, combinedSignal);
-            } catch (error) {
-              if (combinedSignal.aborted) {
-                throw new ModelFailure(`Model request failed with HTTP status ${response.status}; retry interrupted by deadline`, {
+            if (RETRYABLE_STATUS_CODES.has(response.status) && !isQuotaError(code) && attempt < MAX_MODEL_ATTEMPTS - 1) {
+              const delayMs = retryDelay(response, this.retryDelayMs, attempt);
+              if (delayMs >= completionDeadline - Date.now()) {
+                console.warn("Leader model temporary HTTP failure; retry exceeds request budget", {
+                  category: "http", httpStatus: response.status, providerCode: code, attempt: attempt + 1, delayMs,
+                });
+                throw new ModelFailure(`Model request failed with HTTP status ${response.status}; retry exceeds request budget`, {
                   category: "http", httpStatus: response.status, providerCode: code, attempts: attempt + 1,
                 });
               }
-              throw error;
+              console.warn("Leader model temporary HTTP failure; retry scheduled", {
+                category: "http", httpStatus: response.status, providerCode: code, attempt: attempt + 1, delayMs,
+              });
+              finishAttempt("retry");
+              try {
+                await traceSpan("model.http.backoff", () => sleepWithAbort(delayMs, combinedSignal),
+                  { completionId, attempt: attempt + 1, delayMs });
+              } catch (error) {
+                if (combinedSignal.aborted) {
+                  throw new ModelFailure(`Model request failed with HTTP status ${response.status}; retry interrupted by deadline`, {
+                    category: "http", httpStatus: response.status, providerCode: code, attempts: attempt + 1,
+                  });
+                }
+                throw error;
+              }
+              continue;
             }
-            continue;
+            // Never echo provider error body or tokens
+            throw new ModelFailure(`Model request failed with HTTP status ${response.status}`, {
+              category: "http", httpStatus: response.status, providerCode: code, attempts: attempt + 1,
+            });
           }
-          // Never echo provider error body or tokens
-          throw new ModelFailure(`Model request failed with HTTP status ${response.status}`, {
-            category: "http", httpStatus: response.status, providerCode: code, attempts: attempt + 1,
-          });
-        }
 
-        let rawText: string;
-        try {
-          rawText = await readBoundedStream(response.body, this.maxResponseBytes, combinedSignal);
-        } catch (error) {
-          if (combinedSignal.aborted) throw combinedSignal.reason;
-          if (error instanceof ModelTransportFailure) {
-            const failure = new ModelTransportFailure(error.retryable, { ...error.diagnostic, attempts: attempt + 1 });
-            await retryTransport(failure, attempt);
-            continue;
+          let rawText: string;
+          try {
+            rawText = await traceSpan("model.http.body", () =>
+              readBoundedStream(response.body, this.maxResponseBytes, combinedSignal), attemptFields);
+          } catch (error) {
+            if (combinedSignal.aborted) throw combinedSignal.reason;
+            if (error instanceof ModelTransportFailure) {
+              const failure = new ModelTransportFailure(error.retryable, { ...error.diagnostic, attempts: attempt + 1 });
+              finishAttempt("transport_error");
+              await retryTransport(failure, attempt);
+              continue;
+            }
+            if (error instanceof ModelFailure) throw new ModelFailure(error.message, { ...error.diagnostic, attempts: attempt + 1 });
+            throw new ModelFailure("Invalid model response stream", { category: "invalid_response", attempts: attempt + 1 });
           }
-          if (error instanceof ModelFailure) throw new ModelFailure(error.message, { ...error.diagnostic, attempts: attempt + 1 });
-          throw new ModelFailure("Invalid model response stream", { category: "invalid_response", attempts: attempt + 1 });
-        }
-        try {
-          return parseAndValidateResponse(rawText);
-        } catch (error) {
-          throw new ModelFailure(error instanceof Error ? error.message : "Invalid model response", { category: "invalid_response", attempts: attempt + 1 });
+          try {
+            const reply = await traceSpan("model.http.parse", async () => parseAndValidateResponse(rawText), attemptFields);
+            finishAttempt("ok");
+            return reply;
+          } catch (error) {
+            throw new ModelFailure(error instanceof Error ? error.message : "Invalid model response", { category: "invalid_response", attempts: attempt + 1 });
+          }
+        } finally {
+          finishAttempt("error");
         }
       }
 

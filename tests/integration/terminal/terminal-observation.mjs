@@ -131,8 +131,8 @@ export async function verifyTerminalObservation({ base, request, nodeToken, wait
     const message = text => request('/v1/messages', { chatId: 'test-chat', messageId: randomUUID(), text });
     const listed = await message('查询测试终端状态');
     assert.equal(listed.status, 200, JSON.stringify(listed.body));
-    assert(listed.body.text.includes('"statusSource":"terminal"'));
-    assert(listed.body.text.includes('"executionStatus":"active"'));
+    assert(listed.body.text.includes(`fixture（${TERMINAL_NODE}）`), JSON.stringify(listed.body));
+    assert(listed.body.text.includes('[运行中] 合成终端观测'), JSON.stringify(listed.body));
     assert(!methods.includes('pane.read'), 'List tool must not read terminal content');
     const commandsBeforeRead = (await request('/v1/status')).body.commands.length;
     const read = await message(READ_PREFIX + session.id);

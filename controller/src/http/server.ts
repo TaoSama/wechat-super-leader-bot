@@ -1,5 +1,6 @@
 import express, { Request, Response, NextFunction } from "express";
 import http from "http";
+import { createMessageTrace, runWithTrace, traceEvent, traceSpan } from "../runtime/telemetry.js";
 import fs from "fs";
 import { WebSocketServer, WebSocket } from "ws";
 import crypto from "crypto";
@@ -12,6 +13,8 @@ import {
   MAX_DAEMON_RESULT_MESSAGE_BYTES,
 } from "../types.js";
 import { NaturalLanguageResolver } from "../leader/queries/resolver.js";
+import { renderSessionDirectory } from "../leader/queries/session-directory.js";
+import { selectExecutionObservation, selectModelObservation } from "../sessions/observation.js";
 import { CommandService, CommandError } from "../commands/service.js";
 import { publicCommand } from "../commands/public.js";
 import { HttpLeaderModel } from "../leader/model/client.js";
@@ -303,89 +306,104 @@ export class ControllerServer {
         return;
       }
 
-      // Deduplication: Persist message dedupe
-      const existingMsg = await this.store.getMessage(chatId, messageId);
-      if (existingMsg) {
-        if (existingMsg.text !== text) throw new ConflictError("Message ID already used with different text");
-        res.json({
-          text: existingMsg.replyText,
-          commandId: existingMsg.commandId,
-          ...(existingMsg.images ? { images: existingMsg.images } : {}),
+      const trace = createMessageTrace(chatId, messageId, undefined, req.headers["x-latency-attempt"] as string | undefined);
+      await runWithTrace(trace, async () => {
+        traceEvent("controller.received", { inputChars: text.length });
+        let finished = false;
+        res.once("finish", () => runWithTrace(trace, () => {
+          finished = true;
+          traceEvent("controller.response.finish", { httpStatus: res.statusCode,
+            outcome: res.statusCode < 400 ? "ok" : "error" });
+        }));
+        res.once("close", () => {
+          if (!finished) runWithTrace(trace, () => traceEvent("controller.response.close", {
+            httpStatus: res.statusCode, outcome: "disconnected",
+          }));
         });
-        return;
-      }
+        await traceSpan("controller.message", async () => {
+          // Deduplication: Persist message dedupe
+          const existingMsg = await traceSpan("controller.dedupe", () => this.store.getMessage(chatId, messageId));
+          if (existingMsg) {
+            if (existingMsg.text !== text) throw new ConflictError("Message ID already used with different text");
+            traceEvent("controller.replay", { replayed: true });
+            res.json({
+              text: existingMsg.replyText,
+              commandId: existingMsg.commandId,
+              ...(existingMsg.images ? { images: existingMsg.images } : {}),
+            });
+            return;
+          }
 
-      if (this.leader) {
-        const reply = await this.leader.handle(chatId, messageId, text);
-        await this.store.recordMessage({ chatId, messageId, text, replyText: reply.text,
-          commandId: reply.commandId, ...(reply.images ? { images: reply.images } : {}), createdAt: new Date().toISOString() });
-        res.json(reply);
-        return;
-      }
+          if (this.leader) {
+            const reply = await traceSpan("controller.leader", () => this.leader!.handle(chatId, messageId, text));
+            await traceSpan("controller.persist", () => this.store.recordMessage({ chatId, messageId, text, replyText: reply.text,
+              commandId: reply.commandId, ...(reply.images ? { images: reply.images } : {}), createdAt: new Date().toISOString() }));
+            res.json(reply);
+            return;
+          }
 
-      // Resolve intent
-      const sessions = await this.hub.getAllSessions();
-      const lastCtx = this.chatContexts.get(chatId);
-      const intent = this.resolver.resolve(text, { sessions, lastContext: lastCtx });
+          // Resolve intent
+          const sessions = await traceSpan("controller.sessions", () => this.hub.getAllSessions());
+          const lastCtx = this.chatContexts.get(chatId);
+          const intent = this.resolver.resolve(text, { sessions, lastContext: lastCtx });
 
-      let replyText = "";
-      let commandId: string | undefined = undefined;
+          let replyText = "";
+          let commandId: string | undefined = undefined;
 
-      if (intent.action === "list_nodes") {
-        const nodes = this.hub.getNodeStatusList();
-        if (nodes.length === 0) {
-          replyText = "当前没有在线节点连接。";
-        } else {
-          const lines = nodes.map(
-            (n) => `- **${n.nodeId}**: ${n.connected ? "在线 (🟢)" : "离线 (🔴)"} | 会话数: ${n.sessionCount} | 最近心跳: ${n.lastHeartbeat}`
-          );
-          replyText = `### 节点列表\n\n${lines.join("\n")}`;
-        }
-      } else if (intent.action === "list_sessions") {
-        if (sessions.length === 0) {
-          replyText = "当前未发现任何活跃会话。";
-        } else {
-          const lines = sessions.map(
-            (s) => `- [**${s.nodeId}**] ${s.title || s.id} (ID: \`${s.id}\`, 状态: ${s.status}, 能力: ${s.capabilities.join("/")})`
-          );
-          replyText = `### 会话列表\n\n${lines.join("\n")}`;
-        }
-      } else if (intent.action === "clarification") {
-        replyText = intent.clarificationMessage || "请进一步明确指定目标会话。";
-      } else if (intent.action === "unknown") {
-        replyText = intent.replyText || "未能识别该指令意图。可以尝试“查看会话列表”或“查看进度”。";
-      } else if (intent.action === "read_session" || intent.action === "send_session") {
-        const action = intent.action === "read_session" ? "read" : "send";
-        try {
-          const command = await this.commands.submit({
-            nodeId: intent.nodeId!, sessionId: intent.sessionId!, action,
-            prompt: action === "send" ? intent.prompt : undefined,
-            requestId: makeMessageRequestId(chatId, messageId),
-          }, action === "read" ? 5000 : 4000,undefined,undefined,{type:"chat",chatId});
-          commandId = command.commandId;
-          this.chatContexts.set(chatId, { nodeId: intent.nodeId!, sessionId: intent.sessionId! });
-          replyText = action === "read" && command.status === "completed"
-            ? `会话 [${command.nodeId}] ${command.sessionId} 最新输出：\n${command.output || "(无输出内容)"}`
-            : `命令 ${commandId}：${command.status}。accepted 仅表示输入受理；pending/uncertain 请先核查状态，勿重复派发。`;
-        } catch (error) {
-          if (!(error instanceof CommandError || error instanceof ConflictError)) throw error;
-          replyText = `无法处理该请求：${error.message}`;
-        }
-      }
+          if (intent.action === "list_nodes") {
+            const nodes = this.hub.getNodeStatusList();
+            if (nodes.length === 0) {
+              replyText = "当前没有在线节点连接。";
+            } else {
+              const lines = nodes.map(
+                (n) => `- **${n.nodeId}**: ${n.connected ? "在线 (🟢)" : "离线 (🔴)"} | 会话数: ${n.sessionCount} | 最近心跳: ${n.lastHeartbeat}`
+              );
+              replyText = `### 节点列表\n\n${lines.join("\n")}`;
+            }
+          } else if (intent.action === "list_sessions") {
+            const capturedAt = this.now();
+            replyText = renderSessionDirectory(sessions.map(session => ({ ...session,
+              ...selectExecutionObservation(session, capturedAt),
+              modelView: selectModelObservation(session, capturedAt),
+            })));
+          } else if (intent.action === "clarification") {
+            replyText = intent.clarificationMessage || "请进一步明确指定目标会话。";
+          } else if (intent.action === "unknown") {
+            replyText = intent.replyText || "未能识别该指令意图。可以尝试“查看会话列表”或“查看进度”。";
+          } else if (intent.action === "read_session" || intent.action === "send_session") {
+            const action = intent.action === "read_session" ? "read" : "send";
+            try {
+              const command = await this.commands.submit({
+                nodeId: intent.nodeId!, sessionId: intent.sessionId!, action,
+                prompt: action === "send" ? intent.prompt : undefined,
+                requestId: makeMessageRequestId(chatId, messageId),
+              }, action === "read" ? 5000 : 4000,undefined,undefined,{type:"chat",chatId});
+              commandId = command.commandId;
+              this.chatContexts.set(chatId, { nodeId: intent.nodeId!, sessionId: intent.sessionId! });
+              replyText = action === "read" && command.status === "completed"
+                ? `会话 [${command.nodeId}] ${command.sessionId} 最新输出：\n${command.output || "(无输出内容)"}`
+                : `命令 ${commandId}：${command.status}。accepted 仅表示输入受理；pending/uncertain 请先核查状态，勿重复派发。`;
+            } catch (error) {
+              if (!(error instanceof CommandError || error instanceof ConflictError)) throw error;
+              replyText = `无法处理该请求：${error.message}`;
+            }
+          }
 
-      // Persist processed message record
-      await this.store.recordMessage({
-        chatId,
-        messageId,
-        text,
-        replyText,
-        commandId,
-        createdAt: new Date().toISOString(),
-      });
+          // Persist processed message record
+          await traceSpan("controller.persist", () => this.store.recordMessage({
+            chatId,
+            messageId,
+            text,
+            replyText,
+            commandId,
+            createdAt: new Date().toISOString(),
+          }));
 
-      res.json({
-        text: replyText,
-        commandId,
+          res.json({
+            text: replyText,
+            commandId,
+          });
+        });
       });
     });
 
