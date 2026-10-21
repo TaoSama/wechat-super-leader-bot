@@ -24,6 +24,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 FROM node:24-bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 curl python3-bs4 python3-html2text \
+    && rm -rf /var/lib/apt/lists/*
 # Install on the target platform so Codex's native sandbox matches the deployed CPU.
 RUN npm install --global @openai/codex@0.163.0 \
     && mkdir -p /var/lib/super-leader-background /var/lib/super-leader-artifacts \
@@ -36,5 +39,6 @@ COPY --from=controller-build --chown=node:node /work/controller/package.json ./p
 COPY --from=controller-build --chown=node:node /work/controller/node_modules ./node_modules
 COPY --from=controller-build --chown=node:node /work/controller/dist ./dist
 COPY --from=web-build --chown=node:node /web/dist ./web
+COPY deploy/skills/ /etc/codex/skills/
 USER node
 CMD ["node", "dist/index.js"]

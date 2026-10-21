@@ -12,7 +12,7 @@ import { ReplyEngineBackpressureError, ReplyEngineConflictError, ReplyEngineUnav
   type GatewayReplyEngine } from "./contracts.js";
 import { ControlMcp, CONTROL_TOKEN_ENV, hasConsoleCredential, redactConsoleCredentials } from "./control-mcp.js";
 import { DEFAULT_CONTROLLER_TIMEOUT_MS, DEFAULT_CONTROLLER_MAX_RETRIES } from "../runtime/budgets.js";
-import { HEADLESS_CODEX_CONFIG } from "./headless-config.js";
+import { HEADLESS_CODEX_CONFIG, HEADLESS_SKILLS_ROOT } from "./headless-config.js";
 import { traceEvent, traceSpan } from "../runtime/telemetry.js";
 import { NativeEventTrace, nativeId } from "./native-events.js";
 
@@ -61,6 +61,7 @@ function runtimeReadPath(codexPath?: string): string {
 function permissionOverrides(workspace: LeaderWorkspace, codexPath?: string): string[] {
   const filesystem = [
     [":minimal", "read"],
+    [HEADLESS_SKILLS_ROOT, "read"],
     [workspace.workspacePath, "write"],
     [workspace.codexHome, "deny"],
     [path.join(workspace.workspacePath, ".replies.json"), "deny"],
@@ -71,7 +72,7 @@ function permissionOverrides(workspace: LeaderWorkspace, codexPath?: string): st
     [runtimeReadPath(codexPath), "read"],
   ].map(([file, access]) => `${JSON.stringify(file)}=${JSON.stringify(access)}`).join(",");
   // Inline TOML avoids SDK dotted-key flattening corrupting filesystem paths.
-  // No parent profile is inherited: only runtime paths and this chat are readable.
+  // No parent profile is inherited: only runtime paths, skills and this chat are readable.
   return [`permissions.wechat_memory={filesystem={${filesystem}},network={enabled=true}}`];
 }
 

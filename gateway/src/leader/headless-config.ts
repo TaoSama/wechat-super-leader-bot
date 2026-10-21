@@ -1,6 +1,7 @@
 const MAX_CHAT_SUBAGENTS = 2;
 const DOCS_STARTUP_TIMEOUT_SECONDS = 10;
 const DOCS_TOOL_TIMEOUT_SECONDS = 30;
+export const HEADLESS_SKILLS_ROOT = "/etc/codex/skills";
 
 export const HEADLESS_CODEX_CONFIG = {
   features: {

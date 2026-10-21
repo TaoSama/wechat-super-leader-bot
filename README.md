@@ -227,8 +227,13 @@ Agent 可通过原生文件工具读取完整内容，并在回复前维护相�
 Goals 用于本轮目标管理，`exec` 完成后的自动续轮未作保证。后台 worker 使用相同的搜索与文档能力，继续由 Controller 管理并发、续跑和过期，
 不另启子 Agent 或 Goals。浏览器、Computer use 与桌面自动化在两条路径均显式关闭。
 这些配置不依赖开发机的配置文件、桌面插件、通知程序或本机路径。
-技能发现保留；由于 Codex 私有目录整体隔离，关闭该目录中不可读取的内置技能目录展示，不迁移本机技能。
-后续部署到聊天工作目录 `.agents/skills` 的技能仍使用原生发现机制。
+技能发现保留；由于 Codex 私有目录整体隔离，关闭该目录中不可读取的内置技能目录展示。
+两运行镜像包含 Python 3、curl、BeautifulSoup 和 html2text，随镜像只读提供
+`/etc/codex/skills/web-content-fetcher`，由 Codex 原生管理员技能目录发现。
+主聊天和后台 worker 只增加该技能目录的读取权限，不开放本机配置或私有 Codex 目录。
+该技能用于 HTTP/HTTPS 网页正文读取；需要登录、浏览器渲染或遇到验证页时如实说明，
+不将验证页视为文章，不启动浏览器。完整命令及边界见技能目录内的 `SKILL.md`。
+聊天工作目录 `.agents/skills` 的原生发现仍保留。
 
 延期回复按来源读取冻结结果，不重新调用模型或执行控制；发送完成凭证先持久保存，再确认和清理回复记录。
 每个聊天保留最多 128 条待交付或结果不明的记录，另保留最近 64 条已关闭记录，总日志上限 16 MiB。
@@ -404,6 +409,17 @@ Linux 宿主机必须允许非特权 user namespace，容器使用
 ## 验证与结果边界
 
 微信消息链路埋点、按消息查看各阶段耗时及观测边界见 [微信消息延迟分析](MESSAGE_LATENCY.md)。
+
+网页正文提取测试需要 Python >=3.9、curl 和两个 Python 库。本机运行单测或完整验证前，在项目虚拟环境安装固定版本；CI 使用临时虚拟环境，生产镜像使用 Debian 对应运行包。
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r deploy/skills/web-content-fetcher/requirements.txt
+. .venv/bin/activate
+node --test tests/unit/tooling/web-content-fetcher.test.mjs # 只验证网页提取
+```
+
+统一验证保留 `PATH`，因此激活虚拟环境后会使用其中的 Python，不需要传递额外环境变量。
 
 ```sh
 node scripts/verify.mjs                     # 完整验证
