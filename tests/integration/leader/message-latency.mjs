@@ -29,6 +29,7 @@ const HTTP_MS = 5_000;
 const PROCESS_MS = 30_000;
 const MODEL_DELAY_MS = 80;
 const CHUNK_CHARS = 72;
+const MAX_DIAGNOSTIC_CHARS = 160;
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const { values } = parseArgs({ options: { run: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } });
 if (!values.run || values.help) {
@@ -52,7 +53,10 @@ function respond(response, body) {
 }
 function latencyEvents(output) {
   return output.split('\n').filter(line => line.startsWith('{"schema":1,'))
-    .map(line => JSON.parse(line)).filter(event => event.event === 'message_latency');
+    .map(line => {
+      try { return JSON.parse(line); }
+      catch (cause) { throw new Error(`Malformed latency event: ${line.slice(0, MAX_DIAGNOSTIC_CHARS)}`, { cause }); }
+    }).filter(event => event.event === 'message_latency');
 }
 
 export async function verifyMessageLatency() {
@@ -178,7 +182,7 @@ globalThis.fetch = (input, init) => {
       try { [exit] = await once(gatewayChild, 'exit'); } finally { clearTimeout(timeout); }
       gatewayChild = undefined; gatewayOutput += output + stderr; healthy();
       assert.equal(exit, 0, `Actual Gateway CLI failed: ${stderr}${output}`);
-      return latencyEvents(output + stderr);
+      return latencyEvents(output + '\n' + stderr);
     };
     await runGateway('--establish-baseline');
     incoming.push(...QUERIES.map((text, index) => ({ message_type: 1, from_user_id: CHAT, client_id: messageIds[index],
