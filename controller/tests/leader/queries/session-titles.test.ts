@@ -13,7 +13,7 @@ describe("session title identity rendering", () => {
     const titles = new SessionTitles();
     const { sessions } = titles.listing({ sessions: [session()] });
     expect(sessions[0].title).toBe(ORIGINAL);
-    expect(visible(titles.render(`${sessions[0].displayLabel}\n正在核对资料`))).toBe(`已观测会话：\n\n未关联 Project（mac）\n[运行中] ${ORIGINAL}\n模型：gpt-6.1-sol\n\n仅展示在线节点已观测的会话。`);
+    expect(visible(titles.render(`${sessions[0].displayLabel}\n正在核对资料`))).toBe(`已观测会话：\n\n未关联 Project（mac）\n1. [忙] ${ORIGINAL}\n\n仅展示在线节点已观测的会话。`);
     expect(visible(sessionLabel("mac", "session-a", ORIGINAL))).toBe(`[mac] ${ORIGINAL}`);
   });
 
@@ -21,7 +21,7 @@ describe("session title identity rendering", () => {
     const titles = new SessionTitles();
     titles.listing({ sessions: [session()] });
     const rendered = visible(titles.render("微信 typing：已经完成上线。\n另起的新名字：待检查"));
-    expect(rendered).toBe(`已观测会话：\n\n未关联 Project（mac）\n[运行中] ${ORIGINAL}\n模型：gpt-6.1-sol\n\n仅展示在线节点已观测的会话。`);
+    expect(rendered).toBe(`已观测会话：\n\n未关联 Project（mac）\n1. [忙] ${ORIGINAL}\n\n仅展示在线节点已观测的会话。`);
     expect(rendered).not.toContain("另起的新名字");
     expect(rendered).not.toContain("已经完成上线");
   });
@@ -71,12 +71,12 @@ describe("session title identity rendering", () => {
     expect(rendered).not.toContain("改写后的B");
   });
 
-  it("retains exact repeated titles and distinguishes same-node IDs and separate nodes", () => {
+  it("retains exact repeated titles with distinct global numbers across project groups", () => {
     const titles = new SessionTitles();
     const listed = titles.listing({ sessions: [session("12345678a"), session("12345678b"), session("12345678a", ORIGINAL, "mini")] });
     const rendered = visible(titles.render(listed.sessions.map(item => item.displayLabel).join("\n")));
-    expect(rendered).toContain(`未关联 Project（mac）\n[运行中] ${ORIGINAL}（12345678a）\n模型：gpt-6.1-sol\n\n[运行中] ${ORIGINAL}（12345678b）`);
-    expect(rendered).toContain(`未关联 Project（mini）\n[运行中] ${ORIGINAL}`);
+    expect(rendered).toContain(`未关联 Project（mac）\n1. [忙] ${ORIGINAL}\n2. [忙] ${ORIGINAL}`);
+    expect(rendered).toContain(`未关联 Project（mini）\n3. [忙] ${ORIGINAL}`);
   });
 
   it("binds the correct specific target before preserving model progress analysis", () => {
@@ -90,7 +90,7 @@ describe("session title identity rendering", () => {
     const titles = new SessionTitles();
     const ref = titles.add(session());
     const rendered = visible(titles.render(`${ref}\n⟦session:invented:1⟧：已完成`));
-    expect(rendered).toBe(`已观测会话：\n\n[mac] ${ORIGINAL}\n运行中；模型：gpt-6.1-sol`);
+    expect(rendered).toBe(`已观测会话：\n\n[mac] ${ORIGINAL}\n忙；模型：gpt-6.1-sol`);
   });
 
   it("retains markdown characters and multiline title text literally in the rendered response", () => {
