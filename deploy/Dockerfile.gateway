@@ -32,6 +32,9 @@ RUN apt-get update \
 FROM node:24-bookworm-slim
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.revision=$VCS_REF
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 curl python3-bs4 python3-html2text \
+    && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 WORKDIR /app
 COPY --from=build --chown=node:node /work/gateway/package.json ./package.json
@@ -40,6 +43,7 @@ COPY --from=build --chown=node:node /work/gateway/dist ./dist
 COPY --from=build --chown=node:node /runtime/etc/super-leader /etc/super-leader
 COPY --from=build --chown=node:node /runtime/var/lib/super-leader-gateway /var/lib/super-leader-gateway
 COPY --from=runtime-certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY deploy/skills/ /etc/codex/skills/
 
 USER node
 

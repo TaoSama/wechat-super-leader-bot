@@ -8,6 +8,7 @@ const KILL_GRACE_MS = 3000;
 const HARD_STOP_MS = KILL_GRACE_MS + 1000;
 const DOCS_STARTUP_TIMEOUT_SECONDS = 10;
 const DOCS_TOOL_TIMEOUT_SECONDS = 30;
+const HEADLESS_SKILLS_ROOT = "/etc/codex/skills";
 const ENV_ALLOWLIST = ["PATH", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"] as const;
 
 export class WorkerExecutionFailure extends Error {
@@ -44,6 +45,7 @@ export class CodexCliExecutor implements WorkerExecutor {
     // Keep the default outside-workspace denial. Denying its ancestors as well
     // prevents Linux's filesystem helper from constructing the home mount.
     const filesystem = [[":minimal", "read"], [this.options.artifactRoot, "deny"], [request.workspace, "write"],
+      [HEADLESS_SKILLS_ROOT, "read"],
       [request.home, "deny"], ["/etc/super-leader", "deny"], ["/proc", "deny"],
       [path.resolve(path.dirname(command), ".."), "read"],
       [path.resolve(path.dirname(nodePath), ".."), "read"], ...nodeLibraries.map(file => [file, "read"])]

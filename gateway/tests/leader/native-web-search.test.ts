@@ -66,6 +66,7 @@ process.stdin.on("end", () => {
       assert.ok(permission);
       assert.ok(permission.includes(`${JSON.stringify(workspace.workspacePath)}="write"`));
       assert.ok(permission.includes(`${JSON.stringify(workspace.codexHome)}="deny"`));
+      assert.ok(permission.includes('"/etc/codex/skills"="read"'));
       assert.doesNotMatch(permission, /:root|danger-full-access|extends/);
       assert.equal(call.args.includes("--sandbox"), false, "Search must not replace the isolated permission profile");
       assert.equal(call.home, workspace.workspacePath);
