@@ -6,7 +6,7 @@ import test from 'node:test';
 import { verificationEnvironment } from '../../../scripts/verify.mjs';
 import { withTestCleanup } from '../../support/cleanup.mjs';
 import { createControllerFixture, createPostgresFixture, waitFor } from '../../support/control-plane-fixture.mjs';
-import { verifyDesktopRoute } from './desktop-route.mjs';
+import { createDesktopModelFixture, verifyDesktopRoute } from './desktop-route.mjs';
 
 const DESKTOP_NODE_ID = 'desktop-fixture-node';
 const SCENARIO_TIMEOUT_MS = 150_000;
@@ -22,21 +22,20 @@ test('original desktop owner: large snapshots, exact receipts, busy changes and 
   const token = randomBytes(24).toString('hex');
   const nodeToken = randomBytes(24).toString('hex');
   const modelErrors = [];
+  const desktopModel = createDesktopModelFixture();
   let controller;
   const model = createServer(async (request, response) => {
     try {
       let body = '';
       for await (const chunk of request) body += chunk;
       const last = JSON.parse(body).input.at(-1);
-      let output;
-      if (last.type === 'function_call_output') {
-        output = [{ type: 'message', role: 'assistant', status: 'completed',
-          content: [{ type: 'output_text', text: `Tool evidence: ${last.output}` }] }];
-      } else {
-        assert.equal(last.content, '查询桌面模型');
-        output = [{ type: 'function_call', call_id: 'fixture-list-sessions', name: 'list_sessions',
-          arguments: JSON.stringify({ nodeId: DESKTOP_NODE_ID }) }];
-      }
+      const message = desktopModel.respond(last);
+      assert(message, 'Synthetic desktop model received an unexpected request');
+      const output = message.tool_calls
+        ? message.tool_calls.map(call => ({ type: 'function_call', call_id: call.id,
+          name: call.function.name, arguments: call.function.arguments }))
+        : [{ type: 'message', role: 'assistant', status: 'completed',
+          content: [{ type: 'output_text', text: message.content }] }];
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ status: 'completed', output }));
     } catch (error) {
@@ -57,7 +56,7 @@ test('original desktop owner: large snapshots, exact receipts, busy changes and 
       LEADER_MODEL_NAME: 'local-fixture-only', LEADER_MODEL_API_KEY: 'non-secret-test-key',
     } });
     await controller.start();
-    await verifyDesktopRoute({ base: controller.base, request: controller.request, nodeToken, waitFor });
+    await verifyDesktopRoute({ base: controller.base, request: controller.request, nodeToken, waitFor, modelEvidence: desktopModel.outputs });
     assert.deepEqual(modelErrors, [], 'Synthetic model received an unexpected request');
   }, [
     { label: 'desktop scenario Controller', cleanup: () => controller?.stop() },

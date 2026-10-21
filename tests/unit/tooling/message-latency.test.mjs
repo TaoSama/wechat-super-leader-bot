@@ -100,6 +100,11 @@ test('keeps recovery-only attempts and orphan controller attempts explicit with 
   assert.equal(orphan.gatewayAttemptId, 'unknown');
   assert.equal(orphan.parentAttemptId, 'missing-parent');
   assert.equal(orphan.controllers[0].outcome, 'error');
+  const ackOnly = json([event('delivery.recovery.start'),
+    event('delivery.recovery.ack.end', { durationMs: 5, outcome: 'ok' })]).attempts[0];
+  assert.equal(ackOnly.deliveryOnlyAttempt, true);
+  assert.equal(ackOnly.deliveryReceipt, 'unknown');
+  assert.equal(ackOnly.timings.receivedToApiAcceptedMs, 'unknown');
 });
 
 test('preserves clock skew and never turns a negative platform interval into end-to-end latency', () => {

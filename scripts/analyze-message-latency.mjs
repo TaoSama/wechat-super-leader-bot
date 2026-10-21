@@ -93,7 +93,7 @@ function summarize(group) {
     outcome: processing?.outcome ?? delivery?.receiptStatus ?? UNKNOWN,
     deliveryReceipt: delivery?.receiptStatus ?? UNKNOWN,
     receiptReused: events.some(event => ['wechat.reply.reused', 'codex.journal.reused'].includes(event.stage)),
-    deliveryOnlyAttempt: !received && events.some(event => event.stage === 'delivery.start'),
+    deliveryOnlyAttempt: !received && events.some(event => event.stage.startsWith('delivery.')),
     nativeThreadResumed: events.some(event => event.stage === 'codex.thread.selected' && event.recovery === true),
     clockSkew: received?.clockSkew ?? UNKNOWN,
     batch: { id: received?.batchId ?? UNKNOWN, index: received?.batchIndex ?? UNKNOWN, count: received?.batchCount ?? UNKNOWN },

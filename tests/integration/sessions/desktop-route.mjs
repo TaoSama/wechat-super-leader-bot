@@ -5,7 +5,7 @@ import { once } from 'node:events';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertSkillPrompt, createSkillFixtures, SKILL_OUTPUT, SKILL_TURN_ID,
   verifySkillCombination } from './skill-combination.mjs';
@@ -18,10 +18,29 @@ const OUTPUT = 'EXACT_DESKTOP_FIXTURE_OUTPUT';
 const FRAME_LIMIT = 16 * 1024 * 1024;
 const LARGE_SNAPSHOT_BYTES = 17 * 1024 * 1024;
 const SNAPSHOT_LIMIT = 32 * 1024 * 1024;
+const MODEL_CALL_ID = 'fixture-desktop-model-view';
+
+/** Capture the real tool output received over the fixture model HTTP boundary. */
+export function createDesktopModelFixture() {
+  const outputs = [];
+  return {
+    outputs,
+    respond(last) {
+      if (last.content === '查询桌面模型') return { role: 'assistant', content: null, tool_calls: [{
+        id: MODEL_CALL_ID, type: 'function', function: { name: 'list_sessions', arguments: JSON.stringify({ nodeId: NODE_ID }) },
+      }] };
+      if (last.type === 'function_call_output' && last.call_id === MODEL_CALL_ID) {
+        outputs.push(JSON.parse(last.output));
+        return { role: 'assistant', content: '已读取桌面模型观测。' };
+      }
+      return null;
+    },
+  };
+}
 
 // Only called by the isolated PostgreSQL runner. Both socket and rollout paths
 // are newly created fixtures; no actual App, user session or credentials are used.
-export async function verifyDesktopRoute({ base, request, nodeToken, waitFor, onSkillReceipt, onHistoryReady }) {
+export async function verifyDesktopRoute({ base, request, nodeToken, waitFor, modelEvidence, onSkillReceipt, onHistoryReady }) {
   const directory = await mkdtemp(join(tmpdir(), 'sld-'));
   const socketPath = join(directory, 'desktop.sock');
   const binary = join(directory, 'daemon');
@@ -166,12 +185,33 @@ export async function verifyDesktopRoute({ base, request, nodeToken, waitFor, on
   }
   const status = async () => (await request('/v1/status')).body.sessions.find(s => s.nodeId === NODE_ID && s.id === SESSION_ID);
   const checkLeaderModel = async (model, effort) => {
+    assert(Array.isArray(modelEvidence), 'Desktop model fixture must capture tool output');
+    const previousOutputs = modelEvidence.length;
+    const raw = await status();
     const response = await request('/v1/messages', { chatId: 'test-chat', messageId: randomUUID(), text: '查询桌面模型' });
     assert.equal(response.status, 200);
-    assert(response.body.text.includes('"modelView"'), 'Leader tool omitted the model view');
-    assert(response.body.text.includes(`"model":"${model}"`), 'Leader tool lost the desktop model');
-    assert(response.body.text.includes(`"reasoningEffort":"${effort}"`), 'Leader tool lost the reasoning effort');
-    assert(response.body.text.includes('"source":"codex-desktop"'), 'Leader tool lost model provenance');
+    assert.equal(modelEvidence.length, previousOutputs + 1, 'Model did not receive exactly one session inventory');
+    const listed = modelEvidence.at(-1);
+    assert.equal(listed.sessions.length, 1);
+    const observed = listed.sessions[0];
+    assert.equal(observed.nodeId, NODE_ID);
+    assert.equal(observed.id, SESSION_ID);
+    assert.equal(observed.status, 'unknown', 'Selected desktop state rewrote the raw native status');
+    assert.equal(observed.loaded, false, 'Selected desktop state rewrote native loaded');
+    assert.equal(observed.model, undefined, 'Selected model rewrote raw native metadata');
+    assert.equal(observed.modelProvider, raw.modelProvider, 'Selected model rewrote raw native provider');
+    assert.deepEqual(observed.capabilities, ['read']);
+    assert.equal(observed.executionStatus, state.threadRuntimeStatus.type);
+    assert.equal(observed.statusSource, 'codex-desktop');
+    assert.deepEqual(observed.modelView, { model, modelProvider: 'fixture-desktop-provider',
+      reasoningEffort: effort, source: 'codex-desktop', observedAt: observed.desktopObservation.observedAt });
+    assert.equal(observed.desktopObservation.source, 'codex-desktop');
+    assert.equal(observed.desktopObservation.model, model);
+    assert.equal(observed.desktopObservation.reasoningEffort, effort);
+    assert(response.body.text.includes(`${basename(directory)}（${NODE_ID}）`), 'Directory lost Project/machine identity');
+    assert(response.body.text.includes(`[${state.threadRuntimeStatus.type === 'active' ? '运行中' : '空闲'}]`),
+      'Directory lost the selected execution state');
+    assert(response.body.text.includes(`模型：${model}`), 'Directory lost the selected desktop model');
   };
   const assertHealthy = () => {
     if (errors.length) throw new AggregateError(errors, `Desktop fixture protocol error: ${errors.map(error => error.message).join('; ')}`);
