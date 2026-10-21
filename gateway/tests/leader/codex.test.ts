@@ -56,6 +56,7 @@ test("native memory edits, early thread ID and restart resume persist in isolate
     }
     assert.ok(permissionProfile.includes(`${JSON.stringify(path.join(settings.workingDirectory!, "AGENTS.md"))}="read"`));
     assert.match(permissionProfile, /":minimal"="read"/);
+    assert.ok(permissionProfile.includes('"/etc/codex/skills"="read"'));
     assert.match(permissionProfile, /network=\{enabled=true\}/);
     assert.match(permissionProfile, /@openai\+codex@[^=]+="read"/);
     assert.doesNotMatch(permissionProfile, /extends|:root|sandbox_mode|sandbox_workspace_write|:workspace_roots/);

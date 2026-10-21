@@ -75,6 +75,7 @@ describe("Codex CLI process contract", () => {
       expect(observed.args.join(" ")).toContain('"/proc"="deny"');
       const profile = observed.args.find((value: string) => value.startsWith('permissions.background_worker='));
       expect(profile).toContain('\":minimal\"=\"read\"');
+      expect(profile).toContain('\"/etc/codex/skills\"=\"read\"');
       const canonicalWorkspace = fs.realpathSync(f.workspace);
       expect(profile).toContain(`${JSON.stringify(canonicalWorkspace)}=\"write\"`);
       expect(profile).toContain(`${JSON.stringify(path.join(path.dirname(canonicalWorkspace), "home"))}=\"deny\"`);
