@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { markdownToWeChat } from "@super-leader/wechat-text";
-import { groupSessionProjects, MAX_DIRECTORY_CHARS, renderSessionDirectory, type DirectorySession } from "../../../src/leader/queries/session-directory.js";
+import { groupSessionProjects, MAX_DIRECTORY_CHARS, renderSessionDirectory, sessionStatusLabel, type DirectorySession } from "../../../src/leader/queries/session-directory.js";
 import { SessionTitles } from "../../../src/leader/queries/session-titles.js";
 
 const session = (id: string, overrides: Partial<DirectorySession> = {}): DirectorySession => ({
@@ -23,8 +23,10 @@ describe("WeChat project directory", () => {
     const body = visible(titles.render("按机器列出：\n[demoair] 改写的标题"));
     expect(body.indexOf("app（demoair）")).toBeLessThan(body.indexOf("other（demoair）"));
     expect(body.indexOf("原始标题 new")).toBeLessThan(body.indexOf("原始标题 old"));
-    expect(body).toContain("[运行中] 原始标题 new");
-    expect(body).toContain("[空闲] 原始标题 old");
+    expect(body).toContain("1. [忙] 原始标题 new\n2. [闲] 原始标题 old\n3. [闲] 原始标题 unknown");
+    expect(body).toContain("other（demoair）\n4. [闲] 原始标题 other");
+    expect(body).not.toContain("模型：");
+    expect(body).not.toContain("gpt-6.1-sol");
     expect(body).not.toContain("[demoair]");
     expect(body).not.toContain("改写的标题");
   });
@@ -44,8 +46,29 @@ describe("WeChat project directory", () => {
     const groups = groupSessionProjects([session("unknown", { updatedAt: "invalid", executionStatus: "notLoaded" }), session("known")]);
     expect(groups[0].sessions.map(item => item.id)).toEqual(["known", "unknown"]);
     const body = visible(renderSessionDirectory(groups[0].sessions));
-    expect(body).toContain("[控制端未加载] 原始标题 unknown");
-    expect(visible(renderSessionDirectory([session("s", { executionStatus: "unexpected" })]))).toContain("[状态未知]");
+    expect(body).toContain("2. [未载] 原始标题 unknown");
+    expect(visible(renderSessionDirectory([session("s", { executionStatus: "unexpected" })]))).toContain("[未知]");
+  });
+
+  it.each([
+    ["active", "忙"], ["busy", "忙"], ["running", "忙"], ["idle", "闲"], ["done", "完"],
+    ["blocked", "等"], ["notLoaded", "未载"], ["unknown", "未知"], ["error", "错"],
+    ["unexpected", "未知"], [undefined, "未知"],
+  ])("uses a compact, accurate label for execution state %s", (status, label) => {
+    expect(sessionStatusLabel(status)).toBe(label);
+  });
+
+  it("keeps identical titles distinct by their global list number without appending session IDs", () => {
+    const title = "共同标题 | GPT-6.1-Sol";
+    const body = visible(renderSessionDirectory([
+      session("abcdefgh-one", { title }),
+      session("abcdefgh-two", { title }),
+      session("abcdefgh-three", { title, cwd: "/work/other" }),
+    ]));
+    expect(body).toContain(`1. [闲] ${title}\n2. [闲] ${title}`);
+    expect(body).toContain(`other（demoair）\n3. [闲] ${title}`);
+    expect(body).not.toContain("abcdefgh");
+    expect(body).not.toContain("模型：");
   });
 
   it("preserves literal titles and project names through the WeChat renderer", () => {
@@ -71,7 +94,8 @@ describe("WeChat project directory", () => {
     titles.listing({ sessions: Array.from({ length: 80 }, (_, index) => session(String(index), { title: `原始会话 ${index} ${"长标题".repeat(40)}` })) });
     const body = visible(titles.render("会话很多，请搜索"));
     expect(body.length).toBeGreaterThan(6000);
-    expect(body.match(/\[空闲\] 原始会话 /gu)).toHaveLength(80);
+    expect(body.match(/\[闲\] 原始会话 /gu)).toHaveLength(80);
+    expect(body).toContain("80. [闲] 原始会话 79");
     expect(body).not.toContain("请搜索");
   });
 
@@ -102,7 +126,9 @@ describe("WeChat project directory", () => {
     expect(shown.length).toBeLessThan(sessions.length);
     expect(body).toContain(`另有${sessions.length - shown.length}个会话因消息长度限制未展示。`);
     expect(body).toMatch(/仅展示在线节点已观测的会话。$/u);
-    expect(body.match(/\[空闲\]/gu)).toHaveLength(shown.length);
+    expect(body.match(/\[闲\]/gu)).toHaveLength(shown.length);
+    expect([...body.matchAll(/^(\d+)\. \[闲\]/gmu)].map(match => Number(match[1])))
+      .toEqual(Array.from({ length: shown.length }, (_, index) => index + 1));
     for (const item of sessions) {
       if (body.includes(`完整标题-${item.id}-`)) expect(body).toContain(item.title);
     }

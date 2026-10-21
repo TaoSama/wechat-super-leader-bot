@@ -42,8 +42,10 @@ node scripts/analyze-message-latency.mjs --input /tmp/message-latency.log --trac
 
 同一条消息可能有多次处理、HTTP 重试或仅恢复交付。分析器保留所有独立尝试与阶段耗时数组；一次早期分片成功不代表整条回复发送成功。阶段可能嵌套或重叠，**不能直接相加为端到端耗时**。
 
+明确的纯会话列表和控制台链接请求直接交给 Controller 的现有工具，不启动原生 Codex 或模型排版。Gateway 阶段为 `codex.directory.controller`、`codex.console.controller`，Controller 对应 `leader.tool` 的 `source=direct_directory/direct_console`。聊天锁、持久回复日志、请求防重、Controller 对话历史和微信 outbox 均继续生效；控制台链接仍由原发行器生成，原生回复日志仅保留受保护的来源标识。多意图、具体进度、项目筛选等未精确匹配的自然语言继续由模型处理。快通道没有 SDK 事件时，原生耗时和 TTFT 仍显示 `unknown`，不冒充为 0。
+
 平台时间与服务端存在时钟偏差时，端到端平台耗时显示 `unknown`；不同机器的 UTC 时间差也不能替代同进程单调时钟。SDK 首事件和首条 agent message **不是模型 TTFT**。当前 SDK 不提供可靠的原生 turn ID、真实 TTFT 或精确 CLI 退出时刻；`turn.completed` 到流排空也不等于纯 CLI 退出耗时。微信 API 接受仅证明接口受理，手机收到、通知弹出和已读时间仍不可观测。
 
 ## 微信会话目录
 
-微信列表按 Project 的完整工作目录和机器分组，Project 名后显示机器；组与组内按会话 `updatedAt` 最近更新倒序，未知时间排最后。会话前显示真实执行状态，原标题完整保留，未观测到的状态显示未知。未关联工作目录时明确显示“未关联 Project”。默认返回全部已观测会话；真正超过消息预算时保留完整条目并说明未展示数量。此规则不改变 Dashboard。
+微信列表按 Project 的完整工作目录和机器分组，Project 名后显示机器；组与组内按会话 `updatedAt` 最近更新倒序，未知时间排最后。会话跨 Project 连续编号，每项单独一行，仅展示短状态和完整原标题，不再额外展示模型。状态为忙、闲、完、等、未载、未知、错，未加载不等于空闲。未关联工作目录时明确显示“未关联 Project”。默认返回全部已观测会话；真正超过消息预算时保留完整条目并说明未展示数量。此规则不改变 Dashboard。

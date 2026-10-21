@@ -1,4 +1,4 @@
-import { sessionLabel, sessionLabels } from "../plans/presentation.js";
+import { sessionLabel } from "../plans/presentation.js";
 
 export const MAX_DIRECTORY_CHARS = 15000;
 const DIRECTORY_PREFIX = "已观测会话：\n\n";
@@ -17,10 +17,10 @@ export interface DirectorySession {
 }
 
 const STATUS_LABELS: Record<string, string> = {
-  active: "运行中", busy: "忙碌", running: "运行中", idle: "空闲", done: "已结束",
-  blocked: "等待处理", notLoaded: "控制端未加载", unknown: "状态未知", error: "异常",
+  active: "忙", busy: "忙", running: "忙", idle: "闲", done: "完",
+  blocked: "等", notLoaded: "未载", unknown: "未知", error: "错",
 };
-export const sessionStatusLabel = (status?: string) => STATUS_LABELS[status ?? "unknown"] ?? "状态未知";
+export const sessionStatusLabel = (status?: string) => STATUS_LABELS[status ?? "unknown"] ?? "未知";
 
 export interface SessionProject {
   name: string;
@@ -64,24 +64,22 @@ export function groupSessionProjects<T extends DirectorySession>(sessions: T[]) 
 
 export function renderSessionDirectory(sessions: DirectorySession[]): string {
   if (!sessions.length) return "当前筛选范围的已观测快照未发现会话；仅覆盖在线节点已观测的会话。";
+  let number = 0;
   const projects = groupSessionProjects(sessions).map(group => {
-    const titles = new Map(group.sessions.map(session => [session.id, session.title]));
-    const labels = sessionLabels(group.sessions.map(session => ({
-      nodeId: sessionStatusLabel(session.executionStatus), sessionId: session.id,
-    })), (_status, id) => titles.get(id));
-    const lines = group.sessions.map((session, index) => `${labels[index]}\n模型：${session.modelView?.model ?? "未知"}`);
+    const lines = group.sessions.map(session =>
+      `${++number}. ${sessionLabel(sessionStatusLabel(session.executionStatus), session.id, session.title)}`);
     // Reuse the title literal escaping so project metadata cannot become transport Markdown.
     const header = sessionLabel("", "", group.project.groupLabel).slice("[] ".length);
     return { header, lines };
   });
-  const complete = `${DIRECTORY_PREFIX}${projects.map(project => `${project.header}\n${project.lines.join("\n\n")}`).join("\n\n")}${DIRECTORY_COVERAGE}`;
+  const complete = `${DIRECTORY_PREFIX}${projects.map(project => `${project.header}\n${project.lines.join("\n")}`).join("\n\n")}${DIRECTORY_COVERAGE}`;
   if (complete.length <= MAX_DIRECTORY_CHARS) return complete;
   let directory = "";
   let shownCount = 0;
   // Reserve the omission notice before accepting a whole session, including its project header.
   for (const project of projects) {
     for (let index = 0; index < project.lines.length; index++) {
-      const prefix = index === 0 ? `${directory ? "\n\n" : ""}${project.header}\n` : "\n\n";
+      const prefix = index === 0 ? `${directory ? "\n\n" : ""}${project.header}\n` : "\n";
       const candidate = `${directory}${prefix}${project.lines[index]}`;
       const remaining = sessions.length - shownCount - 1;
       if (DIRECTORY_PREFIX.length + candidate.length + omissionNotice(remaining).length + DIRECTORY_COVERAGE.length > MAX_DIRECTORY_CHARS) {

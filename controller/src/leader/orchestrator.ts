@@ -1,4 +1,5 @@
 import { traceEvent, traceSpan } from "../runtime/telemetry.js";
+import { isConsoleLinkQuery, parseSessionDirectoryQuery } from "@super-leader/wechat-text";
 import { createHash, randomUUID } from "node:crypto";
 import { formatDisplayTime } from "../display-time.js";
 import { CommandError, CommandService } from "../commands/service.js";
@@ -385,6 +386,23 @@ export class LeaderOrchestrator {
     backgroundTurn: BackgroundTurn = { mutations: [], errors: [] }): Promise<ReasonedReply> {
     const signal = AbortSignal.timeout(TURN_TIMEOUT_MS);
     const sanitizedUserPrompt = sanitizeConsoleLinkSecrets(text);
+    const directoryQuery = parseSessionDirectoryQuery(text);
+    if (directoryQuery) {
+      const titles = new SessionTitles();
+      await traceSpan("leader.tool", () => this.callTool({ id: "session-directory", type: "function",
+        function: { name: "list_sessions", arguments: JSON.stringify(directoryQuery) } },
+      chatId, data, [], linkContext, signal, titles), { tool: "list_sessions", source: "direct_directory" });
+      signal.throwIfAborted();
+      return { text: titles.render(""), directory: true };
+    }
+    if (isConsoleLinkQuery(text)) {
+      await traceSpan("leader.tool", () => this.callTool({ id: "console-link", type: "function",
+        function: { name: "get_console_link", arguments: "{}" } },
+      chatId, data, [], linkContext, signal, new SessionTitles()), { tool: "get_console_link", source: "direct_console" });
+      signal.throwIfAborted();
+      return { text: linkContext.issuedLink ? this.attachConsoleLink("控制台", linkContext)
+        : "暂时无法获取控制台链接，请稍后再试。" };
+    }
     const assertCurrentAuthority = async () => {
       signal.throwIfAborted();
       const current = await this.store.getLeaderState(chatId);
