@@ -107,15 +107,33 @@ async function main() {
     });
     async function serve(request, response) {
       assert.equal(request.headers.authorization, `Bearer ${FIXTURE_TOKEN}`, 'Unexpected fixture credential');
+      const send = data => { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify(data)); };
+      if (request.url === '/v1/chats/notification-interest') {
+        assert.equal(request.method, 'GET');
+        return send({ chatIds: [CHAT], interested: [] });
+      }
       let raw = '';
       for await (const chunk of request) {
         raw += chunk;
         assert(raw.length <= 65536, 'Fixture request too large');
       }
       const body = JSON.parse(raw || '{}');
-      const send = data => { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify(data)); };
       assert.equal(request.method, 'POST', 'Unexpected fixture method');
       switch (request.url) {
+        case '/v1/notifications/pending':
+        case '/v1/deliveries/pending':
+          assert.deepEqual(body, { chatIds: [CHAT] });
+          return send({ items: [] });
+        case '/v1/deliveries/resume':
+          assert.equal(body.chatId, CHAT);
+          assert(Object.keys(body).every(key => ['chatId', 'generation'].includes(key)));
+          assert(body.generation === undefined || typeof body.generation === 'string' && body.generation.length > 0 && body.generation.length <= 512);
+          return send({ resumed: 0 });
+        case '/v1/deliveries/blocked':
+          assert.deepEqual(Object.keys(body).sort(), ['chatId', 'reason']);
+          assert.equal(body.chatId, CHAT);
+          assert(typeof body.reason === 'string' && body.reason.length > 0 && body.reason.length <= 128);
+          return send({ blocked: 0 });
         case '/ilink/bot/getupdates':
           return send({ ret: 0, errcode: 0, get_updates_buf: `cursor_${randomUUID()}`, msgs: queue.splice(0) });
         case '/ilink/bot/getconfig': return send({ ret: 0, typing_ticket: 'synthetic-typing' });
@@ -128,9 +146,19 @@ async function main() {
         case '/v1/chats/authorize':
           assert.deepEqual(body, { chatId: CHAT }, 'Unexpected authorization target');
           return send({ allowed: true });
-        case '/v1/messages':
+        case '/v1/tools/list':
+          assert.equal(body.chatId, CHAT, 'Unexpected discovery chat');
+          return send({ context: { history: [], memories: {} }, tools: [{ name: 'list_sessions', description: 'Read the synthetic project status.',
+            inputSchema: { type: 'object', properties: { arguments: { type: 'object', properties: {}, additionalProperties: false } },
+              required: ['arguments'], additionalProperties: false }, annotations: { readOnlyHint: true } }],
+          instructions: '查询合成项目的当前状态时调用 list_sessions，arguments 使用空对象。返回的识别码是本轮新事实。' });
+        case '/v1/tools/call':
+          assert.equal(body.chatId, CHAT, 'Unexpected tool chat');
+          assert.equal(body.name, 'list_sessions', 'Unexpected business tool');
+          assert.deepEqual(body.arguments, {}, 'Unexpected business arguments');
+          assert.match(body.callId, /^[a-f0-9]{64}$/, 'Missing stable call identity');
           forwarded.push(body);
-          return send({ text: `合成项目的当前状态为 ${markers.controller}，这是本次查询得到的随机事实。` });
+          return send({ result: { status: markers.controller } });
         default:
           unexpected.push('unexpected-fixture-route');
           response.writeHead(404); response.end();
@@ -188,14 +216,14 @@ async function main() {
     assert.equal(forwarded.length, 0, 'Recall message must not dispatch');
     evidence.checks.push({ check: 'new-cli-process-resumes-thread-and-recalls', passed: true,
       replySummary: boundedReply(second.text) });
-    const controlText = '请通过 control_current_request 工具查询合成项目的当前状态，并把 Controller 返回的识别码原样告诉我。这是只读查询，不要派发项目修改或外部消息。';
+    const controlText = '请通过 list_sessions 工具查询合成项目的当前状态，并把 Controller 返回的识别码原样告诉我。这是只读查询，不要派发项目修改或外部消息。';
     const third = await message(controlText);
     const nativeFiles = await recursivelyList(join(workspace, '.codex', 'sessions'));
     const transcript = (await Promise.all(nativeFiles.filter(path => path.endsWith('.jsonl')).map(path => readFile(path, 'utf8')))).join('\n');
     const events = transcript.split('\n').filter(line => line.trim()).map(line => JSON.parse(line));
     const controlReferences = events.filter(event => {
-      return (event.payload?.type === 'function_call' && /control_current_request/.test(event.payload.name || '')) ||
-        (event.payload?.type === 'custom_tool_call' && /control_current_request/.test(event.payload.input || ''));
+      return (event.payload?.type === 'function_call' && /list_sessions/.test(event.payload.name || '')) ||
+        (event.payload?.type === 'custom_tool_call' && /list_sessions/.test(event.payload.input || ''));
     }).length;
     const nativeTools = [...new Set(events.filter(event => ['function_call', 'custom_tool_call'].includes(event.payload?.type))
       .map(event => `${event.payload.type}:${/^[A-Za-z0-9_:.-]{1,160}$/.test(event.payload.name || '') ? event.payload.name : 'withheld'}`))];
@@ -204,10 +232,12 @@ async function main() {
     evidence.controlObservation = { forwardedCount: forwarded.length, nativeControlReferences: controlReferences,
       nativeTools, diagnosticMentions, replySummary: boundedReply(third.text) };
     assert.equal(third.summary.processedCount, 1);
-    assert.deepEqual(forwarded, [{ chatId: CHAT, messageId: third.inbound.client_id, text: controlText }],
-      'MCP must forward exactly the immutable current request once');
+    assert.equal(forwarded.length, 1, 'MCP must call the business tool exactly once');
+    assert.deepEqual({ chatId: forwarded[0].chatId, messageId: forwarded[0].messageId, text: forwarded[0].text },
+      { chatId: CHAT, messageId: third.inbound.client_id, text: controlText },
+      'MCP must retain the immutable current request');
     assert(third.text.includes(markers.controller), 'Reply missing fresh Controller result');
-    assert(controlReferences > 0, 'Native transcript has no control_current_request tool reference');
+    assert(controlReferences > 0, 'Native transcript has no list_sessions tool reference');
     evidence.checks.push({ check: 'real-mcp-query-preserves-current-request', passed: true,
       replySummary: boundedReply(third.text) });
     const beforeReplay = { replies: replies.length, forwarded: forwarded.length,

@@ -27,6 +27,20 @@ const TIMEOUT_MS = 90_000;
 const CHILD_OUTPUT_LIMIT = 262_144;
 const REQUEST_LIMIT = 8 * 1024 * 1024;
 const EXPECTED_VERSION = 'codex-cli 0.163.0';
+const METADATA_PROBE = `
+text(await tools.exec_command({cmd:"cat .agents/skills/headless-proof/SKILL.md",login:false,max_output_tokens:2000}));
+text(await tools.exec_command({cmd:"cat .codex/deny-probe.txt",login:false,max_output_tokens:2000}));
+try { text(await tools.list_mcp_resources({server:"openaiDeveloperDocs"})); }
+catch(error) { text({docsDiscoveryError:String(error)}); }
+text(ALL_TOOLS.map(({name}) => name));`;
+// The registry is captured when exec starts; MCP initialization updates the next exec's snapshot.
+const DOCS_PROBE = `
+text(ALL_TOOLS.map(({name}) => name));
+const docs = ALL_TOOLS.find(({name}) => name === "mcp__openaiDeveloperDocs__list_openai_docs");
+if (docs) {
+  try { text({docsNativeCall:await tools[docs.name]({limit:1})}); }
+  catch(error) { text({docsNativeError:String(error)}); }
+}`;
 const children = new Set();
 
 if (!values.run || values.help) console.log(`Usage: node tests/integration/leader/headless-tools.mjs --run [--gateway-cli PATH] [--codex-path PATH] [--evidence PATH] [--tls-key PATH --tls-cert PATH] [--require-docs]
@@ -102,19 +116,23 @@ async function main() {
     });
     async function serve(req, res) {
       assert.equal(req.headers.authorization, `Bearer ${TOKEN}`);
+      const send = data => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(data)); };
+      if (req.url === '/v1/chats/notification-interest') {
+        assert.equal(req.method, 'GET');
+        return send({ chatIds: [CHAT], interested: [] });
+      }
       assert.equal(req.method, 'POST');
       let raw = '';
       for await (const chunk of req) { raw += chunk; assert(raw.length <= REQUEST_LIMIT); }
       const body = JSON.parse(raw || '{}');
-      const send = data => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(data)); };
       if (req.url === '/v1/responses') {
         requests.push({ round, body });
         await writeFile(join(EVIDENCE, `responses-${requests.length}.json`), JSON.stringify({ round, body }, null, 2));
-        const previous = requests.filter(request => request.round === round).length > 1;
-        const item = previous ? { id: `msg_${randomUUID()}`, type: 'message', status: 'completed', role: 'assistant',
+        const ordinal = requests.filter(request => request.round === round).length;
+        const item = ordinal > 2 ? { id: `msg_${randomUUID()}`, type: 'message', status: 'completed', role: 'assistant',
           content: [{ type: 'output_text', annotations: [], text: `synthetic-native-tools-round-${round}` }] }
-          : { id: `ctc_${randomUUID()}`, type: 'custom_tool_call', call_id: `call_${round}`, name: 'exec',
-            namespace: 'functions', input: 'text(await tools.exec_command({cmd:"cat .agents/skills/headless-proof/SKILL.md",login:false,max_output_tokens:2000})); text(await tools.exec_command({cmd:"cat .codex/deny-probe.txt",login:false,max_output_tokens:2000})); await new Promise(resolve => setTimeout(resolve, 11000)); try { text(await tools.list_mcp_resources({server:"openaiDeveloperDocs"})); } catch(error) { text({docsDiscoveryError:String(error)}); } text(ALL_TOOLS.map(({name}) => name));' };
+          : { id: `ctc_${randomUUID()}`, type: 'custom_tool_call', call_id: `${ordinal === 1 ? 'call' : 'docs'}_${round}`, name: 'exec',
+            namespace: 'functions', input: ordinal === 1 ? METADATA_PROBE : DOCS_PROBE };
         res.writeHead(200, { 'content-type': 'text/event-stream' });
         const emit = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
         const id = `resp_${randomUUID()}`;
@@ -126,6 +144,20 @@ async function main() {
         return;
       }
       switch (req.url) {
+        case '/v1/notifications/pending':
+        case '/v1/deliveries/pending':
+          assert.deepEqual(body, { chatIds: [CHAT] });
+          return send({ items: [] });
+        case '/v1/deliveries/resume':
+          assert.equal(body.chatId, CHAT);
+          assert(Object.keys(body).every(key => ['chatId', 'generation'].includes(key)));
+          assert(body.generation === undefined || typeof body.generation === 'string' && body.generation.length > 0 && body.generation.length <= 512);
+          return send({ resumed: 0 });
+        case '/v1/deliveries/blocked':
+          assert.deepEqual(Object.keys(body).sort(), ['chatId', 'reason']);
+          assert.equal(body.chatId, CHAT);
+          assert(typeof body.reason === 'string' && body.reason.length > 0 && body.reason.length <= 128);
+          return send({ blocked: 0 });
         case '/ilink/bot/getupdates': return send({ ret: 0, errcode: 0, get_updates_buf: randomUUID(), msgs: queue.splice(0) });
         case '/ilink/bot/getconfig': return send({ ret: 0, typing_ticket: 'synthetic-typing' });
         case '/ilink/bot/sendtyping': return send({ ret: 0 });
@@ -135,6 +167,12 @@ async function main() {
           replies.push(body.msg.item_list.map(item => item.text_item.text).join(''));
           return send({ ret: 0, errcode: 0 });
         case '/v1/chats/authorize': assert.deepEqual(body, { chatId: CHAT }); return send({ allowed: true });
+        case '/v1/tools/list':
+          assert.equal(body.chatId, CHAT);
+          return send({ context: { history: [], memories: {} }, tools: [{ name: 'list_sessions', description: 'Synthetic read-only session inventory.',
+            inputSchema: { type: 'object', properties: { arguments: { type: 'object', properties: {}, additionalProperties: false } },
+              required: ['arguments'], additionalProperties: false }, annotations: { readOnlyHint: true } }],
+          instructions: 'Only expose synthetic read-only business tools. Native tool probes do not need to invoke Controller.' });
         default: throw new Error(`Unexpected synthetic fixture route ${req.url}`);
       }
     }
@@ -185,7 +223,9 @@ syncBuiltinESMExports();`);
       threadId = state.threadId;
       const observed = requests.filter(request => request.round === round);
       const metadata = observed.at(-1)?.body.input.find(item => item.type === 'custom_tool_call_output' && item.call_id === `call_${round}`);
-      const nativeOutput = (metadata?.output || []).filter(item => item.type === 'input_text').map(item => item.text);
+      const docsMetadata = observed.at(-1)?.body.input.find(item => item.type === 'custom_tool_call_output' && item.call_id === `docs_${round}`);
+      const nativeOutput = [...(metadata?.output || []), ...(docsMetadata?.output || [])]
+        .filter(item => item.type === 'input_text').map(item => item.text);
       const nativeResults = nativeOutput.filter(text => text.startsWith('{')).map(text => JSON.parse(text));
       const catalog = observed[0]?.body.input.filter(item => item.role === 'developer').flatMap(item => item.content || []).map(item => item.text || '').join('\n');
       const skillRoots = new Map([...catalog.matchAll(/^- `(r\d+)` = `([^`]+)`$/gm)].map(match => [match[1], match[2]]));
@@ -193,20 +233,28 @@ syncBuiltinESMExports();`);
       assert.equal(skillRoots.get(proofRoot), join(workspace, '.agents/skills'), 'Workspace skill not discovered');
       assert(!catalog.includes('.codex/skills/.system'), 'Inaccessible bundled skill path exposed');
       assert(nativeResults.some(item => item.exit_code === 0 && item.output?.includes(skillSentinel)), 'Native shell could not read workspace skill');
-      assert(nativeResults.some(item => item.exit_code !== 0 && /deny-probe.txt: Permission denied/.test(item.output || '')), 'CODEX_HOME marker was not denied');
+      assert(nativeResults.some(item => item.exit_code !== 0 && /deny-probe\.txt: (?:Permission denied|Operation not permitted)/.test(item.output || '')), 'CODEX_HOME marker was not denied');
       assert(!JSON.stringify(observed).includes(deniedSentinel), 'Denied CODEX_HOME marker leaked to model');
       const runtimeNames = nativeOutput.filter(text => text.startsWith('[')).flatMap(text => JSON.parse(text));
       const docsError = nativeOutput.filter(text => text.startsWith('{')).map(text => JSON.parse(text).docsDiscoveryError).find(Boolean);
       const docsAvailable = runtimeNames.some(name => /^mcp__openaiDeveloperDocs__/.test(name));
       const docs = { status: docsAvailable ? 'AVAILABLE' : /MCP startup failed[\s\S]*HTTP 403/.test(docsError || '')
         ? 'UNAVAILABLE_HTTP_403' : 'UNKNOWN', ...(docsError ? { error: docsError } : {}) };
+      if (docsAvailable) {
+        const docsCall = nativeResults.find(item => item.docsNativeCall)?.docsNativeCall;
+        assert(docsCall && docsCall.isError !== true, `Native Docs call failed: ${JSON.stringify(nativeResults.find(item => item.docsNativeError) || docsCall)}`);
+        const docsPayload = docsCall.content?.filter(item => item.type === 'text').map(item => JSON.parse(item.text))
+          .find(item => Array.isArray(item.hits));
+        assert(docsPayload?.hits.length > 0, 'Native Docs call returned no documentation');
+        docs.nativeCall = { name: 'list_openai_docs', hits: docsPayload.hits.length };
+      }
       evidence.rounds.push({ round, threadId, responsesRequests: observed.length,
         tools: observed.map(request => toolInventory(request.body)), runtimeNames, docs,
         skills: { discovered: true, nativeRead: true, bundledPathsAbsent: true, codexHomeDenied: true }, reply: replies.at(-1) });
-      assert.equal(observed.length, 2, 'Expected native metadata call and final response per round');
+      assert.equal(observed.length, 3, 'Expected native metadata, fresh Docs registry, and final response per round');
       assert.equal(replies.at(-1), `synthetic-native-tools-round-${round}`, 'Gateway did not deliver real native output');
       for (const capture of observed) verifyTools(capture.body, evidence.checks, round);
-      for (const name of ['exec_command', 'create_goal', 'get_goal', 'update_goal', 'web__run', 'mcp__wechat_control__control_current_request']) {
+      for (const name of ['exec_command', 'create_goal', 'get_goal', 'update_goal', 'web__run', 'mcp__wechat_control__list_sessions']) {
         assert(runtimeNames.includes(name), `Native runtime registry missing ${name}`);
       }
       assert.notEqual(docs.status, 'UNKNOWN', `Unexplained Docs discovery failure in round ${round}`);

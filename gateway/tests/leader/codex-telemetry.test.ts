@@ -1,3 +1,4 @@
+import { directToolController } from "./direct-tool-fixture.js";
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -12,7 +13,7 @@ import { createMessageTrace, runWithTrace } from "../../src/runtime/telemetry.js
 const request = { chatId: "chat", messageId: "message", text: "user-body-secret" };
 const usage = { input_tokens: 20, cached_input_tokens: 5, cache_write_input_tokens: 0,
   output_tokens: 4, reasoning_output_tokens: 2 };
-const noController = { forwardMessage: async () => { throw new Error("Unexpected controller call"); } };
+const noController = directToolController();
 
 function setup(t: TestContext, run: (sdk: CodexOptions) => AsyncIterable<ThreadEvent>) {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "codex-telemetry-"));
@@ -54,13 +55,20 @@ test("SDK lifecycle distinguishes turn completion, stream exhaustion, MCP close 
   await turnCompleted;
   stage(events, "codex.turn.completed");
   assert.equal(events.some(event => event.stage === "codex.stream.drained"), false);
-  assert.equal(events.some(event => event.stage === "codex.journal.outcome.save.end"), false);
-  release();
+  stage(events, "codex.journal.outcome.save.end");
   assert.deepEqual(await pending, { text: "reply-secret" });
+  assert.equal(stage(events, "codex.reply.ready").cleanupPending, true);
+  await runWithTrace(trace, () => engine.ackReply("account", request.chatId, request.messageId, "accepted"));
+  assert.equal(events.some(event => event.stage === "codex.stream.drained"), false,
+    "durable delivery receipts must not wait for SDK cleanup");
+  assert.equal(stage(events, "codex.journal.delivery.save.end").receiptStatus, "accepted");
+  release();
+  await engine.drain();
   const names = events.map(event => event.stage);
   assert.ok(names.indexOf("codex.turn.completed") < names.indexOf("codex.stream.drained"));
   assert.ok(names.indexOf("codex.stream.drained") < names.indexOf("codex.mcp.close.start"));
-  assert.ok(names.indexOf("codex.mcp.close.end") < names.indexOf("codex.journal.outcome.save.end"));
+  assert.ok(names.indexOf("codex.journal.outcome.save.end") < names.indexOf("codex.stream.drained"));
+  assert.ok(names.indexOf("codex.journal.delivery.save.end") < names.indexOf("codex.stream.drained"));
   assert.equal(stage(events, "codex.stream.begin").ttftAvailable, false);
   assert.equal(stage(events, "codex.stream.begin").nativeTurnIdAvailable, false);
   assert.equal(stage(events, "codex.stream.drained").cliExitTimeAvailable, false);
@@ -101,16 +109,15 @@ test("real MCP HTTP callbacks retain originating trace and time Controller call 
       const response = await fetch(server.url, { method: "POST", headers: {
         Authorization: `Bearer ${sdk.env![CONTROL_TOKEN_ENV]}`, "Content-Type": "application/json",
         Accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1,
-        method: "tools/call", params: { name: "control_current_request", arguments: {} } }) });
+        method: "tools/call", params: { name: "test_business", arguments: { arguments: {} } } }) });
       assert.equal(response.status, 200);
       await response.text();
     }
     yield { type: "item.completed", item: { id: "answer", type: "agent_message", text: "done" } };
     yield { type: "turn.completed", usage };
   });
-  await runWithTrace(trace, () => engine.reply("account", request, {
-    forwardMessage: async () => ({ text: "controller-reply-secret", commandId: "command-1" }),
-  }));
+  await runWithTrace(trace, () => engine.reply("account", request, directToolController(async () => ({ result: { checked: true },
+    reply: { text: "controller-reply-secret", commandId: "command-1" } }))));
   assert.equal(events.filter(event => event.stage === "codex.mcp.controller.start").length, 1);
   assert.equal(events.filter(event => event.stage === "codex.mcp.controller.end").length, 1);
   assert.equal(stage(events, "codex.mcp.controller.end").traceId, trace.traceId);

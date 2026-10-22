@@ -165,6 +165,15 @@ async function main() {
           return send({ ret: 0, errcode: 0 });
         case '/v1/chats/authorize': assert.deepEqual(body, { chatId: CHAT }); return send({ allowed: true });
         case '/v1/chats/notification-interest': return send({ chatIds: [], interested: [] });
+        case '/v1/tools/list':
+          assert.equal(req.method, 'POST');
+          assert.deepEqual(Object.keys(body).sort(), ['chatId', 'messageId', 'text']);
+          assert.equal(body.chatId, CHAT);
+          assert.equal(typeof body.messageId, 'string');
+          assert(body.messageId.trim());
+          assert.equal(body.text, ROOT_TEXT);
+          return send({ tools: [], instructions: '本轮为普通聊天与进度汇报；业务工具不可用。',
+            context: { history: [], memories: {} } });
         default: throw new Error(`Unexpected route ${req.method} ${req.url}`);
       }
     };

@@ -15,6 +15,8 @@ export const AUTOMATION_TOOLS: ModelTool[] = [
   tool("update_automation", "Pause, resume or cancel a schedule explicitly requested by the current user", UpdateSchema),
   tool("automation_runs", "Read persisted schedule execution results and command status", IdSchema),
 ];
+export const AUTOMATION_ARGUMENTS = { create_automation: CreateScheduleSchema, list_automations: EmptySchema,
+  update_automation: UpdateSchema, automation_runs: IdSchema };
 export const AUTOMATION_TOOL_NAMES = new Set(AUTOMATION_TOOLS.map(tool => tool.function.name));
 export async function executeAutomationTool(service: AutomationService, name: string, raw: unknown,
   authority: CreationAuthority, now = Date.now()): Promise<unknown> {
