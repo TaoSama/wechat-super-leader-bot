@@ -1,10 +1,12 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { harness } from "../fixtures/notification-fixtures.js";
 import { WeChatGateway } from "../../src/gateway.js";
 import { StateManager } from "../../src/runtime/state.js";
 import { ResultClient } from "../../src/controller/result-client.js";
-import { FileResultOutbox } from "../../src/results/outbox.js";
+import { FileResultOutbox, resultIdentity } from "../../src/results/outbox.js";
+import type { ResultDelivery } from "../../src/results/contracts.js";
 import { renewalDeliveryKey } from "../../src/results/renewal.js";
 import { LocalSendDeferredError } from "../../src/runtime/context-policy.js";
 
@@ -121,5 +123,26 @@ for (const evidence of ["unknown", "permanent-image-failure", "accepted"] as con
     assert.equal(f.sends.length, 0);
     assert.equal(restarted.contextBudgets.chat.remaining, 2);
     assert.deepEqual(f.acknowledgements, [evidence === "accepted" ? "accepted" : "uncertain"]);
+  });
+}
+
+for (const terminal of ["expired", "uncertain", "superseded"] as const) {
+  test(`a local stale ${terminal} result reference does not qualify without Controller interest`, async t => {
+    const f = fixture(t, 2);
+    f.state.removeOutbox("ordinary");
+    const now = Date.now(), id = randomUUID(), attemptId = randomUUID();
+    const item: ResultDelivery = { id, key: id, chatId: "chat", source: { type: "plan", id: "old-plan" },
+      kind: "completed", status: terminal === "expired" ? "ready" : terminal, mode: "text", messages: ["old result"],
+      artifact: { id: randomUUID(), chatId: "chat", name: "result.md", size: 10, sha256: "a".repeat(64), expiresAt: now + HOUR },
+      createdAt: now - HOUR, expiresAt: terminal === "expired" ? now - 1_000 : now + HOUR, retainedUntil: now + HOUR,
+      ...(terminal === "uncertain" ? { attemptId, attemptedAt: now - 2_000, attemptExpiresAt: now - 1_000 } : {}) };
+    const outbox = new FileResultOutbox(`${f.statePath}.results.json`, () => f.state.getLoginFingerprint());
+    outbox.put({ id, chatId: "chat", identity: resultIdentity(item), status: "pending" });
+    t.mock.method(f.client, "getDelivery", async () => item);
+    await f.create().deliverNotificationsOnce();
+    assert.equal(f.sends.length, 0);
+    assert.equal(f.state.contextBudgets.chat.remaining, 2);
+    const reconciled = new FileResultOutbox(`${f.statePath}.results.json`, () => f.state.getLoginFingerprint());
+    assert.deepEqual(reconciled.references(), [], "normal dispatcher still reconciles the stale reference");
   });
 }
