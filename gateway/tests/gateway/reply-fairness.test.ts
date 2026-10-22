@@ -6,9 +6,10 @@ import path from "node:path";
 import { StateManager } from "../../src/runtime/state.js";
 import { ControllerClient } from "../../src/controller/client.js";
 import { ILinkClient } from "../../src/wechat/client.js";
-import { WeChatGateway } from "../../src/gateway.js";
+import { WeChatGateway, type GatewayReplyEngine } from "../../src/gateway.js";
+import { ReplyEngineBackpressureError } from "../../src/leader/contracts.js";
 
-function fixture(t: TestContext) {
+function fixture(t: TestContext, outboxLimit?: number) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-reply-fairness-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const account = path.join(directory, "account.json");
@@ -19,10 +20,11 @@ function fixture(t: TestContext) {
   const timestamp = Date.now() - 1000;
   let page = 1;
   let beforeRead: ((messageId: string) => Promise<void>) | undefined;
-  const createState = () => new StateManager(account, statePath, { sendBudget: 1 });
+  const createState = () => new StateManager(account, statePath, { sendBudget: 1,
+    ...(outboxLimit === undefined ? {} : { outboxLimit }) });
   const state = createState();
   state.markBaselineEstablished();
-  const createGateway = (current: StateManager) => new WeChatGateway({ stateManager: current, splitMaxChars: 1,
+  const createGateway = (current: StateManager, replyEngine?: GatewayReplyEngine) => new WeChatGateway({ stateManager: current, splitMaxChars: 1, replyEngine,
     ilink: new ILinkClient({ stateManager: current, fetchImpl: async (input, init) => {
       const url = String(input);
       if (url.endsWith("getupdates")) return Response.json({ ret: 0, get_updates_buf: `cursor-${page}`, msgs: [{
@@ -85,6 +87,143 @@ test("fresh nonempty replies yield budget to deferred chunks, including after re
   await gateway.flushRepliesOnce();
   assert.deepEqual(f.sends, ["A", "B", "C", "D"], "recovery never replenishes budget");
 });
+
+test("a failed admission recovery read does not reject the new message or erase its old reply", async t => {
+  const f = fixture(t), gateway = f.createGateway(f.state);
+  await gateway.pollOnce();
+  const oldKey = f.state.computeDeliveryKey("chat", "m1");
+  f.setBeforeRead(async () => { throw new Error("synthetic frozen read failure"); });
+  f.nextPage();
+  const result = await gateway.pollOnce();
+  assert.equal(result.processedCount, 1);
+  assert.equal(f.state.isMessageProcessed(f.state.computeDeliveryKey("chat", "m2")), true);
+  assert.equal(f.state.outbox[oldKey].status, "pending");
+  assert.equal(f.state.replyDeliveries[oldKey].acknowledgedChunks, 1);
+  assert.deepEqual(f.posts, ["m1", "m2"]);
+  assert.deepEqual(f.sends, ["A", "C"]);
+  assert.equal(f.state.syncBuf, "cursor-2");
+  f.state.recordInboundContext("retry-old", "chat", Date.now(), true, "retry-context");
+  await assert.rejects(gateway.flushRepliesOnce(), /synthetic frozen read failure/,
+    "ordinary recovery must continue reporting its failures");
+  f.setBeforeRead(async () => undefined);
+  await gateway.flushRepliesOnce();
+  assert.deepEqual(f.sends, ["A", "C", "B"]);
+  assert.equal(f.state.outbox[oldKey], undefined);
+  assert.deepEqual(f.posts, ["m1", "m2"]);
+});
+
+test("a failed admission engine acknowledgement admits new work and retries only its receipt", async t => {
+  const f = fixture(t), modelRequests: string[] = [], reads: string[] = [];
+  let oldAcknowledgements = 0;
+  const engine: GatewayReplyEngine = { requestBudgetMs: 1000,
+    reply: async (_account, input) => {
+      modelRequests.push(input.messageId);
+      return { text: input.messageId === "m1" ? "AB" : "C" };
+    },
+    getReply: async (_account, _chat, messageId) => { reads.push(messageId); return { text: "AB" }; },
+    ackReply: async (_account, _chat, messageId) => {
+      if (messageId === "m1" && ++oldAcknowledgements === 1) throw new Error("synthetic receipt persistence failure");
+    },
+  };
+  const gateway = f.createGateway(f.state, engine);
+  await gateway.pollOnce();
+  f.nextPage();
+  await gateway.pollOnce();
+  assert.deepEqual(modelRequests, ["m1", "m2"]);
+  assert.deepEqual(reads, ["m1"]);
+  assert.equal(oldAcknowledgements, 2, "the failed acknowledgement is retried without reading or sending again");
+  assert.deepEqual(f.sends, ["A", "B"]);
+  assert.equal(f.state.outbox[f.state.computeDeliveryKey("chat", "m1")], undefined);
+  assert.equal(f.state.outbox[f.state.computeDeliveryKey("chat", "m2")].status, "pending");
+  assert.equal(f.state.isMessageProcessed(f.state.computeDeliveryKey("chat", "m2")), true);
+  assert.equal(f.state.syncBuf, "cursor-2");
+  assert.deepEqual(f.posts, []);
+});
+
+for (const status of ["pending", "receipt"] as const) {
+  test(`global recovery skips another active chat's ${status} engine item until its query finishes`, async t => {
+    const f = fixture(t);
+    const oldKey = f.state.computeDeliveryKey("chat", "old");
+    f.state.putOutbox({ kind: "reply", source: "engine", chatId: "chat", messageId: "old", deliveryKey: oldKey,
+      splitMaxChars: 1, splitMultiPart: true, status, ...(status === "receipt" ? { receiptStatus: "accepted" as const } : {}) });
+    let started!: () => void, release!: () => void;
+    const startedPromise = new Promise<void>(resolve => { started = resolve; });
+    const releasePromise = new Promise<void>(resolve => { release = resolve; });
+    let oldOperations = 0, queryActive = false;
+    const recoverOld = async () => {
+      oldOperations++;
+      if (oldOperations === 1) throw new Error("synthetic admission recovery failure");
+      if (queryActive) await releasePromise; // An engine recovery takes the same chat lock as reply().
+    };
+    const engine: GatewayReplyEngine = { requestBudgetMs: 1000,
+      reply: async () => {
+        queryActive = true;
+        started();
+        await releasePromise;
+        queryActive = false;
+        return { text: "C" };
+      },
+      getReply: async () => { await recoverOld(); return { text: "Q" }; },
+      ackReply: async (_account, _chat, messageId) => {
+        if (status === "receipt" && messageId === "old") await recoverOld();
+      },
+    };
+    const gateway = f.createGateway(f.state, engine);
+    const polling = gateway.pollOnce();
+    await Promise.race([startedPromise, polling.then(() => assert.fail("query must start and wait at the release gate"))]);
+    let recoveryFinished = false;
+    const recovery = gateway.flushRepliesOnce().then(() => { recoveryFinished = true; });
+    try {
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(recoveryFinished, true, "global recovery cannot wait for another active query's chat lock");
+      assert.equal(oldOperations, 1, "neither frozen reads nor terminal receipts may touch an unrelated active chat");
+      assert.equal(f.state.outbox[oldKey].status, status);
+    } finally {
+      release();
+      await Promise.all([polling, recovery]);
+    }
+    if (status === "pending") {
+      assert.equal(f.state.outbox[oldKey].status, "pending");
+      f.state.recordInboundContext("retry-old", "chat", Date.now(), true, "retry-context");
+      await gateway.flushRepliesOnce();
+      assert.deepEqual(f.sends, ["C", "Q"]);
+    } else assert.deepEqual(f.sends, ["C"]);
+    assert.equal(f.state.outbox[oldKey], undefined);
+    assert.equal(f.state.syncBuf, "cursor-1");
+  });
+}
+
+for (const pressure of ["outbox", "engine"] as const) {
+  test(`${pressure} backpressure recovery keeps the caller's active chat eligible`, async t => {
+    const f = fixture(t, pressure === "outbox" ? 1 : undefined);
+    const oldKey = f.state.computeDeliveryKey("chat", "old");
+    f.state.putOutbox({ kind: "reply", source: "engine", chatId: "chat", messageId: "old", deliveryKey: oldKey,
+      splitMaxChars: 1, splitMultiPart: true, status: "pending" });
+    let reads = 0, requests = 0, released = false;
+    const engine: GatewayReplyEngine = { requestBudgetMs: 1000,
+      reply: async () => {
+        requests++;
+        if (pressure === "engine" && requests === 1) throw new ReplyEngineBackpressureError();
+        assert.equal(released, true, "global backpressure recovery must release the caller's own old reply");
+        return { text: "C" };
+      },
+      getReply: async () => {
+        if (++reads === 1) throw new Error("synthetic admission recovery failure");
+        return { text: "Q" };
+      },
+      ackReply: async (_account, _chat, messageId) => { if (messageId === "old") released = true; },
+    };
+    await f.createGateway(f.state, engine).pollOnce();
+    assert.equal(reads, 2);
+    assert.equal(requests, pressure === "engine" ? 2 : 1);
+    assert.equal(f.state.outbox[oldKey], undefined);
+    assert.equal(f.state.outbox[f.state.computeDeliveryKey("chat", "m1")].status, "pending");
+    assert.equal(f.state.isMessageProcessed(f.state.computeDeliveryKey("chat", "m1")), true);
+    assert.deepEqual(f.sends, ["Q"]);
+    assert.deepEqual(f.posts, []);
+    assert.equal(f.state.syncBuf, "cursor-1");
+  });
+}
 
 test("fresh budget quarantines uncertain old chunks without GET, resend or re-POST", async t => {
   const f = fixture(t);
