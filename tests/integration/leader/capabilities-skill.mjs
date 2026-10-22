@@ -141,7 +141,7 @@ async function main() {
         const item = prior ? { id: `msg_${randomUUID()}`, type: 'message', role: 'assistant', status: 'completed', content: [{
           type: 'output_text', text: sourceReference, annotations: [] }] } : {
           id: `ctc_${randomUUID()}`, type: 'custom_tool_call', call_id: `read_${round}`, name: 'exec', namespace: 'functions',
-          input: `text(await tools.exec_command({cmd:${JSON.stringify(`cat '${skillRoot}/SKILL.md' '${skillRoot}/references/capabilities.md'`)},login:false,max_output_tokens:12000}));` };
+          input: `text(await tools.exec_command({cmd:${JSON.stringify(`cat '${skillRoot}/SKILL.md' '${skillRoot}/references/capabilities.md'`)},login:false,max_output_tokens:12000})); text({nativeToolNames:ALL_TOOLS.map(({name})=>name)});` };
         syntheticResponse(res, item); return;
       }
       routes.push(req.url);
@@ -190,9 +190,18 @@ async function main() {
       const state = JSON.parse(await readFile(join(workspace, '.thread.json'), 'utf8'));
       if (threadId) assert.equal(state.threadId, threadId, 'Expected resumed native thread'); threadId = state.threadId;
       const observed = requests.filter(item => item.round === round);
-      const toolNames = (observed[0].body.tools || []).flatMap(tool => tool.type === 'namespace'
-        ? tool.tools.map(nested => nested.name) : [tool.name]);
-      assert(toolNames.some(name => name === 'list_sessions' || name?.endsWith('__list_sessions')), 'Direct business tool discovery missing');
+      const declaredTools = [...(observed[0].body.tools || []), ...(observed[0].body.input || [])
+        .filter(item => item.type === 'additional_tools').flatMap(item => item.tools || [])];
+      const toolNames = declaredTools.flatMap(tool => tool.type === 'namespace'
+        ? tool.tools.map(nested => `${tool.name}__${nested.name}`) : [tool.name]);
+      const registry = observed.flatMap(item => item.body.input || [])
+        .filter(item => item.type === 'custom_tool_call_output' && item.call_id === `read_${round}`)
+        .flatMap(item => Array.isArray(item.output) ? item.output : [])
+        .filter(part => part.type === 'input_text' && /^\{\s*"nativeToolNames"\s*:/.test(part.text || ''))
+        .map(part => JSON.parse(part.text).nativeToolNames);
+      assert(registry.every(names => Array.isArray(names) && names.every(name => typeof name === 'string')), 'Invalid native tool registry result');
+      const runtimeNames = registry.flat();
+      assert([...toolNames, ...runtimeNames].includes('mcp__wechat_control__list_sessions'), 'Direct business tool discovery missing');
       const catalog = (observed[0].body.input || []).filter(item => item.role === 'developer').flatMap(item => item.content || []).map(item => item.text || '').join('\n');
       const roots = new Map([...catalog.matchAll(/^- `(r\d+)` = `([^`]+)`$/gm)].map(match => [match[1], match[2]]));
       const alias = catalog.match(/^- super-leader-capabilities:[^\n]*\(file: (r\d+)\/super-leader-capabilities\/SKILL\.md\)/m)?.[1];
@@ -209,7 +218,7 @@ async function main() {
       verifyHelp(delivered.join('\n'), sourceReference, !values.live || round === 1, false);
       if (answer.length > Number(values['max-chars'] || 3800)) assert(delivered.length > 1, 'WeChat delivery must split long help');
       await writeFile(join(EVIDENCE, `answer-${round}.md`), answer);
-      evidence.rounds.push({ round, threadId, requests: observed.length, discovery: true, skillRead: true, referenceRead: true, deliveryChunks: delivered.length, ...checks });
+      evidence.rounds.push({ round, threadId, requests: observed.length, discovery: true, runtimeNames, skillRead: true, referenceRead: true, deliveryChunks: delivered.length, ...checks });
     }
     assert.deepEqual(errors, []); assert(!routes.some(route => route.startsWith('/v1/messages')), 'Unexpected Controller execution');
     assert(!routes.includes('/v1/tools/call'), 'Capability help must not invoke a Controller business action');
