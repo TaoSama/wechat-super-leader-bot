@@ -399,7 +399,7 @@ export class PostgresStore implements IStore {
   private notificationCommandReader(client: Pick<pg.PoolClient, "query">, metadataOnly = false): Pick<IStore, "findCommandByRequestId"> {
     return { findCommandByRequestId: async requestId => {
       const columns = metadataOnly ? `command_id,request_id,node_id,session_id,action,prompt,status,expires_at,created_at,updated_at,skills,turn_id,send_route,input_receipt,delivery_mode,expected_turn_id,authority,queue_order,CASE WHEN status='completed' THEN substring(output from 1 for ${PROGRESS_OUTPUT_LIMIT}) END AS output` : "*";
-      const progressStatus = metadataOnly ? " AND status IN ('queued','pending','accepted','completed')" : "";
+      const progressStatus = metadataOnly ? " AND status IN ('admitting','queued','pending','accepted','completed')" : "";
       const result = await client.query(`SELECT ${columns} FROM commands WHERE request_id = $1${progressStatus}`, [requestId]);
       return result.rows[0] ? this.mapCommandRow(result.rows[0]) : null;
     } };
