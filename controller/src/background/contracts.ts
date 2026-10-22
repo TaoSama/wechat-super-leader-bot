@@ -3,6 +3,7 @@ import type { WorkerArtifact } from "./worker/contracts.js";
 import type { AutomationRun, RunnerOutcome, RunResult } from "../automations/contracts.js";
 
 export const WORKER_LIFETIME_MS = 24 * 60 * 60 * 1_000;
+export const DEFAULT_OBSERVATION_DEADLINE_MS = 60 * 60 * 1_000;
 export const BACKGROUND_LEASE_MS = 60_000;
 export const BACKGROUND_LEASE_RENEWAL_MS = 20_000;
 export const WORKER_SHUTDOWN_GRACE_MS = 60_000;
@@ -18,7 +19,7 @@ export const BackgroundSpecSchema = z.object({
   prompt: z.string().trim().min(1).max(128_000),
   sources: z.array(BackgroundSourceSchema).max(50).default([]),
   preferences: z.array(z.string().max(8_000)).max(50).default([]),
-  deadlineMs: z.number().int().positive().max(WORKER_LIFETIME_MS).default(6 * 60 * 60 * 1_000),
+  deadlineMs: z.number().int().positive().max(WORKER_LIFETIME_MS).default(DEFAULT_OBSERVATION_DEADLINE_MS),
   checkIntervalsMs: z.array(z.number().int().min(1_000).max(WORKER_LIFETIME_MS)).min(1).max(20).default(DEFAULT_CHECK_INTERVALS_MS),
 }).strict().refine(spec => spec.sources.every(source => source.offsetMs < spec.deadlineMs), {
   message: "Source expected time must precede the monitoring deadline", path: ["sources"],
