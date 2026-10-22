@@ -1,10 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { TurnIdSchema, type CommandRecord } from "../types.js";
 import { matchesExecutionCommand, type ExecutionRecord } from "../leader/plans/execution.js";
 import { matchesGoalCommand, type GoalRecord } from "../leader/goals/goal.js";
 import { normalizeNotification, validateNotificationTime, NOTIFICATION_PROGRESS_LIMIT, NOTIFICATION_TTL_MS,
   type NotificationSource, type StoredNotification } from "./contracts.js";
-import { notificationTaskTitle } from "./presentation.js";
 
 export const NOTIFICATION_PROGRESS_INITIAL_DELAY_MS = 30_000;
 export const NOTIFICATION_PROGRESS_INTERVAL_MS = 60_000;
@@ -35,32 +34,64 @@ export function progressNotificationBudgetAvailable(record: NotificationSourceRe
   return progress.length < NOTIFICATION_PROGRESS_LIMIT && progress.every(item => now >= item.createdAt + NOTIFICATION_PROGRESS_INTERVAL_MS);
 }
 
-/** Only exact, persisted command receipts establish a progress milestone. */
-export function createProgressNotification(record: NotificationSourceRecord, commands: readonly CommandRecord[],
-  notifications: readonly StoredNotification[], now: number): StoredNotification | null {
+export interface ProgressDraft { eventKey: string; text: string }
+export interface ProgressContext {
+  source: NotificationSource;
+  chatId: string;
+  eventKey: string;
+  remaining: number;
+  objective: string;
+  evidence: { step?: number; prompt: string; status: string; output?: string }[];
+}
+export const PROGRESS_TEXT_LIMIT = 2000;
+export const PROGRESS_OUTPUT_LIMIT = 4000;
+
+export function progressOutputExcerpt(output: string): string {
+  let excerpt = "", length = 0;
+  for (const character of output) {
+    if (length++ >= PROGRESS_OUTPUT_LIMIT) break;
+    excerpt += character;
+  }
+  return excerpt;
+}
+
+/** Waiting is persisted authorization; execution claims require exact matching command evidence. */
+export function progressNotificationContext(record: NotificationSourceRecord, commands: readonly CommandRecord[],
+  notifications: readonly StoredNotification[], now: number): ProgressContext | null {
   if (!progressNotificationBudgetAvailable(record, notifications, now)) return null;
   const source = notificationSource(record);
   const progress = notifications.filter(item => item.kind === "progress" && sameNotificationSource(item.source, source));
   const isPlan = "plan" in record;
   const actions = isPlan ? record.plan.actions : record.actions;
-  const receipts = actions.flatMap((_action, index) => {
+  const evidence: ProgressContext["evidence"] = actions.flatMap((action, index) => {
     const attempted = isPlan ? record.attempts[index] : record.actions[index].attempt;
-    const command = attempted && commands.find(item => isPlan ? matchesExecutionCommand(record, index, item) : matchesGoalCommand(record, index, item));
-    if (!command || !["accepted", "completed"].includes(command.status) || !TurnIdSchema.safeParse(command.turnId).success ||
-        command.inputReceipt || command.sendRoute === "terminal-pane" || command.sessionId.startsWith("terminal:")) return [];
-    return [{ command, index, stamp: Date.parse(command.updatedAt) }];
-  }).filter(item => Number.isFinite(item.stamp) && item.stamp <= now);
-  receipts.sort((a, b) => b.stamp - a.stamp || b.index - a.index);
-  const latest = receipts[0];
-  if (!latest) return null;
-  const eventKey = `${latest.command.commandId}:${latest.command.status}`;
+    if (!attempted) return [{ step: index + 1, prompt: action.prompt, status: "waiting" }];
+    const command = commands.find(item => isPlan ? matchesExecutionCommand(record, index, item) : matchesGoalCommand(record, index, item));
+    if (!command || command.inputReceipt || command.sendRoute === "terminal-pane" || command.sessionId.startsWith("terminal:") ||
+      !Number.isFinite(Date.parse(command.updatedAt)) || Date.parse(command.updatedAt) > now) return [];
+    if (["accepted", "completed"].includes(command.status) && !TurnIdSchema.safeParse(command.turnId).success) return [];
+    if (!["pending", "queued", "claimed", "accepted", "completed"].includes(command.status)) return [];
+    return [{ step: index + 1, prompt: action.prompt, status: command.status,
+      ...(command.status === "completed" && command.output ? { output: progressOutputExcerpt(command.output) } : {}),
+      commandId: command.commandId }];
+  });
+  if (!isPlan && !actions.length) evidence.push({ prompt: record.proposal.objective,
+    status: record.lease ? "deciding_next_action" : "waiting_for_decision" });
+  if (!evidence.length) return null;
+  const eventKey = createHash("sha256").update(JSON.stringify(evidence)).digest("hex");
   if (progress.some(item => item.kind === "progress" && item.progress.eventKey === eventKey)) return null;
-  const objective = isPlan ? record.plan.actions[0].prompt : record.proposal.objective;
-  const completed = receipts.filter(item => item.command.status === "completed").length;
-  const state = latest.command.status === "completed" ? `已收到第 ${latest.index + 1} 项任务的精确完成回执，累计完成 ${completed}/${actions.length} 项。` :
-    `第 ${latest.index + 1} 项任务已接收，正在等待精确完成回执。`;
-  return normalizeNotification({ id: randomUUID(), source, chatId: record.chatId, kind: "progress",
-    progress: { sequence: progress.length + 1, eventKey },
-    text: `### 任务进展\n\n**任务**：${notificationTaskTitle(objective)}\n\n${state}`,
-    status: "pending", createdAt: now, expiresAt: now + NOTIFICATION_TTL_MS });
+  return { source, chatId: record.chatId, eventKey, remaining: NOTIFICATION_PROGRESS_LIMIT - progress.length,
+    objective: isPlan ? record.plan.actions[0].prompt : record.proposal.objective,
+    evidence };
+}
+
+/** Model text is committed only while its original exact milestone is still current. */
+export function createProgressNotification(record: NotificationSourceRecord, commands: readonly CommandRecord[],
+  notifications: readonly StoredNotification[], now: number, draft?: ProgressDraft): StoredNotification | null {
+  if (!draft || typeof draft.text !== "string" || !draft.text.trim() || draft.text.length > PROGRESS_TEXT_LIMIT) return null;
+  const context = progressNotificationContext(record, commands, notifications, now);
+  if (!context || draft.eventKey !== context.eventKey) return null;
+  return normalizeNotification({ id: randomUUID(), source: context.source, chatId: record.chatId, kind: "progress",
+    progress: { sequence: NOTIFICATION_PROGRESS_LIMIT - context.remaining + 1, eventKey: context.eventKey },
+    text: draft.text.trim(), status: "pending", createdAt: now, expiresAt: now + NOTIFICATION_TTL_MS });
 }

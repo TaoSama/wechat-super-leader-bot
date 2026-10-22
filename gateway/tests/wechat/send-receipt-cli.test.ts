@@ -102,6 +102,7 @@ type Options = {
   sendBody?: unknown;
   sendStatus?: number;
   inbound?: boolean;
+  replyPendingRace?: boolean;
   controllerError?: { endpoint: "pending" | "messages"; status: number };
 };
 type Running = {
@@ -170,7 +171,11 @@ async function fixture(t: TestContext, options: Options = {}) {
     createdAt, expiresAt: createdAt + 60_000, retainedUntil: createdAt + 120_000,
   };
   const records = new Map<string, ResultDelivery>([[item.id, item]]);
-  let polls = 0, claims = 0, receipts = 0, defers = 0, pendingRequests = 0;
+  let polls = 0, claims = 0, receipts = 0, defers = 0, pendingRequests = 0, replyPendingDefers = 0;
+  let markInitialClaim!: () => void, markForwarded!: () => void, markReplyDeferred!: () => void;
+  const initialClaim = new Promise<void>(resolve => { markInitialClaim = resolve; });
+  const forwarded = new Promise<void>(resolve => { markForwarded = resolve; });
+  const replyDeferred = new Promise<void>(resolve => { markReplyDeferred = resolve; });
 
   async function stop(running: Running): Promise<void> {
     if (running.child.exitCode === null && running.child.signalCode === null) {
@@ -180,6 +185,7 @@ async function fixture(t: TestContext, options: Options = {}) {
     assert.equal(JSON.parse(fs.readFileSync(healthPath, "utf8")).status, "stopped");
   }
   t.after(async () => {
+    markInitialClaim(); markForwarded(); markReplyDeferred();
     const cleanupErrors: unknown[] = [];
     for (const running of children) {
       try { await stop(running); } catch (error) { cleanupErrors.push(error); }
@@ -219,6 +225,7 @@ async function fixture(t: TestContext, options: Options = {}) {
     const body = await readBody(req);
     if (req.url === "/ilink/bot/getupdates") {
       polls++;
+      if (options.replyPendingRace && polls === 1) await initialClaim;
       json(res, { ret: 0, get_updates_buf: "synthetic-next-cursor", msgs: options.inbound ? [{
         message_type: 1, from_user_id: CHAT, client_id: MESSAGE_ID, context_token: CONTEXT,
         create_time_ms: inboundCreatedAtMs,
@@ -277,6 +284,8 @@ async function fixture(t: TestContext, options: Options = {}) {
     if (req.url === "/v1/messages") {
       assert.deepEqual(body, { chatId: CHAT, messageId: MESSAGE_ID, text: INBOUND_TEXT });
       forwards.push(body);
+      markForwarded();
+      if (options.replyPendingRace) await replyDeferred;
       json(res, { text: REPLY_TEXT, errmsg: UPSTREAM_ERROR }, options.controllerError?.endpoint === "messages" ? options.controllerError.status : 200);
       return;
     }
@@ -295,6 +304,11 @@ async function fixture(t: TestContext, options: Options = {}) {
     const current = records.get(item.id)!;
     if (req.url === `/v1/deliveries/${item.id}/claim`) {
       claims++; assert.equal(current.status, "ready");
+      if (options.replyPendingRace && claims === 1) {
+        // Claim the existing result before inbound admission, then keep its response in flight until the reply is active.
+        markInitialClaim();
+        await forwarded;
+      }
       records.set(item.id, { ...current, status: "claimed", attemptId: body.attemptId as string,
         attemptedAt: Date.now(), attemptExpiresAt: Date.now() + 30_000 });
     } else if (req.url === `/v1/deliveries/${item.id}/materialize`) {
@@ -304,12 +318,18 @@ async function fixture(t: TestContext, options: Options = {}) {
         downloadUrl: `http://127.0.0.1:${controllerPort}/v1/result-artifacts/${current.artifact.id}/download?expires=${current.expiresAt}&signature=${"a".repeat(64)}` } } });
       return;
     } else if (req.url === `/v1/deliveries/${item.id}/defer`) {
-      defers++; assert.equal(body.attemptId, current.attemptId);
-      assert.equal(body.reason, "rejected");
+      defers++; assert.equal(current.status, "claimed"); assert.equal(body.attemptId, current.attemptId);
+      assert.ok(body.reason === "rejected" || options.inbound && body.reason === "reply_pending");
       assert.equal(body.submittedMessages, 0);
       const { attemptId: _attemptId, attemptedAt: _attemptedAt, attemptExpiresAt: _attemptExpiresAt, ...rest } = current;
-      records.set(item.id, { ...rest, status: "waiting_for_user", submittedMessages: 0,
-        lastDeferredAttemptId: body.attemptId as string, lastDeferReason: "rejected", lastDeferredAt: Date.now() });
+      const reason = body.reason as "rejected" | "reply_pending";
+      records.set(item.id, { ...rest, status: reason === "reply_pending" ? "ready" : "waiting_for_user", deferReason: reason,
+        submittedMessages: 0, lastDeferredAttemptId: body.attemptId as string, lastDeferReason: reason, lastDeferredAt: Date.now() });
+      if (reason === "reply_pending") {
+        replyPendingDefers++;
+        assert.equal(sends.length, 0, "A reply-pending defer cannot follow an actual send");
+        markReplyDeferred();
+      }
     } else {
       assert.equal(req.url, `/v1/deliveries/${item.id}/receipt`);
       receipts++; assert.equal(body.attemptId, current.attemptId);
@@ -322,7 +342,7 @@ async function fixture(t: TestContext, options: Options = {}) {
   const wechatPort = await listen(wechat), controllerPort = await listen(controller);
 
   function start(): Running {
-    const child = spawn(process.execPath, [CLI_PATH, "--run", "--notifications", "--poll-interval-ms", String(POLL_INTERVAL_MS),
+    const child = spawn(process.execPath, [CLI_PATH, "--run", "--poll-interval-ms", String(POLL_INTERVAL_MS),
       "--poll-timeout-ms", String(POLL_TIMEOUT_MS), "--credentials-path", accountPath, "--state-path", statePath,
       "--health-path", healthPath, "--controller-url", `http://127.0.0.1:${controllerPort}`,
       "--wechat-base-url", `https://127.0.0.1:${wechatPort}`], {
@@ -355,24 +375,26 @@ async function fixture(t: TestContext, options: Options = {}) {
     assert.deepEqual(errors, []);
   }
   return { start, stop, waitFor, assertPrivate, records, item, sends, forwards, statePath, accountPath, healthPath,
-    counts: () => ({ polls, claims, receipts, defers, pendingRequests }) };
+    counts: () => ({ polls, claims, receipts, defers, pendingRequests, replyPendingDefers }) };
 }
 
 for (const sendBody of [{}, { errmsg: "" }, { ret: 0 }, { message_id: "18446744073709551615" }]) {
   test(`real CLI accepts ${JSON.stringify(sendBody)} and persists inbound/result dedup across restart`, { timeout: TEST_MS }, async t => {
-    const f = await fixture(t, { sendBody, inbound: true });
+    const f = await fixture(t, { sendBody, inbound: true, replyPendingRace: true });
     const first = f.start();
     await f.waitFor(first, () => f.counts().polls >= 3 && f.sends.length === 2 && f.counts().receipts === 1);
     await f.stop(first); f.assertPrivate(first);
     assert.equal(f.records.get(f.item.id)!.status, "accepted");
-    assert.deepEqual([f.counts().claims, f.counts().receipts, f.sends.length, f.forwards.length], [1, 1, 2, 1]);
+    assert.deepEqual([f.counts().claims, f.counts().receipts, f.counts().defers, f.counts().replyPendingDefers,
+      f.sends.length, f.forwards.length], [2, 1, 1, 1, 2, 1]);
     const state = new StateManager(f.accountPath, f.statePath);
     assert.equal(state.isMessageProcessed(state.computeDeliveryKey(CHAT, MESSAGE_ID)), true);
     const initialPolls = f.counts().polls, second = f.start();
     await f.waitFor(second, () => f.counts().polls >= initialPolls + 3);
     await f.stop(second); f.assertPrivate(second);
     assert.deepEqual(diagnosticLines(first.output.stderr + second.output.stderr), []);
-    assert.deepEqual([f.counts().claims, f.counts().receipts, f.sends.length, f.forwards.length], [1, 1, 2, 1]);
+    assert.deepEqual([f.counts().claims, f.counts().receipts, f.counts().defers, f.counts().replyPendingDefers,
+      f.sends.length, f.forwards.length], [2, 1, 1, 1, 2, 1]);
   });
 }
 

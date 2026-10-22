@@ -30,7 +30,6 @@ services:
       WECHAT_CREDENTIALS_PATH: /etc/super-leader/wechat-account.json
       WECHAT_STATE_PATH: /var/lib/super-leader-gateway/state.json
       GATEWAY_HEALTH_PATH: /var/lib/super-leader-gateway/health.json
-      GATEWAY_NOTIFICATIONS: ${GATEWAY_NOTIFICATIONS:-false}
       GATEWAY_MAX_CHARS: ${GATEWAY_MAX_CHARS:-3800}
       GATEWAY_CONTEXT_WINDOW_MS: ${GATEWAY_CONTEXT_WINDOW_MS:-82800000}
       GATEWAY_SEND_BUDGET: ${GATEWAY_SEND_BUDGET:-10}

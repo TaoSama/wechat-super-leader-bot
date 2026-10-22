@@ -1,3 +1,4 @@
+import { ModelProgressRunner } from "../notifications/model-progress.js";
 import express, { Request, Response, NextFunction } from "express";
 import http from "http";
 import { createMessageTrace, runWithTrace, traceEvent, traceSpan } from "../runtime/telemetry.js";
@@ -35,6 +36,7 @@ import { hashConsoleToken } from "../console/types.js";
 import { createMediaRouter } from "../sessions/media-routes.js";
 import { createMessageReplyRouter } from "../sessions/message-reply-routes.js";
 import { createReadResponseCompression } from "./response-compression.js";
+import { createMessageStream } from "./message-stream.js";
 
 import { TaskNotifications } from "../runtime/task-notifications.js";
 import { createAutomationRouter } from "../automations/routes.js";
@@ -63,6 +65,7 @@ export class ControllerServer {
   private now: () => number;
   private statusEvents: StatusEvents<Awaited<ReturnType<ControllerServer["statusSnapshot"]>>>;
   private taskNotifications: TaskNotifications;
+  private progress?: ModelProgressRunner;
 
   // Chat context cache: chatId -> { nodeId, sessionId }
   private chatContexts = new Map<string, { nodeId: string; sessionId: string }>();
@@ -79,8 +82,11 @@ export class ControllerServer {
     const leaderModel = model ?? (config.leader ? new HttpLeaderModel(config.leader) : undefined);
     this.taskNotifications = new TaskNotifications(config, store, this.hub, this.commands, leaderModel, now, () => this.statusEvents?.changed());
     if (leaderModel) {
+      this.progress = new ModelProgressRunner(store, leaderModel, now, () => this.statusEvents?.changed(), undefined,
+        chatId => this.config.allowedChatIds.has(chatId));
       this.executions = new ExecutionScheduler(store, this.commands, { now,
         isChatAllowed: chatId => this.config.allowedChatIds.has(chatId),
+        onProgress: (source, createdAt) => this.progress!.request(source, createdAt),
         canDispatch: (execution, index) => {
           const action = execution.plan.actions[index];
           return !!action.sendRoute && this.commands.canDispatchSend(action, action.sendRoute);
@@ -89,6 +95,7 @@ export class ControllerServer {
       });
       this.goals = new GoalScheduler(store, this.commands, createGoalDecider(leaderModel), { now,
         isChatAllowed: chatId => this.config.allowedChatIds.has(chatId),
+        onProgress: (source, createdAt) => this.progress!.request(source, createdAt),
         canDispatch: (goal, targetIndex) => {
           const target = goal.proposal.targets[targetIndex];
           return !!target && this.commands.canDispatchSend(target, target.sendRoute);
@@ -306,6 +313,13 @@ export class ControllerServer {
         return;
       }
 
+      const stream = createMessageStream(req, res);
+      if (res.writableEnded) return;
+      const reply = async (value: unknown) => {
+        if (stream) await stream.reply(value);
+        else res.json(value);
+      };
+
       const trace = createMessageTrace(chatId, messageId, undefined, req.headers["x-latency-attempt"] as string | undefined);
       await runWithTrace(trace, async () => {
         traceEvent("controller.received", { inputChars: text.length });
@@ -326,7 +340,7 @@ export class ControllerServer {
           if (existingMsg) {
             if (existingMsg.text !== text) throw new ConflictError("Message ID already used with different text");
             traceEvent("controller.replay", { replayed: true });
-            res.json({
+            await reply({
               text: existingMsg.replyText,
               commandId: existingMsg.commandId,
               ...(existingMsg.images ? { images: existingMsg.images } : {}),
@@ -335,10 +349,10 @@ export class ControllerServer {
           }
 
           if (this.leader) {
-            const reply = await traceSpan("controller.leader", () => this.leader!.handle(chatId, messageId, text));
-            await traceSpan("controller.persist", () => this.store.recordMessage({ chatId, messageId, text, replyText: reply.text,
-              commandId: reply.commandId, ...(reply.images ? { images: reply.images } : {}), createdAt: new Date().toISOString() }));
-            res.json(reply);
+            const result = await traceSpan("controller.leader", () => this.leader!.handle(chatId, messageId, text, stream?.report));
+            await traceSpan("controller.persist", () => this.store.recordMessage({ chatId, messageId, text, replyText: result.text,
+              commandId: result.commandId, ...(result.images ? { images: result.images } : {}), createdAt: new Date().toISOString() }));
+            await reply(result);
             return;
           }
 
@@ -399,7 +413,7 @@ export class ControllerServer {
             createdAt: new Date().toISOString(),
           }));
 
-          res.json({
+          await reply({
             text: replyText,
             commandId,
           });
@@ -409,6 +423,14 @@ export class ControllerServer {
 
     this.app.use("/v1", apiRouter);
     this.app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+      if (res.headersSent) {
+        if (!res.destroyed && !res.writableEnded) {
+          if (String(res.getHeader("Content-Type")).startsWith("application/x-ndjson")) {
+            res.end(JSON.stringify({ type: "error", code: "REPLY_UNAVAILABLE" }) + "\n");
+          } else res.destroy();
+        }
+        return;
+      }
       if (error instanceof ConsoleAuthError) {
         res.status(error.statusCode).json({ error: error.message });
         return;
@@ -476,12 +498,13 @@ export class ControllerServer {
     });
     this.executions?.start();
     this.goals?.start();
+    this.progress?.start();
     this.commands.start();
     this.taskNotifications.start();
   }
 
   async stop(): Promise<void> {
-    await Promise.all([this.taskNotifications.stop(), this.executions?.stop(), this.goals?.stop(),this.commands.stop()]);
+    await Promise.all([this.taskNotifications.stop(), this.executions?.stop(), this.goals?.stop(),this.progress?.stop(),this.commands.stop()]);
     this.statusEvents.stop();
     // Proactively close all active node websocket connections first
     await this.hub.closeAll();

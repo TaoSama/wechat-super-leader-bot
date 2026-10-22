@@ -45,8 +45,9 @@ test("native memory edits, early thread ID and restart resume persist in isolate
     assert.equal(settings.networkAccessEnabled, undefined);
     assert.equal(sdk.config?.default_permissions, "wechat_memory");
     const mcpServers = sdk.config?.mcp_servers as Record<string, Record<string, unknown>>;
-    assert.deepEqual(mcpServers.wechat_control.enabled_tools, ["control_current_request"]);
-    assert.deepEqual(mcpServers.wechat_control.tools, { control_current_request: { approval_mode: "approve" } });
+    assert.deepEqual(mcpServers.wechat_control.enabled_tools, ["control_current_request", "report_progress"]);
+    assert.deepEqual(mcpServers.wechat_control.tools, { control_current_request: { approval_mode: "approve" },
+      report_progress: { approval_mode: "approve" } });
     const permissionProfile = sdk.configOverrides?.find(override => override.startsWith("permissions.wechat_memory="));
     assert.ok(permissionProfile);
     assert.ok(permissionProfile.includes(`${JSON.stringify(settings.workingDirectory)}="write"`));

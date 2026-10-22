@@ -90,7 +90,6 @@ export async function verifyPlanNotifications({ base, token, request, store, res
       stateManager: options.state ?? state,
       ilink: new ILinkClient({ stateManager: options.state ?? state, fetchImpl: transport }),
       controller: new ControllerClient({ controllerUrl: base, controllerToken: token, fetchImpl: options.fetchImpl ?? fetch }),
-      notifications: options.enabled ?? true,
     });
     gateways.push(instance);
     return instance;
@@ -146,8 +145,6 @@ export async function verifyPlanNotifications({ base, token, request, store, res
     assert.deepEqual((await pending()).body.items.map(item => item.id), before);
     assert.equal(state.recordInboundContext('synthetic-plan-notification-input', PLAN_CHAT,
       Date.now(), true, 'synthetic-context'), true);
-    await makeGateway({ enabled: false }).deliverNotificationsOnce();
-    assert.equal(sent.length, 0, 'Default-off control ignored');
 
     const first = makeGateway(), competitor = makeGateway();
     const racers = await Promise.allSettled([first.deliverNotificationsOnce(), competitor.deliverNotificationsOnce()]);
@@ -163,7 +160,7 @@ export async function verifyPlanNotifications({ base, token, request, store, res
         .map(item => item.item_list[0].text_item.text).join(''), originalText.get(id),
       'Notification Markdown was changed or truncated');
     }
-    console.log('PASS exact completed plan → durable notification → actual Gateway/HTTP → simulated WeChat; cookie denied, no-context/default-off preserved, concurrent sends unique');
+    console.log('PASS exact completed plan → durable notification → actual Gateway/HTTP → simulated WeChat; cookie denied, no-context guarded, automatic delivery, concurrent sends unique');
 
     const lostClaim = await addFailure();
     let claims = 0;

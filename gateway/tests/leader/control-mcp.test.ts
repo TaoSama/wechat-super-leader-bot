@@ -99,7 +99,7 @@ test("official MCP client negotiates protocol and invokes the stateless turn too
   }));
   try {
     const listed = await client.listTools();
-    assert.equal(listed.tools.length, 1);
+    assert.equal(listed.tools.length, 2);
     const result = await client.callTool({ name: listed.tools[0].name, arguments: {} });
     assert.deepEqual(result.content, [{ type: "text", text: JSON.stringify({ text: "running" }) }]);
   } finally { await client.close(); }

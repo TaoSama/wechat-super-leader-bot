@@ -639,3 +639,24 @@ describe("Leader orchestration", () => {
     expect((state?.data.history as { complete: boolean }[]).every(item => item.complete)).toBe(true);
   });
 });
+
+
+describe("query progress tool", () => {
+  it("returns the shared remaining count and retains the normal final answer", async () => {
+    const f = fixture([tool("report_progress", { text: "已核对第一部分，继续查询。" }), final("核查完成")]);
+    const progress = vi.fn(async (_text: string) => ({ status: "queued", remaining: 1, limit: 3 as const }));
+    expect(await f.create().handle("chat", "with-progress", "请仔细核查这个问题", progress)).toEqual({ text: "核查完成" });
+    expect(progress).toHaveBeenCalledExactlyOnceWith("已核对第一部分，继续查询。");
+    const result = f.model.calls[1].find(message => message.role === "tool")!;
+    expect(JSON.parse(result.content!)).toMatchObject({ status: "queued", remaining: 1, limit: 3 });
+  });
+  it("stops at the shared budget and does not fail the answer after progress transport errors", async () => {
+    const f = fixture([tool("report_progress", { text: "第一次进展" }), tool("report_progress", { text: "第二次进展" }), final("结果")]);
+    const progress = vi.fn(async () => ({ status: "queued", remaining: 0, limit: 3 as const }));
+    await f.create().handle("chat", "budget-progress", "核查问题", progress);
+    expect(progress).toHaveBeenCalledOnce();
+    expect(JSON.parse(f.model.calls[2].filter(message => message.role === "tool").at(-1)!.content!)).toMatchObject({ status: "budget_exhausted", remaining: 0 });
+    const failed = fixture([tool("report_progress", { text: "核查中" }), final("真实结论")]);
+    expect(await failed.create().handle("chat", "failed-progress", "核查", vi.fn().mockRejectedValue(new Error("disconnected")))).toEqual({ text: "真实结论" });
+  });
+});

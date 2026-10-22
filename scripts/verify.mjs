@@ -49,6 +49,7 @@ export function verificationPlan(suite = 'all') {
     step('synthetic-integration', process.execPath, ['tests/integration/run.mjs']),
     step('console-auth-integration', process.execPath, ['tests/integration/console-auth.mjs', '--run']),
     step('wechat-interaction', process.execPath, ['tests/integration/leader/wechat-interaction.mjs', '--run']),
+    step('native-progress-steering', process.execPath, ['tests/integration/leader/progress-steering.mjs', '--run']),
     step('message-latency', process.execPath, ['tests/integration/leader/message-latency.mjs', '--run']),
     step('direct-directory-latency', process.execPath, ['tests/integration/leader/message-latency.mjs', '--run', '--direct-directory']),
     step('direct-console-latency', process.execPath, ['tests/integration/leader/message-latency.mjs', '--run', '--direct-console']),

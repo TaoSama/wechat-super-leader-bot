@@ -13,7 +13,7 @@ import { normalizeGoal, assertGoalConfirmation, validateGoalUpdate, goalIsOpen, 
   type GoalConfirmationAuthority, type CreateGoalResult } from "../leader/goals/goal.js";
 import { validateGoalProofs } from "../leader/goals/view.js";
 import { notificationCommands, planNotificationRequestIds, goalNotificationRequestIds } from "../notifications/presentation.js";
-import { notificationSource, sameNotificationSource, createProgressNotification, progressNotificationEligible, progressNotificationBudgetAvailable } from "../notifications/progress.js";
+import { notificationSource, sameNotificationSource, createProgressNotification, progressNotificationEligible, progressNotificationBudgetAvailable, progressNotificationContext, type ProgressContext, type ProgressDraft } from "../notifications/progress.js";
 import {NotificationSourceSchema, type NotificationSource } from "../notifications/contracts.js";
 import { normalizeNotification, createTerminalNotifications, createGoalNotifications, terminalNotificationPartEligible, readNotification, claimNotificationRecord, receiptNotificationRecord,
   deferNotificationRecord, NotificationDeferReasonSchema, NotificationIdSchema, NotificationReceiptStatusSchema, validateNotificationTime, NOTIFICATION_BATCH_LIMIT,
@@ -493,7 +493,14 @@ export class MemoryStore implements IStore {
     const record = item.source.type === "plan" ? this.executions.get(item.source.id) : this.goals.get(item.source.id);
     return !!record && progressNotificationEligible(item, record, now);
   }
-  async enqueueProgressNotification(source: NotificationSource, now = Date.now()): Promise<Notification | null> {
+  async getProgressNotificationContext(source: NotificationSource, now = Date.now()): Promise<ProgressContext | null> {
+    NotificationSourceSchema.parse(source); validateNotificationTime(now);
+    const record = source.type === "plan" ? this.executions.get(source.id) : this.goals.get(source.id);
+    if (!record || !progressNotificationBudgetAvailable(record, [...this.notifications.values()], now)) return null;
+    const commands = await notificationCommands(this, "plan" in record ? planNotificationRequestIds(record) : goalNotificationRequestIds(record));
+    return progressNotificationContext(record, commands, [...this.notifications.values()], now);
+  }
+  async enqueueProgressNotification(source: NotificationSource, now = Date.now(), draft?: ProgressDraft): Promise<Notification | null> {
     NotificationSourceSchema.parse(source); validateNotificationTime(now);
     const record = source.type === "plan" ? this.executions.get(source.id) : this.goals.get(source.id);
     if (!record || !sameNotificationSource(notificationSource(record),source)) return null;
@@ -501,7 +508,7 @@ export class MemoryStore implements IStore {
     const commands = await notificationCommands(this,"plan" in record ? planNotificationRequestIds(record) : goalNotificationRequestIds(record));
     const latest = source.type === "plan" ? this.executions.get(source.id) : this.goals.get(source.id);
     if (!latest || latest.revision !== record.revision || latest.status !== record.status) return null;
-    const notification = createProgressNotification(latest,commands,[...this.notifications.values()],now);
+    const notification = createProgressNotification(latest,commands,[...this.notifications.values()],now,draft);
     if (!notification) return null;
     this.notifications.set(notification.id,notification); return readNotification(notification,now);
   }

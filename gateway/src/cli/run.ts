@@ -61,7 +61,6 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
       baselineEstablished: stateManager.baselineEstablished,
       baselineInProgress: stateManager.baselineInProgress,
       baselineEstablishedAt: stateManager.baselineEstablishedAt || null,
-      notifications: opts.notifications,
       leaderMode: opts.leaderMode,
       leaderModel: opts.leaderModel,
       hasLeaderApiKey: Boolean(env.GATEWAY_LEADER_API_KEY?.trim()),
@@ -95,14 +94,11 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
     controller,
     splitMaxChars: opts.maxChars,
     healthTracker,
-    notifications: opts.notifications,
     replyEngine,
-    ...(opts.notifications ? {
-      resultClient: new ResultClient({ controllerUrl: validatedControllerUrl, controllerToken: opts.controllerToken,
-        allowInsecureController: opts.allowInsecureController, artifactPublicOrigin: opts.resultPublicOrigin,
-        maxFileBytes: opts.resultFileMaxBytes }),
-      resultOutbox: new FileResultOutbox(`${stateManager.statePath}.results.json`, () => stateManager.getLoginFingerprint()),
-    } : {}),
+    resultClient: new ResultClient({ controllerUrl: validatedControllerUrl, controllerToken: opts.controllerToken,
+      allowInsecureController: opts.allowInsecureController, artifactPublicOrigin: opts.resultPublicOrigin,
+      maxFileBytes: opts.resultFileMaxBytes }),
+    resultOutbox: new FileResultOutbox(`${stateManager.statePath}.results.json`, () => stateManager.getLoginFingerprint()),
   });
 
   if (opts.mode === "establish-baseline") {
