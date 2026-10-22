@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { ReplyDeliveryState } from "../types.js";
 
 const RENEWAL_LEAD_MS = 60 * 60 * 1000;
-const RESERVED_RESULT_MESSAGES = 3;
+const RENEWAL_BUDGET_THRESHOLD = 3;
 const RENEWAL_TEXT = "还有任务更新待接收。发一条消息，可以继续接收后续更新。";
 
 export interface RenewalState {
@@ -20,7 +20,6 @@ export interface RenewalOptions {
   send: (chatId: string, text: string, options: {
     deliveryKey: string; kind: "final"; shouldContinue: () => boolean; signal?: AbortSignal;
   }) => Promise<number>;
-  isReplyPending: (chatId: string) => boolean;
   now?: () => number;
   active?: () => boolean;
   signal?: AbortSignal;
@@ -42,9 +41,26 @@ export class RenewalNotifier {
     if (!this.active() || !Number.isSafeInteger(windowMs) || windowMs <= RENEWAL_LEAD_MS ||
         typeof refreshedAt !== "number" || !Number.isSafeInteger(refreshedAt) || refreshedAt < 0 || !Number.isFinite(now) ||
         now - refreshedAt < windowMs - RENEWAL_LEAD_MS || now - refreshedAt >= windowMs ||
-        this.options.isReplyPending(chatId) || !state.canSendToChat(chatId, "final")) return false;
+        !state.canSendToChat(chatId, "final")) return false;
     const remaining = state.remainingSendBudget(chatId);
-    return Number.isSafeInteger(remaining) && remaining > RESERVED_RESULT_MESSAGES;
+    return Number.isSafeInteger(remaining) && remaining > 0 && remaining < RENEWAL_BUDGET_THRESHOLD;
+  }
+
+  private pendingDelivery(chatId: string) {
+    const { state } = this.options;
+    const account = state.getLoginFingerprint(), token = state.contextTokens[chatId];
+    if (!account || !token || !this.eligible(chatId)) return undefined;
+    const refreshedAt = state.contextBudgets[chatId].refreshedAt, windowMs = state.policy.contextWindowMs;
+    const deliveryKey = renewalDeliveryKey(account, chatId, refreshedAt);
+    const prior = state.replyDeliveries[deliveryKey];
+    if (prior && (prior.acknowledgedChunks > 0 || prior.inFlight || prior.failureReason)) return undefined;
+    return { account, token, refreshedAt, windowMs, deliveryKey };
+  }
+
+  /** A synchronous policy check for transport admission; no network work while its chat lock is held. */
+  public shouldYield(chatId: string, deliveryKey?: string): boolean {
+    const pending = this.pendingDelivery(chatId);
+    return pending !== undefined && pending.deliveryKey !== deliveryKey;
   }
 
   async deliverOnce(interestedChats: readonly string[]): Promise<{ sent: number; skipped: number }> {
@@ -58,15 +74,9 @@ export class RenewalNotifier {
         if (!this.active()) break;
         try {
           const { state } = this.options;
-          const account = state.getLoginFingerprint(), token = state.contextTokens[chatId];
-          if (!account || !token || !this.eligible(chatId)) { outcome.skipped++; continue; }
-          const refreshedAt = state.contextBudgets[chatId].refreshedAt;
-          const windowMs = state.policy.contextWindowMs;
-          const deliveryKey = renewalDeliveryKey(account, chatId, refreshedAt);
-          const previous = state.replyDeliveries[deliveryKey];
-          if (previous && (previous.acknowledgedChunks > 0 || previous.inFlight || previous.failureReason)) {
-            outcome.skipped++; continue;
-          }
+          const pending = this.pendingDelivery(chatId);
+          if (!pending) { outcome.skipped++; continue; }
+          const { account, token, refreshedAt, windowMs, deliveryKey } = pending;
           // Checked again by the shared send path after queueing and immediately before submission.
           const shouldContinue = () => account === state.getLoginFingerprint() &&
             token === state.contextTokens[chatId] && refreshedAt === state.contextBudgets[chatId]?.refreshedAt &&
