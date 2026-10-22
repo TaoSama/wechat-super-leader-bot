@@ -96,7 +96,7 @@ async function main() {
   const workspace = join(leaderRoot, createHash('sha256').update(JSON.stringify([ACCOUNT, CHAT])).digest('hex'));
   const sourceReference = await readFile(join(SKILL, 'references/capabilities.md'), 'utf8');
   const skillRoot = values['system-skill'] ? '/etc/codex/skills/super-leader-capabilities' : join(workspace, '.agents/skills/super-leader-capabilities');
-  const requests = [], errors = [], replies = [], queue = [], routes = [];
+  const requests = [], errors = [], replies = [], queue = [], routes = [], discoveries = [], originalRequests = new Map();
   const evidence = { status: 'running', liveModel: Boolean(values.live), systemSkill: Boolean(values['system-skill']), rounds: [] };
   let server, provider, round = 0;
   try {
@@ -153,6 +153,15 @@ async function main() {
           assert.equal(body.msg?.to_user_id, CHAT); assert(body.msg.item_list.every(item => item.type === 1));
           replies.push({ round, text: body.msg.item_list.map(item => item.text_item.text).join('') }); return send({ ret: 0, errcode: 0 });
         case '/v1/chats/authorize': assert.deepEqual(body, { chatId: CHAT }); return send({ allowed: true });
+        case '/v1/tools/list':
+          assert.equal(req.method, 'POST');
+          assert.deepEqual(body, originalRequests.get(round), 'Tool discovery must preserve the current user request');
+          discoveries.push({ round, request: body });
+          return send({ context: { history: [], memories: {} }, tools: [{ name: 'list_sessions',
+            description: 'Synthetic read-only session inventory; capability help does not require a business call.',
+            inputSchema: { type: 'object', properties: { arguments: { type: 'object', properties: {}, additionalProperties: false } },
+              required: ['arguments'], additionalProperties: false }, annotations: { readOnlyHint: true } }],
+          instructions: 'Explain capabilities by reading the installed skill. This help request authorizes no business mutation.' });
         case '/v1/chats/notification-interest': return send({ chatIds: [], interested: [] });
         case '/v1/deliveries/resume': assert.equal(body.chatId, CHAT); return send({ resumed: 0 });
         default: throw new Error(`Unexpected route ${req.method} ${req.url}`);
@@ -172,21 +181,27 @@ async function main() {
     assert.equal(JSON.parse(await execute(process.execPath, [...args, '--establish-baseline'], env, 'baseline')).ok, true);
     let threadId;
     for (round = 1; round <= 2; round++) {
-      queue.push({ message_type: 1, from_user_id: CHAT, client_id: randomUUID(), create_time_ms: String(Date.now()),
+      const messageId = randomUUID();
+      originalRequests.set(round, { chatId: CHAT, messageId, text: QUESTIONS[round - 1] });
+      queue.push({ message_type: 1, from_user_id: CHAT, client_id: messageId, create_time_ms: String(Date.now()),
         context_token: 'synthetic-context', item_list: [{ type: 1, text_item: { text: QUESTIONS[round - 1] } }] });
       const summary = JSON.parse(await execute(process.execPath, [...args, '--poll-once'], env, `round-${round}`));
       assert.equal(summary.processedCount, 1);
       const state = JSON.parse(await readFile(join(workspace, '.thread.json'), 'utf8'));
       if (threadId) assert.equal(state.threadId, threadId, 'Expected resumed native thread'); threadId = state.threadId;
       const observed = requests.filter(item => item.round === round);
+      const toolNames = (observed[0].body.tools || []).flatMap(tool => tool.type === 'namespace'
+        ? tool.tools.map(nested => nested.name) : [tool.name]);
+      assert(toolNames.some(name => name === 'list_sessions' || name?.endsWith('__list_sessions')), 'Direct business tool discovery missing');
       const catalog = (observed[0].body.input || []).filter(item => item.role === 'developer').flatMap(item => item.content || []).map(item => item.text || '').join('\n');
       const roots = new Map([...catalog.matchAll(/^- `(r\d+)` = `([^`]+)`$/gm)].map(match => [match[1], match[2]]));
       const alias = catalog.match(/^- super-leader-capabilities:[^\n]*\(file: (r\d+)\/super-leader-capabilities\/SKILL\.md\)/m)?.[1];
       assert.equal(roots.get(alias), dirname(skillRoot), 'Native skill catalog must expose the installed skill path');
       assert(observed.some(item => textInput(item.body).includes('帮助用户了解功能')), 'Skill content is missing from model context');
       assert(observed.some(item => textInput(item.body).includes('后台追问与延期')), 'Reference content is missing from model context');
-      const calls = observed.flatMap(item => item.body.input || []).filter(item => /tool_call$/.test(item.type || ''));
-      assert(!calls.some(item => /create_goal|control_current_request/.test(item.name || '') || /\b(create_goal|control_current_request)\s*\(/.test(item.input || item.arguments || '')), 'Help executed a control action');
+      const calls = observed.flatMap(item => item.body.input || []).filter(item => /(?:tool_call|function_call)$/.test(item.type || ''));
+      const mutations = /\b(?:control_current_request|create_goal|execute_plan|execute_goal|propose_plan|propose_goal|confirm_pending|cancel_plan|cancel_goal|remember|forget|send_session_images|get_console_link|create_automation|update_automation|follow_up_background_task|extend_background_task)\b/;
+      assert(!calls.some(item => mutations.test(item.name || '') || mutations.test(item.input || item.arguments || '')), 'Help executed a control action');
       const journal = JSON.parse(await readFile(join(workspace, '.replies.json'), 'utf8'));
       const answer = Object.values(journal).filter(item => item.reply).at(-1).reply.text;
       const checks = verifyHelp(answer, sourceReference, !values.live || round === 1);
@@ -197,10 +212,12 @@ async function main() {
       evidence.rounds.push({ round, threadId, requests: observed.length, discovery: true, skillRead: true, referenceRead: true, deliveryChunks: delivered.length, ...checks });
     }
     assert.deepEqual(errors, []); assert(!routes.some(route => route.startsWith('/v1/messages')), 'Unexpected Controller execution');
+    assert(!routes.includes('/v1/tools/call'), 'Capability help must not invoke a Controller business action');
+    assert.deepEqual(discoveries.map(item => item.round), [1, 2], 'Each fresh or resumed help turn must discover its bound tools');
     evidence.status = 'passed'; evidence.controlActions = 0;
     console.log(JSON.stringify({ status: 'PASS', evidence: join(EVIDENCE, 'result.json'), ...evidence }));
   } catch (error) { evidence.status = 'failed'; evidence.error = error.message; throw error; } finally {
-    evidence.errors = errors; evidence.routes = routes; evidence.replies = replies;
+    evidence.errors = errors; evidence.routes = routes; evidence.replies = replies; evidence.discoveries = discoveries;
     await writeFile(join(EVIDENCE, 'result.json'), JSON.stringify(evidence, null, 2));
     for (const child of children) stop(child);
     for (const fixture of [provider, server].filter(Boolean)) { fixture.closeAllConnections(); await new Promise(done => fixture.close(done)); }
