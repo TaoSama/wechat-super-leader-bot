@@ -1,7 +1,9 @@
 .app-shell { position: relative; height: 100dvh; max-height: 100dvh; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--surface-0); color: var(--text); }
 .app-header { flex-shrink: 0; min-height: 64px; padding: 8px 24px; display: flex; align-items: center; gap: 24px; border-bottom: 1px solid var(--border); background: var(--sidebar); z-index: 10; }
-.main-workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: auto; }
-.workspace-panel, .leader-panel { flex: 1; min-height: 0; }
+.main-workspace { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: auto; }
+.is-authenticated[data-view="sessions"] .main-workspace { overflow: hidden; }
+.workspace-panel, .leader-panel { flex: 1; min-width: 0; min-height: 0; }
+.workspace-panel { display: grid; grid-template-rows: minmax(0, 1fr); }
 .leader-panel { overflow-y: auto; }
 .brand { display: flex; align-items: center; gap: 8px; min-width: 0; flex-shrink: 0; }
 .brand-mark { width: 32px; height: 32px; display: grid; place-items: center; color: var(--text); }
@@ -43,4 +45,9 @@
   .app-header { padding-inline: 8px; gap: 4px; }
   .brand h1 { font-size: 14px; }
   .primary-nav button { gap: 4px; padding-inline: 4px; }
+}
+@media (min-width: 720px) and (pointer: fine) {
+  .app-header { min-height: 44px; padding: 4px 16px; gap: 20px; }
+  .primary-nav button { min-height: 36px; padding: 6px 12px; }
+  .header-actions button { min-height: 36px; min-width: 36px; }
 }

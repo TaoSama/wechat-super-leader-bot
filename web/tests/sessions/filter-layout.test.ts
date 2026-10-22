@@ -39,7 +39,7 @@ it("小屏和粗指针筛选保持44px触摸高度，横屏触摸设备也不缩
 it("键盘筛选触发器保留清晰焦点，节点筛选选中样式不增加尺寸", () => {
   const focus = stylesheet.nodes.find(node => node.type === "rule" && node.selectors.includes("button:focus-visible"));
   if (!focus || focus.type !== "rule") throw new Error("Missing filter trigger keyboard focus rule");
-  expect(declarations(focus)).toMatchObject({ outline: "3px solid var(--accent-teal)", "outline-offset": "3px" });
+  expect(declarations(focus)).toMatchObject({ outline: "2px solid var(--ring)", "outline-offset": "2px" });
   for (const property of ["padding", "width", "height", "min-height", "transform"]) {
     expect(declarations(rule(".node-card.selected"))).not.toHaveProperty(property);
   }
