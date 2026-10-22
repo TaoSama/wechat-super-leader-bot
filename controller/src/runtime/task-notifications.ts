@@ -14,6 +14,7 @@ import { FallbackService, MemoryFallbackRepository, PostgresFallbackRepository, 
 import { NotificationResultCollector } from "../notifications/result-collector.js";
 import { createAutomationRunner } from "./automation-runner.js";
 import { BackgroundExecution } from "./background.js";
+import { consoleDelivery } from "../console/deliveries.js";
 
 const DEFAULT_TICK_MS = 5_000;
 const SUMMARY_RETRY_MS = 60_000;
@@ -197,7 +198,7 @@ export class TaskNotifications {
     const chatIds = [...this.config.allowedChatIds];
     return {
       automations: (await Promise.all(chatIds.map(id => this.automations.repository.list(id)))).flat(),
-      deliveries: (await this.results.repository.list(chatIds)).map(({ preparation: _preparation, ...plan }) => plan),
+      deliveries: (await this.results.repository.list(chatIds)).map(consoleDelivery),
       fallbackDeliveries: (await Promise.all(chatIds.map(id => this.fallbackRepository.list(id)))).flat(),
     };
   }
