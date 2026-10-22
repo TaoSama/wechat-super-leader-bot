@@ -296,8 +296,21 @@ async function openGoalConsoleProbe({ base, request, waitFor }) {
         item = group.items.find(goal => goal.id === id);
         return item?.status === status && JSON.stringify(item.actions.map(action => action.status)) === JSON.stringify(actionStatuses);
       }, 'HTTP goal precise state ' + status);
-      await waitFor(() => {
-        if (errors.length) throw errors[0]; assert(!finished);
+      await waitFor(async () => {
+        if (errors.length) throw errors[0];
+        if (finished) {
+          const response = await get('/v1/status');
+          const body = Buffer.from(await response.arrayBuffer());
+          let sections;
+          try {
+            const snapshot = JSON.parse(body.toString('utf8'));
+            sections = Object.fromEntries(Object.entries(snapshot ?? {}).map(([key, value]) => [key, Buffer.byteLength(JSON.stringify(value))]));
+          } catch (error) {
+            if (!(error instanceof SyntaxError)) throw error;
+            sections = 'non-json';
+          }
+          throw new Error(`Goal SSE closed before ${status} ${JSON.stringify(actionStatuses)} update; revoked=${revoked}; snapshots=${snapshots.length}; HTTP=${response.status}; bytes=${body.length}; sections=${JSON.stringify(sections)}`);
+        }
         return snapshots.some(group => group.items.some(goal => goal.id === id && JSON.stringify(goal) === JSON.stringify(item)));
       }, 'SSE matches the HTTP goal projection');
       return item;

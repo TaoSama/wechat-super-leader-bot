@@ -11,10 +11,11 @@ const Id = z.string().uuid();
 const Followup = z.object({ chatId: ChatId, prompt: z.string().trim().min(1).max(128_000),
   requestId: z.string().trim().min(1).max(256) }).strict();
 const Extend = z.object({ chatId: ChatId, expiresAt: z.string().datetime({ offset: true }) }).strict();
+const Cancel = z.object({ chatId: ChatId }).strict();
 const NodeId = z.string().trim().min(1).max(128);
 const SourceQuery = z.object({ nodeId: NodeId }).strict();
 const InspectionQuery = SourceQuery.extend({ expectedAt: z.string().regex(/^\d{1,16}$/), notAfter: z.string().regex(/^\d{1,16}$/) });
-type BackgroundHttpService = Pick<BackgroundService, "repository" | "list" | "enqueue" | "extend">;
+type BackgroundHttpService = Pick<BackgroundService, "repository" | "list" | "enqueue" | "extend" | "cancel">;
 type SourceHub = Pick<NodeHub, "getNodeStatusList" | "listAutomations" | "inspectAutomation">;
 
 /** Mount only behind administrator authentication; browser cookies do not authorize these mutations. */
@@ -62,6 +63,16 @@ export function createBackgroundRouter(service: BackgroundHttpService | undefine
     if (!worker || worker.chatId !== body.data.chatId) { res.status(404).json({ error: "Background task not found" }); return; }
     try { res.json({ task: publicBackgroundWorker(await service!.extend(worker.id, body.data.chatId, Date.parse(body.data.expiresAt))) }); }
     catch { res.status(409).json({ error: "Background task cannot be extended to the requested expiry" }); }
+  });
+  // Cancels this retained run only; cancelling its schedule also stops future occurrences.
+  router.post("/:runId/cancel", async (req, res) => {
+    const body = Cancel.safeParse(req.body), id = Id.safeParse(req.params.runId);
+    if (!req.is("application/json") || !body.success || !id.success) { res.status(400).json({ error: "Invalid background cancellation" }); return; }
+    if (!permit(body.data.chatId, res)) return;
+    const worker = await service!.repository.getByRun(id.data);
+    if (!worker || worker.chatId !== body.data.chatId) { res.status(404).json({ error: "Background task not found" }); return; }
+    try { res.status(202).json({ task: publicBackgroundWorker(await service!.cancel(worker.id, body.data.chatId)), cancellationRequested: true }); }
+    catch { res.status(409).json({ error: "Background cancellation could not be confirmed; inspect the task before retrying" }); }
   });
   return router;
 }

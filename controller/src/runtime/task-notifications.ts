@@ -5,6 +5,7 @@ import type { IStore } from "../store/interface.js";
 import type { CommandService } from "../commands/service.js";
 import type { NodeHub } from "../nodes/hub.js";
 import type { LeaderModel } from "../leader/model/contracts.js";
+import { HttpLeaderModel } from "../leader/model/client.js";
 import { AutomationService, MemoryAutomationRepository, PostgresAutomationRepository, initAutomationTables, discoverAutomationTarget } from "../automations/index.js";
 import { MemoryDeliveryRepository } from "../deliveries/memory.js";
 import { PostgresDeliveryRepository, initDeliveryTables } from "../deliveries/postgres.js";
@@ -13,6 +14,7 @@ import { FallbackService, MemoryFallbackRepository, PostgresFallbackRepository, 
 import { NotificationResultCollector } from "../notifications/result-collector.js";
 import { createAutomationRunner } from "./automation-runner.js";
 import { BackgroundExecution } from "./background.js";
+import { consoleDelivery } from "../console/deliveries.js";
 
 const DEFAULT_TICK_MS = 5_000;
 const SUMMARY_RETRY_MS = 60_000;
@@ -46,8 +48,15 @@ export class TaskNotifications {
     const schedules = this.pool ? new PostgresAutomationRepository(this.pool) : new MemoryAutomationRepository();
     const deliveries = this.pool ? new PostgresDeliveryRepository(this.pool) : new MemoryDeliveryRepository();
     this.fallbackRepository = this.pool ? new PostgresFallbackRepository(this.pool) : new MemoryFallbackRepository();
+    const backgroundProvider = config.background;
     this.results = new ResultDeliveryService(deliveries, {
-      model, now, publicUrl: config.consolePublicUrl ?? `http://localhost:${config.port}`,
+      // Short results need no model. Initialize the independent provider only when a summary is requested.
+      model: model ?? (backgroundProvider ? {
+        complete: (...args: Parameters<LeaderModel["complete"]>) => new HttpLeaderModel({
+          baseUrl: backgroundProvider.baseUrl, apiKey: backgroundProvider.apiKey, model: backgroundProvider.model,
+        }).complete(...args),
+      } : undefined),
+      now, publicUrl: config.consolePublicUrl ?? `http://localhost:${config.port}`,
       signingSecret: createHash("sha256").update(`task-results:${config.controllerToken}`).digest("hex"),
       fileMaxBytes: config.taskNotifications?.fileMaxBytes, retentionMs: config.taskNotifications?.retentionMs,
     });
@@ -189,7 +198,7 @@ export class TaskNotifications {
     const chatIds = [...this.config.allowedChatIds];
     return {
       automations: (await Promise.all(chatIds.map(id => this.automations.repository.list(id)))).flat(),
-      deliveries: (await this.results.repository.list(chatIds)).map(({ preparation: _preparation, ...plan }) => plan),
+      deliveries: (await this.results.repository.list(chatIds)).map(consoleDelivery),
       fallbackDeliveries: (await Promise.all(chatIds.map(id => this.fallbackRepository.list(id)))).flat(),
     };
   }

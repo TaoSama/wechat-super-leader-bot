@@ -483,7 +483,14 @@ export class ControllerServer {
 
   private setupWebSocket(): void {
     this.server.on("upgrade", (request, socket, head) => {
-      const url = new URL(request.url || "", "http://localhost");
+      let url: URL;
+      try {
+        url = new URL(request.url || "", "http://localhost");
+      } catch {
+        // Upgrade events run outside Express's request error middleware.
+        socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", () => socket.destroy());
+        return;
+      }
       if (url.pathname !== "/v1/daemon") {
         socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
         socket.destroy();

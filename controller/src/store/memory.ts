@@ -185,7 +185,7 @@ export class MemoryStore implements IStore {
   private queueUnsentCommand(commandId: string, status: "admitting" | "pending"): CommandRecord | null {
     const cmd = this.commands.get(commandId);
     if (!cmd || cmd.status !== status || cmd.action !== "send" || !cmd.authority ||
-        status === "pending" && cmd.authority.type !== "automation" ||
+        status === "pending" && !["automation", "plan"].includes(cmd.authority.type) ||
         !cmd.sendRoute || cmd.sendRoute === "terminal-pane" ||
         cmd.turnId !== undefined || cmd.inputReceipt !== undefined || Date.parse(cmd.expiresAt) <= Date.now()) return null;
     const next = { ...cmd, status: "queued" as const, updatedAt: new Date().toISOString() };

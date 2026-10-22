@@ -26,22 +26,58 @@ declare global {
 const EXACT_TOKEN_REGEX = /^[A-Za-z0-9_-]{43}$/;
 
 let sharedAuthInitPromise: Promise<AuthState> | null = null;
+let authInitAbort: AbortController | null = null;
+export interface AuthSessionSnapshot {
+  generation: number;
+  state: AuthState;
+}
+let authSessionSnapshot: AuthSessionSnapshot = { generation: 0, state: { status: "checking" } };
 const authStateSubscribers = new Set<(state: AuthState) => void>();
+const authSessionSubscribers = new Set<(snapshot: AuthSessionSnapshot) => void>();
+
+export function getAuthSessionSnapshot(): AuthSessionSnapshot {
+  return authSessionSnapshot;
+}
+
+export function isCurrentAuthGeneration(generation: number): boolean {
+  return generation === authSessionSnapshot.generation;
+}
 
 export function resetAuthHelperForTesting(): void {
+  authInitAbort?.abort();
+  authInitAbort = null;
   sharedAuthInitPromise = null;
+  authSessionSnapshot = { generation: authSessionSnapshot.generation + 1, state: { status: "checking" } };
   authStateSubscribers.clear();
+  authSessionSubscribers.clear();
 }
 
-export function setUnauthenticatedSession(reason: AuthReason = "none"): void {
-  sharedAuthInitPromise = Promise.resolve({ status: "unauthenticated", reason });
-  notifySubscribers({ status: "unauthenticated", reason });
+export function setUnauthenticatedSession(reason: AuthReason = "none", expectedGeneration?: number): boolean {
+  if (expectedGeneration !== undefined && !isCurrentAuthGeneration(expectedGeneration)) return false;
+  authInitAbort?.abort();
+  authInitAbort = null;
+  const state: AuthState = { status: "unauthenticated", reason };
+  sharedAuthInitPromise = Promise.resolve(state);
+  publishAuthState(state, authSessionSnapshot.generation + 1);
+  return true;
 }
 
-function notifySubscribers(state: AuthState): void {
+function publishAuthState(state: AuthState, generation: number): void {
+  const snapshot = { state, generation };
+  authSessionSnapshot = snapshot;
+  for (const subscriber of authSessionSubscribers) {
+    if (authSessionSnapshot !== snapshot) return;
+    subscriber(snapshot);
+  }
   for (const subscriber of authStateSubscribers) {
+    if (authSessionSnapshot !== snapshot) return;
     subscriber(state);
   }
+}
+
+export function subscribeAuthSession(callback: (snapshot: AuthSessionSnapshot) => void): () => void {
+  authSessionSubscribers.add(callback);
+  return () => { authSessionSubscribers.delete(callback); };
 }
 
 /**
@@ -124,6 +160,12 @@ export function getOrInitAuthSession(
     return sharedAuthInitPromise;
   }
 
+  authInitAbort?.abort();
+  const abort = new AbortController();
+  authInitAbort = abort;
+  const generation = authSessionSnapshot.generation + 1;
+  const checking: AuthState = { status: "checking" };
+  authSessionSnapshot = { state: checking, generation };
   sharedAuthInitPromise = (async (): Promise<AuthState> => {
     // 1. Check bootstrap error
     if (targetWindow && targetWindow.__SUPER_LEADER_LOGIN_ERROR__) {
@@ -139,7 +181,7 @@ export function getOrInitAuthSession(
 
     if (token) {
       try {
-        const res = await exchangeLoginToken(token);
+        const res = await exchangeLoginToken(token, abort.signal);
         return { status: "authenticated", expiresAt: res.expiresAt };
       } catch (_err) {
         return { status: "unauthenticated", reason: "invalid_link" };
@@ -153,7 +195,7 @@ export function getOrInitAuthSession(
 
     // 3. No token present -> verify existing HttpOnly session cookie (e.g. page refresh)
     try {
-      const session = await fetchAuthSession();
+      const session = await fetchAuthSession(abort.signal);
       if (session.authenticated) {
         return { status: "authenticated", expiresAt: session.expiresAt };
       }
@@ -161,8 +203,17 @@ export function getOrInitAuthSession(
     } catch (_err) {
       return { status: "unauthenticated", reason: "none" };
     }
-  })();
+  })().then((state) => {
+    // Superseded requests adopt the current initialization instead of publishing old results.
+    if (!isCurrentAuthGeneration(generation)) {
+      return sharedAuthInitPromise ?? authSessionSnapshot.state;
+    }
+    authInitAbort = null;
+    publishAuthState(state, generation);
+    return state;
+  });
 
+  publishAuthState(checking, generation);
   return sharedAuthInitPromise;
 }
 
@@ -180,11 +231,7 @@ export function handleHashChangeLogin(
     return null;
   }
 
-  const promise = getOrInitAuthSession(targetWindow, true);
-  void promise.then((newState) => {
-    notifySubscribers(newState);
-  });
-  return promise;
+  return getOrInitAuthSession(targetWindow, true);
 }
 
 if (typeof window !== "undefined") {

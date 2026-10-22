@@ -3,7 +3,7 @@ import { CLAIM_LEASE_MS, type AutomationOutbox, type AutomationRepository, type 
 import { assertSameCreation } from "./identity.js";
 import { finishRun, newRun } from "./state.js";
 import { supplementOutbox, assertSameSupplement } from "./supplements.js";
-import { dueOccurrence } from "./timing.js";
+import { alignHashedCronNextAt, dueOccurrence } from "./timing.js";
 import { validateBodyRetention } from "./retention.js";
 import { AutomationConflictError } from "./errors.js";
 
@@ -68,7 +68,9 @@ export class PostgresAutomationRepository implements AutomationRepository {
       const result = await client.query<{ data: Schedule }>("SELECT data FROM automation_schedules WHERE id=$1 AND chat_id=$2 FOR UPDATE", [id, chatId]);
       const schedule = result.rows[0]?.data;
       if (!schedule) return null;
-      if (schedule.status === "cancelled" || schedule.status === "completed") throw new AutomationConflictError("Finished schedules cannot be resumed or modified");
+      // A completed background occurrence can still have live follow-ups; cancellation is terminal.
+      const cancellingRetainedBackground = schedule.kind === "background" && schedule.status === "completed" && status === "cancelled";
+      if (schedule.status === "cancelled" || (schedule.status === "completed" && !cancellingRetainedBackground)) throw new AutomationConflictError("Finished schedules cannot be resumed or modified");
       schedule.status = status; schedule.updatedAt = now;
       await saveSchedule(client, schedule);
       if (status === "cancelled") await client.query("UPDATE automation_outbox SET state='superseded',data=jsonb_set(data,'{status}','\"superseded\"') WHERE schedule_id=$1 AND state='pending'", [id]);
@@ -86,6 +88,8 @@ export class PostgresAutomationRepository implements AutomationRepository {
         AND active_run_id IS NULL ORDER BY next_at LIMIT $2 FOR UPDATE SKIP LOCKED`, [now, limit]);
       const claimed: { schedule: Schedule; run: AutomationRun }[] = [];
       for (const { data: schedule } of due.rows) {
+        if (alignHashedCronNextAt(schedule, now)) await saveSchedule(client, schedule);
+        if (schedule.nextAt! > now) continue;
         const candidate = dueOccurrence(schedule, now);
         const previous = await client.query<{data: AutomationRun}>("SELECT data FROM automation_runs WHERE schedule_id=$1 AND scheduled_at=$2", [schedule.id, candidate.scheduledAt]);
         const skipped = previous.rows[0]?.data;

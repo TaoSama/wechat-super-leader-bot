@@ -3,7 +3,7 @@ import { CLAIM_LEASE_MS } from "./contracts.js";
 import { assertSameCreation } from "./identity.js";
 import { finishRun, newRun } from "./state.js";
 import { supplementOutbox, assertSameSupplement } from "./supplements.js";
-import { dueOccurrence } from "./timing.js";
+import { alignHashedCronNextAt, dueOccurrence } from "./timing.js";
 import { clearRunBody, validateBodyRetention } from "./retention.js";
 import { AutomationConflictError } from "./errors.js";
 
@@ -28,7 +28,9 @@ export class MemoryAutomationRepository implements AutomationRepository {
   async setStatus(id: string, chatId: string, status: "active" | "paused" | "cancelled", now: number): Promise<Schedule | null> {
     const schedule = this.schedules.get(id);
     if (!schedule || schedule.chatId !== chatId) return null;
-    if (schedule.status === "cancelled" || schedule.status === "completed") throw new AutomationConflictError("Finished schedules cannot be resumed or modified");
+    // A completed background occurrence can still have live follow-ups; cancellation is terminal.
+    const cancellingRetainedBackground = schedule.kind === "background" && schedule.status === "completed" && status === "cancelled";
+    if (schedule.status === "cancelled" || (schedule.status === "completed" && !cancellingRetainedBackground)) throw new AutomationConflictError("Finished schedules cannot be resumed or modified");
     schedule.status = status;
     schedule.updatedAt = now;
     if (status === "cancelled") for (const item of this.outbox.values()) if (item.scheduleId === id && item.status === "pending") item.status = "superseded";
@@ -43,6 +45,8 @@ export class MemoryAutomationRepository implements AutomationRepository {
     for (const schedule of this.schedules.values()) {
       if (result.length >= limit) break;
       if (schedule.status !== "active" || schedule.nextAt === null || schedule.nextAt > now || schedule.activeRunId) continue;
+      alignHashedCronNextAt(schedule, now);
+      if (schedule.nextAt > now) continue;
       const candidate = dueOccurrence(schedule, now);
       const skipped = [...this.runs.values()].find(run => run.scheduleId === schedule.id && run.scheduledAt === candidate.scheduledAt);
       if (skipped && skipped.status !== "skipped") throw new Error("Occurrence was already executed");

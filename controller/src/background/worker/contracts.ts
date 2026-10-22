@@ -8,6 +8,17 @@ export interface WorkerInput {
   /** Observations are data, never authorization to control their source. */
   input: unknown;
   timeoutMs?: number;
+  /** Absolute boundaries survive time spent waiting for execution capacity. */
+  launchDeadlineAt?: number;
+  executionDeadlineAt?: number;
+}
+
+export interface WorkerInspectOptions {
+  /** Maintenance can observe an invocation without causing queued work to start. */
+  resumeQueued?: boolean;
+  /** Restore or extend bounds authorized in the caller's durable schedule. */
+  launchDeadlineAt?: number;
+  executionDeadlineAt?: number;
 }
 
 export interface WorkerArtifact {
@@ -34,7 +45,7 @@ export interface WorkerRuntimeStatus {
 
 export interface WorkerRuntime {
   start(input: WorkerInput): Promise<WorkerRuntimeStatus>;
-  inspect(workerId: string, invocationId: string): Promise<WorkerRuntimeStatus>;
+  inspect(workerId: string, invocationId: string, options?: WorkerInspectOptions): Promise<WorkerRuntimeStatus>;
   cancel(workerId: string, invocationId: string): Promise<void>;
   exportArtifacts(workerId: string, invocationId: string): Promise<WorkerArtifact[]>;
   /** Caller accepts results before cleanup. Active or unexported workers are refused. */

@@ -35,6 +35,8 @@ export function useHistoryScroll(options: Options) {
   const geometryRef = useRef<RowGeometry[]>([]);
   const geometryByElementRef = useRef(new Map<HTMLElement, RowGeometry>());
   const measuredContentSizeRef = useRef({ width: 0, height: 0 });
+  const measuredViewportHeightRef = useRef(0);
+  const lastScrollTopRef = useRef(0);
   const observerRef = useRef<{ element: HTMLDivElement; owner: string; observer: ResizeObserver } | null>(null);
   const readingIntentRef = useRef(false);
   const touchYRef = useRef<number | null>(null);
@@ -46,6 +48,7 @@ export function useHistoryScroll(options: Options) {
   const [autoLoadBlocked, setAutoLoadBlocked] = useState(false);
 
   function remember(element: HTMLDivElement) {
+    lastScrollTopRef.current = element.scrollTop;
     const positions = positionsRef.current;
     positions.delete(optionsRef.current.owner);
     const anchor = anchorRef.current;
@@ -72,6 +75,7 @@ export function useHistoryScroll(options: Options) {
     const content = element.querySelector(".history-content") ?? element;
     const size = content.getBoundingClientRect();
     measuredContentSizeRef.current = { width: size.width, height: size.height };
+    measuredViewportHeightRef.current = element.clientHeight;
   }
 
   function capture(): Anchor | null {
@@ -103,6 +107,28 @@ export function useHistoryScroll(options: Options) {
     if (Math.abs(delta) > 0.5) element.scrollTop += delta;
   }
 
+  function followViewportResize(element: HTMLDivElement) {
+    // Zero height is an unmeasured/hidden viewport, not a previous reading
+    // window. Its first usable size must not turn a reader's scroll into follow.
+    if (measuredViewportHeightRef.current <= 0) {
+      measuredViewportHeightRef.current = element.clientHeight;
+      return false;
+    }
+    if (element.clientHeight <= 0) return false;
+    const resized = measuredViewportHeightRef.current !== element.clientHeight;
+    if (resized && bottomRef.current && !readingIntentRef.current) {
+      const maximum = Math.max(0, element.scrollHeight - element.clientHeight);
+      // A resize can queue scroll before ResizeObserver. Preserve the previous
+      // following state unless the reader actually moved upward in the meantime.
+      if (element.scrollTop >= Math.min(lastScrollTopRef.current, maximum) - 1) element.scrollTop = element.scrollHeight;
+      else {
+        bottomRef.current = false;
+        anchorRef.current = capture();
+      }
+    }
+    return resized;
+  }
+
   const loadOlder = useCallback(async (): Promise<boolean> => {
     const current = optionsRef.current;
     if (current.visible === false || busyRef.current || current.loadingOlder || !current.nextCursor) return false;
@@ -127,6 +153,7 @@ export function useHistoryScroll(options: Options) {
   const onScroll = useCallback(() => {
     const element = scrollRef.current;
     if (!element || optionsRef.current.visible === false) return;
+    followViewportResize(element);
     const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
     if (distance <= 1) readingIntentRef.current = false;
     bottomRef.current = !readingIntentRef.current && distance < NEAR_BOTTOM_PX;
@@ -178,8 +205,10 @@ export function useHistoryScroll(options: Options) {
     const visibilityChanged = visibleRef.current !== visible;
     const elementChanged = elementRef.current !== element;
     const reopened = visible && (visibilityChanged || elementChanged);
+    const viewportResized = element && measuredViewportHeightRef.current > 0 && element.clientHeight > 0 &&
+      measuredViewportHeightRef.current !== element.clientHeight;
     if (!ownerChanged && !visibilityChanged && !elementChanged && processedRef.current?.items === options.items &&
-      processedRef.current.loadingOlder === options.loadingOlder) return;
+      processedRef.current.loadingOlder === options.loadingOlder && !viewportResized) return;
     processedRef.current = { items: options.items, loadingOlder: options.loadingOlder };
     visibleRef.current = visible;
     elementRef.current = element;
@@ -205,6 +234,7 @@ export function useHistoryScroll(options: Options) {
       if (visible && element && !resumeRef.current) element.scrollTop = element.scrollHeight;
     }
     if (!visible || !element || !options.items.length) return;
+    if (!ownerChanged && !reopened) followViewportResize(element);
     const resume = resumeRef.current;
     if (resume) {
       // Restore only when the retained rows still overlap this reading window.
@@ -231,7 +261,7 @@ export function useHistoryScroll(options: Options) {
     const previousIds = idsRef.current;
     const previousIdSet = new Set(previousIds);
     const insertedItems = options.items.some((item) => !previousIdSet.has(item.id));
-    if (bottomRef.current && (reopened || signature !== tailRef.current || insertedItems)) {
+    if (bottomRef.current && (reopened || viewportResized || signature !== tailRef.current || insertedItems)) {
       element.scrollTop = element.scrollHeight;
       anchorRef.current = null;
     } else if (!bottomRef.current) restore(element);
@@ -245,7 +275,7 @@ export function useHistoryScroll(options: Options) {
   });
 
   // The observer stays attached across tail polls. Its callback checks the
-  // actual content size so its initial delivery does not repeat a layout scan.
+  // actual sizes so its initial delivery does not repeat a layout scan.
   useLayoutEffect(() => {
     const element = scrollRef.current;
     const current = observerRef.current;
@@ -254,19 +284,25 @@ export function useHistoryScroll(options: Options) {
     observerRef.current = null;
     if (!element || options.visible === false || typeof ResizeObserver === "undefined") return;
     const content = element.querySelector(".history-content") ?? element;
+    measuredViewportHeightRef.current = element.clientHeight;
+    lastScrollTopRef.current = element.scrollTop;
     const observer = new ResizeObserver(() => {
       if (observerRef.current?.observer !== observer || scrollRef.current !== element || optionsRef.current.visible === false) return;
       const size = content.getBoundingClientRect();
       const previous = measuredContentSizeRef.current;
-      if (Math.abs(size.width - previous.width) < 0.5 && Math.abs(size.height - previous.height) < 0.5) return;
+      const contentResized = Math.abs(size.width - previous.width) >= 0.5 || Math.abs(size.height - previous.height) >= 0.5;
+      const viewportResized = followViewportResize(element);
+      if (!contentResized && !viewportResized) return;
       if (bottomRef.current) element.scrollTop = element.scrollHeight;
       else restore(element);
-      measure(element);
+      if (contentResized) measure(element);
+      else measuredViewportHeightRef.current = element.clientHeight;
       anchorRef.current = bottomRef.current ? null : capture();
       remember(element);
     });
     observerRef.current = { element, owner: options.owner, observer };
     observer.observe(content);
+    if (content !== element) observer.observe(element);
   });
   useLayoutEffect(() => () => {
     observerRef.current?.observer.disconnect();

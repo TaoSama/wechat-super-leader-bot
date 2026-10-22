@@ -61,7 +61,7 @@ export interface IStore extends IConsoleAuthStore, MessageImageStore {
   claimQueuedCommand(commandId: string, route: SendRoute): Promise<CommandRecord | null>;
   /** Only the original submitter may publish this admitting record after its complete admission checks. */
   admitCommand(commandId: string): Promise<CommandRecord | null>;
-  /** Release this worker's automation claim only before calling transport. Never recover a stale or ambiguous send. */
+  /** Release this worker's automation or plan claim only before calling transport. Never recover a stale or ambiguous send. */
   requeueClaimedCommand(commandId: string): Promise<CommandRecord | null>;
   cancelQueuedCommand(commandId: string, authority?: CommandAuthority): Promise<CommandRecord | null>;
 

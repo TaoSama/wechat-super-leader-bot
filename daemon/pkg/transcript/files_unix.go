@@ -63,6 +63,8 @@ func anchoredRoot(anchor *os.File) (*os.Root, error) {
 func resolve(ctx context.Context, anchor *os.File, ref Ref) (string, error) {
 	seen := 0
 	match := ""
+	matchKey := ""
+	seenKeys := map[string]struct{}{}
 	var walk func(*os.File, string, int) error
 	walk = func(dir *os.File, prefix string, depth int) (err error) {
 		if err := ctx.Err(); err != nil {
@@ -101,6 +103,9 @@ func resolve(ctx context.Context, anchor *os.File, ref Ref) (string, error) {
 					continue
 				}
 				if entry.IsDir() {
+					if candidate(ref, rel) {
+						return failure(protocol.HistoryUnavailable)
+					}
 					if name == "subagents" || name == "archived_sessions" {
 						continue
 					}
@@ -116,10 +121,29 @@ func resolve(ctx context.Context, anchor *os.File, ref Ref) (string, error) {
 						return err
 					}
 				} else if candidate(ref, rel) {
-					if !entry.Type().IsRegular() || match != "" {
+					if !entry.Type().IsRegular() {
 						return failure(protocol.HistoryUnavailable)
 					}
-					match = rel
+					key := ""
+					if ref.Agent == "codex" && strings.HasPrefix(name, "rollout-") {
+						var valid bool
+						key, valid = codexRolloutKey(name, ref.Value)
+						if !valid {
+							return failure(protocol.HistoryUnavailable)
+						}
+						if _, duplicate := seenKeys[key]; duplicate {
+							return failure(protocol.HistoryUnavailable)
+						}
+						seenKeys[key] = struct{}{}
+					}
+					// Only standard Codex rollout names carry an ordering key.
+					// Other formats still require a unique matching file.
+					if match != "" && (key == "" || matchKey == "") {
+						return failure(protocol.HistoryUnavailable)
+					}
+					if match == "" || key > matchKey {
+						match, matchKey = rel, key
+					}
 				}
 			}
 			if readErr != nil {
@@ -148,7 +172,12 @@ func candidate(ref Ref, rel string) bool {
 	name := parts[len(parts)-1]
 	switch ref.Agent {
 	case "codex":
-		return strings.HasPrefix(name, "rollout-") && strings.HasSuffix(name, "-"+ref.Value+".jsonl") || strings.HasPrefix(name, ref.Value+"_") && strings.HasSuffix(name, ".jsonl")
+		if !strings.HasSuffix(name, ".jsonl") {
+			return false
+		}
+		stem := strings.TrimSuffix(name, ".jsonl")
+		return strings.HasPrefix(name, ref.Value+"_") || strings.HasPrefix(name, "rollout-") &&
+			(strings.HasSuffix(stem, "-"+ref.Value) || strings.Contains(stem, "-"+ref.Value+"_"))
 	case "claude":
 		return len(parts) == 2 && name == ref.Value+".jsonl"
 	case "grok":

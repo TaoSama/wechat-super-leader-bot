@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { WorkerArtifact } from "./worker/contracts.js";
+import type { WorkerArtifact, WorkerInspectOptions } from "./worker/contracts.js";
 import type { AutomationRun, RunnerOutcome, RunResult } from "../automations/contracts.js";
 
 export const WORKER_LIFETIME_MS = 24 * 60 * 60 * 1_000;
@@ -35,6 +35,7 @@ export interface BackgroundSourceReader {
 }
 export interface WorkerInvocation {
   workerId: string; invocationId: string; task: string; preferences?: string[]; input: unknown; timeoutMs?: number;
+  launchDeadlineAt?: number; executionDeadlineAt?: number;
 }
 export interface WorkerReceipt {
   status: "queued" | "running" | "completed" | "waiting" | "needs_attention" | "failed" | "unknown";
@@ -46,7 +47,7 @@ export interface WorkerReceipt {
 /** start is idempotent by invocationId and returns before model completion. inspect never redispatches. */
 export interface BackgroundWorkerRuntime {
   start(input: WorkerInvocation): Promise<WorkerReceipt>;
-  inspect(workerId: string, invocationId: string): Promise<WorkerReceipt>;
+  inspect(workerId: string, invocationId: string, options?: WorkerInspectOptions): Promise<WorkerReceipt>;
   exportArtifacts(workerId: string, invocationId: string): Promise<WorkerArtifact[]>;
   cancel(workerId: string, invocationId: string): Promise<void>;
   cleanup(workerId: string): Promise<void>;

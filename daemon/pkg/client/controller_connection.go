@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -14,6 +15,53 @@ import (
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 	"github.com/gorilla/websocket"
 )
+
+const controllerWriteChunkBytes = 4 * 1024
+
+// Keep one logical message intact while bounding each network write. Renewing
+// the deadline between fragments lets a progressing large result finish, and
+// control pings keep the peer's watchdog alive before the complete JSON arrives.
+// The caller serializes data messages; Gorilla permits interleaved control frames.
+func writeControllerMessage(conn *websocket.Conn, encoded []byte, idleTimeout, keepaliveInterval time.Duration) error {
+	setDeadline := func() error {
+		if err := conn.SetWriteDeadline(time.Now().Add(idleTimeout)); err != nil {
+			return fmt.Errorf("set controller write deadline: %w", err)
+		}
+		return nil
+	}
+	if err := setDeadline(); err != nil {
+		return err
+	}
+	writer, err := conn.NextWriter(websocket.TextMessage)
+	if err != nil {
+		return err
+	}
+	lastKeepalive := time.Now()
+	for len(encoded) > 0 {
+		if err := setDeadline(); err != nil {
+			return err
+		}
+		chunk := encoded[:min(len(encoded), controllerWriteChunkBytes)]
+		written, err := writer.Write(chunk)
+		if err != nil {
+			return err
+		}
+		if written != len(chunk) {
+			return io.ErrShortWrite
+		}
+		encoded = encoded[written:]
+		if time.Since(lastKeepalive) >= keepaliveInterval {
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(idleTimeout)); err != nil {
+				return fmt.Errorf("controller transfer keepalive failed: %w", err)
+			}
+			lastKeepalive = time.Now()
+		}
+	}
+	if err := setDeadline(); err != nil {
+		return err
+	}
+	return writer.Close()
+}
 
 // Run maintains the outbound WebSocket connection to Controller with exponential backoff until ctx is canceled.
 func (d *Daemon) Run(ctx context.Context) error {
@@ -80,6 +128,19 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 	defer closeConnection()
 	wsConn.SetReadLimit(controllerInboundFrameLimit)
 
+	connCtx, cancelConn := context.WithCancel(ctx)
+	defer cancelConn()
+	connectionClosed := make(chan struct{})
+	go func() {
+		defer close(connectionClosed)
+		<-connCtx.Done()
+		closeConnection()
+	}()
+	defer func() {
+		cancelConn()
+		<-connectionClosed
+	}()
+
 	var writeMu sync.Mutex
 	sendJSON := func(msg any) error {
 		encoded, err := encodeControllerMessage(msg)
@@ -88,10 +149,7 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 		}
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		if err := wsConn.SetWriteDeadline(time.Now().Add(controllerWriteTimeout)); err != nil {
-			return fmt.Errorf("set controller write deadline: %w", err)
-		}
-		return wsConn.WriteMessage(websocket.TextMessage, encoded)
+		return writeControllerMessage(wsConn, encoded, controllerWriteTimeout, regularHeartbeatInterval)
 	}
 
 	// Connection liveness does not wait for source discovery. A reconnect retains
@@ -107,21 +165,6 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 	if err := sendJSON(hello); err != nil {
 		return fmt.Errorf("failed to send hello: %w", err)
 	}
-	if err := d.flushResults(sendJSON); err != nil {
-		return err
-	}
-
-	connCtx, cancelConn := context.WithCancel(ctx)
-	defer cancelConn()
-
-	// Close websocket when connCtx is canceled to unblock ReadMessage
-	connectionClosed := make(chan struct{})
-	go func() {
-		defer close(connectionClosed)
-		<-connCtx.Done()
-		closeConnection()
-	}()
-
 	// Heartbeat loop
 	errCh := make(chan error, 2)
 	reportFailure := func(err error) {
@@ -141,6 +184,12 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 	}()
 	go func() {
 		defer close(heartbeatDone)
+		// Start replay independently of the reader, so ACKs and new commands are
+		// handled while a durable result is still crossing a slow connection.
+		if err := d.flushResults(sendJSON); err != nil {
+			reportFailure(err)
+			return
+		}
 		if err := d.heartbeatLoop(connCtx, updates, skillRefresh, skillCache.snapshot, sendJSON); err != nil {
 			reportFailure(err)
 		}

@@ -67,6 +67,8 @@ function assertImageContract(source, component) {
     component === 'controller' ? [SKILL_RUNTIME_INSTALL, CONTROLLER_RUNTIME_INSTALL, SKILL_RUNTIME_PERMISSIONS]
       : [SKILL_RUNTIME_INSTALL, SKILL_RUNTIME_PERMISSIONS],
     'only reviewed target-platform skill dependencies, pinned CLI, writable directories and skill permissions may be installed');
+  assert.ok(runtime.indexOf(SKILL_RUNTIME_PERMISSIONS) > runtime.indexOf('COPY deploy/skills/ /etc/codex/skills/'));
+  assert.ok(runtime.indexOf(SKILL_RUNTIME_PERMISSIONS) < runtime.indexOf('USER node'));
   assert.ok(runtime.includes('USER node'));
   assert.ok(runtime.includes('WORKDIR /app'));
   const sourceStage = buildNames[0];

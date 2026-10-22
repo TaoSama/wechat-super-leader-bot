@@ -6,8 +6,8 @@ import { hasSkillRefs } from "../skills/catalog.js";
 import { selectSendRoute } from "../sessions/send-eligibility.js";
 import { isTerminalSession } from "../sessions/terminal.js";
 import { QUEUE_BATCH_SIZE, QUEUE_TICK_MS, queueSendRoute, sameAuthority, sameCommandPayload } from "./queue.js";
-import { matchesExecutionCommand } from "../leader/plans/execution.js";
 import { matchesGoalCommand } from "../leader/goals/goal.js";
+import { isPlanCommandAuthorized } from "./plan-authorization.js";
 
 export class CommandError extends Error {
   constructor(public readonly httpStatus: number, message: string) { super(message); }
@@ -101,6 +101,7 @@ export class CommandService {
     if (request.action === "send" && sendRoute !== "terminal-pane") {
       const queued = await this.store.admitCommand(record.commandId);
       if (queued) { this.onStatusChanged?.(); await this.dispatchOne(queued,waitMs); }
+      else await this.store.markExpiredActiveCommandsUncertain();
     } else await this.transmit(record,waitMs);
     return (await this.store.getCommand(record.commandId))!;
   }
@@ -136,9 +137,7 @@ export class CommandService {
     if (authority.type === "chat") return true;
     if (authority.type === "automation") return this.isAutomationAuthorized ? this.isAutomationAuthorized(authority, record) : false;
     if (authority.type === "plan") {
-      const plan = await this.store.getExecution(authority.id);
-      return !!plan && plan.chatId === authority.chatId && plan.status === "active" && plan.expiresAt>Date.now() &&
-        plan.plan.actions.some((_,index)=>!!plan.attempts[index] && matchesExecutionCommand(plan,index,record));
+      return isPlanCommandAuthorized(this.store, record, authority);
     }
     const goal = await this.store.getGoal(authority.id);
     return !!goal && goal.chatId === authority.chatId && goal.status === "active" && goal.expiresAt>Date.now() &&

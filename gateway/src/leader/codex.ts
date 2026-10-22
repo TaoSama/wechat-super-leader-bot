@@ -480,6 +480,29 @@ export class CodexReplyEngine implements GatewayReplyEngine {
     let drained = false;
     let replyReady = false;
     let processExited = false;
+    let text = "";
+    let completed = false;
+    let failed = false;
+    let aborted = false;
+    const result = (nativeComplete: boolean): NativeOutcome | undefined => {
+      const sideband = control.result;
+      if (control.wasCalled && !sideband) return;
+      // Query-only tool results still need native analysis. Confirmed business
+      // receipts survive a failed narration without borrowing unfinished prose.
+      if (!nativeComplete && (!sideband || !control.authoritativeText)) return;
+      const reply: ControllerMessageResponse = { text: (sideband && control.authoritativeText
+        ? nativeComplete
+          ? combineReplyText(text, sideband.text, control.hasQueryResults || query.supplemented, control.consoleText)
+          : sideband.text
+        : redactConsoleCredentials(text)).slice(0, MAX_REPLY_CHARS),
+        ...(sideband?.commandId ? { commandId: sideband.commandId } : {}),
+        ...(sideband?.images ? { images: structuredClone(sideband.images),
+          ...(control.resultMessageId && control.resultMessageId !== request.messageId
+            ? { imageSourceMessageId: control.resultMessageId } : {}) } : {}) };
+      return { reply, stage: "completed", ...(control.consoleText
+        ? { provenance: "controller-console" as const, consoleText: control.consoleText,
+          ...(control.resultMessageId !== request.messageId ? { controllerMessageId: control.resultMessageId } : {}) } : {}) };
+    };
     try {
       await traceSpan("codex.mcp.start", () => control.start());
       started = true;
@@ -539,24 +562,6 @@ export class CodexReplyEngine implements GatewayReplyEngine {
         query.resolveReady(true);
         events = native.events;
       }
-      let text = "";
-      let completed = false;
-      let failed = false;
-      const result = (): NativeOutcome | undefined => {
-        if (!completed || failed || abort.signal.aborted || query.uncertain || !text.trim()) return;
-        const sideband = control.result;
-        if (control.wasCalled && !sideband) return;
-        const reply: ControllerMessageResponse = { text: (sideband && control.authoritativeText
-          ? combineReplyText(text, sideband.text, control.hasQueryResults || query.supplemented, control.consoleText)
-          : redactConsoleCredentials(text)).slice(0, MAX_REPLY_CHARS),
-          ...(sideband?.commandId ? { commandId: sideband.commandId } : {}),
-          ...(sideband?.images ? { images: structuredClone(sideband.images),
-            ...(control.resultMessageId && control.resultMessageId !== request.messageId
-              ? { imageSourceMessageId: control.resultMessageId } : {}) } : {}) };
-        return { reply, stage: "completed", ...(control.consoleText
-          ? { provenance: "controller-console" as const, consoleText: control.consoleText,
-            ...(control.resultMessageId !== request.messageId ? { controllerMessageId: control.resultMessageId } : {}) } : {}) };
-      };
       for await (const event of events) {
         nativeEvents.observe(event);
         if (event.type === "thread.started") {
@@ -570,7 +575,7 @@ export class CodexReplyEngine implements GatewayReplyEngine {
           await query.pending;
           control.seal();
           await control.drain();
-          const outcome = result();
+          const outcome = !abort.signal.aborted && !query.uncertain && text.trim() ? result(true) : undefined;
           if (outcome) {
             await onCompleted(outcome);
             clearTimeout(timer);
@@ -585,43 +590,45 @@ export class CodexReplyEngine implements GatewayReplyEngine {
           }
         }
       }
-      query.accepting = false;
-      await query.pending;
-      // App-server completes its event stream before its process closes. Start
-      // close after publishing; keep the same-thread execution lock until close.
-      if (native) { await traceSpan("codex.app_server.close", () => native!.close()); native = undefined; }
       drained = true;
-      nativeEvents.finish(true);
-      nativeEvents = undefined;
-      // The native process has terminated. Also wait for any disconnected MCP
-      // submission before recording a completed reply or releasing this chat.
-      await traceSpan("codex.mcp.close", () => control.close());
-      started = false;
-      if (!completed || failed || abort.signal.aborted || query.uncertain || !text.trim()) {
-        traceEvent("codex.native.incomplete", { turnCompletedObserved: completed, failed, aborted: abort.signal.aborted,
-          emptyReply: !text.trim() });
-        return { reply: { text: FAILED_REPLY }, stage: "started" };
-      }
-      // Controller has already generated the grounded reply and original session
-      // titles; another model pass must not rename targets or rewrite receipts.
-      return result() ?? { reply: { text: FAILED_REPLY }, stage: "started" };
     } catch {
+      failed = true;
       traceEvent("codex.native.failed", { aborted: abort.signal.aborted, replyAlreadyReady: replyReady });
       // Raw CLI stderr and provider failures can include credentials or file contents.
-      return { reply: { text: FAILED_REPLY }, stage: "started" };
     } finally {
       query.accepting = false;
       query.resolveReady(false);
       await query.pending;
+      control.seal();
       clearTimeout(timer);
       clearTimeout(cleanupTimer);
+      aborted = abort.signal.aborted;
       abort.abort();
-      nativeEvents?.finish(drained);
       try {
+        // Keep the same-thread execution lock until native close, while durable
+        // early replies and ACKs continue using the independent journal lock.
         try { if (native) await traceSpan("codex.app_server.close", () => native!.close()); }
-        finally { if (started) await traceSpan("codex.mcp.close", () => control.close()); }
-      }
-      finally { this.nativeAborts.delete(abort); }
+        catch {
+          failed = true;
+          traceEvent("codex.native.close.failed");
+        }
+        nativeEvents?.finish(drained);
+        // Native failure or close errors must not skip an already-submitted
+        // Controller obligation; it can settle during this disconnected drain.
+        if (started) {
+          try { await traceSpan("codex.mcp.close", () => control.close()); }
+          catch {
+            failed = true;
+            traceEvent("codex.mcp.close.failed");
+          }
+        }
+      } finally { this.nativeAborts.delete(abort); }
     }
+    const nativeComplete = completed && !failed && !aborted && !query.uncertain && Boolean(text.trim());
+    if (!nativeComplete) {
+      traceEvent("codex.native.incomplete", { turnCompletedObserved: completed, failed, aborted,
+        emptyReply: !text.trim() });
+    }
+    return result(nativeComplete) ?? { reply: { text: FAILED_REPLY }, stage: "started" };
   }
 }

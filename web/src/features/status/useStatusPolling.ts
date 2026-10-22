@@ -9,6 +9,7 @@ import { fetchControlPlaneStatus, fetchControllerHealth } from "../../api/status
 import { fetchAuthSession } from "../../api/auth";
 import { normalizeControlPlaneStatus } from "../../api/normalizers";
 import { ApiAuthError } from "../../api/errors";
+import { isCurrentAuthGeneration } from "../../auth/bootstrap";
 
 export interface DerivedNodeStatus extends NodeStatus {
   /**
@@ -85,7 +86,8 @@ export function buildDerivedNodes(
 export function useStatusPolling(
   enabled: boolean,
   pollIntervalMs: number = POLL_INTERVAL_MS,
-  onAuthFailure?: () => void
+  onAuthFailure?: () => void,
+  authGeneration?: number
 ): PollingTelemetryState {
   const [data, setData] = useState<ControlPlaneStatusResponse | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -131,7 +133,8 @@ export function useStatusPolling(
     let connectTimer: ReturnType<typeof setTimeout> | undefined;
     let pollDeadline: ReturnType<typeof setTimeout> | undefined;
     let authDeadline: ReturnType<typeof setTimeout> | undefined;
-    const available = () => active && !rejected && document.visibilityState !== "hidden" && navigator.onLine !== false;
+    const current = () => active && (authGeneration === undefined || isCurrentAuthGeneration(authGeneration));
+    const available = () => current() && !rejected && document.visibilityState !== "hidden" && navigator.onLine !== false;
     const clearTimers = () => {
       clearTimeout(pollTimer);
       clearTimeout(reconnectTimer);
@@ -156,7 +159,7 @@ export function useStatusPolling(
       setConnectionState("offline");
     };
     const rejectAuth = () => {
-      if (!active || rejected) return;
+      if (!current() || rejected) return;
       rejected = true;
       suspend();
       setData(null);
@@ -290,6 +293,7 @@ export function useStatusPolling(
       }
     };
     const resume = () => {
+      if (!current()) return;
       if (!available()) suspend();
       else connect();
     };
@@ -311,7 +315,7 @@ export function useStatusPolling(
       window.removeEventListener("offline", resume);
       manualRefreshRef.current = () => {};
     };
-  }, [enabled, pollIntervalMs]);
+  }, [enabled, pollIntervalMs, authGeneration]);
 
   const manualRefresh = useCallback(() => manualRefreshRef.current(), []);
 

@@ -35,6 +35,7 @@ const QUERY = '开始执行了吗？';
 const MISROUTED_QUERY = '合成会话里的待办记录统计完了吗？';
 const NEGATIVE = '暂时不要执行';
 const PROGRESS = 'SYNTHETIC_PROGRESS_ONLY：正在统计，尚未完成';
+const PROGRESS_RACE_PROMPT = '合成进度任务 1';
 const FINAL = '**验收最终结果**：共 17 条记录，其中 3 条需要复核。';
 const FINAL_DISPLAY = '验收最终结果：共 17 条记录，其中 3 条需要复核。';
 const RESULT_SUMMARY = '模型摘要：完整成果已生成，请查看附件。';
@@ -84,6 +85,7 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
   const env = verificationEnvironment();
   const require = createRequire(new URL('../../../controller/package.json', import.meta.url));
   const { WebSocket } = require('ws');
+  const { Pool } = require('pg');
   const postgres = createPostgresFixture({ env });
   const token = randomUUID();
   const nodeToken = randomUUID();
@@ -96,6 +98,7 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
   const sent = [], incoming = [], inputs = [], deliveries = [], acknowledgements = [], modelCalls = [], errors = [], logs = [];
   const recordedResults = [], historyReads = [], confirmationCalls = [], progressCalls = [], progressToolResults = [];
   const receiptRace = { armed: true, verified: false, held: undefined };
+  const progressRace = { armed: true, injected: false, verified: false, held: undefined, eventKey: undefined };
   const wireEvents = [], notificationClientIds = new Set(), fault = { remaining: 0, mode: null };
   const uploads = new Map();
   const fingerprint = createHash('sha256').update(JSON.stringify(['synthetic-account', 'synthetic-wechat-token'])).digest('hex');
@@ -111,11 +114,17 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
     }
   };
   const authorizationCalls = [], controllerRequests = [], validContexts = new Set([CONTEXT]);
-  let controller, authorizationStore, model, wechat, proxy, gatewayControllerUrl, socket, heartbeat, gatewayChild, cursor = 0;
+  let controller, authorizationStore, progressInspectionPool, model, wechat, proxy, gatewayControllerUrl, socket, heartbeat, gatewayChild, cursor = 0;
   const healthy = () => { if (errors.length) throw errors[0]; };
   const evidence = (step, data) => console.log(JSON.stringify({ step, ...data }, (_key, value) =>
     typeof value === 'string' ? value.replace(/#login=[A-Za-z0-9_.~%-]+/gu, '#login=[synthetic-redacted]') : value));
   const notificationMessages = () => sent.filter(message => notificationClientIds.has(message.client_id));
+  const progressNotifications = async source => {
+    assert.equal(source.type, 'plan');
+    const result = await progressInspectionPool.query(
+      "SELECT data FROM leader_notifications WHERE execution_id=$1 AND kind='progress' ORDER BY id", [source.id]);
+    return result.rows.map(row => row.data);
+  };
 
   await withTestCleanup(async () => {
     execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-sha256',
@@ -166,9 +175,34 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
             const result = JSON.parse(last.output);
             const call = progressCalls.find(item => item.callId === last.call_id);
             assert(call, 'Background progress returned an unknown model tool call');
-            assert.equal(result.status, 'queued', 'Model progress was not durably committed');
-            assert.equal(result.remaining, context.remaining - 1); assert.equal(result.limit, 3);
-            progressToolResults.push({ sourceId: context.source.id, eventKey: context.eventKey, ...result });
+            assert.equal(result.limit, 3);
+            if (result.status === 'stale_or_budget_unavailable') {
+              const source = await authorizationStore.getExecution(context.source.id);
+              assert.equal(source?.status, 'active', 'Stale progress unexpectedly lost its active source');
+              assert.equal(source.chatId, CHAT);
+              const current = await authorizationStore.getProgressNotificationContext(context.source);
+              assert(current, 'Stale progress no longer has an available progress budget');
+              assert.notEqual(current.eventKey, context.eventKey, 'Rejected progress facts did not change');
+              assert.notDeepEqual(current.evidence, context.evidence, 'Rejected progress retained the same exact evidence');
+              assert.equal(current.remaining, context.remaining, 'Rejected progress consumed a durable slot');
+              assert.equal(result.remaining, context.remaining, 'Rejected progress changed the model allowance');
+              const progress = await progressNotifications(context.source);
+              assert.deepEqual(progress.map(item => item.id).sort(), call.previousProgressIds,
+                'Rejected draft added or replaced a durable progress notification');
+              assert(progress.every(item => item.progress.eventKey !== context.eventKey),
+                'Rejected draft was durably queued with its old facts');
+              assert.equal(sent.length, call.sentCount, 'A message was delivered while its progress draft was rejected');
+              if (progressRace.eventKey === context.eventKey) progressRace.verified = true;
+              evidence('stale-progress-draft-rejected', { sourceId: source.id, sourceStatus: source.status,
+                previousEventKey: context.eventKey, currentEventKey: current.eventKey,
+                previousEvidence: context.evidence, currentEvidence: current.evidence,
+                remaining: current.remaining, durableProgressCount: progress.length, oldDraftDelivered: false,
+                deterministicInjection: progressRace.eventKey === context.eventKey });
+            } else {
+              assert.equal(result.status, 'queued', 'Model progress was not durably committed');
+              assert.equal(result.remaining, context.remaining - 1);
+              progressToolResults.push({ sourceId: context.source.id, eventKey: context.eventKey, ...result });
+            }
             output = [{ type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: '' }] }];
           } else {
             assert.equal(last.role, 'user');
@@ -185,7 +219,17 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
             const text = `核对到的执行进展：${completed.length ? `已完成第 ${completed.join('、')} 项` : '尚无已完成步骤'}；` +
               `${accepted.length ? `第 ${accepted.join('、')} 项已接收，等待完成回执` : '其余步骤等待调度'}。`;
             const callId = 'synthetic-model-progress-' + context.eventKey;
-            progressCalls.push({ ...context, text, callId });
+            const previousProgressIds = (await progressNotifications(context.source)).map(item => item.id).sort();
+            progressCalls.push({ ...context, text, callId, previousProgressIds, sentCount: sent.length });
+            const held = progressRace.held;
+            if (held && context.evidence.some(item => item.commandId === held.command.commandId)) {
+              assert.equal(context.evidence.find(item => item.commandId === held.command.commandId).status, 'pending');
+              progressRace.held = undefined;
+              progressRace.injected = true;
+              progressRace.eventKey = context.eventKey;
+              sendFrame(held.receipt);
+              await waitForAccepted(held.command);
+            }
             output = [{ type: 'function_call', call_id: callId, name: 'report_progress', arguments: JSON.stringify({ text }) }];
           }
         } else if (body.input[0]?.content?.startsWith('你负责根据刚刚核查的真实执行记录')) {
@@ -310,6 +354,7 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
     const modelPort = await listen(model);
     const databaseUrl = await postgres.start();
     authorizationStore = new PostgresStore(databaseUrl);
+    progressInspectionPool = new Pool({ connectionString: databaseUrl, max: 1 });
     controller = await createControllerFixture({ logs, secrets: [token, nodeToken, postgres.password], env: {
       ...env, PERSISTENCE_MODE: 'postgres', DATABASE_URL: databaseUrl, CONTROLLER_TOKEN: token,
       NODE_TOKENS: JSON.stringify({ [NODE]: nodeToken }), ALLOWED_CHAT_IDS: CHAT, LEADER_MODE: 'model',
@@ -378,6 +423,9 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
             // exact command must remain pending until the confirmation model checks it.
             recordedResults.push({ ...accepted, nodeId: NODE },
               { ...accepted, nodeId: NODE, status: 'completed', output: RECEIPT_RACE_OUTPUT });
+          } else if (progressRace.armed && message.prompt === PROGRESS_RACE_PROMPT) {
+            progressRace.armed = false;
+            progressRace.held = { command: message, receipt: accepted };
           } else sendFrame(accepted);
         } else if (message.type === 'result_ack') acknowledgements.push(message);
       } catch (error) { errors.push(error); }
@@ -789,6 +837,8 @@ globalThis.fetch = async (input, init) => {
       getDelivery, fullResult, artifactText, elapseDispatchInterval, resultClientId, waitForAccepted, waitForTyping,
       progressCalls, progressToolResults });
     healthy();
+    assert(progressRace.injected && progressRace.verified,
+      'Progress did not exercise and validate a draft invalidated by an exact accepted receipt');
     assert(confirmationCalls.length > 0, 'Interaction did not exercise model-generated confirmation');
     evidence('PASS', { realControllerProcess: true, realGatewayCli: true, disposablePostgres: true,
       daemonCommands: deliveries.length, notificationWireParts: notificationMessages().length,
@@ -805,12 +855,14 @@ globalThis.fetch = async (input, init) => {
         'independent authorization rejects planner execute_plan on a query'] });
   }, [
     { label: 'gateway child', cleanup: () => stopTestProcess(gatewayChild) },
+    { label: 'held progress receipt', cleanup: () => { progressRace.held = undefined; } },
     { label: 'heartbeat', cleanup: () => { clearInterval(heartbeat); } },
     { label: 'synthetic Daemon', cleanup: () => closeTestWebSocket(socket) },
     { label: 'Controller', cleanup: () => controller?.stop() },
     { label: 'Controller proxy', cleanup: () => closeServer(proxy) },
     { label: 'WeChat HTTPS shim', cleanup: () => closeServer(wechat) },
     { label: 'model HTTP shim', cleanup: () => closeServer(model) },
+    { label: 'progress notification reader', cleanup: () => progressInspectionPool?.end() },
     { label: 'authorization history reader', cleanup: () => authorizationStore?.close() },
     { label: 'disposable PostgreSQL', cleanup: () => postgres.stop() },
     { label: 'owned temporary fixture files', cleanup: () => rm(dir, { recursive: true, force: true }) },

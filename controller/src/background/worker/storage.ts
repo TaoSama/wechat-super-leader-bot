@@ -16,6 +16,9 @@ export interface Receipt extends WorkerRuntimeStatus {
   processCleanupUnverified?: boolean;
   queuedAt?: number;
   pendingInput?: WorkerInput;
+  /** Durable bounds; legacy reconciliation leaves the authorized input immutable. */
+  launchDeadlineAt?: number;
+  executionDeadlineAt?: number;
 }
 interface WorkerState { workerId: string; threadId?: string }
 interface LaunchClaim { ownerPid: number; decision?: "launch" | "cancel" }
@@ -26,8 +29,11 @@ const receiptSchema = z.object({
   status: z.enum(["queued", "running", "completed", "waiting", "needs_attention", "failed", "unknown"]),
   summary: z.string(), attachments: z.array(z.string()),
   queuedAt: z.number().int().nonnegative().optional(),
+  launchDeadlineAt: z.number().int().positive().optional(), executionDeadlineAt: z.number().int().positive().optional(),
   pendingInput: z.object({ workerId: z.string().regex(UUID), invocationId: z.string().regex(UUID),
-    task: z.string().trim().min(1), input: z.unknown() }).passthrough().optional(),
+    task: z.string().trim().min(1), input: z.unknown(),
+    launchDeadlineAt: z.number().int().positive().optional(), executionDeadlineAt: z.number().int().positive().optional(),
+  }).passthrough().optional(),
 }).passthrough();
 
 export function validId(id: string): void {
