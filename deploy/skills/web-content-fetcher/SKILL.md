@@ -14,7 +14,7 @@ python3 /etc/codex/skills/web-content-fetcher/scripts/fetch_content.py 'https://
 支持 `--format text|markdown|html`、`--output FILE`、可重复的 `--headers 'K:V'`；所有格式均返回 JSON，包含 `url`、`final_url`、`title`、`content`、`format`、`method`、`status_code`、`content_type`、`truncated`、`error`。`--output` 保存整个 JSON 到可写的任务目录，不要写入技能目录。敏感请求头不写入聊天、脚本或日志。
 
 - 退出码 `0` 表示 HTTP 获取与提取成功，仍需核对目标正文；`1` 表示请求或提取失败，`2` 表示飞书云文档需对应授权 API，或 CLI 参数有误。
-- 请求仅支持 HTTP/HTTPS，最多 5 次重定向；默认总超时 30 秒，可调至 120 秒。单次响应最多 2 MiB，内容输出最多 50,000 字符，截断会设置 `truncated=true`，不能声称已读全文。
+- 请求仅支持 HTTP/HTTPS，最多 5 次重定向；HTTP 请求默认超时 30 秒，可调至 120 秒，后续解析时间另计。单次响应最多 8 MiB，内容输出最多 50,000 字符，截断会设置 `truncated=true`，不能声称已读全文。
 - Markdown 保留链接、图片、列表、表格和代码；纯文本模式去掉 Markdown 标记；HTML 模式返回原始 HTML。非 HTML 文本按原文返回 `format=text`。不负责二进制文件下载。
 - 飞书 docx/wiki 等私人文档需要对应 API；没有可用授权工具时如实说明，避免把登录页当正文。
 

@@ -13,7 +13,7 @@ from email.message import Message
 from pathlib import Path
 from urllib.parse import urlsplit
 
-MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_CONTENT_CHARS = 50_000
 MAX_HTML_TAGS = 50_000
 MAX_URL_CHARS = 8192
@@ -21,6 +21,7 @@ MAX_TIMEOUT_SECONDS = 120
 DEFAULT_TIMEOUT_SECONDS = 30
 MAX_REDIRECTS = 5
 CURL_GRACE_SECONDS = 2
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 TEXT_MIME_TYPES = {
     "application/json", "application/xml", "application/xhtml+xml",
     "application/rss+xml", "application/atom+xml", "application/javascript",
@@ -94,7 +95,7 @@ def curl_fetch(url, timeout, headers):
             "--max-time", str(timeout), "--max-redirs", str(MAX_REDIRECTS),
             "--max-filesize", str(MAX_RESPONSE_BYTES), "--output", str(body_file),
             "--write-out", "%{http_code}\t%{url_effective}\t%{content_type}",
-            "--user-agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
+            "--user-agent", DEFAULT_USER_AGENT,
             "--header", "Accept: text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.8",
             "--header", "Accept-Language: zh-CN,zh;q=0.9,en;q=0.8",
         ]
@@ -154,6 +155,10 @@ def extract_html(html, url, output_format):
     host = urlsplit(url).hostname.lower()
     wechat_body = soup.select_one("#js_content, .rich_media_content") if host == "mp.weixin.qq.com" else None
     has_wechat_body = wechat_body is not None and bool(wechat_body.get_text(strip=True))
+    if has_wechat_body:
+        heading = soup.select_one("#activity-name")
+        if heading is not None and heading.get_text(strip=True):
+            title = heading.get_text(" ", strip=True)
     if not has_wechat_body and title.casefold().strip(" .…!") in BLOCKED_TITLES:
         raise FetchError(f"页面要求登录或验证，未取得目标正文（{title}）")
     if not has_wechat_body and soup.select_one("#js_verify, #verify_container") is not None:
@@ -165,6 +170,7 @@ def extract_html(html, url, output_format):
             "请在微信客户端打开链接", "该内容已被发布者删除", "该内容已被投诉",
         )):
             raise FetchError("微信页面要求环境验证或文章不可用，未取得目标正文")
+        raise FetchError("微信页面缺少文章正文，未取得目标正文")
     for tag in soup.find_all(["script", "style", "noscript", "iframe", "svg", "nav", "footer"]):
         tag.decompose()
     selectors = []
