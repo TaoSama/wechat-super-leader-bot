@@ -13,6 +13,13 @@ export type ReplyJournal = Record<string, {
   reply?: ControllerMessageResponse;
   delivery?: "pending" | "accepted" | "uncertain" | "expired";
   provenance?: "codex" | "controller-console";
+  controllerMessageId?: string;
+  steering?: {
+    rootMessageId: string;
+    threadId: string;
+    turnId: string;
+    status: "submitting" | "accepted" | "uncertain";
+  };
 }>;
 const MAX_MIGRATION_BYTES = 1024 * 1024;
 export const MAX_REPLY_JOURNAL_BYTES = 16 * 1024 * 1024;
@@ -99,13 +106,24 @@ function validateReplyJournal(value: unknown): ReplyJournal {
   let closed = 0;
   for (const [key, entry] of Object.entries(value)) {
     if (!/^[a-f0-9]{64}$/.test(key) || !object(entry) ||
-        Object.keys(entry).some(name => !["inputHash", "stage", "reply", "delivery", "provenance"].includes(name)) ||
+        Object.keys(entry).some(name => !["inputHash", "stage", "reply", "delivery", "provenance", "steering", "controllerMessageId"].includes(name)) ||
         typeof entry.inputHash !== "string" || !/^[a-f0-9]{64}$/.test(entry.inputHash) ||
         (entry.stage !== "started" && entry.stage !== "completed") ||
         (entry.delivery !== undefined && !["pending", "accepted", "uncertain", "expired"].includes(entry.delivery as string)) ||
         (entry.provenance !== undefined && !["codex", "controller-console"].includes(entry.provenance as string)) ||
         (entry.provenance === "controller-console" && entry.stage !== "completed") ||
+        (entry.controllerMessageId !== undefined && (entry.provenance !== "controller-console" ||
+          typeof entry.controllerMessageId !== "string" || !entry.controllerMessageId.trim() ||
+          Buffer.byteLength(entry.controllerMessageId) > MAX_ID_BYTES)) ||
         Buffer.byteLength(JSON.stringify(entry), "utf8") > MAX_REPLY_ENTRY_BYTES) return invalid();
+    const steering = entry.steering;
+    if (steering !== undefined && (!object(steering) ||
+        Object.keys(steering).some(name => !["rootMessageId", "threadId", "turnId", "status"].includes(name)) ||
+        !["rootMessageId", "threadId", "turnId"].every(name => typeof steering[name] === "string" &&
+          Boolean((steering[name] as string).trim()) && Buffer.byteLength(steering[name] as string) <= MAX_ID_BYTES) ||
+        !["submitting", "accepted", "uncertain"].includes(steering.status as string) ||
+        (steering.status === "accepted" ? entry.stage !== "completed" || entry.delivery !== "accepted"
+          : entry.stage !== "started") || entry.provenance !== undefined)) return invalid();
     if (entry.stage === "started" || entry.delivery === undefined || entry.delivery === "pending" || entry.delivery === "uncertain") {
       if (++pinned > MAX_PINNED_REPLY_ENTRIES) return invalid();
     } else if (++closed > MAX_CLOSED_REPLY_ENTRIES) return invalid();
@@ -113,10 +131,13 @@ function validateReplyJournal(value: unknown): ReplyJournal {
     if (reply === undefined) {
       if (entry.stage === "completed") return invalid();
     } else if (!object(reply) || Object.keys(reply).some(name =>
-        !(entry.provenance === "controller-console" ? ["text"] : ["text", "commandId", "images"]).includes(name)) ||
+        !(entry.provenance === "controller-console" ? ["text"] : ["text", "commandId", "images", "imageSourceMessageId"]).includes(name)) ||
         typeof reply.text !== "string" || reply.text.length > MAX_REPLY_CHARS ||
         (reply.commandId !== undefined && (typeof reply.commandId !== "string" ||
-          !reply.commandId.trim() || reply.commandId.length > MAX_ID_BYTES))) return invalid();
+          !reply.commandId.trim() || reply.commandId.length > MAX_ID_BYTES)) ||
+        (reply.imageSourceMessageId !== undefined && (typeof reply.imageSourceMessageId !== "string" ||
+          !reply.imageSourceMessageId.trim() || Buffer.byteLength(reply.imageSourceMessageId) > MAX_ID_BYTES ||
+          !Array.isArray(reply.images) || reply.images.length === 0))) return invalid();
     let images: ControllerMessageResponse["images"];
     if (reply !== undefined && reply.images !== undefined) {
       try { images = validateImageAttachments(reply.images); } catch { return invalid(); }
@@ -124,10 +145,13 @@ function validateReplyJournal(value: unknown): ReplyJournal {
     entries.push([key, { inputHash: entry.inputHash, stage: entry.stage,
       ...(entry.delivery !== undefined ? { delivery: entry.delivery as ReplyJournal[string]["delivery"] } : {}),
       ...(entry.provenance !== undefined ? { provenance: entry.provenance as ReplyJournal[string]["provenance"] } : {}),
+      ...(entry.controllerMessageId !== undefined ? { controllerMessageId: entry.controllerMessageId as string } : {}),
+      ...(steering !== undefined ? { steering: steering as ReplyJournal[string]["steering"] } : {}),
       ...(reply !== undefined ? { reply: {
         text: reply.text as string,
         ...(reply.commandId !== undefined ? { commandId: reply.commandId as string } : {}),
         ...(images !== undefined ? { images } : {}),
+        ...(reply.imageSourceMessageId !== undefined ? { imageSourceMessageId: reply.imageSourceMessageId as string } : {}),
       } } : {}),
     }]);
   }

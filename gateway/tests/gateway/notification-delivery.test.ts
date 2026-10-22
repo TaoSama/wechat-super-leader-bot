@@ -55,7 +55,7 @@ test("long notification preserves all Markdown and Unicode across bounded chunks
   item.text = "# 执行结果\n\n- **完成**：" + "验证通过🚀".repeat(200);
   const f = harness(t, { items: [item], policy: { sendBudget: 100 } }), maxChars = 96;
   const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink,
-    notifications: true, splitMaxChars: maxChars, splitMultiPart: true });
+    splitMaxChars: maxChars, splitMultiPart: true });
   assert.equal((await gateway.deliverNotificationsOnce()).accepted, 1);
   assert.ok(f.sends.length > 1);
   const texts = f.sends.map((send, index) => {
@@ -76,10 +76,10 @@ test("failed Markdown notification is permanently uncertain without another send
   const f = harness(t, { items: [item] });
   f.hooks.send = () => { throw new TypeError("response lost"); };
   const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink,
-    notifications: true, splitMaxChars: 96, splitMultiPart: true });
+    splitMaxChars: 96, splitMultiPart: true });
   assert.deepEqual(await gateway.deliverNotificationsOnce(), { accepted: 0, uncertain: 1, skipped: 0 });
   const state = new StateManager(f.accountPath, f.statePath);
-  const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.createILink(state), notifications: true });
+  const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.createILink(state) });
   await restarted.deliverNotificationsOnce();
   assert.equal(f.records.get(item.id)?.status, "uncertain");
   assert.equal(f.sends.length, 1);
@@ -101,7 +101,7 @@ test("uncertain goal notification remains permanent across gateway restart", asy
   f.hooks.send = () => ({ ret: null });
   assert.equal((await f.gateway.deliverNotificationsOnce()).uncertain, 1);
   const state = new StateManager(f.accountPath, f.statePath);
-  const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.createILink(state), notifications: true });
+  const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.createILink(state) });
   await restarted.deliverNotificationsOnce();
   assert.equal(f.records.get(item.id)?.status, "uncertain");
   assert.equal(f.sends.length, 1);
@@ -117,9 +117,9 @@ for (const sourceType of ["plan", "goal"] as const) test(`claim cannot change ${
   assert.equal(f.sends.length, 0);
   assert.equal(f.requests.filter(request => request.url.endsWith("claim")).length, 1);
 });
-test("disabled, missing prerequisites, expired budgets and stop perform no list/claim/send", async t => {
-  for (const mode of ["disabled", "baseline", "context", "account", "budget", "window", "stop"]) {
-    const f = harness(t, { enabled: mode !== "disabled", baseline: mode !== "baseline" });
+test("missing prerequisites, expired budgets and stop perform no list/claim/send", async t => {
+  for (const mode of ["baseline", "context", "account", "budget", "window", "stop"]) {
+    const f = harness(t, { baseline: mode !== "baseline" });
     if (mode === "context") f.state.contextTokens = {};
     if (mode === "account") f.state.account = null;
     if (mode === "budget") f.state.contextBudgets = {};
@@ -128,10 +128,12 @@ test("disabled, missing prerequisites, expired budgets and stop perform no list/
     assert.deepEqual(await f.gateway.deliverNotificationsOnce(), { accepted: 0, uncertain: 0, skipped: 0 });
     assert.equal(f.requests.length, 0); assert.equal(f.sends.length, 0);
   }
+});
+test("notifications deliver by default without a feature flag", async t => {
   const f = harness(t);
   const defaultGateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink });
-  assert.equal(defaultGateway.notifications, false);
-  await defaultGateway.deliverNotificationsOnce(); assert.equal(f.requests.length, 0);
+  assert.equal((await defaultGateway.deliverNotificationsOnce()).accepted, 1);
+  assert.equal(f.sends.length, 1);
 });
 test("missing-context older records do not block reachable chat notifications", async t => {
   const f = harness(t, { items: [...Array.from({ length: 4 }, (_, index) => notification(index + 1, "unreachable")), notification(5)] });
@@ -180,7 +182,7 @@ test("lost claim response resumes the existing unattempted send after restart wi
   assert.equal(f.sends.length, 0);
   assert.equal(f.requests.filter(request => request.url.endsWith("claim")).length, 1);
   const state = new StateManager(f.accountPath, f.statePath);
-  const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.createILink(state), notifications: true });
+  const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.createILink(state) });
   assert.deepEqual(await restarted.deliverNotificationsOnce(), { accepted: 1, uncertain: 0, skipped: 0 });
   assert.equal(f.sends.length, 1);
   assert.equal(f.requests.filter(request => request.url.endsWith("claim")).length, 1);
@@ -222,7 +224,7 @@ for (const mode of ["stop", "expiry", "attempt-expiry", "context", "account", "b
     const restored = new StateManager(f.accountPath, f.statePath);
     assert.equal(restored.outbox[`notification:${record.id}`].status, "expired");
     const restarted = new WeChatGateway({ stateManager: restored, controller: f.controller,
-      ilink: f.createILink(restored), notifications: true });
+      ilink: f.createILink(restored) });
     await restarted.deliverNotificationsOnce();
     assert.equal(f.sends.length, 0);
     assert.equal(f.requests.filter(request => request.url.endsWith("/receipt")).length, 0);
@@ -234,7 +236,7 @@ test("post-claim exhausted budget defers durably and resumes only after new inbo
   assert.equal((await f.gateway.deliverNotificationsOnce()).skipped, 1);
   assert.equal(f.sends.length, 0);
   const state = new StateManager(f.accountPath, f.statePath);
-  const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.createILink(state), notifications: true });
+  const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.createILink(state) });
   await restarted.deliverNotificationsOnce();
   assert.equal(f.sends.length, 0);
   assert.equal(f.requests.filter(request => request.url.endsWith("/claim")).length, 1);
@@ -340,7 +342,7 @@ test("closed real stderr pipe exits CLI with code 2 after uncertainty, without r
   const f = harness(t), healthPath = path.join(path.dirname(f.statePath), "health.json");
   f.state.saveState();
   const moduleUrl = new URL("../../src/cli/run.js", import.meta.url).href;
-  const args = ["--run", "--notifications", "--credentials-path", f.accountPath, "--state-path", f.statePath,
+  const args = ["--run", "--credentials-path", f.accountPath, "--state-path", f.statePath,
     "--health-path", healthPath];
   const source = `
     import { runCli } from ${JSON.stringify(moduleUrl)};
@@ -474,7 +476,7 @@ test("notification work does not create a processing phase or hide stale inbound
   const healthPath = path.join(path.dirname(f.statePath), "health.json");
   const health = new HealthTracker(healthPath); health.startRun(); health.recordPollSuccess();
   const before = JSON.parse(fs.readFileSync(healthPath, "utf8"));
-  const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink, notifications: true, healthTracker: health });
+  const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink, healthTracker: health });
   let release!: () => void;
   let markStarted!: () => void;
   const started = new Promise<void>(resolve => { markStarted = resolve; });
@@ -497,7 +499,7 @@ test("notification cleanup does not erase a concurrent inbound polling health ph
   const f = harness(t);
   const healthPath = path.join(path.dirname(f.statePath), "health.json");
   const health = new HealthTracker(healthPath); health.startRun();
-  const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink, notifications: true, healthTracker: health });
+  const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink, healthTracker: health });
   let release!: () => void;
   let markStarted!: () => void;
   const started = new Promise<void>(resolve => { markStarted = resolve; });
@@ -515,14 +517,14 @@ test("stop after the first notification chunk cancels the remaining chunks and r
   item.text = "# 结果\n" + "完整输出🚀\n".repeat(30);
   const f = harness(t, { items: [item] });
   const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink,
-    notifications: true, splitMaxChars: 32 });
+    splitMaxChars: 32 });
   f.hooks.send = () => { gateway.stop(); return { ret: 0 }; };
   assert.deepEqual(await gateway.deliverNotificationsOnce(), { accepted: 0, uncertain: 1, skipped: 0 });
   assert.equal(f.sends.length, 1);
   assert.equal(f.records.get(item.id)?.status, "uncertain");
   const restartedState = new StateManager(f.accountPath, f.statePath);
   const restarted = new WeChatGateway({ stateManager: restartedState, controller: f.controller, ilink: f.createILink(restartedState),
-    notifications: true, splitMaxChars: 32 });
+    splitMaxChars: 32 });
   await restarted.deliverNotificationsOnce();
   assert.equal(f.sends.length, 1);
 });
@@ -532,7 +534,7 @@ test("blocked notification work does not prevent inbound polling or replace its 
   const healthPath = path.join(path.dirname(f.statePath), "health.json");
   const health = new HealthTracker(healthPath); health.startRun();
   const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink,
-    notifications: true, healthTracker: health });
+    healthTracker: health });
   let release!: () => void;
   let notificationStarted = false;
   let markStarted!: () => void;
@@ -570,19 +572,19 @@ test("CLI poll-once processes notifications only after a successful inbound cycl
     return new Response(JSON.stringify({ items: [] }));
   };
   t.after(() => { globalThis.fetch = original; });
-  const args = ["--poll-once", "--notifications", "--credentials-path", f.accountPath, "--state-path", f.statePath];
+  const args = ["--poll-once", "--credentials-path", f.accountPath, "--state-path", f.statePath];
   assert.equal(await runCli(args, { CONTROLLER_TOKEN: "synthetic" }), 0);
   assert.deepEqual(calls, ["/ilink/bot/getupdates", "/v1/chats/notification-interest", "/v1/deliveries/pending"]);
   calls.length = 0; failPoll = true;
   await assert.rejects(runCli(args, { CONTROLLER_TOKEN: "synthetic" }), /inbound failed/);
   assert.deepEqual(calls, ["/ilink/bot/getupdates"]);
 });
-test("CLI notification opt-in is explicit and check/healthcheck/baseline never list or send", async t => {
-  assert.equal(parseGatewayCli([], {}).notifications, false);
-  assert.equal(parseGatewayCli(["--notifications"], {}).notifications, true);
-  assert.equal(parseGatewayCli([], { GATEWAY_NOTIFICATIONS: "true" }).notifications, true);
-  assert.equal(parseGatewayCli([], { GATEWAY_NOTIFICATIONS: "1" }).notifications, false);
-  assert.equal(parseGatewayCli([], { GATEWAY_PLAN_NOTIFICATIONS: "true" }).notifications, false);
+test("CLI ignores legacy notification environment and check/healthcheck/baseline never list or send", async t => {
+  assert.equal("notifications" in parseGatewayCli([], {}), false);
+  for (const value of ["true", "false", "1"]) {
+    assert.deepEqual(parseGatewayCli([], { GATEWAY_NOTIFICATIONS: value }), parseGatewayCli([], {}));
+  }
+  assert.throws(() => parseGatewayCli(["--notifications"], {}), /Unknown option/);
   assert.throws(() => parseGatewayCli(["--plan-notifications"], {}), /Unknown option/);
   const f = harness(t, { baseline: false });
   const original = globalThis.fetch;
@@ -592,7 +594,7 @@ test("CLI notification opt-in is explicit and check/healthcheck/baseline never l
     polls++; return new Response(JSON.stringify({ ret: 0, msgs: [], get_updates_buf: "baseline" }));
   };
   t.after(() => { globalThis.fetch = original; });
-  const args = ["--notifications", "--credentials-path", f.accountPath, "--state-path", f.statePath];
+  const args = ["--credentials-path", f.accountPath, "--state-path", f.statePath];
   assert.equal(await runCli(["--check", ...args], { CONTROLLER_TOKEN: "synthetic" }), 0);
   await runCli(["--healthcheck", ...args], {});
   assert.equal(await runCli(["--establish-baseline", ...args], { CONTROLLER_TOKEN: "synthetic" }), 0);

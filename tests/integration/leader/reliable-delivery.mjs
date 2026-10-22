@@ -209,11 +209,13 @@ async function verifyUnknownOrdinaryReply(harness) {
 
 async function verifyProgressDelivery(harness, complete) {
   const { input, runGateway, pending, sent, deliveries, wireEvents, healthy, evidence, databaseUrl, chatId,
-    directTask, fullResult, getDelivery, elapseDispatchInterval, waitForTyping } = harness;
+    directTask, fullResult, getDelivery, elapseDispatchInterval, waitForTyping,
+    progressCalls, progressToolResults } = harness;
   const require = createRequire(new URL('../../../controller/package.json', import.meta.url));
   const { Pool } = require('pg');
   const pool = new Pool({ connectionString: databaseUrl });
-  const { NOTIFICATION_TTL_MS } = await import('../../../controller/dist/notifications/contracts.js');
+  const { NOTIFICATION_PROGRESS_INITIAL_DELAY_MS, NOTIFICATION_PROGRESS_INTERVAL_MS } =
+    await import('../../../controller/dist/notifications/progress.js');
   try {
     await verifyPostgresAuthorityAndInspection(databaseUrl, pool, evidence);
     const activeSource = async () => {
@@ -221,19 +223,11 @@ async function verifyProgressDelivery(harness, complete) {
       assert.equal(result.rows.length, 1);
       return result.rows[0].id;
     };
-    // Move only synthetic persisted timestamps. Production 30s/60s policy is unchanged and is
-    // boundary-tested independently by the real PostgreSQL notification-progress fixture.
-    const ageSource = id => pool.query(`UPDATE leader_executions SET revision=revision+1,created_at=$2,
-      data=jsonb_set(jsonb_set(jsonb_set(data,'{createdAt}',to_jsonb($2::bigint)),
-        '{expiresAt}',to_jsonb($3::bigint)),'{revision}',to_jsonb(revision+1)) WHERE id=$1`,
-      [id, Date.now() - 31_000, Date.now() + 600_000]);
-    const ageProgress = id => {
-      const createdAt = Date.now() - 61_000;
-      return pool.query(`UPDATE leader_notifications SET created_at=$2,expires_at=$3,
-        data=jsonb_set(jsonb_set(data,'{createdAt}',to_jsonb($2::bigint)),'{expiresAt}',to_jsonb($3::bigint))
-        WHERE execution_id=$1 AND kind='progress'`, [id, createdAt, createdAt + NOTIFICATION_TTL_MS]);
-    };
     const progressRows = async id => (await pool.query("SELECT data FROM leader_notifications WHERE execution_id=$1 AND kind='progress'", [id])).rows;
+    // Both durable eligibility and the live model runner enforce these deadlines.
+    // Use real time so changing database timestamps cannot bypass either gate.
+    const waitInitialDelay = () => delay(NOTIFICATION_PROGRESS_INITIAL_DELAY_MS);
+    const waitProgressInterval = () => delay(NOTIFICATION_PROGRESS_INTERVAL_MS);
     const waitNotification = async (kind, sequence) => {
       let match;
       await waitFor(async () => { healthy(); match = (await pending()).find(item => item.kind === kind &&
@@ -243,6 +237,12 @@ async function verifyProgressDelivery(harness, complete) {
     const deliver = async notification => {
       await elapseDispatchInterval();
       const start = sent.length, eventStart = wireEvents.length;
+      if (notification.kind === 'progress') {
+        const modelCall = progressCalls.find(call => call.eventKey === notification.progress.eventKey);
+        assert(modelCall, 'Progress notification was created without a model tool call');
+        assert.equal(notification.text, modelCall.text, 'Progress substituted a fixed template for model output');
+        assert.equal(modelCall.remaining, 4 - notification.progress.sequence);
+      }
       assert.equal((await runGateway('--poll-once')).notifications.accepted, 1);
       assert.equal(notification.mode, 'text');
       assert.deepEqual(sent.slice(start).map(text), notification.messages,
@@ -254,9 +254,9 @@ async function verifyProgressDelivery(harness, complete) {
     await input(PROGRESS_TASK);
     await waitFor(() => { healthy(); return deliveries.length === start + 1; }, 'First progress action accepted');
     const source = await activeSource();
-    await ageSource(source);
+    await waitInitialDelay();
     await deliver(await waitNotification('progress', 1));
-    await ageProgress(source);
+    await waitProgressInterval();
     const unchanged = sent.length;
     await delay(OBSERVATION_MS);
     await runGateway('--poll-once');
@@ -266,13 +266,15 @@ async function verifyProgressDelivery(harness, complete) {
       await complete(deliveries.at(-1), `**精确步骤结果 ${sequence - 1}**`);
       await waitFor(() => { healthy(); return deliveries.length === start + sequence; }, 'Next progress action accepted');
       await deliver(await waitNotification('progress', sequence));
-      await ageProgress(source);
+      await waitProgressInterval();
     }
     await complete(deliveries.at(-1), '**精确步骤结果 3**');
     await waitFor(() => { healthy(); return deliveries.length === start + 4; }, 'Fourth progress fact accepted');
     await delay(OBSERVATION_MS);
     assert.equal((await progressRows(source)).length, 3, 'A fourth progress slot was created');
     assert.equal((await pending()).length, 0, 'Progress limit failed after a new receipt');
+    assert.deepEqual(progressToolResults.filter(result => result.sourceId === source).map(result => result.remaining), [2, 1, 0],
+      'Background model did not receive the exact remaining allowance after every tool call');
     await complete(deliveries.at(-1), '**精确步骤结果 4**');
     const terminal = await waitNotification('completed');
     const terminalRaw = '### 已完成\n\n**任务**：合成进度任务 1\n\n' +
@@ -286,8 +288,8 @@ async function verifyProgressDelivery(harness, complete) {
     const terminalStart = deliveries.length;
     await input(directTask);
     await waitFor(() => deliveries.length === terminalStart + 1, 'Terminal-priority task accepted');
-    const racingSource = await activeSource();
-    await ageSource(racingSource);
+    await activeSource();
+    await waitInitialDelay();
     const stale = await waitNotification('progress', 1);
     await complete(deliveries.at(-1), '**终态必须优先**');
     const preferred = await waitNotification('completed');
@@ -298,7 +300,7 @@ async function verifyProgressDelivery(harness, complete) {
     assert(!sent.slice(beforeTerminal).some(message => text(message) === stale.text), 'Stale progress preceded terminal result');
     evidence('real-process-progress', { progressNotifications: 3, unchangedFactNotifications: 0,
       fourthFactNotifications: 0, exactFinalResults: 4, backgroundTypingCompleted: true,
-      pendingProgressSuppressedByTerminal: true, acceleratedSyntheticPersistedTimes: true });
+      pendingProgressSuppressedByTerminal: true, realPolicyTiming: true });
     return { delivered: 3, unchangedFactNotifications: 0, fourthFactNotifications: 0, terminalPriority: true };
   } finally { await pool.end(); }
 }

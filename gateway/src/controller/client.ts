@@ -8,6 +8,10 @@ import { NOTIFICATION_TIMEOUT_MS, type NotificationDeferReason } from "./notific
 import { downloadControllerImage } from "./image-client.js";
 import type { ImageAttachment } from "../wechat/media-delivery.js";
 import { getControllerMessageReply, parseControllerReply } from "./reply-client.js";
+import { readMessageStream, type ForwardMessageProgress } from "./message-stream.js";
+import { beforeAbort } from "../runtime/abort.js";
+import { QUERY_PROGRESS_LIMIT } from "../leader/progress.js";
+export type { ForwardMessageProgress } from "./message-stream.js";
 export { DEFAULT_CONTROLLER_TIMEOUT_MS } from "../runtime/budgets.js";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
@@ -146,9 +150,13 @@ export class ControllerClient {
     return this.notifications.recordNotificationReceipt(id, attemptId, status);
   }
 
-  public async forwardMessage(req: ControllerMessageRequest): Promise<ControllerMessageResponse> {
+  public async forwardMessage(req: ControllerMessageRequest, progress?: ForwardMessageProgress): Promise<ControllerMessageResponse> {
     if (!req.chatId || !req.messageId || !req.text) {
       throw new Error("ControllerMessageRequest requires non-empty chatId, messageId, and text");
+    }
+    if (progress && (!Number.isInteger(progress.progressRemaining) || progress.progressRemaining < 0 ||
+      progress.progressRemaining > QUERY_PROGRESS_LIMIT || typeof progress.onProgress !== "function")) {
+      throw new Error("Invalid Controller progress budget");
     }
     const url = `${this.baseUrl}/v1/messages`;
     let lastError: Error | null = null;
@@ -160,12 +168,13 @@ export class ControllerClient {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.timeoutMs);
       try {
-        const response = await this.fetchImpl(url, {
+        const pendingResponse = this.fetchImpl(url, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "Authorization": `Bearer ${this.token}`,
             ...(currentTrace() ? { "X-Latency-Attempt": currentTrace()!.attemptId } : {}),
+            ...(progress ? { Accept: "application/x-ndjson", "X-Progress-Remaining": String(progress.progressRemaining) } : {}),
           },
           body: JSON.stringify({
             chatId: req.chatId,
@@ -175,6 +184,7 @@ export class ControllerClient {
           redirect: "error",
           signal: controller.signal,
         });
+        const response = await (progress ? beforeAbort(pendingResponse, controller.signal) : pendingResponse);
 
         traceEvent("controller.http.headers", { attempt, httpStatus: response.status, durationMs: performance.now() - started });
         if (response.status === 403) {
@@ -196,7 +206,7 @@ export class ControllerClient {
           throw new Error("Controller authentication failed (HTTP 401); verify CONTROLLER_TOKEN");
         }
 
-        if (response.status >= 500 && attempt < this.maxRetries) {
+        if (response.status >= 500 && !progress && attempt < this.maxRetries) {
           outcome = "retry";
           lastError = new Error(`Controller temporary server error (HTTP ${response.status})`);
           continue;
@@ -207,14 +217,17 @@ export class ControllerClient {
           throw new Error(`Controller /v1/messages returned HTTP ${response.status}`);
         }
 
-        const data: unknown = await response.json();
-        const reply = parseControllerReply(data, "/v1/messages");
+        const streamed = response.headers.get("content-type")?.split(";")[0] === "application/x-ndjson";
+        if (streamed && !progress) throw new Error("Controller /v1/messages returned invalid response schema (unexpected stream)");
+        const reply = streamed
+          ? await readMessageStream(response, progress!, controller.signal)
+          : parseControllerReply(await beforeAbort(response.json(), controller.signal), "/v1/messages");
         outcome = "ok";
         return reply;
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         // Do not retry poison chats, auth, or schema validation errors
-        if (error instanceof ChatNotAllowedError ||
+        if (progress || error instanceof ChatNotAllowedError ||
             error.message.includes("authentication") ||
             error.message.includes("returned HTTP 4") ||
             error.message.includes("invalid response schema")) {
@@ -227,6 +240,7 @@ export class ControllerClient {
       } finally {
         traceEvent("controller.http.end", { attempt, outcome, durationMs: performance.now() - started });
         clearTimeout(timer);
+        controller.abort();
       }
     }
     throw lastError || new Error("Controller request failed");

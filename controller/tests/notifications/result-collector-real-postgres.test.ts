@@ -76,7 +76,7 @@ it.skipIf(!databaseUrl)("persists conversion markers without delivery-table coup
       nodeId: "synthetic-node", sessionId: "synthetic-thread", action: "send", sendRoute: "control-socket",
       prompt: active.plan.actions[0].prompt, status: "accepted", turnId: "synthetic-exact-progress",
       createdAt: stamp, updatedAt: stamp, expiresAt: new Date(NOW + 60_000).toISOString() });
-    const progress = (await reopened.enqueueProgressNotification({ type: "plan", id: running.id }, NOW + 30_000))!;
+    const progress = (await reopened.enqueueProgressNotification({ type: "plan", id: running.id }, NOW + 30_000, { eventKey: (await reopened.getProgressNotificationContext({ type: "plan", id: running.id }, NOW + 30_000))!.eventKey, text: "模型进展" }))!;
     expect(progress).not.toBeNull();
     expect(await restarted.collect(["synthetic-chat"], NOW + 30_000)).toMatchObject({ scanned: 1, prepared: 1, failures: [] });
     expect((await repository.get(progress.id, NOW + 30_000))?.kind).toBe("progress");

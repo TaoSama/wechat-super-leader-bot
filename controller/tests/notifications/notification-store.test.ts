@@ -3,6 +3,7 @@ import pg from "pg";
 import { MemoryStore } from "../../src/store/memory.js";
 import { PostgresStore } from "../../src/store/postgres.js";
 import { ConflictError, type IStore } from "../../src/store/interface.js";
+import { PROGRESS_OUTPUT_LIMIT, progressOutputExcerpt } from "../../src/notifications/progress.js";
 import { createExecution, executionRequestId, type ExecutionRecord } from "../../src/leader/plans/execution.js";
 import type { CommandRecord } from "../../src/types.js";
 import { normalizeNotification, NOTIFICATION_TTL_MS, NOTIFICATION_ATTEMPT_MS, NOTIFICATION_TEXT_LIMIT, type StoredNotification } from "../../src/notifications/contracts.js";
@@ -46,7 +47,10 @@ class NotificationPool {
       const row = this.commandRows.get(String(params[0]));
       if (query.includes("AND status IN ('accepted','completed')") && row && !["accepted", "completed"].includes(String(row.status))) return { rows: [] };
       const columns = query.slice("SELECT ".length, query.indexOf(" FROM commands")).split(",").map(column => column.trim());
-      return { rows: row ? [Object.fromEntries(columns.map(column => [column, structuredClone(row[column])]))] : [] };
+      if (columns.includes("*")) return { rows: row ? [structuredClone(row)] : [] };
+      return { rows: row ? [Object.fromEntries(columns.map(column => column.startsWith("CASE WHEN")
+        ? ["output", row.status === "completed" && typeof row.output === "string" ? progressOutputExcerpt(row.output) : null]
+        : [column, structuredClone(row[column])]))] : [] };
     }
     if (query.startsWith("SELECT pg_advisory_xact_lock(") || query.startsWith("SELECT id FROM leader_goals WHERE chat_id=$1")) return this.result();
     if (/^(CREATE |ALTER |DROP INDEX |INSERT INTO known_sessions |DELETE FROM node_sessions|UPDATE commands)/.test(query)) return this.result();
@@ -141,7 +145,7 @@ function postgres() {
   return { store: new PostgresStore("postgresql://unused/notification-test"), pool };
 }
 
-it("PostgresStore progress projects only receipt metadata, never large output/error bodies", async () => {
+it("PostgresStore progress projects bounded completed output and excludes unfinished output/error bodies", async () => {
   const { store, pool } = postgres(), record = execution();
   await store.createExecutionIfAbsent(record);
   await store.compareAndSetExecution({ ...record, revision: 2, attempts: [{ token: attempt, startedAt: NOW, expiresAt: NOW + 15_000 }] }, 1, NOW);
@@ -149,23 +153,58 @@ it("PostgresStore progress projects only receipt metadata, never large output/er
   pool.commandRows.set(executionRequestId(record, 0), { command_id: "receipt", request_id: executionRequestId(record, 0),
     node_id: "node", session_id: "session", action: "send", prompt: "private prompt", status: "accepted", turn_id: "exact-turn",
     send_route: "control-socket", expires_at: new Date(NOW + 60_000).toISOString(), created_at: stamp, updated_at: stamp,
-    output: "x".repeat(NOTIFICATION_TEXT_LIMIT), error: "private large error", authority: { secret: "not progress evidence" } });
-  expect(await store.enqueueProgressNotification({ type: "plan", id: record.id }, NOW + 30_000)).toMatchObject({ kind: "progress" });
+    output: "x".repeat(NOTIFICATION_TEXT_LIMIT), error: "private large error", authority: { type: "plan", id: record.id, chatId: record.chatId } });
+  const source = { type: "plan" as const, id: record.id };
+  const context = (await store.getProgressNotificationContext(source, NOW + 30_000))!;
+  expect(context.evidence.every(item => item.output === undefined)).toBe(true);
+  expect(await store.enqueueProgressNotification(source, NOW + 30_000, { eventKey: context.eventKey, text: "模型报告的真实进展" })).toMatchObject({ kind: "progress" });
   const queries = pool.queries.filter(query => query.includes(" FROM commands "));
-  expect(queries).toHaveLength(1);
-  const columns = queries[0].slice("SELECT ".length, queries[0].indexOf(" FROM commands")).split(",").map(column => column.trim());
+  expect(queries).toHaveLength(2);
+  const columns = queries[1].slice("SELECT ".length, queries[1].indexOf(" FROM commands")).split(",").map(column => column.trim());
   expect(columns).toEqual(["command_id", "request_id", "node_id", "session_id", "action", "prompt", "status", "expires_at", "created_at", "updated_at",
-    "skills", "turn_id", "send_route", "input_receipt", "delivery_mode", "expected_turn_id"]);
+    "skills", "turn_id", "send_route", "input_receipt", "delivery_mode", "expected_turn_id", "authority", "queue_order",
+    `CASE WHEN status='completed' THEN substring(output from 1 for ${PROGRESS_OUTPUT_LIMIT}) END AS output`]);
   expect(columns).not.toContain("output"); expect(columns).not.toContain("error"); expect(columns).not.toContain("*");
 });
 
-it("PostgresStore progress does not map queued commands without their omitted authorization", async () => {
+it.each(["x", "汉", "🙂"])("keeps PostgreSQL and memory completed evidence identical with bounded %s output", async character => {
+  const { store, pool } = postgres(), memory = new MemoryStore(), record = execution();
+  for (const target of [store, memory]) {
+    await target.createExecutionIfAbsent(record);
+    await target.compareAndSetExecution({ ...record, revision: 2,
+      attempts: [{ token: attempt, startedAt: NOW, expiresAt: NOW + 15_000 }] }, 1, NOW);
+  }
+  const stamp = new Date(NOW).toISOString(), output = character.repeat(PROGRESS_OUTPUT_LIMIT + 10);
+  const receipt: CommandRecord = { commandId: "completed-receipt", requestId: executionRequestId(record, 0), nodeId: "node",
+    sessionId: "session", action: "send", prompt: "private prompt", status: "completed", turnId: "exact-turn",
+    sendRoute: "control-socket", expiresAt: new Date(NOW + 60_000).toISOString(), createdAt: stamp, updatedAt: stamp, output };
+  await memory.createCommandIfAbsent(receipt);
+  pool.commandRows.set(receipt.requestId, { command_id: receipt.commandId, request_id: receipt.requestId, node_id: "node",
+    session_id: "session", action: "send", prompt: receipt.prompt, status: receipt.status, turn_id: receipt.turnId,
+    send_route: "control-socket", expires_at: receipt.expiresAt, created_at: stamp, updated_at: stamp, output });
+  const source = { type: "plan" as const, id: record.id }, now = NOW + 30_000;
+  const pgContext = await store.getProgressNotificationContext(source, now);
+  expect(pgContext).toEqual(await memory.getProgressNotificationContext(source, now));
+  expect(pgContext!.evidence[0].output).toBe(character.repeat(PROGRESS_OUTPUT_LIMIT));
+  expect(pool.queries.filter(query => query.includes(" FROM commands ")).every(query =>
+    query.includes(`CASE WHEN status='completed' THEN substring(output from 1 for ${PROGRESS_OUTPUT_LIMIT}) END AS output`))).toBe(true);
+  expect(await store.enqueueProgressNotification(source, now, { eventKey: pgContext!.eventKey, text: "依据完成结果继续核查。" })).not.toBeNull();
+});
+
+it("PostgresStore includes durable queued authorization when rechecking model progress", async () => {
   const { store, pool } = postgres(), record = execution();
   await store.createExecutionIfAbsent(record);
   await store.compareAndSetExecution({ ...record, revision: 2, attempts: [{ token: attempt, startedAt: NOW, expiresAt: NOW + 15_000 }] }, 1, NOW);
-  pool.commandRows.set(executionRequestId(record, 0), { status: "queued" });
-  expect(await store.enqueueProgressNotification({ type: "plan", id: record.id }, NOW + 30_000)).toBeNull();
-  expect(pool.queries.find(query => query.includes(" FROM commands "))).toContain("AND status IN ('accepted','completed')");
+  const stamp = new Date(NOW).toISOString();
+  pool.commandRows.set(executionRequestId(record, 0), { command_id: "queued-receipt", request_id: executionRequestId(record, 0),
+    node_id: "node", session_id: "session", action: "send", prompt: "private prompt", status: "queued",
+    authority: { type: "plan", id: record.id, chatId: record.chatId }, send_route: "control-socket",
+    expires_at: new Date(NOW + 60_000).toISOString(), created_at: stamp, updated_at: stamp });
+  const source = { type: "plan" as const, id: record.id };
+  const context = (await store.getProgressNotificationContext(source, NOW + 30_000))!;
+  expect(context.evidence).toMatchObject([{ status: "queued" }]);
+  expect(await store.enqueueProgressNotification(source, NOW + 30_000, { eventKey: context.eventKey, text: "任务已排队，等待会话可用。" })).toMatchObject({ kind: "progress" });
+  expect(pool.queries.filter(query => query.includes(" FROM commands ")).at(-1)).toContain("authority,queue_order");
 });
 
 async function terminal(store: IStore, index = 1, chatId = "allowed", status: ExecutionRecord["status"] = "completed", now = NOW) {

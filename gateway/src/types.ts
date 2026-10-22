@@ -70,6 +70,8 @@ export interface ControllerMessageResponse {
   text: string;
   commandId?: string;
   images?: import("./wechat/media-delivery.js").ImageAttachment[];
+  /** Engine-local identity of the original request that owns these attachments. */
+  imageSourceMessageId?: string;
 }
 
 export interface GatewayConfig {
