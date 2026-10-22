@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -11,13 +11,15 @@ import { createControlFixture } from '../../support/reliability-control.mjs';
 import { createModelFixture, CHAT, OTHER_CHAT, NODE, SESSION, TASK, TASK_RESULT } from '../../support/reliability-model.mjs';
 import { createNativeFixture } from '../../support/reliability-native.mjs';
 import { createWechatFixture } from '../../support/reliability-wechat.mjs';
+import { createSdkModelFixture } from '../../support/reliability-sdk-model.mjs';
 
 const require = createRequire(new URL('../../../controller/package.json', import.meta.url));
 const { Pool } = require('pg');
 export { Pool, CHAT, OTHER_CHAT, NODE, SESSION, TASK, TASK_RESULT, delay, waitFor };
 export const OBSERVE_MS = 2_200;
 
-export async function withReliabilityFixture({ databaseUrl, evidence, name, signal }, operation) {
+export async function withReliabilityFixture({ databaseUrl, evidence, name, signal,
+  leaderMode = 'controller', sdkModelOptions = {} }, operation) {
   // /tmp deliberately keeps the Unix socket below macOS's 104-byte limit.
   const dir = await mkdtemp('/tmp/slr-');
   const cleanup = [];
@@ -33,6 +35,8 @@ export async function withReliabilityFixture({ databaseUrl, evidence, name, sign
     registerCleanup('SQL observer', () => pool.end());
     const model = await createModelFixture({ evidence });
     registerCleanup('model server', () => model.stop());
+    const sdkModel = leaderMode === 'codex' ? await createSdkModelFixture({ evidence, ...sdkModelOptions }) : undefined;
+    if (sdkModel) registerCleanup('SDK model server', () => sdkModel.stop());
     const token = randomUUID(), nodeToken = randomUUID();
     control = await createControlFixture({ env, databaseUrl, token, nodeToken, nodeId: NODE,
       chatIds: [CHAT, OTHER_CHAT], modelUrl: model.url, evidence, commandTtlSeconds: name === 'offline-expiry' ? 5 : 60 });
@@ -46,14 +50,16 @@ export async function withReliabilityFixture({ databaseUrl, evidence, name, sign
     signal?.throwIfAborted();
     wechat = await createWechatFixture({ dir: join(dir, 'wechat'), env, evidence: item => evidence('wechat', item) });
     registerCleanup('Gateway and WeChat shim', () => wechat.close());
-    const healthy = () => { signal?.throwIfAborted(); control.healthy(); native.healthy(); wechat.healthy(); model.healthy(); };
-    const gatewayOptions = { controllerUrl: control.proxyUrl, controllerToken: token };
+    const healthy = () => { signal?.throwIfAborted(); control.healthy(); native.healthy(); wechat.healthy(); model.healthy(); sdkModel?.healthy(); };
+    const gatewayOptions = { controllerUrl: control.proxyUrl, controllerToken: token,
+      ...(sdkModel ? { leaderMode, leaderRoot: join(await realpath(dir), 'leader'), leaderModel: sdkModel.model,
+        sdkBaseUrl: sdkModel.url, sdkApiKey: sdkModel.apiKey } : {}) };
     const command = async id => {
       const response = await control.request('/v1/commands/' + id);
       assert.equal(response.status, 200, JSON.stringify(response));
       return response.body;
     };
-    const h = { dir, control, native, wechat, model, pool, healthy, gatewayOptions, evidence,
+    const h = { dir, control, native, wechat, model, sdkModel, pool, healthy, gatewayOptions, evidence,
       async poll(options) {
         const result = await wechat.runOnce({ ...gatewayOptions, ...options });
         evidence('gateway-process-output', result);
@@ -127,6 +133,7 @@ export async function withReliabilityFixture({ databaseUrl, evidence, name, sign
       for (const running of wechat.processes) evidence('gateway-process-output', {
         pid: running.child.pid, stdout: running.stdout, stderr: running.stderr,
         code: running.child.exitCode, signal: running.child.signalCode });
+      if (sdkModel) evidence('sdk-process-snapshot', { processes: await wechat.readSdkProcesses() });
       evidence('native-snapshot', { starts: native.starts, resumes: native.resumes, turns: native.turns });
     }
   }, cleanup);

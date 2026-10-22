@@ -177,6 +177,20 @@ export function createNativeFixture({ dir, env = verificationEnvironment(), cont
       turn.items.push({ id: randomUUID(), type: 'agentMessage', text: output, phase: 'final_answer' });
       status = 'idle';
     },
+    appendExternalCompletedTurn({ prompt, output }) {
+      assert(turns.every(turn => turn.status === 'completed'), 'Complete synthetic in-flight turns before appending an external turn');
+      assert.equal(typeof prompt, 'string');
+      assert.equal(typeof output, 'string');
+      const turn = { id: randomUUID(), status: 'completed', items: [
+        { id: randomUUID(), type: 'userMessage', content: [{ type: 'text', text: prompt }] },
+        { id: randomUUID(), type: 'agentMessage', text: output, phase: 'final_answer' },
+      ] };
+      // Independent synthetic native history, never a Daemon dispatch receipt.
+      turns.push(turn);
+      status = 'idle';
+      evidence('synthetic-external-turn-completed', { threadId: sessionId, turnId: turn.id, prompt, output });
+      return structuredClone(turn);
+    },
     holdNextStart() { assert(!nextFault, 'Native fault already armed'); nextFault = 'hold'; },
     dropNextStartAck() { assert(!nextFault, 'Native fault already armed'); nextFault = 'drop'; },
     ackStart(turnId = [...held.keys()].at(-1)) {
