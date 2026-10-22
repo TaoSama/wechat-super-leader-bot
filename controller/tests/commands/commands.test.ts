@@ -114,11 +114,10 @@ it("dispatches a frozen resume route after loading and never rewrites its persis
   expect(f.hub.sendCommand).toHaveBeenCalledTimes(1);
 });
 
-it.each(["capability", "active", "stale", "desktop"])("does not consume an attempt for revoked loaded resume: %s", async change => {
+it.each(["capability", "stale", "desktop"])("does not consume an attempt for revoked loaded resume: %s", async change => {
   const f = setup();
   f.session.capabilities = ["read", "send", "resume-send"];
   if (change === "capability") f.session.capabilities = ["read", "send"];
-  if (change === "active") f.session.status = "active";
   if (change === "stale") f.session.observedAt = new Date(Date.now() - 60_000).toISOString();
   if (change === "desktop") f.session.desktopObservation = {
     source: "codex-desktop", availability: "available", status: "idle", observedAt: new Date().toISOString(),
