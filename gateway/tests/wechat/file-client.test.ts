@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { ILinkClient } from "../../src/wechat/client.js";
 import { StateManager } from "../../src/runtime/state.js";
 import type { UploadedFileItem } from "../../src/wechat/file-upload.js";
+import { LocalSendDeferredError } from "../../src/runtime/context-policy.js";
 
 const BYTES = Buffer.from("# 完整任务成果\n\n这是下载并验证过的正文。\n");
 const FILE = { fileName: "研究成果.md", byteLength: BYTES.length,
@@ -162,4 +163,21 @@ test("new context or renewed window during CDN upload cancels the old file befor
     assert.equal(f.state.contextBudgets.chat.remaining, 10);
     assert.equal(f.state.replyDeliveries[mutation].inFlight, false);
   }
+});
+
+test("shared admission policy can yield a file after upload without consuming quota or creating uncertainty", async t => {
+  const f = fixture(t);
+  const client = f.client();
+  client.setBeforeSendCheck((chatId, key) => {
+    assert.equal(chatId, "chat"); assert.equal(key, "priority-file");
+    throw new LocalSendDeferredError("budget_exhausted", "priority reminder pending");
+  });
+  await assert.rejects(client.sendFileReply("chat", BYTES, FILE, { deliveryKey: "priority-file" }), LocalSendDeferredError);
+  assert.equal(f.calls.filter(path => path === "/c2c/upload").length, 1);
+  assert.equal(f.sends.length, 0);
+  assert.equal(f.state.contextBudgets.chat.remaining, 10);
+  assert.equal(f.restart().replyDeliveries["priority-file"].inFlight, false);
+  client.setBeforeSendCheck(() => {});
+  await client.sendFileReply("chat", BYTES, FILE, { deliveryKey: "priority-file" });
+  assert.equal(f.sends.length, 1);
 });

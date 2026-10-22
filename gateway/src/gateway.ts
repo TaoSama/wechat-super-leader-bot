@@ -69,6 +69,7 @@ export class WeChatGateway {
   private readonly resultDispatcher?: ResultDispatcher;
   private readonly renewalNotifier?: RenewalNotifier;
   private readonly resultClient?: ResultClient;
+  private readonly resultOutbox?: FileResultOutbox;
   private notificationInterest?: { fetchedAt: number; chatIds: string[]; interested: string[] };
   private readonly activeInboundChats = new Set<string>();
   private flushingReplies = false;
@@ -98,6 +99,7 @@ export class WeChatGateway {
     this.notifications = options.notifications ?? false;
     if (options.resultClient && options.resultOutbox) {
       this.resultClient = options.resultClient;
+      this.resultOutbox = options.resultOutbox;
       const active = () => !this.stopped && this.stateManager.isReadyForActivePolling();
       const isReplyPending = (chatId: string) => this.isReplyPending(chatId);
       const canDispatch = (chatId: string, kind: "final" | "progress") => Boolean(this.stateManager.contextTokens[chatId]) && this.stateManager.canSendToChat(chatId, kind);
@@ -115,8 +117,13 @@ export class WeChatGateway {
       });
       this.resultDispatcher = new ResultDispatcher({ controller: options.resultClient, store: options.resultOutbox,
         runner, state: this.stateManager, canDispatch, deferReason, isReplyPending, active, signal: this.notificationAbort.signal });
-      this.renewalNotifier = new RenewalNotifier({ state: this.stateManager, isReplyPending, active, signal: this.notificationAbort.signal,
+      this.renewalNotifier = new RenewalNotifier({ state: this.stateManager, active, signal: this.notificationAbort.signal,
         send: (chatId, text, sendOptions) => this.ilink.sendMarkdownReply(chatId, text, sendOptions) });
+      this.ilink.setBeforeSendCheck((chatId, deliveryKey) => {
+        if (this.notifications && this.renewalInterestedChats().includes(chatId) && this.renewalNotifier!.shouldYield(chatId, deliveryKey)) {
+          throw new LocalSendDeferredError("budget_exhausted", "Local send deferred for a priority renewal reminder");
+        }
+      });
       this.stateManager.setReplyEvidenceProtection(key => options.resultOutbox!.protectsDeliveryKey(key) ||
         Object.entries(this.stateManager.contextBudgets).some(([chatId, budget]) => Date.now() >= budget.refreshedAt &&
           Date.now() - budget.refreshedAt < this.stateManager.policy.contextWindowMs &&
@@ -138,20 +145,30 @@ export class WeChatGateway {
   public async deliverNotificationsOnce(): Promise<NotificationDeliverySummary> {
     if (!this.notifications || this.stopped || !this.stateManager.isReadyForActivePolling()) return { accepted: 0, uncertain: 0, skipped: 0 };
     let firstError: unknown;
-    try { await this.flushRepliesOnce(); } catch (error) { firstError = error; }
+    let renewalError: unknown;
     let summary: NotificationDeliverySummary = { accepted: 0, uncertain: 0, skipped: 0 };
-    try {
-      if (this.resultDispatcher && this.resultClient) {
+    if (this.resultDispatcher && this.resultClient) {
+      try {
         if (!this.notificationInterest || Date.now() - this.notificationInterest.fetchedAt >= NOTIFICATION_INTEREST_CACHE_MS) {
           this.notificationInterest = { ...await this.resultClient.notificationInterest(this.notificationAbort.signal), fetchedAt: Date.now() };
         }
-        try { summary = await this.resultDispatcher.deliverOnce(this.notificationInterest.chatIds); }
+      } catch (error) { firstError = error; }
+      // Renewal has priority over ordinary replies and task results, including local SDK replies.
+      try { await this.renewalNotifier!.deliverOnce(this.renewalInterestedChats()); }
+      catch (error) { renewalError = error; }
+    }
+    try { await this.flushRepliesOnce(); } catch (error) { firstError ??= error; }
+    try {
+      if (this.resultDispatcher) {
+        try { summary = await this.resultDispatcher.deliverOnce(this.notificationInterest?.chatIds ?? []); }
         catch (error) { firstError ??= error; }
-        try { await this.renewalNotifier!.deliverOnce(this.notificationInterest.interested); }
-        catch (error) { firstError ??= error; }
+        // A multipart reply can cross 3 -> 2 and yield its unsent suffix during this pass.
+        try { await this.renewalNotifier!.deliverOnce(this.renewalInterestedChats()); }
+        catch (error) { renewalError ??= error; }
       } else summary = await this.notificationOutbox!.deliverOnce();
     } catch (error) { firstError ??= error; }
     if (firstError !== undefined) throw firstError;
+    if (renewalError !== undefined) throw renewalError;
     return summary;
   }
 
@@ -343,6 +360,17 @@ export class WeChatGateway {
       this.healthTracker?.recordPollError(err);
       throw err;
     }
+  }
+
+  private renewalInterestedChats(): string[] {
+    const pendingReplies = Object.values(this.stateManager.outbox).filter(item => {
+      if (item.kind !== "reply" || item.status !== "pending" || this.hasQuarantinedInboundReply(item.deliveryKey)) return false;
+      const text = this.stateManager.replyDeliveries[item.deliveryKey];
+      return !text || text.acknowledgedChunks < text.totalChunks;
+    });
+    return [...new Set([...(this.notificationInterest?.interested ?? []),
+      ...(this.resultOutbox?.references().filter(item => item.status !== "receipt").map(item => item.chatId) ?? []),
+      ...pendingReplies.map(item => item.chatId)])];
   }
 
   private isReplyPending(chatId: string): boolean {
