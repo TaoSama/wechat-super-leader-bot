@@ -19,12 +19,12 @@ interface Props {
 export const RECENT_COMMAND_LIMIT = 50;
 const GROUPS = [
   { key: "attention", title: "需要处理", description: "优先核查异常与未确认的结果", statuses: ["uncertain", "failed", "expired"] },
-  { key: "running", title: "执行中", description: "排队、等待响应或已经受理，最终结果尚未确认", statuses: ["queued", "pending", "accepted"] },
+  { key: "running", title: "执行中", description: "准备发送、排队、等待响应或已经受理，最终结果尚未确认", statuses: ["admitting", "queued", "pending", "accepted"] },
   { key: "input", title: "终端输入已写入", description: "仅输入投递结束，执行未确认；不是任务完成，勿自动重发", statuses: ["input-written"] },
   { key: "completed", title: "最近完成", description: "已收到最终回执的指令", statuses: ["completed"] },
   { key: "cancelled", title: "已取消", description: "已从队列移除的消息", statuses: ["cancelled"] },
 ] as const;
-const STATUS_ICONS = { queued: Clock, pending: Clock, accepted: Radio, "input-written": AlertTriangle, completed: CheckCircle2, failed: XCircle, uncertain: AlertTriangle, cancelled: XCircle, expired: AlertTriangle };
+const STATUS_ICONS = { admitting: Clock, queued: Clock, pending: Clock, accepted: Radio, "input-written": AlertTriangle, completed: CheckCircle2, failed: XCircle, uncertain: AlertTriangle, cancelled: XCircle, expired: AlertTriangle };
 
 export function CommandsSection({ commands, selectedNodeId, sessions = [], onOpenSession, statusFilter, onStatusFilterChange, onClearNodeFilter }: Props) {
   const [receipts, setReceipts] = useState<Record<string, CommandRecord>>({});
@@ -56,7 +56,7 @@ export function CommandsSection({ commands, selectedNodeId, sessions = [], onOpe
             <div className="command-main"><div className="command-title-line">{session && onOpenSession ? <button className="command-session-link" type="button" onClick={() => onOpenSession(session)}>{session.title || "未命名会话"}<ArrowUpRight size={15} aria-hidden="true" /></button> : <h4>{session?.title || "会话未在当前快照中"}</h4>}<time title={formatTimestamp(command.updatedAt)}>{formatRelativeAge(command.updatedAt || command.createdAt)}</time></div>
               <p className="command-preview">{command.prompt || (command.action === "read" ? "读取会话状态与历史" : "发送到会话的消息未记录摘要")}</p>
               <div className="command-meta"><span>{command.nodeId}</span><span>{command.action === "send" ? "发送消息" : "读取会话"}</span><span className={`status-badge status-${command.status}`} data-testid={`command-status-${command.commandId}`}><Icon size={14} aria-hidden="true" />{semantics.label}</span></div>
-              {(command.status === "uncertain" || command.status === "accepted" || command.status === "input-written") && <p className="command-caution">{semantics.description}</p>}
+              {(command.status === "admitting" || command.status === "uncertain" || command.status === "accepted" || command.status === "input-written") && <p className="command-caution">{semantics.description}</p>}
               {command.error && <p className="command-error">{command.error}</p>}
               {canCancelWebQueue(command) && <QueuedCommandCancel command={command} onReceipt={receipt => setReceipts(previous => ({ ...previous, [receipt.commandId]: receipt }))} />}
             </div>

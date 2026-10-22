@@ -2,6 +2,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import { LeaderOverview } from "../../src/features/leader/components/LeaderOverview";
 import { CommandsSection } from "../../src/features/leader/components/CommandsSection";
+import { MetricsRibbon } from "../../src/features/leader/components/MetricsRibbon";
 import { ControlPlaneStatusResponse, CommandRecord, ScopedSession } from "../../src/types";
 import { DerivedNodeStatus } from "../../src/features/status/useStatusPolling";
 import { emptyExecutions, emptyGoals } from "../fixtures/status-fixtures";
@@ -30,6 +31,25 @@ function setup(selectedNodeId: string | null = null) {
   const props = { data, nodes, selectedNodeId, onSelectNodeId: vi.fn(), onOpenSession: vi.fn(), onBrowseSessions: vi.fn() };
   return { ...render(<LeaderOverview {...props} />), props };
 }
+
+it("准备发送计入进行中，准确展示已保存且不提供取消排队", () => {
+  const commands = [command("admitting")];
+  render(<LeaderOverview data={{ ...data, commands }} nodes={nodes} selectedNodeId={null} onSelectNodeId={vi.fn()} onOpenSession={vi.fn()} onBrowseSessions={vi.fn()} />);
+  expect(screen.getByRole("button", { name: "查看执行中指令 1 条" })).toBeVisible();
+  expect(within(screen.getByRole("region", { name: "执行中" })).getByTestId("command-item-admitting")).toBeVisible();
+  expect(screen.getByTestId("command-status-admitting")).toHaveTextContent("准备发送");
+  expect(screen.getByText("请求已保存，准备发送", { selector: ".command-caution" })).toBeVisible();
+  expect(screen.queryByRole("button", { name: "取消排队" })).toBeNull();
+  fireEvent.click(screen.getByRole("combobox", { name: "按指令状态过滤" }));
+  expect(screen.getByRole("option", { name: /^准备发送/ })).toBeVisible();
+});
+
+it("遥测计数单独保留准备发送而不计入已派发等待响应", () => {
+  render(<MetricsRibbon nodes={nodes} sessions={[session]} commands={[command("admitting")]} selectedNodeId={null} onSelectNodeId={vi.fn()} />);
+  expect(screen.getByText("准备发送:1")).toBeVisible();
+  expect(screen.getByText("待响应:0")).toBeVisible();
+  expect(screen.getByText("已受理:0")).toBeVisible();
+});
 
 it("排队、取消和过期分别展示，取消不会计入完成", () => {
   render(<CommandsSection commands={[command("queued"), command("cancelled"), command("expired")]} selectedNodeId={null} sessions={[session]} statusFilter="ALL" onStatusFilterChange={vi.fn()} />);

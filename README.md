@@ -483,6 +483,33 @@ node scripts/verify.mjs --list              # 查看计划，不运行检查
 验证清除真实业务配置与 LIVE 开关，使用合成模型、微信和桌面目标；
 不部署或触达正式会话。CI 在 Ubuntu 运行全量、macOS 运行 unit，使用 Node 24。
 
+可靠性故障注入另有进程级入口，先按本机开发说明构建 Controller、Gateway 和
+`daemon/bin/super-leader-daemon`，再运行：
+
+```sh
+node tests/integration/reliability/run.mjs --run
+node tests/integration/reliability/run.mjs --run --suite sdk
+node tests/integration/reliability/run.mjs --run --scenario busy-native-admission
+node tests/integration/reliability/run.mjs --help
+```
+
+它启动真实 Gateway、Controller、Go Daemon 和临时 PostgreSQL，每场景使用独立数据库、
+Gateway 状态文件及 Daemon journal；只在自建代理和子进程注入断网、回包丢失与 SIGKILL。
+覆盖离线排队、忙时接收、FIFO、取消、真实时钟过期、持久 claim/回执/成果恢复、
+重复入站及完成回执、通知重放和未知结果禁止盲重发，核对准确 command、turn 与聊天归属。
+Codex 场景通过已安装的运行依赖启动真实原生 app-server，仅将上游模型替换为本地 Responses SSE。
+通过私有旁路审计记录原生进程、二进制 SHA、turn/thread RPC 及 MCP 启动状态，
+核对仅本地 `wechat_control` 启动并 ready；辅助文档 MCP 和遥测在最终配置中禁用。
+真实 `--run` 场景审计 Inbox 与游标的实际文件写入顺序，在游标已提交、原生执行尚未开始时崩溃，
+不重新入队即从磁盘恢复原消息全部字段，并核对源轮询为空、执行一次及成果只投递原聊天一次。
+还覆盖执行中崩溃、完成 journal 后重启续传、原 MCP 请求提交后断流、稳定消息重放、
+不同聊天相同消息 ID 的成果归属，以及发送结果未知时的 journal 隔离和禁止盲重发。
+失败场景返回非零；未运行完成或清理失败不能报告通过。
+匿名原始日志、协议帧、数据库快照和断言写入
+`.runtime/verification/reliability-e2e/{events.jsonl,summary.json}`，可用 `--evidence` 指定目录。
+微信 HTTPS、Codex Unix WebSocket 与模型接口为合成端点；接口 accepted 不证明手机收到或已读，
+也不覆盖真实桌面 owner、断电/磁盘损坏、缺少稳定消息 ID 或超出去重保留期的重放。
+
 真模型任务确认可单独运行 `node tests/live/task-confirmation.mjs --run --postgres`。
 预先通过环境提供 `LIVE_MODEL_BASE_URL`（HTTPS `/v1`）及 `LIVE_MODEL_API_KEY`；脚本不读取凭证文件。
 它使用隔离 Controller、临时 PostgreSQL 和合成执行会话，确认正文由 `gpt-6.1-sol` 生成，
@@ -496,6 +523,7 @@ node scripts/verify.mjs --list              # 查看计划，不运行检查
 
 | 回执 | 能证明什么 |
 | --- | --- |
+| `admitting` | 请求已保存，正在校验发送条件；尚未投递，也不查询执行回执，超时后不会发送 |
 | `queued` | 尚未投递，等待原会话可用；允许取消，超过有效期不会发送 |
 | `accepted` | 已受理，需要继续核对原请求与准确 turn |
 | 精确完成回执 | 对应原任务已结束，并有该 turn 的已记录结果 |

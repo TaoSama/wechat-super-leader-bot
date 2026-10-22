@@ -19,6 +19,8 @@ export function queueSendRoute(session: Session, expected?: SendRoute): SendRout
   let route: SendRoute | undefined;
   if (session.id.startsWith("terminal:") || session.provider.startsWith("terminal")) return undefined;
   if (session.sendAvailability?.route === "desktop-owner") route = "desktop-owner";
+  else if (expected === "app-server-resume" && session.loaded === true &&
+    ["active", "waitingApproval", "waitingUserInput"].includes(session.status) && session.capabilities.includes("resume-send")) route = expected;
   else if (session.capabilities.includes("resume-send") && session.loaded === false) route = "app-server-resume";
   else if (session.capabilities.includes("send")) route = "control-socket";
   else if (session.capabilities.includes("resume-send")) route = "app-server-resume";

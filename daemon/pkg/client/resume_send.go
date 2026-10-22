@@ -11,10 +11,16 @@ import (
 )
 
 func freshManagedResumeTarget(session protocol.Session, now time.Time) bool {
+	return freshManagedResumeQueueTarget(session, now) &&
+		(session.Status == "idle" || session.Status == "notLoaded")
+}
+
+func freshManagedResumeQueueTarget(session protocol.Session, now time.Time) bool {
 	observed, err := time.Parse(time.RFC3339Nano, session.ObservedAt)
+	busy := session.Status == "active" || session.Status == "waitingApproval" || session.Status == "waitingUserInput"
 	return err == nil && !observed.After(now) && now.Sub(observed) <= protocol.MaxSendAvailabilityAge &&
 		session.Provider == codex.ProviderCodexApp && !isTerminalSession(session.ID) &&
-		session.Loaded != nil && (session.Status == "idle" || (!*session.Loaded && session.Status == "notLoaded")) &&
+		session.Loaded != nil && (session.Status == "idle" || (!*session.Loaded && session.Status == "notLoaded") || (*session.Loaded && busy)) &&
 		slices.Contains(session.Capabilities, protocol.CapabilityResumeSend)
 }
 
@@ -27,13 +33,19 @@ func freshDesktopOwner(observation protocol.DesktopObservation, now time.Time) b
 // Caller holds snapshotMu. A file scan or an expired observation cannot grant
 // this capability. It is permission to attempt an explicit send, never ready.
 func (d *Daemon) canResumeSendLocked(id string, now time.Time) bool {
+	session, exists := d.managedSessionLocked(id)
+	return exists && d.canQueueResumeSendLocked(id, now) && freshManagedResumeTarget(session, now)
+}
+
+// Queue permission never authorizes a resume or turn/start while the target is busy.
+func (d *Daemon) canQueueResumeSendLocked(id string, now time.Time) bool {
 	sender, ok := d.adapter.(codex.ResumeSender)
 	if !ok || !d.durableJournal || d.journal == nil || d.cfg.SocketPath == "" || sender.Endpoint() != d.cfg.SocketPath ||
 		freshDesktopOwner(d.desktopSnapshot[id], now) {
 		return false
 	}
 	session, exists := d.managedSessionLocked(id)
-	return exists && freshManagedResumeTarget(session, now)
+	return exists && freshManagedResumeQueueTarget(session, now)
 }
 
 func (d *Daemon) sendWithResume(ctx context.Context, cmd protocol.ControllerCommandMessage, prompt string) (string, error) {

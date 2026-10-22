@@ -49,7 +49,8 @@ export async function initializeDatabase(pool: pg.Pool): Promise<void> {
     await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS authority JSONB");
     await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS console_hidden_at TIMESTAMPTZ");
     await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS queue_order BIGSERIAL");
-    await client.query("CREATE INDEX IF NOT EXISTS commands_queue_idx ON commands (node_id, session_id, queue_order) WHERE status IN ('queued','pending','accepted','uncertain')");
+    await client.query("DROP INDEX IF EXISTS commands_queue_idx");
+    await client.query("CREATE INDEX commands_queue_idx ON commands (node_id, session_id, queue_order) WHERE status IN ('admitting','queued','pending','accepted','uncertain')");
     await client.query("DROP INDEX IF EXISTS commands_inspection_idx");
     await client.query("CREATE INDEX commands_inspection_idx ON commands (node_id, command_id) WHERE action = 'send' AND status IN ('pending', 'accepted', 'uncertain')");
 

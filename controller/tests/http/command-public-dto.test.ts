@@ -167,6 +167,29 @@ it("returns complete output in command detail while excluding internal authority
   expect((await store.getCommand(stored.commandId))?.authority).toEqual(stored.authority);
 });
 
+it("returns 202 and a public admitting status for a duplicate awaiting admission", async () => {
+  const { command: stored } = await store.createCommandIfAbsent(command("awaiting-admission", {
+    status: "admitting", authority: { type: "admin" }, deliveryMode: "next-turn",
+  }));
+  const response = await fetch(`${baseUrl}/v1/commands`, {
+    method: "POST", headers: { ...bearer, "Content-Type": "application/json" },
+    body: JSON.stringify({ nodeId: stored.nodeId, sessionId: stored.sessionId, action: stored.action,
+      prompt: stored.prompt, requestId: stored.requestId }),
+  });
+  expect(response.status).toBe(202);
+  const duplicate = await response.json();
+  expectPublic(duplicate);
+  expect(duplicate).toMatchObject({ commandId: stored.commandId, status: "admitting" });
+  const detail = await fetch(`${baseUrl}/v1/commands/${stored.commandId}`, { headers: bearer });
+  expect(detail.status).toBe(200);
+  expect(await detail.json()).toEqual(duplicate);
+  const status = await fetch(`${baseUrl}/v1/status`, { headers: bearer });
+  const summary = (await status.json()).commands.find((item: CommandRecord) => item.commandId === stored.commandId);
+  expectPublic(summary);
+  expect(summary).toMatchObject({ commandId: stored.commandId, status: "admitting" });
+  expect(await store.getCommand(stored.commandId)).toEqual(stored);
+});
+
 it("admin cancellation exposes a public command while retaining its stored authority", async () => {
   const { command: stored } = await store.createCommandIfAbsent(command("admin-cancel", { status: "queued", deliveryMode: "next-turn" }));
   const response = await fetch(`${baseUrl}/v1/commands/${stored.commandId}/cancel`, { method: "POST", headers: bearer });
