@@ -102,6 +102,38 @@ test('a dispatch MCP failure returns uncertainty without a replacement execution
   });
 });
 
+test('native timing and JSON error content preserve uncertainty when the outer MCP error flag is absent', async () => {
+  await withFixture({ control: true }, async fixture => {
+    const input = [user(TASK)];
+    const list = (await post(fixture, request(input))).output[0];
+    input.push(list, output(list, discovery));
+    const dispatch = (await post(fixture, request(input))).output[0];
+    const text = 'Controller 调用未成功，执行结果待核实；请勿声称已完成，也不要自行重试。';
+    input.push(dispatch, { type: 'function_call_output', call_id: dispatch.call_id,
+      output: [{ type: 'input_text', text: 'Wall time: 0.0596 seconds\nOutput:' },
+        { type: 'input_text', text: JSON.stringify({ text }) }] });
+    const final = (await post(fixture, request(input))).output[0];
+    assert.equal(final.type, 'message'); assert.equal(final.content[0].text, text);
+    assert.equal(fixture.calls.length, 3); fixture.healthy();
+  });
+});
+
+test('missing receipts are not treated as uncertainty for near-match or extra-field payloads', async () => {
+  const text = 'Controller 调用未成功，执行结果待核实；请勿声称已完成，也不要自行重试。';
+  for (const payload of [{ text: text + '额外内容' }, { text, result: {} }, { result: {} }]) {
+    await withFixture({ control: true }, async fixture => {
+      const input = [user(TASK)];
+      const list = (await post(fixture, request(input))).output[0];
+      input.push(list, output(list, discovery));
+      const dispatch = (await post(fixture, request(input))).output[0];
+      input.push(dispatch, output(dispatch, payload));
+      const failed = await post(fixture, request(input));
+      assert.equal(failed.status, 500); assert.match(failed.text, /authoritative receipt/);
+      assert.throws(() => fixture.healthy(), AggregateError);
+    });
+  }
+});
+
 test('missing discovered target fails instead of dispatching an invented target', async () => {
   await withFixture({ control: true }, async fixture => {
     const input = [user(TASK)];
