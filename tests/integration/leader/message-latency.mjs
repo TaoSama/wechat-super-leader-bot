@@ -230,16 +230,18 @@ globalThis.fetch = (input, init) => {
       const controllerTrace = controllerEvents.filter(event => event.traceId === traceId);
       assert(controllerTrace.length, 'Controller trace cannot be correlated by stable hashed message identity');
       assert(controllerTrace.every(event => event.parentAttemptId === gatewayTrace[0].attemptId && event.attemptId !== event.parentAttemptId));
-      for (const stage of ['controller.received', 'controller.dedupe.end', 'controller.leader.end', 'controller.persist.end',
-        'controller.response.finish', ...(DIRECT ? [] :
-          ['model.complete.end', 'model.http.headers.end', 'model.http.body.end', 'model.http.parse.end'])]) {
+      const controllerStages = DIRECT
+        ? ['controller.received', 'controller.tools.list.end', 'controller.tools.call.end', 'controller.response.finish']
+        : ['controller.received', 'controller.dedupe.end', 'controller.leader.end', 'controller.persist.end',
+          'controller.response.finish', 'model.complete.end', 'model.http.headers.end', 'model.http.body.end', 'model.http.parse.end'];
+      for (const stage of controllerStages) {
         assert(controllerTrace.some(event => event.stage === stage), `Missing Controller stage: ${stage}`);
       }
       if (DIRECT) {
         assert(gatewayTrace.some(event => event.stage === (DIRECT_CONSOLE ? 'codex.console.controller.end' : 'codex.directory.controller.end') && event.outcome === 'ok'),
           'Plain directory did not reach Controller through the Codex reply engine fast path');
         assert(controllerTrace.some(event => event.stage === 'leader.tool.end' && event.tool === (DIRECT_CONSOLE ? 'get_console_link' : 'list_sessions') &&
-          event.source === (DIRECT_CONSOLE ? 'direct_console' : 'direct_directory') && event.outcome === 'ok'), 'Controller did not use the direct inventory tool');
+          event.source === 'direct' && event.outcome === 'ok'), 'Controller did not use the direct inventory tool');
         assert(!controllerTrace.some(event => event.stage.startsWith('model.')), 'Plain directory invoked the Controller model');
         assert(!gatewayTrace.some(event => event.stage.startsWith('codex.stream.')), 'Plain directory invoked the native SDK stream');
       }

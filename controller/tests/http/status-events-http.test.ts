@@ -6,7 +6,8 @@ import { ControllerServer } from "../../src/http/server.js";
 import { MemoryStore } from "../../src/store/memory.js";
 import type { Config } from "../../src/runtime/config.js";
 import { createExecution, executionRequestId, EXECUTION_CLAIM_MS } from "../../src/leader/plans/execution.js";
-import { createGoal, goalRequestId, renderGoalAction, GOAL_SEND_CLAIM_MS } from "../../src/leader/goals/goal.js";
+import { createGoal, goalRequestId, GOAL_SEND_CLAIM_MS } from "../../src/leader/goals/goal.js";
+import { authorize, lease, commit } from "../fixtures/goals.js";
 
 const ADMIN_TOKEN = "events-admin-token";
 const CONSOLE_ORIGIN = "http://127.0.0.1:8790";
@@ -241,11 +242,19 @@ it.each(["plan", "goal"] as const)("keeps the existing SSE stream open when a %s
     const record = createGoal("plan-chat", { id, expiresAt: now + 600_000, objective: "queue fixture",
       criteria: ["exact result"], targets: [{ nodeId: action.nodeId, sessionId: action.sessionId, sendRoute: action.sendRoute }],
       constraints: "fixture only", maxActions: 1, maxDecisions: 2, durationMinutes: 10, shareResults: true }, now);
-    prompt = renderGoalAction(record.proposal, action.prompt, []);
-    record.actions.push({ index: 1, target: 1, prompt: action.prompt, sourceActions: [], input: { prompt, sources: [] },
-      attempt: { token: "00000000-0000-4000-8000-000000000099", startedAt: now, expiresAt: now + GOAL_SEND_CLAIM_MS } });
-    vi.spyOn(store, "listRecentGoals").mockResolvedValue([record]);
-    requestId = goalRequestId(record, 0);
+    await store.confirmGoal(record, await authorize(store, record), () => now);
+    const deciding = lease(record, now);
+    deciding.lease!.input.availableTargets = [1];
+    expect(await store.compareAndSetGoal(deciding, record.revision, () => now)).not.toBeNull();
+    const planned = commit(deciding, { type: "next", target: 1, prompt: action.prompt, sourceActions: [], reason: "queue fixture" });
+    expect(await store.compareAndSetGoal(planned, deciding.revision, () => now)).not.toBeNull();
+    const sending = structuredClone(planned);
+    sending.revision++;
+    sending.actions[0].attempt = { token: "00000000-0000-4000-8000-000000000099", startedAt: now,
+      expiresAt: now + GOAL_SEND_CLAIM_MS };
+    expect(await store.compareAndSetGoal(sending, planned.revision, () => now)).not.toBeNull();
+    prompt = sending.actions[0].input.prompt;
+    requestId = goalRequestId(sending, 0);
   }
   await store.createCommandIfAbsent({ commandId, requestId, nodeId: action.nodeId, sessionId: action.sessionId,
     action: "send", prompt, sendRoute: action.sendRoute, status: "queued", deliveryMode: "next-turn",

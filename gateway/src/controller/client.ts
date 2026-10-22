@@ -8,6 +8,7 @@ import { NOTIFICATION_TIMEOUT_MS, type NotificationDeferReason } from "./notific
 import { downloadControllerImage } from "./image-client.js";
 import type { ImageAttachment } from "../wechat/media-delivery.js";
 import { getControllerMessageReply, parseControllerReply } from "./reply-client.js";
+import { ControllerDirectTools, type ControllerToolCall } from "./direct-tools.js";
 import { readMessageStream, type ForwardMessageProgress } from "./message-stream.js";
 import { beforeAbort } from "../runtime/abort.js";
 import { QUERY_PROGRESS_LIMIT } from "../leader/progress.js";
@@ -63,6 +64,7 @@ export class ControllerClient {
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
   private readonly notifications: NotificationClient;
+  private readonly directTools: ControllerDirectTools;
 
   constructor(options: {
     controllerUrl: string;
@@ -84,8 +86,12 @@ export class ControllerClient {
       throw new Error("Invalid Controller request timeout or retry budget");
     }
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
+    this.directTools = new ControllerDirectTools({ baseUrl: this.baseUrl, token: this.token, fetchImpl: this.fetchImpl, timeoutMs: this.timeoutMs });
     this.notifications = new NotificationClient(this.baseUrl, this.token, this.fetchImpl, Math.min(this.timeoutMs, NOTIFICATION_TIMEOUT_MS));
   }
+
+  public listTools(request: ControllerMessageRequest) { return this.directTools.listTools(request); }
+  public callTool(request: ControllerToolCall) { return this.directTools.callTool(request); }
 
   public get requestBudgetMs(): number { return this.timeoutMs * (this.maxRetries + 1); }
   public get authorizationBudgetMs(): number { return Math.min(this.timeoutMs, CHAT_AUTHORIZATION_TIMEOUT_MS); }

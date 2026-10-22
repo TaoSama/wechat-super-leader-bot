@@ -1,3 +1,4 @@
+import { directToolController } from "./direct-tool-fixture.js";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -17,7 +18,7 @@ const usage = { input_tokens: 0, cached_input_tokens: 0, cache_write_input_token
   output_tokens: 0, reasoning_output_tokens: 0 };
 const messageKey = (messageId: string): string => createHash("sha256").update(messageId).digest("hex");
 const noController = {
-  forwardMessage: async (): Promise<never> => { throw new Error("Unexpected Controller forward"); },
+  ...directToolController(),
   getMessageReply: async (): Promise<never> => { throw new Error("Unexpected Controller GET"); },
 };
 

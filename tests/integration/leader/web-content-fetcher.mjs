@@ -106,11 +106,15 @@ async function main() {
         return;
       }
       assert.equal(req.headers.authorization, `Bearer ${TOKEN}`);
+      const send = data => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(data)); };
+      if (req.url === '/v1/chats/notification-interest') {
+        assert.equal(req.method, 'GET');
+        return send({ chatIds: [CHAT], interested: [] });
+      }
       assert.equal(req.method, 'POST');
       let raw = '';
       for await (const chunk of req) { raw += chunk; assert(raw.length <= REQUEST_LIMIT); }
       const body = JSON.parse(raw || '{}');
-      const send = data => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(data)); };
       if (req.url === '/v1/responses') {
         requests.push({ round, body });
         await writeFile(join(EVIDENCE, `responses-${requests.length}.json`), JSON.stringify({ round, body }, null, 2));
@@ -130,6 +134,20 @@ async function main() {
         return;
       }
       switch (req.url) {
+        case '/v1/notifications/pending':
+        case '/v1/deliveries/pending':
+          assert.deepEqual(body, { chatIds: [CHAT] });
+          return send({ items: [] });
+        case '/v1/deliveries/resume':
+          assert.equal(body.chatId, CHAT);
+          assert(Object.keys(body).every(key => ['chatId', 'generation'].includes(key)));
+          assert(body.generation === undefined || typeof body.generation === 'string' && body.generation.length > 0 && body.generation.length <= 512);
+          return send({ resumed: 0 });
+        case '/v1/deliveries/blocked':
+          assert.deepEqual(Object.keys(body).sort(), ['chatId', 'reason']);
+          assert.equal(body.chatId, CHAT);
+          assert(typeof body.reason === 'string' && body.reason.length > 0 && body.reason.length <= 128);
+          return send({ blocked: 0 });
         case '/ilink/bot/getupdates': return send({ ret: 0, errcode: 0, get_updates_buf: randomUUID(), msgs: queue.splice(0) });
         case '/ilink/bot/getconfig': return send({ ret: 0, typing_ticket: 'synthetic-typing' });
         case '/ilink/bot/sendtyping': return send({ ret: 0 });
@@ -139,6 +157,12 @@ async function main() {
           replies.push(body.msg.item_list.map(item => item.text_item.text).join(''));
           return send({ ret: 0, errcode: 0 });
         case '/v1/chats/authorize': assert.deepEqual(body, { chatId: CHAT }); return send({ allowed: true });
+        case '/v1/tools/list':
+          assert.equal(body.chatId, CHAT);
+          return send({ context: { history: [], memories: {} }, tools: [{ name: 'list_sessions', description: 'Synthetic read-only session inventory.',
+            inputSchema: { type: 'object', properties: { arguments: { type: 'object', properties: {}, additionalProperties: false } },
+              required: ['arguments'], additionalProperties: false }, annotations: { readOnlyHint: true } }],
+          instructions: 'Only expose synthetic read-only business tools. Native tool probes do not need to invoke Controller.' });
         default: throw new Error(`Unexpected synthetic fixture route ${req.url}`);
       }
     }
@@ -197,7 +221,7 @@ syncBuiltinESMExports();`);
       assert.equal(skillRoots.get(proofRoot), '/etc/codex/skills', 'System skill not discovered');
       assert(!catalog.includes('.codex/skills/.system'), 'Inaccessible bundled skill path exposed');
       assert(nativeResults.some(item => item.exit_code === 0 && item.output?.includes('name: web-content-fetcher')), 'Native shell could not read packaged skill');
-      assert(nativeResults.some(item => item.exit_code !== 0 && /deny-probe.txt: Permission denied/.test(item.output || '')), 'CODEX_HOME marker was not denied');
+      assert(nativeResults.some(item => item.exit_code !== 0 && /deny-probe\.txt: (?:Permission denied|Operation not permitted)/.test(item.output || '')), 'CODEX_HOME marker was not denied');
       assert(!JSON.stringify(observed).includes(deniedSentinel), 'Denied CODEX_HOME marker leaked to model');
       const artifact = JSON.parse(await readFile(join(workspace, 'fixture-fetch.json'), 'utf8'));
       assert.equal(artifact.status_code, 200);
@@ -224,7 +248,7 @@ syncBuiltinESMExports();`);
       assert.equal(observed.length, 2, 'Expected native metadata call and final response per round');
       assert.equal(replies.at(-1), `synthetic-native-tools-round-${round}`, 'Gateway did not deliver real native output');
       for (const capture of observed) verifyTools(capture.body, evidence.checks, round);
-      for (const name of ['exec_command', 'web__run', 'mcp__wechat_control__control_current_request']) {
+      for (const name of ['exec_command', 'web__run', 'mcp__wechat_control__list_sessions']) {
         assert(runtimeNames.includes(name), `Native runtime registry missing ${name}`);
       }
       assert.equal(unexpected.length, 0);
