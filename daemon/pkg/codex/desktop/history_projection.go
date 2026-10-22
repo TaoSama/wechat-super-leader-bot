@@ -55,7 +55,7 @@ func historyPaginationComplete(value any) (bool, error) {
 
 func historyOrdinary(state map[string]any) bool {
 	source, exists := state["threadSource"]
-	return exists && (source == nil || source == "user") && state["resumeState"] == "resumed" &&
+	return exists && ordinaryDesktopThreadSource(source) && state["resumeState"] == "resumed" &&
 		state["mode"] == "default"
 }
 
