@@ -46,7 +46,7 @@ export class AutomationService {
       return existing;
     }
     const now = this.now();
-    const nextAt = validateTiming(parsed, now);
+    const nextAt = validateTiming(parsed, now, id);
     let target: FrozenTarget | undefined;
     if (parsed.kind === "background") {
       if (!this.options.validateBackground) throw new Error("Background worker execution is unavailable");

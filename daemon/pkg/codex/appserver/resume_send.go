@@ -123,6 +123,10 @@ func (a *AppServerAdapter) startTurn(ctx context.Context, rc *rpcConn, sessionID
 		if errors.Is(err, errInvalidRPCResponse) {
 			return "", &codex.UncertainError{Err: errors.New(protocol.InvalidTurnAcknowledgement)}
 		}
+		var rejected *rpcRejectedError
+		if errors.As(err, &rejected) && rejected.beforeExecution {
+			return "", fmt.Errorf("turn/start rejected: %w", err)
+		}
 		return "", &codex.UncertainError{Err: fmt.Errorf("turn/start error (result uncertain): %w", err)}
 	}
 	turn, _ := result["turn"].(map[string]any)

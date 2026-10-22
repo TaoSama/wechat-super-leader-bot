@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { WorkerInput, WorkerRuntime, WorkerRuntimeOptions, WorkerRuntimeStatus } from "./contracts.js";
+import type { WorkerInput, WorkerInspectOptions, WorkerRuntime, WorkerRuntimeOptions, WorkerRuntimeStatus } from "./contracts.js";
 import { WorkerStorage, alive, hash, readJson, validId, writeJson, type Receipt } from "./storage.js";
 import { CodexCliExecutor, WorkerExecutionFailure } from "./executor.js";
 import { outputSchema, parseOutput, workerPrompt } from "./output.js";
@@ -10,6 +10,7 @@ const DEFAULT_TIMEOUT_MS = 5 * 60_000;
 const MAX_TIMEOUT_MS = 60 * 60_000;
 const DEFAULT_MAX_CONCURRENT = 2;
 const MAX_CONCURRENT = 16;
+const UNBOUNDED_LAUNCH_DEADLINE = Number.MAX_SAFE_INTEGER;
 const UNCERTAIN = "本轮执行结果不明确，可能已产生外部影响；请核对后再安排后续任务。";
 interface ActiveExecution { invocationId: string; abort: AbortController; done: Promise<void> }
 interface ProcessState { active: Map<string, ActiveExecution>; stopping: boolean }
@@ -17,7 +18,7 @@ interface ProcessState { active: Map<string, ActiveExecution>; stopping: boolean
 const processStates = new Map<string, ProcessState>();
 function publicStatus(receipt: Receipt): WorkerRuntimeStatus {
   const { inputHash: _, ownerPid: __, processPid: ___, exported: ____, pendingInput: _____, queuedAt: ______,
-    exportedToCaller: _______, processCleanupUnverified: ________, ...status } = receipt;
+    exportedToCaller: _______, processCleanupUnverified: ________, launchDeadlineAt: _________, executionDeadlineAt: __________, ...status } = receipt;
   return status;
 }
 
@@ -47,6 +48,7 @@ export class CodexWorkerRuntime implements WorkerRuntime {
     validId(input.workerId); validId(input.invocationId);
     if (!input.task?.trim()) throw new Error("Background worker task is required");
     this.validateTimeout(input.timeoutMs ?? this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    this.validateDeadlines(input);
     input = JSON.parse(JSON.stringify(input)) as WorkerInput;
     const inputHash = hash(JSON.stringify(input));
     const dir = this.store.worker(input.workerId, true)!;
@@ -64,6 +66,8 @@ export class CodexWorkerRuntime implements WorkerRuntime {
     const receipt: Receipt = { workerId: input.workerId, invocationId: input.invocationId, inputHash,
       ownerPid: process.pid, status: "queued", summary: "后台会话已排队，等待执行容量。", attachments: [],
       queuedAt: Date.now(), pendingInput: input,
+      launchDeadlineAt: input.launchDeadlineAt ?? UNBOUNDED_LAUNCH_DEADLINE,
+      ...(input.executionDeadlineAt === undefined ? {} : { executionDeadlineAt: input.executionDeadlineAt }),
       ...(this.store.state(dir)?.threadId ? { threadId: this.store.state(dir)!.threadId } : {}) };
     try {
       writeJson(path.join(dir, "output-schema.json"), outputSchema);
@@ -76,7 +80,8 @@ export class CodexWorkerRuntime implements WorkerRuntime {
     return publicStatus(receipt);
   }
 
-  async inspect(workerId: string, invocationId: string): Promise<WorkerRuntimeStatus> {
+  async inspect(workerId: string, invocationId: string, options: WorkerInspectOptions = {}): Promise<WorkerRuntimeStatus> {
+    this.validateDeadlines(options);
     validId(invocationId);
     const dir = this.store.worker(workerId);
     let receipt = dir ? this.store.receipt(dir, invocationId) : undefined;
@@ -85,8 +90,19 @@ export class CodexWorkerRuntime implements WorkerRuntime {
     }
     if (!receipt) return { workerId, invocationId, status: "unknown", summary: "没有本轮执行回执。", attachments: [], receiptMissing: true };
     if (receipt.status === "queued") {
+      // Legacy receipts keep their original authorized input/hash. Only the
+      // caller's durable lifetime may fill in missing execution bounds.
+      if (receipt.pendingInput!.launchDeadlineAt === undefined && receipt.launchDeadlineAt === undefined && options.launchDeadlineAt !== undefined) {
+        receipt.launchDeadlineAt = options.launchDeadlineAt;
+        receipt.executionDeadlineAt = options.executionDeadlineAt;
+        this.store.save(dir!, receipt);
+      }
       // Only receipts that never crossed the launch boundary are safely resumable.
-      this.drain(); receipt = this.store.receipt(dir!, invocationId)!;
+      if (options.resumeQueued !== false) this.drain();
+      receipt = this.store.receipt(dir!, invocationId)!;
+      if (receipt.status === "queued" && this.launchDeadline(receipt) === undefined) {
+        return { ...publicStatus(receipt), summary: "后台会话等待恢复绝对执行期限，尚未启动。" };
+      }
     } else if (receipt.status === "running" && this.active.get(workerId)?.invocationId !== invocationId &&
       (receipt.ownerPid === process.pid || !alive(receipt.ownerPid))) {
       receipt.status = "needs_attention"; receipt.summary = UNCERTAIN; receipt.error = "worker_owner_lost";
@@ -157,6 +173,9 @@ export class CodexWorkerRuntime implements WorkerRuntime {
     if (this.processState.stopping) return;
     for (const receipt of this.store.queued(error => this.report(error.message, error))) {
       if (this.active.has(receipt.workerId)) continue;
+      // An older controller did not record a deadline. Hold its queue until the
+      // service reconciles the durable worker lifetime instead of guessing it.
+      if (this.launchDeadline(receipt) === undefined) continue;
       const slot = this.store.slot(this.maxConcurrent, receipt.workerId, receipt.invocationId);
       if (!slot) break;
       const dir = this.store.worker(receipt.workerId)!;
@@ -175,6 +194,11 @@ export class CodexWorkerRuntime implements WorkerRuntime {
         continue;
       }
       const input = receipt.pendingInput!;
+      if ((this.launchDeadline(receipt) ?? Infinity) <= Date.now()) {
+        try { this.expiredBeforeLaunch(dir, receipt); }
+        finally { fs.unlinkSync(slot); }
+        continue;
+      }
       const abort = new AbortController();
       // Persist before spawn: a crash after this boundary is uncertain, never replayed.
       receipt.status = "running"; receipt.ownerPid = process.pid; receipt.summary = "后台会话正在启动。";
@@ -188,9 +212,18 @@ export class CodexWorkerRuntime implements WorkerRuntime {
   }
 
   private async run(dir: string, input: WorkerInput, receipt: Receipt, abort: AbortController, slot: string): Promise<void> {
-    const timer = setTimeout(() => abort.abort(), input.timeoutMs ?? this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    let timer: ReturnType<typeof setTimeout> | undefined;
     let exporting = false;
     try {
+      const timeoutMs = Math.min(input.timeoutMs ?? this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        (input.executionDeadlineAt ?? receipt.executionDeadlineAt ?? Infinity) - Date.now());
+      // Synchronous receipt persistence and the execution microtask can cross
+      // the deadline even when the slot was claimed just before it.
+      if ((input.launchDeadlineAt ?? receipt.launchDeadlineAt ?? Infinity) <= Date.now() || timeoutMs <= 0) {
+        this.expiredBeforeLaunch(dir, receipt);
+        return;
+      }
+      timer = setTimeout(() => abort.abort(), timeoutMs);
       const text = await this.executor.execute({ workspace: path.join(dir, "workspace"), home: path.join(dir, "home"),
         schemaPath: path.join(dir, "output-schema.json"), prompt: workerPrompt(input), threadId: receipt.threadId,
         signal: abort.signal,
@@ -233,6 +266,24 @@ export class CodexWorkerRuntime implements WorkerRuntime {
 
   private validateTimeout(value: number): void {
     if (!Number.isSafeInteger(value) || value <= 0 || value > MAX_TIMEOUT_MS) throw new Error("Invalid worker timeout budget");
+  }
+  private validateDeadlines(input: Pick<WorkerInput, "launchDeadlineAt" | "executionDeadlineAt">): void {
+    for (const value of [input.launchDeadlineAt, input.executionDeadlineAt]) {
+      if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) throw new Error("Invalid worker absolute deadline");
+    }
+    if (input.launchDeadlineAt !== undefined && input.executionDeadlineAt !== undefined && input.executionDeadlineAt < input.launchDeadlineAt) {
+      throw new Error("Worker execution deadline cannot precede its launch deadline");
+    }
+  }
+  private launchDeadline(receipt: Receipt): number | undefined {
+    return receipt.pendingInput?.launchDeadlineAt ?? receipt.launchDeadlineAt;
+  }
+  private expiredBeforeLaunch(dir: string, receipt: Receipt): void {
+    receipt.status = "failed"; receipt.summary = "后台会话已到期，本轮尚未开始执行。";
+    receipt.error = "worker_expired"; receipt.attachments = [];
+    delete receipt.pendingInput; delete receipt.nextCheckAt;
+    this.store.save(dir, receipt);
+    this.store.release(dir, receipt.invocationId);
   }
   private cancelledReceipt(dir: string, workerId: string, invocationId: string): Receipt {
     const prior = this.store.receipt(dir, invocationId);

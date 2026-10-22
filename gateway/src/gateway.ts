@@ -79,7 +79,7 @@ export class WeChatGateway {
   private onInboundError?: (error: Error) => void;
   private readonly queryStarts = new Map<string, Promise<void>>();
   private readonly activeInboundChats = new Set<string>();
-  private flushingReplies = false;
+  private replyFlushCompletion?: Promise<void>;
   private readonly activeReplyDeliveries = new Set<string>();
   private replyOutboxCursor = 0;
   private readonly notificationAbort = new AbortController();
@@ -337,6 +337,10 @@ export class WeChatGateway {
       const retryingAdmission = this.stateManager.contextBudgets[msg.chatId]?.lastInboundKey === msg.deliveryKey &&
         !this.stateManager.isMessageProcessed(msg.deliveryKey);
       if ((fresh || retryingAdmission) && msg.contextToken?.trim()) this.resultDispatcher?.noteInbound(msg.chatId, msg.deliveryKey);
+      if ((fresh || retryingAdmission) && msg.contextToken?.trim()) {
+        // Give deferred replies this chat's refreshed budget before new progress or results.
+        await this.flushRepliesOnce(msg.chatId);
+      }
       if (this.stateManager.outbox[msg.deliveryKey]) {
         this.stateManager.recordProcessedMessageKey(msg.deliveryKey, { preserveReplyEvidence: true });
         outcome = "processed";
@@ -508,13 +512,17 @@ export class WeChatGateway {
   }
 
   /** Recovery reads immutable responses only; an old command is never POSTed again. */
-  public async flushRepliesOnce(): Promise<void> {
-    if (this.flushingReplies || this.stopped) return;
-    this.flushingReplies = true;
+  public async flushRepliesOnce(chatId?: string): Promise<void> {
+    // A concurrent recovery pass must not bypass a newly refreshed chat's turn.
+    while (this.replyFlushCompletion) await this.replyFlushCompletion;
+    if (this.stopped) return;
+    let complete!: () => void;
+    this.replyFlushCompletion = new Promise<void>(resolve => { complete = resolve; });
     let firstError: unknown;
     try {
       // Retry terminal journal acknowledgements after a prior journal save failure.
       for (const item of Object.values(this.stateManager.outbox)) {
+        if (chatId !== undefined && item.chatId !== chatId) continue;
         if (this.activeReplyDeliveries.has(item.deliveryKey)) continue;
         if (item.kind === "reply" && item.source === "engine" && item.status === "receipt" && item.receiptStatus === "accepted") {
           try {
@@ -532,6 +540,7 @@ export class WeChatGateway {
         }
       }
       const items = Object.values(this.stateManager.outbox).filter(item => item.kind === "reply" && item.status === "pending" &&
+        (chatId === undefined || item.chatId === chatId) &&
         !this.activeReplyDeliveries.has(item.deliveryKey));
       const offset = this.replyOutboxCursor % Math.max(1, items.length);
       for (const item of [...items.slice(offset), ...items.slice(0, offset)]) {
@@ -573,7 +582,10 @@ export class WeChatGateway {
         // One resumed reply per turn keeps getupdates and independent chats moving.
         break;
       }
-    } finally { this.flushingReplies = false; }
+    } finally {
+      this.replyFlushCompletion = undefined;
+      complete();
+    }
     if (firstError) throw firstError;
   }
 

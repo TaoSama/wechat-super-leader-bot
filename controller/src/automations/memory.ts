@@ -28,7 +28,9 @@ export class MemoryAutomationRepository implements AutomationRepository {
   async setStatus(id: string, chatId: string, status: "active" | "paused" | "cancelled", now: number): Promise<Schedule | null> {
     const schedule = this.schedules.get(id);
     if (!schedule || schedule.chatId !== chatId) return null;
-    if (schedule.status === "cancelled" || schedule.status === "completed") throw new AutomationConflictError("Finished schedules cannot be resumed or modified");
+    // A completed background occurrence can still have live follow-ups; cancellation is terminal.
+    const cancellingRetainedBackground = schedule.kind === "background" && schedule.status === "completed" && status === "cancelled";
+    if (schedule.status === "cancelled" || (schedule.status === "completed" && !cancellingRetainedBackground)) throw new AutomationConflictError("Finished schedules cannot be resumed or modified");
     schedule.status = status;
     schedule.updatedAt = now;
     if (status === "cancelled") for (const item of this.outbox.values()) if (item.scheduleId === id && item.status === "pending") item.status = "superseded";

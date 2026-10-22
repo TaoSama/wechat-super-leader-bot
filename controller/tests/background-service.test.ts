@@ -102,7 +102,9 @@ describe("24-hour isolated background workers", () => {
     const restarted = new BackgroundService(f.options);
     f.runtime.inspect.mockResolvedValue({ status: "completed", summary: "done", threadId: "same-thread" });
     expect(await restarted.inspect(f.run)).toMatchObject({ status: "completed", result: { text: "done" } });
-    expect(f.runtime.inspect).toHaveBeenCalledWith(initial.id, initial.activeInvocationId);
+    expect(f.runtime.inspect).toHaveBeenCalledWith(initial.id, initial.activeInvocationId, {
+      launchDeadlineAt: initial.expiresAt, executionDeadlineAt: initial.expiresAt + WORKER_SHUTDOWN_GRACE_MS,
+    });
     expect(f.runtime.start).toHaveBeenCalledTimes(1);
     expect(f.runtime.exportArtifacts).toHaveBeenCalledTimes(1);
     expect(f.runtime.cleanup).not.toHaveBeenCalled();

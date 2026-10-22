@@ -89,7 +89,7 @@ export class NodeHub {
   private nodeSessionWrites = new Map<string, Promise<void>>();
   private sessionSubscribers = new Map<string, Set<() => void>>();
 
-  // Maximum heartbeat timeout: if no heartbeat received for 45s, close connection
+  // Bound idle connections, including while a fragmented result is arriving.
   private static readonly HEARTBEAT_TIMEOUT_MS = 45000;
   private static readonly INSPECTION_TIMEOUT_MS = 20000;
 
@@ -171,6 +171,12 @@ export class NodeHub {
     };
 
     resetHeartbeatWatchdog();
+
+    ws.on("ping", () => {
+      // Only the current socket's completed, authenticated hello grants liveness.
+      if (this.nodes.get(nodeId) !== nodeRecord || !nodeRecord.isHelloCompleted || ws.readyState !== WebSocket.OPEN) return;
+      resetHeartbeatWatchdog();
+    });
 
     ws.on("message", async (data: Buffer | string) => {
       // Guard: Ensure message belongs to currently active socket

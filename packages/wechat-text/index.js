@@ -158,11 +158,30 @@ function scanLinks(text) {
   }
   return candidates.filter(candidate => candidate.end !== void 0);
 }
+function scanCodeSpans(text) {
+  const spans = [];
+  const nextByLength = new Map();
+  // Index complete runs once. The first following run of exactly the same length
+  // closes an opener; different lengths remain literal content inside that span.
+  for (let at = text.length - 1; at >= 0; at--) {
+    if (text[at] !== "`") continue;
+    const end = at + 1;
+    while (at >= 0 && text[at] === "`") at--;
+    const start = at + 1;
+    const length = end - start;
+    const closing = nextByLength.get(length);
+    if (closing) spans.push({ start, contentStart: end, contentEnd: closing.start, end: closing.end });
+    nextByLength.set(length, { start, end });
+  }
+  return spans.reverse();
+}
 function protectInline(text, pattern, token, layout) {
   const links = scanLinks(text);
+  const codeSpans = scanCodeSpans(text);
   const parts = [];
   let cursor = 0;
   let linkIndex = 0;
+  let codeIndex = 0;
   pattern.lastIndex = 0;
   let match = pattern.exec(text);
   while (cursor < text.length) {
@@ -180,29 +199,32 @@ function protectInline(text, pattern, token, layout) {
       link = { ...candidate, opening, start: image ? opening - 1 : opening };
       break;
     }
-    if (link && (!match || link.start < match.index)) {
+    while (codeIndex < codeSpans.length && codeSpans[codeIndex].start < cursor) codeIndex++;
+    const code = codeSpans[codeIndex];
+    const codeFirst = code && (!match || code.start < match.index);
+    const nextStart = codeFirst ? code.start : match?.index;
+    if (link && (nextStart === void 0 || link.start < nextStart)) {
       const label = prose(text.slice(link.opening + 1, link.labelEnd), layout);
       const destination = text.slice(link.labelEnd + 2, link.end - 1);
       const displayed = link.start < link.opening ? label : layout ? label + " (" + destination + ")" : label + ": " + destination;
       parts.push(text.slice(cursor, link.start), token(displayed));
       cursor = link.end;
-      // Retain lookahead if it lies beyond this link, avoiding another search of that suffix.
-      if (match && match.index < cursor) {
-        pattern.lastIndex = cursor;
-        match = pattern.exec(text);
-      }
+    } else if (codeFirst) {
+      parts.push(text.slice(cursor, code.start), token(text.slice(code.contentStart, code.contentEnd)));
+      cursor = code.end;
     } else if (match) {
       let end = pattern.lastIndex;
-      if (match[1] === void 0) {
-        // Only expand the winning URL/path. Expanding a destination hidden inside a link
-        // before choosing that link would repeatedly read an entire adjacent-link suffix.
-        while (end < text.length && !/[\s<>`]/u.test(text[end])) end++;
-      }
-      parts.push(text.slice(cursor, match.index), token(match[1] !== void 0 ? match[2] : text.slice(match.index, end)));
+      // Only expand the winning URL/path. Expanding a destination hidden inside a link
+      // before choosing that link would repeatedly read an entire adjacent-link suffix.
+      while (end < text.length && !/[\s<>`]/u.test(text[end])) end++;
+      parts.push(text.slice(cursor, match.index), token(text.slice(match.index, end)));
       cursor = end;
+    } else break;
+    // Retain lookahead beyond the consumed item, avoiding another search of that suffix.
+    if (match && match.index < cursor) {
       pattern.lastIndex = cursor;
       match = pattern.exec(text);
-    } else break;
+    }
   }
   parts.push(text.slice(cursor));
   return parts.join("");
@@ -211,7 +233,7 @@ function renderMarkdown(text, maxChars = DEFAULT_MESSAGE_MAX_CHARS, layout = tru
   if (!Number.isSafeInteger(maxChars) || maxChars < 0) {
     throw new RangeError("maxChars must be a nonnegative safe integer");
   }
-  const pattern = /(?:(?<!`)(`+)(?!`)([\s\S]*?)(?<!`)\1(?!`)|(https?:\/\/)(?=[^\s<>`])|((?<![\w*])(?:~?\/|\.{1,2}\/|[A-Za-z]:\\))(?=[^\s<>`]))/gm;
+  const pattern = /(?:https?:\/\/(?=[^\s<>`])|(?<![\w*])(?:~?\/|\.{1,2}\/|[A-Za-z]:\\)(?=[^\s<>`]))/gm;
   const opaque = [];
   let tokenPrefix = "\uE000wechat:";
   while (text.includes(tokenPrefix)) tokenPrefix += ":";

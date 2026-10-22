@@ -158,11 +158,12 @@ func (d *Daemon) ackResult(ack protocol.ResultAckMessage) error {
 		return d.journal.Ack(ack)
 	}
 	d.outboxMu.Lock()
-	defer d.outboxMu.Unlock()
 	res, exists := d.outbox[ack.CommandID]
 	if exists && res.Type == "result" && protocol.ReceiptMatchesAck(res, ack) {
 		delete(d.outbox, ack.CommandID)
 	}
+	d.outboxMu.Unlock()
+	d.ackDedupe(ack)
 	return nil
 }
 

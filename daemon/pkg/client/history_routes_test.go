@@ -218,8 +218,14 @@ func TestHistoryCursorTokensAreStableAndBounded(t *testing.T) {
 		}
 	}
 	raw := "one-too-many"
-	if _, err := b.wrapCursor(&raw); err == nil || err.Error() != protocol.HistoryBusy {
+	if token, err := b.wrapCursor(&raw); err != nil || token == nil || b.cursors[*token] != raw {
+		t.Fatalf("full registry blocked a new cursor: %v", err)
+	}
+	if len(b.cursors) != maxHistoryContextCursors || len(b.cursorTokens) != maxHistoryContextCursors || len(b.cursorOrder) != maxHistoryContextCursors {
 		t.Fatal("cursor registry unbounded")
+	}
+	if _, retained := b.cursorTokens["raw-0"]; retained {
+		t.Fatal("oldest cursor was not evicted")
 	}
 	if got, err := b.wrapCursor(nil); got != nil || err != nil {
 		t.Fatal("nil cursor changed")

@@ -40,7 +40,7 @@ import { initializeDatabase } from "./migrations.js";
 import { recordMessageImages, getMessageImage } from "./message-images-postgres.js";
 import type { StoredMessageImage } from "../sessions/message-images.js";
 import { ReplyImagesSchema } from "../sessions/media-contracts.js";
-import { pgListQueuedCommands, pgClaimQueuedCommand, pgRequeueClaimedCommand, pgCancelQueuedCommand } from "./command-queue-postgres.js";
+import { pgListQueuedCommands, pgPublishPreparedCommand, pgClaimQueuedCommand, pgRequeueClaimedCommand, pgCancelQueuedCommand } from "./command-queue-postgres.js";
 import { sameAuthority, sameCommandPayload } from "../commands/queue.js";
 import type { CommandAuthority, SendRoute } from "../types.js";
 import { pgEnqueueProgressNotification } from "./notification-progress-postgres.js";
@@ -190,7 +190,7 @@ export class PostgresStore implements IStore {
 
   async markExpiredActiveCommandsUncertain(): Promise<void> {
     const now = new Date().toISOString();
-    await this.pool.query("UPDATE commands SET status='expired',updated_at=$1 WHERE status='queued' AND expires_at<=$1",[now]);
+    await this.pool.query("UPDATE commands SET status='expired',updated_at=$1 WHERE status IN ('preparing','queued') AND expires_at<=$1",[now]);
     await this.pool.query(
       `
       UPDATE commands
@@ -205,6 +205,9 @@ export class PostgresStore implements IStore {
 
   listQueuedCommands(limit?: number, afterCommandId?: string): Promise<CommandRecord[]> {
     return pgListQueuedCommands(this.pool,row=>this.mapCommandRow(row),limit,afterCommandId);
+  }
+  publishPreparedCommand(id: string): Promise<CommandRecord | null> {
+    return pgPublishPreparedCommand(this.pool, row=>this.mapCommandRow(row), id);
   }
   claimQueuedCommand(id: string, route: SendRoute): Promise<CommandRecord | null> {
     return pgClaimQueuedCommand(this.pool,row=>this.mapCommandRow(row),id,route);

@@ -178,27 +178,28 @@ export class BackgroundService {
       }
       if (worker.activeInvocationId) {
         const invocation = worker.invocations.find(item => item.id === worker!.activeInvocationId)!;
-        let mustCancel = false;
-        worker = await save(current => {
-          if (this.now() >= current.expiresAt + WORKER_SHUTDOWN_GRACE_MS) {
-            current.phase = "expired"; mustCancel = true;
-          }
-        });
-        if (mustCancel) {
-          const beforeCancel = await this.options.runtime.inspect(worker.id, invocation.id);
+        const bounds = { launchDeadlineAt: worker.expiresAt, executionDeadlineAt: worker.expiresAt + WORKER_SHUTDOWN_GRACE_MS };
+        if (this.now() >= worker.expiresAt) {
+          // Reading an expired queue must not itself cross the launch boundary.
+          // Already active turns retain their bounded shutdown grace.
+          const beforeCancel = await this.options.runtime.inspect(worker.id, invocation.id, { ...bounds, resumeQueued: false });
           if (this.stopping()) return worker.initialOutcome ?? running();
           if (terminal(beforeCancel)) worker = await this.recordReceipt(worker, invocation, beforeCancel, save);
-          else {
+          else if (beforeCancel.status === "queued" || this.now() >= worker.expiresAt + WORKER_SHUTDOWN_GRACE_MS) {
+            worker = await save(current => { current.phase = "expired"; });
             await this.options.runtime.cancel(worker.id, invocation.id);
-            const afterCancel = await this.options.runtime.inspect(worker.id, invocation.id);
+            const afterCancel = await this.options.runtime.inspect(worker.id, invocation.id, { ...bounds, resumeQueued: false });
             if (this.stopping()) return worker.initialOutcome ?? running();
             worker = await this.recordReceipt(worker, invocation,
               afterCancel.status === "completed" || afterCancel.error === "worker_process_cleanup_unverified" ? afterCancel : {
-                receiptMissing: beforeCancel.receiptMissing, status: "failed", summary: fallbackSummary(worker, "后台会话保留期已结束，本轮执行已停止。"), error: "worker_expired" }, save);
+                receiptMissing: afterCancel.receiptMissing, status: "failed", summary: fallbackSummary(worker, "后台会话保留期已结束，本轮执行已停止。"), error: "worker_expired" }, save);
+          } else {
+            worker = await save(current => { current.invocations.find(item => item.id === invocation.id)!.receipt = beforeCancel; });
+            return worker.initialOutcome ?? running();
           }
           if (worker.phase === "quarantined") return worker.initialOutcome ?? running();
         } else {
-          const receipt = await this.options.runtime.inspect(worker.id, invocation.id);
+          const receipt = await this.options.runtime.inspect(worker.id, invocation.id, bounds);
           if (this.stopping()) return worker.initialOutcome ?? running();
           if (terminal(receipt)) worker = await this.recordReceipt(worker, invocation, receipt, save);
           else {
@@ -275,7 +276,9 @@ export class BackgroundService {
     if (!canLaunch) return worker;
     let receipt: WorkerReceipt;
     try { receipt = await this.options.runtime.start({ workerId: worker.id, invocationId: invocation.id, task: invocation.task,
-      preferences: worker.spec.preferences, input: invocation.input, timeoutMs: Math.min(this.turnTimeoutMs, MAX_WORKER_TURN_TIMEOUT_MS, Math.max(1, worker.expiresAt + WORKER_SHUTDOWN_GRACE_MS - this.now())) }); }
+      preferences: worker.spec.preferences, input: invocation.input,
+      launchDeadlineAt: worker.expiresAt, executionDeadlineAt: worker.expiresAt + WORKER_SHUTDOWN_GRACE_MS,
+      timeoutMs: Math.min(this.turnTimeoutMs, MAX_WORKER_TURN_TIMEOUT_MS, Math.max(1, worker.expiresAt + WORKER_SHUTDOWN_GRACE_MS - this.now())) }); }
     catch (error) {
       this.options.onError?.(error, `background submit ${invocation.id}`);
       // Ambiguous submission remains active; inspect the same operation after recovery.

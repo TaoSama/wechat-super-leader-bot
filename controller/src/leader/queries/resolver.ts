@@ -201,25 +201,8 @@ export class NaturalLanguageResolver {
       };
     }
 
-    // Only allow fallback to single session or lastContext if user did NOT specify an explicit targetClause
+    // Implicit sends stay bound to the previous exact target, even when it is absent.
     if (!targetClause) {
-      if (ctx.sessions.length === 1) {
-        const s = ctx.sessions[0];
-        if (isTerminalSession(s)) return terminalInputRequiresConfirmation();
-        if (!queueSendRoute(s)) {
-          return {
-            action: "unknown",
-            replyText: `会话 [${s.nodeId}] ${s.id} 当前不具备 send 资格。`,
-          };
-        }
-        return {
-          action: "send_session",
-          nodeId: s.nodeId,
-          sessionId: s.id,
-          prompt,
-        };
-      }
-
       if (ctx.lastContext) {
         const prev = ctx.sessions.find(
           (s) => s.nodeId === ctx.lastContext!.nodeId && s.id === ctx.lastContext!.sessionId
@@ -239,6 +222,27 @@ export class NaturalLanguageResolver {
             prompt,
           };
         }
+        return {
+          action: "unknown",
+          replyText: `上下文会话 [${ctx.lastContext.nodeId}] ${ctx.lastContext.sessionId} 当前不可用，为防误操作已拒绝执行。请等待原会话恢复，或明确指定新的目标会话。`,
+        };
+      }
+
+      if (ctx.sessions.length === 1) {
+        const s = ctx.sessions[0];
+        if (isTerminalSession(s)) return terminalInputRequiresConfirmation();
+        if (!queueSendRoute(s)) {
+          return {
+            action: "unknown",
+            replyText: `会话 [${s.nodeId}] ${s.id} 当前不具备 send 资格。`,
+          };
+        }
+        return {
+          action: "send_session",
+          nodeId: s.nodeId,
+          sessionId: s.id,
+          prompt,
+        };
       }
 
       if (ctx.sessions.length > 1) {

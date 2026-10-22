@@ -6,8 +6,8 @@ import { hasSkillRefs } from "../skills/catalog.js";
 import { selectSendRoute } from "../sessions/send-eligibility.js";
 import { isTerminalSession } from "../sessions/terminal.js";
 import { QUEUE_BATCH_SIZE, QUEUE_TICK_MS, queueSendRoute, sameAuthority, sameCommandPayload } from "./queue.js";
-import { matchesExecutionCommand } from "../leader/plans/execution.js";
 import { matchesGoalCommand } from "../leader/goals/goal.js";
+import { isPlanCommandAuthorized } from "./plan-authorization.js";
 
 export class CommandError extends Error {
   constructor(public readonly httpStatus: number, message: string) { super(message); }
@@ -85,7 +85,8 @@ export class CommandService {
       if (request.skills?.length && this.hub.isNodeConnected(request.nodeId) && !hasSkillRefs(this.hub.getNodeSkills(request.nodeId),request.skills)) throw new CommandError(409,"Selected skill unavailable or changed");
     } else this.targetRoute(request);
     const now = new Date();
-    const record: CommandRecord = { ...request, commandId:`cmd_${randomUUID()}`,status:request.action === "send" && sendRoute !== "terminal-pane" ? "queued" : "pending",
+    const queueable = request.action === "send" && sendRoute !== "terminal-pane";
+    const record: CommandRecord = { ...request, commandId:`cmd_${randomUUID()}`,status:queueable ? "preparing" : "pending",
       ...(sendRoute ? {sendRoute,deliveryMode:request.deliveryMode ?? "next-turn",authority } : {}),
       createdAt:now.toISOString(),updatedAt:now.toISOString(),expiresAt:new Date(now.getTime()+this.ttlSeconds*1000).toISOString() };
     const created = await this.store.createCommandIfAbsent(record);
@@ -97,7 +98,11 @@ export class CommandService {
       await this.store.updateCommandStatus(record.commandId,"failed",undefined,"Target send route or authority changed before transmission");
       throw new CommandError(409,"Target send route or authority changed before transmission");
     }
-    if (request.action === "send" && sendRoute !== "terminal-pane") await this.dispatchOne(created.command,waitMs);
+    if (queueable) {
+      const published = await this.store.publishPreparedCommand(record.commandId);
+      if (published) await this.dispatchOne(published,waitMs);
+      else await this.store.markExpiredActiveCommandsUncertain();
+    }
     else await this.transmit(record,waitMs);
     return (await this.store.getCommand(record.commandId))!;
   }
@@ -133,9 +138,7 @@ export class CommandService {
     if (authority.type === "chat") return true;
     if (authority.type === "automation") return this.isAutomationAuthorized ? this.isAutomationAuthorized(authority, record) : false;
     if (authority.type === "plan") {
-      const plan = await this.store.getExecution(authority.id);
-      return !!plan && plan.chatId === authority.chatId && plan.status === "active" && plan.expiresAt>Date.now() &&
-        plan.plan.actions.some((_,index)=>!!plan.attempts[index] && matchesExecutionCommand(plan,index,record));
+      return isPlanCommandAuthorized(this.store, record, authority);
     }
     const goal = await this.store.getGoal(authority.id);
     return !!goal && goal.chatId === authority.chatId && goal.status === "active" && goal.expiresAt>Date.now() &&
