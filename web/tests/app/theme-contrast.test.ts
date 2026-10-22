@@ -99,7 +99,7 @@ it("状态成功颜色独立于品牌色，并覆盖所有成功pill与在线/�
     expect(declarations(rule).color).toBe("var(--status-success)");
   }
   expect(themeTokens("light")["--accent-bright"]).toBe("#239956");
-  expect(themeTokens("dark")["--accent-bright"]).toBe("#7ccba0");
+  expect(themeTokens("dark")["--accent-bright"]).toBe("#fafafa");
 });
 
 it.each(["light", "dark"] as const)("%s 项目列表所有文字在普通、悬停和选中底色达到4.5:1", theme => {
@@ -133,4 +133,11 @@ it.each(["light", "dark"] as const)("%s 项目列表所有文字在普通、悬�
     }
   }
   expect(ruleValue(sessions, ".project-session-choice .session-title", "opacity")).toBe("1");
+});
+
+it.each(["light", "dark"] as const)("%s 危险按钮使用独立前景色并达到4.5:1", theme => {
+  const tokens = themeTokens(theme);
+  const controls = styles("controls.css");
+  expect(ruleValue(controls, ".ui-button.destructive", "color")).toBe("var(--danger-foreground)");
+  expect(contrast(rgb("#fff"), rgb(tokens["--danger"]))).toBeGreaterThanOrEqual(4.5);
 });
