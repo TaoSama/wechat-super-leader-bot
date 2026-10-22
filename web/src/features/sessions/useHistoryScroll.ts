@@ -26,7 +26,7 @@ export function useHistoryScroll(options: Options) {
   const ownerRef = useRef(options.owner);
   const visibleRef = useRef(options.visible !== false);
   const elementRef = useRef<HTMLDivElement | null>(null);
-  const processedRef = useRef<{ items: HistoryItem[]; loadingOlder: boolean } | null>(null);
+  const processedRef = useRef<{ items: HistoryItem[]; loadingOlder: boolean; hasOlder: boolean } | null>(null);
   const generationRef = useRef(0);
   const bottomRef = useRef(true);
   const busyRef = useRef(false);
@@ -207,9 +207,10 @@ export function useHistoryScroll(options: Options) {
     const reopened = visible && (visibilityChanged || elementChanged);
     const viewportResized = element && measuredViewportHeightRef.current > 0 && element.clientHeight > 0 &&
       measuredViewportHeightRef.current !== element.clientHeight;
+    const paginationChanged = processedRef.current?.hasOlder !== !!options.nextCursor;
     if (!ownerChanged && !visibilityChanged && !elementChanged && processedRef.current?.items === options.items &&
-      processedRef.current.loadingOlder === options.loadingOlder && !viewportResized) return;
-    processedRef.current = { items: options.items, loadingOlder: options.loadingOlder };
+      processedRef.current.loadingOlder === options.loadingOlder && !viewportResized && !paginationChanged) return;
+    processedRef.current = { items: options.items, loadingOlder: options.loadingOlder, hasOlder: !!options.nextCursor };
     visibleRef.current = visible;
     elementRef.current = element;
     if (ownerChanged || visibilityChanged || elementChanged) {
@@ -261,7 +262,7 @@ export function useHistoryScroll(options: Options) {
     const previousIds = idsRef.current;
     const previousIdSet = new Set(previousIds);
     const insertedItems = options.items.some((item) => !previousIdSet.has(item.id));
-    if (bottomRef.current && (reopened || viewportResized || signature !== tailRef.current || insertedItems)) {
+    if (bottomRef.current && (reopened || viewportResized || paginationChanged || signature !== tailRef.current || insertedItems)) {
       element.scrollTop = element.scrollHeight;
       anchorRef.current = null;
     } else if (!bottomRef.current) restore(element);
