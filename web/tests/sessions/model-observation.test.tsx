@@ -82,17 +82,19 @@ describe("model observation selection", () => {
 function workspaceData(raw: ScopedSession) { return { nodes, sessions: [raw], commands: [], goals: emptyGoals(), executions: emptyExecutions() }; }
 
 describe("workspace model views", () => {
-  it("shows one model group in list, detail and composer, with source and time", () => {
+  it("keeps the list compact and shows one model group in detail and composer, with source and time", () => {
     vi.spyOn(Date, "now").mockReturnValue(NOW);
     const raw = session({ model: "native-model", modelProvider: "native-provider", reasoningEffort: "low" });
     render(<SessionWorkspace data={workspaceData(raw)} nodes={nodes} stale={false} active={false} onAuthFailure={vi.fn()} />);
     const row = screen.getByTestId("session-row-node-session");
-    expect(row.querySelector(".session-model")).toHaveTextContent("desktop-model");
+    expect(row.querySelector(".session-model")).toBeNull();
+    expect(row).not.toHaveTextContent("desktop-model");
     fireEvent.click(row);
     expect(document.querySelector(".detail-model")).toBeNull();
     expect(document.querySelector(".composer-model")).toHaveTextContent("desktop-model");
     fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
     const details = document.querySelector(".session-metadata") as HTMLElement;
+    expect(within(details).getByText("模型").nextElementSibling).toHaveTextContent("desktop-model");
     expect(within(details).getByText("desktop-provider")).toBeInTheDocument();
     expect(within(details).getByText("high")).toBeInTheDocument();
     expect(within(details).getByText("桌面会话设置")).toBeInTheDocument();
@@ -100,7 +102,7 @@ describe("workspace model views", () => {
     expect(screen.getByRole("button", { name: "发送消息" })).toBeDisabled();
     expect(raw.model).toBe("native-model");
   });
-  it("searches the displayed model and provider, not shadowed native settings", () => {
+  it("searches the selected model and provider, not shadowed native settings", () => {
     vi.spyOn(Date, "now").mockReturnValue(NOW);
     render(<SessionWorkspace data={workspaceData(session({ model: "native-model" }))} nodes={nodes} stale={false} active={false} onAuthFailure={vi.fn()} />);
     const search = screen.getByLabelText("搜索会话");
@@ -121,8 +123,16 @@ describe("workspace model views", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(45_001); });
     expect(screen.queryByTestId("session-row-node-session")).not.toBeInTheDocument();
     fireEvent.change(search, { target: { value: "native-model" } });
-    expect(screen.getByTestId("session-row-node-session")).toHaveTextContent("native-model");
-    unmount(); expect(vi.getTimerCount()).toBe(0);
+    const row = screen.getByTestId("session-row-node-session");
+    expect(row).not.toHaveTextContent("native-model");
+    fireEvent.click(row);
+    fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
+    const details = screen.getByRole("dialog", { name: "会话详情" });
+    expect(within(details).getByText("模型").nextElementSibling).toHaveTextContent("native-model");
+    expect(within(details).getByText("模型来源").nextElementSibling).toHaveTextContent("控制接口记录");
+    unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(vi.getTimerCount()).toBe(0);
   });
   it("handles a model change and disconnection without retaining stale desktop settings", () => {
     vi.spyOn(Date, "now").mockReturnValue(NOW);
@@ -130,11 +140,15 @@ describe("workspace model views", () => {
     const props = { nodes, stale: false, active: false, onAuthFailure: vi.fn() };
     const { rerender } = render(<SessionWorkspace {...props} data={workspaceData(raw)} />);
     const row = screen.getByTestId("session-row-node-session");
-    expect(row).toHaveTextContent("desktop-model");
+    fireEvent.click(row);
+    fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
+    const details = screen.getByRole("dialog", { name: "会话详情" });
+    expect(within(details).getByText("模型").nextElementSibling).toHaveTextContent("desktop-model");
     rerender(<SessionWorkspace {...props} data={workspaceData(session({ desktopObservation: desktop({ model: "new-model" }) }))} />);
-    expect(row).toHaveTextContent("new-model");
+    expect(within(details).getByText("模型").nextElementSibling).toHaveTextContent("new-model");
     rerender(<SessionWorkspace {...props} data={workspaceData(session({ desktopObservation: desktop({ availability: "unavailable" }) }))} />);
-    expect(row).toHaveTextContent("模型未报告");
-    expect(row).not.toHaveTextContent("new-model");
+    expect(within(details).getByText("模型").nextElementSibling).toHaveTextContent("模型未报告");
+    expect(within(details).getByText("模型来源").nextElementSibling).toHaveTextContent("未报告");
+    expect(details).not.toHaveTextContent("new-model");
   });
 });
