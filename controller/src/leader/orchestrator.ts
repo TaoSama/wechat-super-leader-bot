@@ -1,4 +1,5 @@
 import { REPORT_PROGRESS_TOOL, progressText, type QueryProgressReporter } from "../notifications/model-progress.js";
+import { DirectToolExecutor } from "./direct-executor.js";
 import { traceEvent, traceSpan } from "../runtime/telemetry.js";
 import { isConsoleLinkQuery, parseSessionDirectoryQuery } from "@super-leader/wechat-text";
 import { createHash, randomUUID } from "node:crypto";
@@ -55,7 +56,7 @@ const clip = (text: string, length: number) => {
 const confirmation = /^(?:请)?(?:确认|执行|开始|开始执行|确认执行|确认开始|按这个计划执行|就按这个执行|确认这个计划)[。！!]?$/;
 const naturalConfirmation = /^(?:是|是的|对|对的|没错|好的|好|可以|就这样|就这个|就是这个|就是它|嗯|嗯嗯)[。！!]?$/;
 const cancellation = /^(?:请|帮我)?(?:取消计划|不用执行|取消执行|停止后续任务|停止后续执行|先别跑后面的任务)[。！!]?$/;
-type Hub = Pick<NodeHub, "getAllSessions" | "getNodeStatusList" | "getNodeSession" | "isNodeConnected" | "getAllSkills" | "getNodeSkills" | "readHistory"> & ReadinessHub & Partial<MediaHub>
+export type Hub = Pick<NodeHub, "getAllSessions" | "getNodeStatusList" | "getNodeSession" | "isNodeConnected" | "getAllSkills" | "getNodeSkills" | "readHistory"> & ReadinessHub & Partial<MediaHub>
   & Partial<Pick<NodeHub, "listAutomations" | "inspectAutomation">>;
 
 
@@ -81,12 +82,21 @@ export class LeaderOrchestrator {
   private active = new Map<string, { messageId: string; inputHash: string; promise: Promise<LeaderReply> }>();
   private executions: ExecutionScheduler;
   private goals: GoalConversation;
+  readonly direct: DirectToolExecutor;
   constructor(private store: IStore, private hub: Hub, private commands: Pick<CommandService, "submit">,
     private model: LeaderModel, private now: () => number = Date.now, private consoleLinkIssuer?: ConsoleLinkIssuer,
     executions?: ExecutionScheduler, goals?: GoalScheduler, private automations?: AutomationService,
-    private background?: BackgroundToolService) {
+    private background?: BackgroundToolService, directOptions: { isAllowed?: (chatId: string) => boolean; goalsAvailable?: boolean } = {}) {
     this.executions = executions ?? new ExecutionScheduler(store, commands, { now });
     this.goals = new GoalConversation(store, hub, goals ?? new GoalScheduler(store, commands, createGoalDecider(model), { now }), now);
+    this.direct = new DirectToolExecutor({ store, hub, now, automations, background,
+      isAllowed: directOptions.isAllowed ?? (() => true), goalsAvailable: directOptions.goalsAvailable ?? true,
+      goals: this.goals, executions: this.executions,
+      save: (chatId, revision, data) => this.save(chatId, revision, data),
+      callTool: (...args) => this.callTool(...args), preview: plan => this.preview(plan),
+      executePlan: (chatId, revision, plan, data) => this.executePlan(chatId, revision, plan, data, true),
+      confirmGoal: (chatId, revision, goal, data) => this.confirmGoal(chatId, revision, goal, data, true),
+    });
   }
 
   handle(chatId: string, messageId: string, text: string, progress?: QueryProgressReporter): Promise<LeaderReply> {
@@ -274,7 +284,7 @@ export class LeaderOrchestrator {
     return saved;
   }
 
-  private async executePlan(chatId: string, revision: number, plan: Plan, data: LeaderData): Promise<LeaderReply> {
+  private async executePlan(chatId: string, revision: number, plan: Plan, data: LeaderData, modelFree = false): Promise<LeaderReply> {
     if (plan.expiresAt <= this.now()) return { text: "计划已过期，没有派发。请重新描述任务以核对最新会话状态。" };
     try { validatePlanDependencies(plan); }
     catch { return { text: "计划依赖或结果来源无效，没有派发。请重新规划。" }; }
@@ -313,7 +323,7 @@ export class LeaderOrchestrator {
       },action.sendRoute,{type:"chat",chatId});
       data.commandIds.push(command.commandId);
       const fallbackText = command.status === "accepted" ? "补充已由原会话当前轮受理，执行情况尚待核查。" : `当前轮补充${command.status === "queued" ? "已保存，等待核对原轮次" : "结果待核查"}；不会改成新任务或重复发送。`;
-      return { text: await generateAcknowledgement(this.model, this.store, this.hub, {
+      return { text: modelFree ? fallbackText : await generateAcknowledgement(this.model, this.store, this.hub, {
         mode: "steer", durableState: { planId: plan.id, status: "submitted" },
         targets: [{ ...action, commandId: command.commandId }], fallbackText,
       }), commandId: command.commandId };
@@ -326,7 +336,7 @@ export class LeaderOrchestrator {
           await guard?.();
         }, route) };
       const submitted = await submitTerminalPlan(this.store, guardedCommands, chatId, revision, plan, data, this.now);
-      if (!submitted.commandId) return submitted;
+      if (!submitted.commandId || modelFree) return submitted;
       return { ...submitted, text: await generateAcknowledgement(this.model, this.store, this.hub, {
         mode: "terminal", durableState: { planId: plan.id, executionConfirmed: false, atomic: false },
         targets: [{ ...plan.actions[0], commandId: submitted.commandId }], fallbackText: submitted.text,
@@ -346,7 +356,7 @@ export class LeaderOrchestrator {
     if (!view) throw new Error("Confirmed execution disappeared");
     const commandIds = view.steps.flatMap(step => step.commandId ? [step.commandId] : []);
     data.commandIds.push(...commandIds);
-    return { text: await generateAcknowledgement(this.model, this.store, this.hub, {
+    return { text: modelFree ? executionSummary(view, (nodeId, sessionId) => this.hub.getNodeSession(nodeId, sessionId)?.title) : await generateAcknowledgement(this.model, this.store, this.hub, {
       mode: "plan", durableState: { planId: view.id, status: view.status,
         steps: view.steps.map(({ step, nodeId, sessionId, prompt, status, dependsOn }) => ({ step, nodeId, sessionId, prompt, status, dependsOn })) },
       targets: view.steps.map(({ nodeId, sessionId, commandId }) => ({ nodeId, sessionId, commandId })),
@@ -354,8 +364,9 @@ export class LeaderOrchestrator {
     }), commandId: commandIds.at(-1) };
   }
 
-  private async confirmGoal(chatId: string, revision: number, proposal: GoalProposal, data: LeaderData): Promise<LeaderReply> {
+  private async confirmGoal(chatId: string, revision: number, proposal: GoalProposal, data: LeaderData, modelFree = false): Promise<LeaderReply> {
     const reply = await this.goals.confirm(chatId, revision, proposal, data);
+    if (modelFree) return reply;
     const goal = await this.store.getGoal(proposal.id);
     if (!goal || goal.chatId !== chatId) return reply;
     const view = await readGoalView(this.store, goal, this.now());

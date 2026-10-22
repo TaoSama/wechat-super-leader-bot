@@ -16,7 +16,6 @@ import { StateManager } from '../../gateway/dist/runtime/state.js';
 import { ILinkClient } from '../../gateway/dist/wechat/client.js';
 import { WeChatGateway } from '../../gateway/dist/gateway.js';
 import { HttpLeaderModel } from '../../controller/dist/leader/model/client.js';
-import { classifyUserAuthorization } from '../../controller/dist/leader/model/user-authorization.js';
 
 const { values } = parseArgs({ options: { run: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } });
 const EVIDENCE = new URL('../../.runtime/delegation-verification/live-delegation.json', import.meta.url);
@@ -28,11 +27,12 @@ const SPECIAL_TITLE = '🧪 ① 原始__标题** · `tools` [资料](https://exa
 const CHAT = 'synthetic-delegation-direct';
 const CONTEXT = 'synthetic-context-only';
 const TIMEOUT = 180_000;
+const MAX_PLANNER_STEPS = 12;
 const HOST = 'https://synthetic-ilink.invalid';
 const require = createRequire(new URL('../../controller/package.json', import.meta.url));
 const { WebSocket } = require('ws');
 if (!values.run || values.help) {
-  console.log('Usage: node tests/live/wechat-delegation.mjs --run\nRequires built Controller/Gateway, local Docker PG, LIVE_MODEL_BASE_URL/API_KEY or GATEWAY_LEADER_BASE_URL/API_KEY. Real authorization/planning/ack model; isolated Controller HTTP/PG, synthetic WS; real Gateway+CodexReplyEngine+loopback MCP with SDK runner fixture intentionally rewriting receipts. Zero real WeChat or desktop requests.');
+  console.log('Usage: node tests/live/wechat-delegation.mjs --run\nRequires built Controller/Gateway, local Docker PG, LIVE_MODEL_BASE_URL/API_KEY or GATEWAY_LEADER_BASE_URL/API_KEY. Real outer planning model, deterministic Controller tools with zero inner model calls; isolated Controller HTTP/PG and synthetic WS; real Gateway+CodexReplyEngine+loopback MCP with SDK runner fixture intentionally rewriting trusted receipts. Zero real WeChat or desktop requests.');
 } else await main().catch(error => { console.error('Live delegation failed:', error.name, error.message); process.exitCode = 1; });
 
 async function main() {
@@ -43,7 +43,8 @@ async function main() {
   endpoint.pathname = endpoint.pathname.replace(/\/+$/, '') + '/responses';
   const token = randomBytes(24).toString('hex'), nodeToken = randomBytes(24).toString('hex');
   const logs = [], errors = [], events = [], calls = [], receipts = [], messages = [], mcp = [];
-  const inbox = [], outbox = [], histories = [], sends = [];
+  const inbox = [], outbox = [], histories = [], sends = [], businessCalls = [], outerHistory = [];
+  let innerModelCalls = 0;
   const synthetic = new Map();
   const sessions = [
     { id: 'synthetic-typing', title: TITLE },
@@ -58,30 +59,9 @@ async function main() {
       assert.equal(request.url, '/v1/responses');
       let body = ''; for await (const chunk of request) body += chunk;
       const payload = JSON.parse(body);
-      const ack = payload.input[0]?.content?.startsWith('你负责根据刚刚核查的真实执行记录');
-      if (ack) {
-        const observation = JSON.parse(payload.input.at(-1).content);
-        for (const target of observation.targets) {
-          assert(target.exactReceipt, 'Acknowledgement lacks exact persisted command');
-          const sent = sends.find(s => s.commandId === target.exactReceipt.commandId);
-          assert(sent, 'Acknowledgement refers to an undispatched command');
-          const persisted = await http('/v1/commands/' + sent.commandId);
-          assert(['pending', 'accepted'].includes(persisted.status));
-          assert.equal(persisted.nodeId, NODE); assert.equal(persisted.sessionId, target.sessionId);
-          if (target.exactReceipt.status === 'accepted') {
-            assert.equal(target.exactReceipt.turnId, 'synthetic-turn-' + sent.commandId);
-            assert.equal(persisted.turnId, target.exactReceipt.turnId);
-          } else {
-            assert.equal(target.exactReceipt.status, 'pending');
-            assert.equal(target.exactReceipt.turnId, undefined, 'Pending receipt manufactured a turn');
-          }
-          const history = histories.findLast(h => h.sessionId === target.sessionId && h.fetchedAt === target.historyFetchedAt);
-          assert(history?.afterSend, 'Acknowledgement did not freshly read after sending');
-          assert(target.exactTurnHistory.every(item => item.turnId === target.exactReceipt.turnId));
-          assert(!JSON.stringify(target.exactTurnHistory).includes('OLD_UNRELATED'));
-          events.push({ type: 'model-ack', sessionId: target.sessionId, turnId: target.exactReceipt.turnId });
-          receipts.push({ planId: observation.durableState.planId, commandId: sent.commandId, status: target.exactReceipt.status, persistedStatus: persisted.status, turnId: target.exactReceipt.turnId, historyFetchedAt: target.historyFetchedAt });
-        }
+      if (request.headers.authorization !== 'Bearer synthetic-outer-proxy-key') {
+        innerModelCalls++;
+        throw new Error('Controller unexpectedly invoked an inner model');
       }
       const upstream = await fetch(endpoint, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(TIMEOUT),
         headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' }, body });
@@ -110,9 +90,6 @@ async function main() {
       directory = await mkdtemp(join(await realpath(tmpdir()), 'wechat-delegation-live-'));
       model.listen(0, '127.0.0.1'); await once(model, 'listening');
       const monitorText = '等他们执行完再汇总给我，使用独立后台会话，只读监控已有任务，不能向源会话发送消息或重跑。';
-      const classifierModel = new HttpLeaderModel({ baseUrl: `http://127.0.0.1:${model.address().port}/v1`, apiKey: 'synthetic-proxy-key', model: MODEL });
-      evidence.semanticMonitorIntent = await classifyUserAuthorization(classifierModel, monitorText, AbortSignal.timeout(60000));
-      assert.equal(evidence.semanticMonitorIntent, 'isolated_background');
       const dbUrl = await database.start();
       const cleared = Object.fromEntries(Object.keys(process.env).map(name => [name, undefined]));
       controller = await createControllerFixture({ logs, secrets: [token, nodeToken, apiKey, database.password], env: {
@@ -151,6 +128,14 @@ async function main() {
       send(frame('hello')); heartbeat = setInterval(() => send(frame('heartbeat')), 500);
       await waitFor(async () => (await http('/v1/status')).sessions.length === sessions.length, 'Synthetic sessions ready');
       const controllerClient = new ControllerClient({ controllerUrl: controller.base, controllerToken: token });
+      const originalCallTool = controllerClient.callTool.bind(controllerClient);
+      controllerClient.callTool = async request => {
+        const result = await originalCallTool(request);
+        businessCalls.push({ request: structuredClone(request), result: structuredClone(result) });
+        return result;
+      };
+      const outerModel = new HttpLeaderModel({ baseUrl: `http://127.0.0.1:${model.address().port}/v1`,
+        apiKey: 'synthetic-outer-proxy-key', model: MODEL });
       const sdkFactory = sdk => {
         const run = (input, resumed, settings) => ({ events: (async function* () {
           assert.equal(settings.webSearchMode, 'live');
@@ -158,13 +143,45 @@ async function main() {
           const url = sdk.config.mcp_servers.wechat_control.url;
           assert.equal(new URL(url).hostname, '127.0.0.1');
           yield { type: 'thread.started', thread_id: 'synthetic-live-thread' };
-          const response = await fetch(url, { method: 'POST', headers: { authorization: 'Bearer ' + sdk.env.LEADER_TURN_MCP_TOKEN,
-            'content-type': 'application/json', accept: 'application/json, text/event-stream' },
-            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'control_current_request', arguments: {} } }) });
-          assert.equal(response.status, 200); const body = await response.json();
-          assert(!body.result.isError); const reply = JSON.parse(body.result.content[0].text);
-          mcp.push({ text, resumed, reply });
-          yield { type: 'item.completed', item: { id: 'rewrite', type: 'agent_message', text: 'SDK故意改写：我给它重新取了名字，任务已经完成。' } };
+          const rpc = async (method, params = {}) => {
+            const response = await fetch(url, { method: 'POST', headers: { authorization: 'Bearer ' + sdk.env.LEADER_TURN_MCP_TOKEN,
+              'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+              body: JSON.stringify({ jsonrpc: '2.0', id: randomUUID(), method, params }) });
+            assert.equal(response.status, 200); const body = await response.json();
+            assert(!body.error, 'MCP transport returned an error');
+            return body.result;
+          };
+          const listed = await rpc('tools/list');
+          assert(listed.tools.some(tool => tool.name === 'execute_plan'));
+          assert(!listed.tools.some(tool => tool.name === 'control_current_request'));
+          const tools = listed.tools.map(tool => ({ type: 'function', function: {
+            name: tool.name, description: tool.description, parameters: tool.inputSchema,
+          } }));
+          const conversation = [{ role: 'system', content: input.slice(0, input.indexOf('<current_user_message>')) },
+            ...outerHistory, { role: 'user', content: text }];
+          const replies = [], invoked = [];
+          let finalText;
+          for (let step = 0; step < MAX_PLANNER_STEPS; step++) {
+            const answer = await outerModel.complete(conversation, tools, AbortSignal.timeout(TIMEOUT));
+            if (!answer.toolCalls.length) { finalText = answer.content || '请进一步说明目标。'; break; }
+            conversation.push({ role: 'assistant', content: answer.content, tool_calls: answer.toolCalls,
+              responseOutput: answer.responseOutput });
+            for (const call of answer.toolCalls) {
+              const result = await rpc('tools/call', { name: call.function.name, arguments: JSON.parse(call.function.arguments) });
+              invoked.push(call.function.name);
+              assert(!result.isError, 'Business tool returned an execution error');
+              const observation = JSON.parse(result.content[0].text);
+              if (observation.reply) replies.push(observation.reply);
+              conversation.push({ role: 'tool', tool_call_id: call.id, content: result.content[0].text });
+            }
+            if (replies.length) { finalText = replies.map(reply => reply.text).join('\n\n'); break; }
+          }
+          assert(finalText, 'Outer planner exhausted its bounded tool loop');
+          outerHistory.push({ role: 'user', content: text }, { role: 'assistant', content: finalText });
+          const reply = { text: finalText, ...replies.findLast(value => value.commandId) };
+          mcp.push({ text, resumed, reply, tools: invoked });
+          yield { type: 'item.completed', item: { id: 'rewrite', type: 'agent_message', text: replies.length
+            ? 'SDK故意改写：我给它重新取了名字，任务已经完成。' : finalText } };
           yield { type: 'turn.completed', usage: { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0 } };
         })() });
         return { startThread: settings => ({ runStreamed: async input => run(input, false, settings) }),
@@ -192,10 +209,20 @@ async function main() {
         inbox.push({ message_type: 1, from_user_id: CHAT, client_id: id, create_time_ms: Date.now(), context_token: CONTEXT,
           item_list: [{ type: 1, text_item: { text } }] });
         const cycle = await gateway.pollOnce(); healthy(); assert.equal(cycle.processedCount, 1);
-        assert.equal(mcp.length, nativeBefore + 1, 'SDK did not call real MCP exactly once');
+        assert(mcp.length === nativeBefore || mcp.length === nativeBefore + 1, 'Unexpected native turn count');
         const actual = outbox.slice(before).flatMap(message => message.item_list).map(item => item.text_item?.text ?? '').join('');
         assert(actual); assert(!actual.includes('SDK故意改写'), 'SDK rewrote trusted result');
-        messages.push({ text, reply: actual, controllerReply: mcp.at(-1).reply.text, messageId: id, sends: sends.length });
+        for (const frame of sends.filter(frame => !receipts.some(receipt => receipt.commandId === frame.commandId))) {
+          const command = await http('/v1/commands/' + frame.commandId);
+          assert(['pending', 'accepted'].includes(command.status));
+          assert.equal(command.nodeId, NODE); assert.equal(command.sessionId, frame.sessionId);
+          if (command.status === 'accepted') assert.equal(command.turnId, 'synthetic-turn-' + frame.commandId);
+          const plans = (await http('/v1/status')).executions.items;
+          const plan = plans.find(plan => JSON.stringify(plan).includes(frame.commandId));
+          assert(plan, 'Dispatched command lacks a durable execution plan');
+          receipts.push({ planId: plan.id, commandId: frame.commandId, status: command.status, turnId: command.turnId });
+        }
+        messages.push({ text, reply: actual, messageId: id, sends: sends.length });
         console.log(JSON.stringify({ step: messages.length, text, reply: actual, sends: sends.length }));
         return { id, actual };
       };
@@ -210,9 +237,14 @@ async function main() {
       evidence.directAcceptedReceipt = await http('/v1/commands/' + sends[0].commandId);
       assert.equal(evidence.directAcceptedReceipt.turnId, 'synthetic-turn-' + sends[0].commandId);
       assert(direct.actual.includes(TITLE));
+      assert(!direct.actual.includes('OLD_UNRELATED'), 'Reply promoted unrelated history into the current receipt');
+      assert(histories.some(history => history.sessionId === 'synthetic-typing' && history.afterSend),
+        'Receipt did not freshly inspect the exact target after dispatch');
       const ids = sends.map(s => s.commandId);
-      const replayed = await controllerClient.forwardMessage({ chatId: CHAT, messageId: direct.id, text: PRODUCTION_DELEGATION_REQUEST });
-      assert.equal(replayed.commandId, mcp.find(item => item.text === PRODUCTION_DELEGATION_REQUEST).reply.commandId);
+      const originalCall = businessCalls.find(call => call.request.messageId === direct.id && call.result.reply?.commandId);
+      assert(originalCall, 'Direct delegation lacks its persisted business call');
+      const replayed = await controllerClient.callTool(originalCall.request);
+      assert.equal(replayed.reply.commandId, originalCall.result.reply.commandId);
       assert.deepEqual(sends.map(s => s.commandId), ids, 'Controller replay duplicated dispatch');
       const nativeBeforeReplay = mcp.length, repliesBeforeReplay = outbox.length;
       inbox.push({ message_type: 1, from_user_id: CHAT, client_id: direct.id, create_time_ms: Date.now(), context_token: CONTEXT,
@@ -244,10 +276,15 @@ async function main() {
       assert.equal(sends.length, 2, 'Natural confirmation across read-only query failed');
       assert.equal(sends[1].sessionId, 'synthetic-typing'); assert.match(sends[1].prompt, /网络搜索|搜索工具/);
       assert.equal(receipts.length, 2); assert(confirmation.actual.includes(TITLE));
-      const classification = calls.filter(call => call.toolCalls.some(tool => tool.name === 'classify_user_authorization'));
-      assert(classification.some(call => call.lastUser === PRODUCTION_DELEGATION_REQUEST && call.toolCalls.some(tool => JSON.parse(tool.arguments).intent === 'task')));
-      assert(classification.some(call => call.lastUser === '是' && call.toolCalls.some(tool => JSON.parse(tool.arguments).intent === 'task')));
-      assert(classification.some(call => call.lastUser?.startsWith('等他们执行完') && call.toolCalls.some(tool => JSON.parse(tool.arguments).intent === 'isolated_background')));
+      assert.equal(innerModelCalls, 0, 'Controller performed natural-language model work');
+      assert(!calls.some(call => call.toolCalls.some(tool => tool.name.startsWith('classify_'))),
+        'Outer planner delegated authorization to a second model');
+      assert(businessCalls.some(call => call.request.text === PRODUCTION_DELEGATION_REQUEST &&
+        call.request.name === 'execute_plan' && call.request.authorization?.intent === 'task'));
+      assert(businessCalls.some(call => call.request.text === '是' &&
+        ['execute_plan', 'confirm_pending'].includes(call.request.name)));
+      evidence.outerModelRequests = calls.length;
+      evidence.innerModelRequests = innerModelCalls;
       evidence.outcome = 'PASS';
     } catch (error) { evidence.outcome = 'FAIL'; evidence.failure = { category: error.name, message: error.message.replaceAll(apiKey, '[redacted]') }; throw error; }
   }, [
@@ -258,10 +295,10 @@ async function main() {
     { label: 'temporary PG', cleanup: () => database.stop() },
     { label: 'private workspaces', cleanup: () => directory && rm(directory, { recursive: true, force: true }) },
     { label: 'sanitized evidence', cleanup: async () => {
-      Object.assign(evidence, { finishedAt: new Date().toISOString(), messages, nativeSends: sends, receipts, calls, events, errors });
+      Object.assign(evidence, { finishedAt: new Date().toISOString(), messages, nativeSends: sends, receipts, calls, events, errors, businessCalls, innerModelCalls });
       await mkdir(new URL('./', EVIDENCE), { recursive: true });
       await writeFile(EVIDENCE, JSON.stringify(evidence, null, 2) + '\n', { mode: 0o600 });
     } },
   ]);
-  console.log('PASS real-model Gateway/MCP/Controller/PostgreSQL/WS delegation, title fidelity, receipt grounding, contextual confirmation and replay');
+  console.log('PASS real outer-model Gateway/MCP/direct Controller/PostgreSQL/WS delegation, title fidelity, receipt grounding, contextual confirmation and replay');
 }

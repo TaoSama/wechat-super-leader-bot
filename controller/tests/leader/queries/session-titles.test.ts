@@ -9,6 +9,29 @@ const session = (id = "session-a", title = ORIGINAL, nodeId = "mac") => ({ id, t
 const visible = (text: string) => markdownToWeChat(text, Number.MAX_SAFE_INTEGER);
 
 describe("session title identity rendering", () => {
+  it("expands only references while preserving ordinary text and literal title characters", () => {
+    const titles = new SessionTitles();
+    const title = "**literal** `code`\n[链接](https://example.com)";
+    const ref = titles.add(session("session-a", title));
+    expect(titles.renderReferences("普通状态：idle，原样保留")).toBe("普通状态：idle，原样保留");
+    const rendered = visible(titles.renderReferences(`${ref}\n核查中`));
+    expect(rendered).toContain(title);
+    expect(rendered).toMatch(/\n核查中$/);
+    expect(titles.renderReferences("⟦session:unknown:1⟧")).toBe("[未知会话引用]");
+  });
+
+  it("refreshes reference labels after newly ambiguous sessions and title updates from add or listing", () => {
+    const titles = new SessionTitles();
+    const first = titles.add(session("12345678a", "相同原题"));
+    expect(titles.renderReferences(first)).toBe("[mac] 相同原题");
+    const second = titles.add(session("12345678b", "相同原题"));
+    expect(titles.renderReferences(`${first}\n${second}`)).toBe("[mac] 相同原题（12345678a）\n[mac] 相同原题（12345678b）");
+    expect(titles.add(session("12345678a", "更新原题"))).toBe(first);
+    expect(titles.renderReferences(`${first}\n${second}`)).toBe("[mac] 更新原题\n[mac] 相同原题");
+    titles.listing({ sessions: [session("12345678a", "列表中的最新原题")] });
+    expect(titles.renderReferences(first)).toBe("[mac] 列表中的最新原题");
+  });
+
   it("expands server-bound references without changing any original title characters", () => {
     const titles = new SessionTitles();
     const { sessions } = titles.listing({ sessions: [session()] });

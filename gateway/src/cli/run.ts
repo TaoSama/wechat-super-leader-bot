@@ -6,6 +6,7 @@ import { ControllerClient, validateControllerUrl } from "../controller/client.js
 import { WeChatGateway, NotificationDiagnosticError } from "../gateway.js";
 import { checkGatewayHealth, HealthTracker, resolveHealthPath, sanitizeErrorType } from "../runtime/health.js";
 import { getHelpText, parseGatewayCli } from "./options.js";
+import type { GatewayReplyEngine } from "../leader/contracts.js";
 
 export const NOTIFICATION_DIAGNOSTIC_EXIT_CODE = 2;
 const MAX_CODEX_ACCOUNT_ID_BYTES = 4096;
@@ -79,7 +80,7 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
     allowInsecureController: opts.allowInsecureController,
   });
 
-  let replyEngine;
+  let replyEngine: GatewayReplyEngine | undefined;
   if (opts.leaderMode === "codex" && opts.mode !== "establish-baseline") {
     if (!env.GATEWAY_LEADER_API_KEY?.trim()) throw new Error("Missing GATEWAY_LEADER_API_KEY for Codex reply engine");
     const { CodexReplyEngine } = await import("../leader/codex.js");
@@ -114,16 +115,21 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
   }
 
   if (opts.mode === "poll-once") {
-    const res = await gateway.pollOnce();
-    const notifications = await gateway.deliverNotificationsOnce();
-    process.stdout.write(JSON.stringify({
-      mode: "poll-once",
-      polledCount: res.polledCount,
-      processedCount: res.processedCount,
-      skippedCount: res.skippedCount,
-      notifications,
-    }) + "\n");
-    return 0;
+    try {
+      const res = await gateway.pollOnce();
+      const notifications = await gateway.deliverNotificationsOnce();
+      process.stdout.write(JSON.stringify({
+        mode: "poll-once",
+        polledCount: res.polledCount,
+        processedCount: res.processedCount,
+        skippedCount: res.skippedCount,
+        notifications,
+      }) + "\n");
+      return 0;
+    } finally {
+      gateway.stop();
+      await replyEngine?.stop?.();
+    }
   }
 
   // Run loop mode
@@ -145,7 +151,8 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
   } finally {
     process.removeListener("SIGINT", handleSignal);
     process.removeListener("SIGTERM", handleSignal);
-    healthTracker.recordStop();
+    try { await replyEngine?.stop?.(); }
+    finally { healthTracker.recordStop(); }
   }
   return 0;
 }

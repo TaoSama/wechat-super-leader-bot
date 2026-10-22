@@ -367,6 +367,16 @@ test("reply journal rejects corrupt states, oversized replies and unvalidated im
     { [key]: { inputHash, stage: "started", provenance: "controller-console" } },
     { [key]: { inputHash, stage: "completed", provenance: "controller-console", reply: { text: "placeholder", commandId: "secret" } } },
     { [key]: { inputHash, stage: "completed", provenance: "controller-console", reply: { text: "placeholder", images: [] } } },
+    { [key]: { inputHash, stage: "started", consoleText: "#login=[REDACTED]", reply: { text: "#login=[REDACTED]" } } },
+    { [key]: { inputHash, stage: "completed", provenance: "controller-console", consoleText: 1, reply: { text: "placeholder" } } },
+    { [key]: { inputHash, stage: "completed", provenance: "controller-console", consoleText: "#login=private-token",
+      reply: { text: "#login=private-token" } } },
+    { [key]: { inputHash, stage: "completed", provenance: "controller-console", consoleText: "#login=[REDACTED]",
+      reply: { text: "missing console segment" } } },
+    { [key]: { inputHash, stage: "completed", provenance: "controller-console", consoleText: "#login=[REDACTED]",
+      reply: { text: "#login=[REDACTED] #login=[REDACTED]" } } },
+    { [key]: { inputHash, stage: "completed", provenance: "controller-console", consoleText: "#login=[REDACTED]",
+      reply: { text: "#login=[REDACTED]", commandId: "#login=private-token" } } },
   ];
   for (const invalid of invalidStates) {
     fs.writeFileSync(file, JSON.stringify(invalid));
@@ -395,6 +405,19 @@ test("reply journal retains delivery metadata and frozen started replies across 
   workspace.setReplyJournal(legacy);
   assert.deepEqual(workspace.getReplyJournal(), legacy);
   assert.equal(JSON.stringify(workspace.getReplyJournal()).includes("delivery"), false);
+});
+
+test("sanitized console segments preserve mixed text command and image metadata across reconstruction", async t => {
+  const { root, store } = fixture(t);
+  const workspace = await store.forChat("account", "chat");
+  const consoleText = "控制台：https://console.example/#login=[REDACTED]";
+  const journal: ReplyJournal = { ["a".repeat(64)]: { inputHash: "b".repeat(64), stage: "completed",
+    provenance: "controller-console", consoleText, delivery: "pending", reply: {
+      text: `查询结果\n\n${consoleText}\n\n已保存请求。`, commandId: "command-1",
+      images: [{ id: "image-1", mime: "image/png", size: 10, sha256: "a".repeat(64) }],
+    } } };
+  workspace.setReplyJournal(journal);
+  assert.deepEqual((await new WorkspaceStore(root).findChat("account", "chat"))?.getReplyJournal(), journal);
 });
 
 test("reply journal independently bounds pinned and closed entries without evicting either", async (t) => {
