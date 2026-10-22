@@ -4,6 +4,9 @@ import { normalizeSession, normalizeCommand } from "./normalizers";
 import { sessionRequest } from "./request";
 
 const HISTORY_LIMIT = 20;
+const MAX_TURN_STATUSES = 2048;
+const MAX_TURN_ID_BYTES = 128;
+const TURN_STATUSES = new Set(["inProgress", "completed", "failed", "interrupted"]);
 
 function sessionPath(nodeId: string, sessionId: string): string {
   return `/v1/sessions/${encodeURIComponent(nodeId)}/${encodeURIComponent(sessionId)}`;
@@ -32,9 +35,17 @@ export async function fetchSessionHistory(nodeId: string, sessionId: string, cur
     if (typeof value.id !== "string" || typeof value.text !== "string" || typeof value.turnId !== "string" || !["user", "assistant", "tool", "system"].includes(String(value.kind))) throw new Error("历史条目格式无效");
     if (data.source === "terminal-transcript" && ((value.kind !== "user" && value.kind !== "assistant") ||
         (value.type !== "transcript_message" && value.type !== "transcript_chunk"))) throw new Error("CLI 会话记录条目格式无效");
-    return { id: value.id, text: value.text, turnId: value.turnId, kind: value.kind as HistoryItem["kind"], type: typeof value.type === "string" ? value.type : "unknown", title: typeof value.title === "string" ? value.title : undefined, status: typeof value.status === "string" ? value.status : undefined, timestamp: typeof value.timestamp === "string" ? value.timestamp : undefined, truncated: value.truncated === true };
+    if (value.turnStatus !== undefined && (typeof value.turnStatus !== "string" || !TURN_STATUSES.has(value.turnStatus))) throw new Error("历史轮次状态无效");
+    return { turnStatus: value.turnStatus as HistoryItem["turnStatus"], id: value.id, text: value.text, turnId: value.turnId, kind: value.kind as HistoryItem["kind"], type: typeof value.type === "string" ? value.type : "unknown", title: typeof value.title === "string" ? value.title : undefined, status: typeof value.status === "string" ? value.status : undefined, timestamp: typeof value.timestamp === "string" ? value.timestamp : undefined, truncated: value.truncated === true };
   });
-  return { session, historyContext: data.historyContext, source: data.source, items, nextCursor: typeof data.nextCursor === "string" ? data.nextCursor : null, fetchedAt: data.fetchedAt, truncated: data.truncated === true };
+  let turnStatuses: SessionHistory["turnStatuses"];
+  if (data.turnStatuses !== undefined) {
+    if (!data.turnStatuses || typeof data.turnStatuses !== "object" || Array.isArray(data.turnStatuses)) throw new Error("历史轮次状态无效");
+    const entries = Object.entries(data.turnStatuses);
+    if (entries.length > MAX_TURN_STATUSES || entries.some(([id, status]) => !id || new TextEncoder().encode(id).length > MAX_TURN_ID_BYTES || typeof status !== "string" || !TURN_STATUSES.has(status))) throw new Error("历史轮次状态无效");
+    turnStatuses = Object.fromEntries(entries) as SessionHistory["turnStatuses"];
+  }
+  return { session, turnStatuses, historyContext: data.historyContext, source: data.source, items, nextCursor: typeof data.nextCursor === "string" ? data.nextCursor : null, fetchedAt: data.fetchedAt, truncated: data.truncated === true };
 }
 
 export async function sendSessionMessage(nodeId: string, sessionId: string, prompt: string, requestId: string, signal?: AbortSignal): Promise<CommandRecord> {

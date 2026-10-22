@@ -84,28 +84,30 @@ describe("持续会话快照", () => {
     expect(fetchHistory.mock.calls[2][2]).toBe("older");
   });
 
-  it("409保留内容并暂停轮询/翻页/重试和恢复事件，只有reset去掉context", async () => {
-    fetchHistory.mockResolvedValueOnce(page(["read"])).mockRejectedValueOnce(new ApiHistoryError(409, "history_context_expired", "expired"));
+  it("409保留已展开旧页并暂停轮询/翻页/重试和恢复事件，只有reset去掉context", async () => {
+    fetchHistory.mockResolvedValueOnce(page(["read"])).mockResolvedValueOnce(page(["older-read"], null)).mockRejectedValueOnce(new ApiHistoryError(409, "history_context_expired", "expired"));
     const { result, rerender } = renderHook(({ connected }) => useSessionHistory(session, connected, vi.fn()), { initialProps: { connected: true } });
-    await settle(); await advance(2000);
+    await settle();
+    await act(async () => { await result.current.loadOlder(); });
+    await advance(2000);
     expect(result.current.contextExpired).toBe(true);
     expect(result.current.pollingPaused).toBe(true);
-    expect(result.current.history?.items.map(entry => entry.id)).toEqual(["read"]);
+    expect(result.current.history?.items.map(entry => entry.id)).toEqual(["older-read", "read"]);
     expect(result.current.error).toContain("请重新读取最新页");
     expect(result.current.history?.nextCursor).toBeNull();
     await act(async () => { expect(await result.current.loadOlder()).toBe(false); expect(await result.current.refresh()).toBe(false); });
     rerender({ connected: false }); rerender({ connected: true });
     act(() => document.dispatchEvent(new Event("visibilitychange")));
     await advance(60_000);
-    expect(fetchHistory).toHaveBeenCalledTimes(2);
+    expect(fetchHistory).toHaveBeenCalledTimes(3);
     const fresh = { ...page(["fresh"]), source: "codex-desktop" as const, historyContext: "15c9ef38-59cc-410c-a0f0-6a54bcd7f41a" };
     fetchHistory.mockResolvedValue(fresh);
     await act(async () => { expect(await result.current.resetLatest()).toBe(true); });
-    expect(fetchHistory.mock.calls[2][4]).toBeUndefined();
+    expect(fetchHistory.mock.calls[3][4]).toBeUndefined();
     expect(result.current.history?.items.map(entry => entry.id)).toEqual(["fresh"]);
     expect(result.current.contextExpired).toBe(false);
     await advance(2000);
-    expect(fetchHistory.mock.calls[3][4]).toBe(fresh.historyContext);
+    expect(fetchHistory.mock.calls[4][4]).toBe(fresh.historyContext);
   });
 
   it.each(["source", "context", "scope"])("拒绝不同%s的响应，保留原历史及后续请求context", async mismatch => {

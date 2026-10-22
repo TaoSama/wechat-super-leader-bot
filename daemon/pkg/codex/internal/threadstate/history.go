@@ -28,6 +28,9 @@ func PublicHistoryItem(wrapper map[string]any) (protocol.HistoryItem, bool) {
 	}
 	typeName := ExtractString(raw, "type")
 	item := protocol.HistoryItem{ID: ExtractString(raw, "id"), TurnID: ExtractString(wrapper, "turnId"), Type: typeName}
+	if status, err := NormalizeTurnStatus(ExtractString(wrapper, "turnStatus")); err == nil {
+		item.TurnStatus = status
+	}
 	if !protocol.ValidHistoryIdentity(item.ID) || !protocol.ValidTurnID(item.TurnID) {
 		return item, false
 	}

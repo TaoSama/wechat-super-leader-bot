@@ -113,10 +113,14 @@ export const HISTORY_DEFAULT_LIMIT = 30;
 export const HISTORY_MAX_LIMIT = 50;
 export const HISTORY_MAX_CURSOR_LENGTH = 4096;
 export const HISTORY_MAX_TEXT_LENGTH = 16000;
+export const HISTORY_MAX_TURN_STATUSES = 2048;
+
+const HistoryTurnStatusSchema = z.enum(["inProgress", "completed", "failed", "interrupted"]);
 
 export const HistoryItemSchema = z.object({
   id: z.string().min(1),
   turnId: z.string(),
+  turnStatus: HistoryTurnStatusSchema.optional(),
   kind: z.enum(["user", "assistant", "tool", "system"]),
   type: z.string().min(1),
   text: z.string().max(HISTORY_MAX_TEXT_LENGTH),
@@ -136,6 +140,8 @@ export const SessionHistorySchema = z.object({
   nextCursor: z.string().min(1).max(HISTORY_MAX_CURSOR_LENGTH).nullable(),
   fetchedAt: z.string().datetime({ offset: true }),
   truncated: z.boolean(),
+  turnStatuses: z.record(TurnIdSchema, HistoryTurnStatusSchema)
+    .refine(value => Object.keys(value).length <= HISTORY_MAX_TURN_STATUSES, "Too many history turn statuses").optional(),
 }).refine(history => history.source === "terminal-transcript"
   ? isTerminalHistoryTarget(history.session) && history.session.historySource === "terminal-transcript" &&
     history.items.every(item => (item.kind === "user" || item.kind === "assistant") &&

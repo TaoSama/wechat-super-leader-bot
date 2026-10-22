@@ -1,0 +1,16 @@
+.history-turn { min-width: 0; }
+.turn-tools { margin: 4px 0 16px; min-width: 0; }
+.turn-tools-toggle { display: flex; align-items: center; gap: 8px; min-height: 44px; width: 100%; padding: 6px 8px; margin-inline: -8px; text-align: left; color: var(--text-secondary); font-size: 12px; line-height: 1.5; border-radius: 8px; }
+.turn-tools-toggle:hover { background: var(--surface-1); color: var(--text); }
+.turn-tools-toggle > svg { flex-shrink: 0; }
+.turn-tools-toggle > svg.is-expanded { transform: rotate(90deg); }
+.turn-tools-count { color: var(--text-secondary); }
+.turn-tools-action { margin-left: auto; flex-shrink: 0; }
+.turn-tools-failed { display: inline-flex; align-items: center; gap: 4px; color: var(--danger); }
+.turn-tools.is-expanded { margin-bottom: 4px; }
+.turn-tool-row { min-width: 0; }
+.turn-tool-row:has(+ .history-message) .tool-message { margin-bottom: 16px; }
+.turn-tools-unfinished { color: var(--text-secondary); }
+@media (max-width: 719px) {
+  .turn-tools-toggle { margin-inline: 0; padding-inline: 0; flex-wrap: wrap; }
+}
