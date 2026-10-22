@@ -8,7 +8,9 @@ import { after, before, test } from 'node:test';
 
 const script = new URL('../../../deploy/skills/web-content-fetcher/scripts/fetch_content.py', import.meta.url);
 const python = process.env.WEB_CONTENT_FETCHER_PYTHON || 'python3';
-const responseLimit = 2 * 1024 * 1024;
+const responseLimit = 8 * 1024 * 1024;
+const defaultUserAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+  + '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const article = '<!doctype html><html><head><title>测试文章</title></head><body><nav>导航</nav>'
   + '<article><h1>短文章</h1><p>真正的正文。<strong>重点</strong></p><p><a href="https://example.com/source">来源</a></p>'
   + '<img src="placeholder.gif" data-src="https://example.com/image.png" alt="配图">'
@@ -61,11 +63,15 @@ before(async () => {
       case '/challenge': response.end('<html><head><title>Please wait...</title></head><body>Checking browser</body></html>'); break;
       case '/wechat-challenge': response.end('<html><body><div id="js_verify"><h2>环境异常</h2>当前环境异常，完成验证后即可继续访问。去验证</div></body></html>'); break;
       case '/verify-article': response.end('<html><head><title>验证方案</title></head><body><article>短文讨论验证。当前环境异常，完成验证后即可继续访问，这是一段示例提示。</article></body></html>'); break;
+      case '/large-article': response.end('<html><head><title>包含页面脚本的短文</title></head><body>'
+        + `<script>${'x'.repeat(Math.floor(3.8 * 1024 * 1024))}</script>`
+        + '<article>实际需要阅读的正文很短。</article></body></html>'); break;
       case '/oversize': response.writeHead(200, { 'content-length': responseLimit + 1 }).end('a'.repeat(responseLimit + 1)); break;
       case '/chunked-oversize': response.writeHead(200); response.write('a'.repeat(responseLimit)); response.end('b'.repeat(4096)); break;
       case '/complex': response.end('<i>'.repeat(50_001)); break;
       case '/long-text': response.writeHead(200, { 'content-type': 'text/plain' }).end('文'.repeat(50_001)); break;
       case '/header': response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ value: request.headers['x-test'] })); break;
+      case '/user-agent': response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ value: request.headers['user-agent'] })); break;
       default: response.writeHead(404).end('missing');
     }
   });
@@ -152,6 +158,21 @@ test('bounds known and chunked bodies, parsing complexity and output length', as
   assert.equal(long.result.truncated, true);
 });
 
+test('accepts multi-megabyte HTML script overhead while extracting only the short article', async () => {
+  const actual = await fetch('/large-article');
+  assert.equal(actual.status, 0, actual.result.error);
+  assert.equal(actual.result.error, null);
+  assert.equal(actual.result.title, '包含页面脚本的短文');
+  assert.equal(actual.result.content, '实际需要阅读的正文很短。');
+  assert.equal(actual.result.truncated, false);
+});
+
+test('sends the complete desktop browser user agent in the HTTP request', async () => {
+  const actual = await fetch('/user-agent');
+  assert.equal(actual.status, 0, actual.result.error);
+  assert.equal(JSON.parse(actual.result.content).value, defaultUserAgent);
+});
+
 test('validates URL schemes, redirect protocols and custom header boundaries', async () => {
   for (const target of ['file:///etc/passwd', 'ftp://example.com/test', 'http://127.0.0.1:bad/',
     'http://', 'https://user:password@example.com/', 'https://example.com/ bad']) {
@@ -223,6 +244,45 @@ print(json.dumps(module.extract_html(sys.stdin.read(), 'https://mp.weixin.qq.com
   const [title, content] = JSON.parse(actual.stdout);
   assert.equal(title, '微信文章');
   assert.equal(content, '真正的微信正文。');
+});
+
+test('WeChat articles with an empty HTML title use the article heading', async () => {
+  const code = `import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location('fetch_content', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps(module.extract_html(sys.stdin.read(), 'https://mp.weixin.qq.com/s/example', 'markdown'), ensure_ascii=False))`;
+  const html = '<html><head><title>   </title></head><body>'
+    + '<h1 id="activity-name">公众号真实标题</h1>'
+    + '<div id="js_content"><p>文章正文。</p></div></body></html>';
+  const actual = await run(['-c', code, script.pathname], html);
+  assert.equal(actual.status, 0, actual.stderr);
+  const [title, content] = JSON.parse(actual.stdout);
+  assert.equal(title, '公众号真实标题');
+  assert.equal(content, '文章正文。');
+});
+
+test('WeChat pages without an article body fail rather than returning shell or recommendation text', async () => {
+  const code = `import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location('fetch_content', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+try:
+    value = module.extract_html(sys.stdin.read(), 'https://mp.weixin.qq.com/s/example', 'text')
+    print(json.dumps({'content': value[1]}, ensure_ascii=False))
+except module.FetchError as error:
+    print(json.dumps({'error': str(error)}, ensure_ascii=False))`;
+  for (const html of [
+    '<html><head><title>微信公众号</title></head><body><p>关注公众号查看更多文章</p></body></html>',
+    '<html><body><h1 id="activity-name">文章标题</h1><div id="js_content">   </div><main>相关推荐</main></body></html>',
+  ]) {
+    const actual = await run(['-c', code, script.pathname], html);
+    assert.equal(actual.status, 0, actual.stderr);
+    const result = JSON.parse(actual.stdout);
+    assert.equal(typeof result.error, 'string');
+    assert.match(result.error, /未取得目标正文/u);
+    assert.equal(result.content, undefined);
+  }
 });
 
 test('WeChat environment text without a title fails unless an actual article container exists', async () => {
