@@ -70,8 +70,9 @@ export function progressNotificationContext(record: NotificationSourceRecord, co
     if (!command || command.inputReceipt || command.sendRoute === "terminal-pane" || command.sessionId.startsWith("terminal:") ||
       !Number.isFinite(Date.parse(command.updatedAt)) || Date.parse(command.updatedAt) > now) return [];
     if (["accepted", "completed"].includes(command.status) && !TurnIdSchema.safeParse(command.turnId).success) return [];
-    if (!["pending", "queued", "claimed", "accepted", "completed"].includes(command.status)) return [];
-    return [{ step: index + 1, prompt: action.prompt, status: command.status,
+    const status = command.status === "admitting" ? "claimed" : command.status;
+    if (!["pending", "queued", "claimed", "accepted", "completed"].includes(status)) return [];
+    return [{ step: index + 1, prompt: action.prompt, status,
       ...(command.status === "completed" && command.output ? { output: progressOutputExcerpt(command.output) } : {}),
       commandId: command.commandId }];
   });
