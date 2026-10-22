@@ -40,7 +40,7 @@ import { initializeDatabase } from "./migrations.js";
 import { recordMessageImages, getMessageImage } from "./message-images-postgres.js";
 import type { StoredMessageImage } from "../sessions/message-images.js";
 import { ReplyImagesSchema } from "../sessions/media-contracts.js";
-import { pgListQueuedCommands, pgClaimQueuedCommand, pgRequeueClaimedCommand, pgCancelQueuedCommand } from "./command-queue-postgres.js";
+import { pgListQueuedCommands, pgClaimQueuedCommand, pgAdmitCommand, pgRequeueClaimedCommand, pgCancelQueuedCommand } from "./command-queue-postgres.js";
 import { sameAuthority, sameCommandPayload } from "../commands/queue.js";
 import type { CommandAuthority, SendRoute } from "../types.js";
 import { pgEnqueueProgressNotification } from "./notification-progress-postgres.js";
@@ -190,7 +190,7 @@ export class PostgresStore implements IStore {
 
   async markExpiredActiveCommandsUncertain(): Promise<void> {
     const now = new Date().toISOString();
-    await this.pool.query("UPDATE commands SET status='expired',updated_at=$1 WHERE status='queued' AND expires_at<=$1",[now]);
+    await this.pool.query("UPDATE commands SET status='expired',updated_at=$1 WHERE status IN ('admitting','queued') AND expires_at<=$1",[now]);
     await this.pool.query(
       `
       UPDATE commands
@@ -211,6 +211,9 @@ export class PostgresStore implements IStore {
   }
   cancelQueuedCommand(id: string, authority?: CommandAuthority): Promise<CommandRecord | null> {
     return pgCancelQueuedCommand(this.pool,row=>this.mapCommandRow(row),id,authority);
+  }
+  admitCommand(id: string): Promise<CommandRecord | null> {
+    return pgAdmitCommand(this.pool, row=>this.mapCommandRow(row), id);
   }
   requeueClaimedCommand(id: string): Promise<CommandRecord | null> {
     return pgRequeueClaimedCommand(this.pool, row=>this.mapCommandRow(row), id);
@@ -396,7 +399,7 @@ export class PostgresStore implements IStore {
   private notificationCommandReader(client: Pick<pg.PoolClient, "query">, metadataOnly = false): Pick<IStore, "findCommandByRequestId"> {
     return { findCommandByRequestId: async requestId => {
       const columns = metadataOnly ? `command_id,request_id,node_id,session_id,action,prompt,status,expires_at,created_at,updated_at,skills,turn_id,send_route,input_receipt,delivery_mode,expected_turn_id,authority,queue_order,CASE WHEN status='completed' THEN substring(output from 1 for ${PROGRESS_OUTPUT_LIMIT}) END AS output` : "*";
-      const progressStatus = metadataOnly ? " AND status IN ('queued','pending','accepted','completed')" : "";
+      const progressStatus = metadataOnly ? " AND status IN ('admitting','queued','pending','accepted','completed')" : "";
       const result = await client.query(`SELECT ${columns} FROM commands WHERE request_id = $1${progressStatus}`, [requestId]);
       return result.rows[0] ? this.mapCommandRow(result.rows[0]) : null;
     } };

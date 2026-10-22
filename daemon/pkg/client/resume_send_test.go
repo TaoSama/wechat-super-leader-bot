@@ -164,7 +164,7 @@ func TestResumeRouteFailureNeverFallsBackOrReplays(t *testing.T) {
 }
 
 func TestResumeCapabilityRequiresFreshManagedTargetAndNoAvailableOwner(t *testing.T) {
-	for _, kind := range []string{"eligible", "idle-unloaded", "idle-loaded", "active-loaded", "unavailable-owner", "fresh-idle-owner", "fresh-active-owner", "fresh-unknown-owner", "stale-managed", "future-managed", "catalog-only", "loaded-notLoaded", "active", "unknown", "missing-capability", "endpoint-mismatch", "volatile"} {
+	for _, kind := range []string{"eligible", "idle-unloaded", "idle-loaded", "active-loaded", "waitingApproval-loaded", "waitingUserInput-loaded", "unavailable-owner", "fresh-idle-owner", "fresh-active-owner", "fresh-unknown-owner", "stale-managed", "future-managed", "catalog-only", "loaded-notLoaded", "active", "unknown", "missing-capability", "endpoint-mismatch", "volatile"} {
 		t.Run(kind, func(t *testing.T) {
 			cfg := persistenceConfig(t.TempDir())
 			a := &resumeFixtureAdapter{endpoint: cfg.SocketPath, turnID: "resume-turn"}
@@ -177,6 +177,7 @@ func TestResumeCapabilityRequiresFreshManagedTargetAndNoAvailableOwner(t *testin
 			session := resumeFixtureSession(now)
 			d.sessionSnapshot = []protocol.Session{session}
 			eligible := kind == "eligible" || kind == "idle-unloaded" || kind == "idle-loaded" || kind == "unavailable-owner"
+			queueable := eligible || kind == "active-loaded" || kind == "waitingApproval-loaded" || kind == "waitingUserInput-loaded"
 			switch kind {
 			case "idle-unloaded":
 				d.sessionSnapshot[0].Status = "idle"
@@ -184,8 +185,8 @@ func TestResumeCapabilityRequiresFreshManagedTargetAndNoAvailableOwner(t *testin
 				d.sessionSnapshot[0].Status = "idle"
 				*d.sessionSnapshot[0].Loaded = true
 				d.sessionSnapshot[0].Capabilities = append(d.sessionSnapshot[0].Capabilities, protocol.ActionSend)
-			case "active-loaded":
-				d.sessionSnapshot[0].Status = "active"
+			case "active-loaded", "waitingApproval-loaded", "waitingUserInput-loaded":
+				d.sessionSnapshot[0].Status = strings.TrimSuffix(kind, "-loaded")
 				*d.sessionSnapshot[0].Loaded = true
 			case "unavailable-owner", "fresh-idle-owner", "fresh-active-owner", "fresh-unknown-owner":
 				owner := idleReadinessObservation(now, 1)
@@ -218,7 +219,7 @@ func TestResumeCapabilityRequiresFreshManagedTargetAndNoAvailableOwner(t *testin
 			}
 			for range 3 {
 				got := d.cachedSessions()[0]
-				if slices.Contains(got.Capabilities, protocol.CapabilityResumeSend) != eligible {
+				if slices.Contains(got.Capabilities, protocol.CapabilityResumeSend) != queueable {
 					t.Fatalf("incorrect resume capability: %+v", got)
 				}
 				if a.resumes.Load() != 0 || a.sends.Load() != 0 {

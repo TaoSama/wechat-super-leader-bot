@@ -86,7 +86,7 @@ export function createSessionRouter(hub: NodeHub, commands: CommandService): Rou
     const command = await commands.submit({
       ...target.data, action: "send", prompt: body.data.prompt, requestId,deliveryMode:body.data.deliveryMode,expectedTurnId:body.data.expectedTurnId,
     }, 0, assertDispatchAllowed,undefined,res.locals.commandAuthority);
-    res.status(["queued","pending"].includes(command.status) ? 202 : 200).json(publicCommand(command));
+    res.status(["admitting","queued","pending"].includes(command.status) ? 202 : 200).json(publicCommand(command));
   });
   return router;
 }
