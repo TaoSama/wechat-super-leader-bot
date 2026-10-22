@@ -8,6 +8,7 @@ import type { CommandRecord } from "../../src/types.js";
 
 const databaseUrl = process.env.COMMAND_TEST_DATABASE_URL;
 const TTL_MS = 300_000;
+const EXPIRED_AT = "2020-01-01T00:00:00.000Z";
 if (databaseUrl) {
   const url = new URL(databaseUrl);
   if (url.hostname !== "127.0.0.1" || url.pathname !== "/command_admission_test") {
@@ -75,7 +76,7 @@ for (const kind of ["memory", "postgres"] as const) {
     });
 
     it("expires unsent preparation and cannot publish it after the deadline", async () => {
-      const prepared = (await store.createCommandIfAbsent(command({ expiresAt: new Date(Date.now() - 1).toISOString() }))).command;
+      const prepared = (await store.createCommandIfAbsent(command({ expiresAt: EXPIRED_AT }))).command;
       expect(await store.admitCommand(prepared.commandId)).toBeNull();
       await store.markExpiredActiveCommandsUncertain();
       expect((await store.getCommand(prepared.commandId))?.status).toBe("expired");

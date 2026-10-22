@@ -81,6 +81,9 @@ export class BackgroundService {
       worker.expiresAt = expiresAt; worker.updatedAt = now;
     });
     if (!result) throw new Error("Background worker not found");
+    if (result.activeInvocationId) await this.options.runtime.inspect(result.id, result.activeInvocationId, {
+      resumeQueued: false, launchDeadlineAt: result.expiresAt, executionDeadlineAt: result.expiresAt + WORKER_SHUTDOWN_GRACE_MS,
+    });
     return result;
   }
   /** Called only after the initial outcome is durably committed to the unified outbox. */
@@ -278,7 +281,7 @@ export class BackgroundService {
     try { receipt = await this.options.runtime.start({ workerId: worker.id, invocationId: invocation.id, task: invocation.task,
       preferences: worker.spec.preferences, input: invocation.input,
       launchDeadlineAt: worker.expiresAt, executionDeadlineAt: worker.expiresAt + WORKER_SHUTDOWN_GRACE_MS,
-      timeoutMs: Math.min(this.turnTimeoutMs, MAX_WORKER_TURN_TIMEOUT_MS, Math.max(1, worker.expiresAt + WORKER_SHUTDOWN_GRACE_MS - this.now())) }); }
+      timeoutMs: this.turnTimeoutMs }); }
     catch (error) {
       this.options.onError?.(error, `background submit ${invocation.id}`);
       // Ambiguous submission remains active; inspect the same operation after recovery.

@@ -3,7 +3,7 @@ import { CLAIM_LEASE_MS } from "./contracts.js";
 import { assertSameCreation } from "./identity.js";
 import { finishRun, newRun } from "./state.js";
 import { supplementOutbox, assertSameSupplement } from "./supplements.js";
-import { dueOccurrence } from "./timing.js";
+import { alignHashedCronNextAt, dueOccurrence } from "./timing.js";
 import { clearRunBody, validateBodyRetention } from "./retention.js";
 import { AutomationConflictError } from "./errors.js";
 
@@ -45,6 +45,8 @@ export class MemoryAutomationRepository implements AutomationRepository {
     for (const schedule of this.schedules.values()) {
       if (result.length >= limit) break;
       if (schedule.status !== "active" || schedule.nextAt === null || schedule.nextAt > now || schedule.activeRunId) continue;
+      alignHashedCronNextAt(schedule, now);
+      if (schedule.nextAt > now) continue;
       const candidate = dueOccurrence(schedule, now);
       const skipped = [...this.runs.values()].find(run => run.scheduleId === schedule.id && run.scheduledAt === candidate.scheduledAt);
       if (skipped && skipped.status !== "skipped") throw new Error("Occurrence was already executed");

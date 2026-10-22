@@ -15,7 +15,7 @@ let viewportHeight: number;
 let firstRowGrowth: number;
 let latestChanged: ReturnType<typeof vi.fn>;
 let measured: ReturnType<typeof vi.spyOn>;
-const contentHeight = () => rows.length * ROW_HEIGHT + firstRowGrowth;
+const contentHeight = () => viewportHeight > 0 ? rows.length * ROW_HEIGHT + firstRowGrowth : 0;
 const rect = (top: number, height: number) => ({
   top, bottom: top + height, left: 0, right: CONTENT_WIDTH, width: CONTENT_WIDTH, height, x: 0, y: top, toJSON: () => ({}),
 });
@@ -69,6 +69,21 @@ function deliverResize() {
     for (const observer of observers) if (!observer.disconnected) observer.callback([], {} as ResizeObserver);
   });
 }
+
+it("首次从不可测高度变为可测高度不覆盖用户刚选择的阅读位置", () => {
+  viewportHeight = 0;
+  render(<Window />);
+  const container = screen.getByLabelText("history");
+  viewportHeight = INITIAL_VIEWPORT_HEIGHT;
+  container.scrollTop = 350;
+  fireEvent.scroll(container);
+  deliverResize();
+  expect(container.scrollTop).toBe(350);
+  expect(latestChanged).toHaveBeenLastCalledWith(false);
+  viewportHeight = SMALL_VIEWPORT_HEIGHT;
+  deliverResize();
+  expect(container.scrollTop).toBe(350);
+});
 
 it.each(["observer-first", "scroll-first", "render-first"])("容器缩小保持最新消息，覆盖 %s 的通知顺序", order => {
   const view = render(<Window />);

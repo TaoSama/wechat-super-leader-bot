@@ -90,11 +90,16 @@ export class CodexWorkerRuntime implements WorkerRuntime {
     }
     if (!receipt) return { workerId, invocationId, status: "unknown", summary: "没有本轮执行回执。", attachments: [], receiptMissing: true };
     if (receipt.status === "queued") {
-      // Legacy receipts keep their original authorized input/hash. Only the
-      // caller's durable lifetime may fill in missing execution bounds.
-      if (receipt.pendingInput!.launchDeadlineAt === undefined && receipt.launchDeadlineAt === undefined && options.launchDeadlineAt !== undefined) {
+      // A durable user extension changes lifetime, never the invocation's
+      // authorized task/input/hash. Older observations cannot shorten it.
+      const previousDeadline = this.launchDeadline(receipt);
+      if (options.launchDeadlineAt !== undefined && (previousDeadline === undefined || options.launchDeadlineAt > previousDeadline)) {
+        const previousExecutionDeadline = receipt.executionDeadlineAt ?? receipt.pendingInput!.executionDeadlineAt;
+        const executionDeadlineAt = options.executionDeadlineAt === undefined ? previousExecutionDeadline :
+          Math.max(previousExecutionDeadline ?? options.executionDeadlineAt, options.executionDeadlineAt);
+        this.validateDeadlines({ launchDeadlineAt: options.launchDeadlineAt, executionDeadlineAt });
         receipt.launchDeadlineAt = options.launchDeadlineAt;
-        receipt.executionDeadlineAt = options.executionDeadlineAt;
+        receipt.executionDeadlineAt = executionDeadlineAt;
         this.store.save(dir!, receipt);
       }
       // Only receipts that never crossed the launch boundary are safely resumable.
@@ -102,6 +107,9 @@ export class CodexWorkerRuntime implements WorkerRuntime {
       receipt = this.store.receipt(dir!, invocationId)!;
       if (receipt.status === "queued" && this.launchDeadline(receipt) === undefined) {
         return { ...publicStatus(receipt), summary: "后台会话等待恢复绝对执行期限，尚未启动。" };
+      }
+      if (receipt.status === "queued" && this.launchDeadline(receipt)! <= Date.now()) {
+        return { ...publicStatus(receipt), summary: "本轮启动期限已到，等待调度确认续期或取消。" };
       }
     } else if (receipt.status === "running" && this.active.get(workerId)?.invocationId !== invocationId &&
       (receipt.ownerPid === process.pid || !alive(receipt.ownerPid))) {
@@ -176,9 +184,13 @@ export class CodexWorkerRuntime implements WorkerRuntime {
       // An older controller did not record a deadline. Hold its queue until the
       // service reconciles the durable worker lifetime instead of guessing it.
       if (this.launchDeadline(receipt) === undefined) continue;
+      // The service may have committed an explicit extension just before a
+      // restart. Keep unclaimed work recoverable until it reconciles or cancels.
+      if (this.launchDeadline(receipt)! <= Date.now()) continue;
       const slot = this.store.slot(this.maxConcurrent, receipt.workerId, receipt.invocationId);
       if (!slot) break;
       const dir = this.store.worker(receipt.workerId)!;
+      if (this.launchDeadline(receipt)! <= Date.now()) { fs.unlinkSync(slot); continue; }
       if (!this.store.claimLaunch(dir, receipt.invocationId)) {
         fs.unlinkSync(slot);
         const launcher = this.store.launchClaim(dir, receipt.invocationId);
@@ -216,10 +228,10 @@ export class CodexWorkerRuntime implements WorkerRuntime {
     let exporting = false;
     try {
       const timeoutMs = Math.min(input.timeoutMs ?? this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-        (input.executionDeadlineAt ?? receipt.executionDeadlineAt ?? Infinity) - Date.now());
+        (receipt.executionDeadlineAt ?? input.executionDeadlineAt ?? Infinity) - Date.now());
       // Synchronous receipt persistence and the execution microtask can cross
       // the deadline even when the slot was claimed just before it.
-      if ((input.launchDeadlineAt ?? receipt.launchDeadlineAt ?? Infinity) <= Date.now() || timeoutMs <= 0) {
+      if ((receipt.launchDeadlineAt ?? input.launchDeadlineAt ?? Infinity) <= Date.now() || timeoutMs <= 0) {
         this.expiredBeforeLaunch(dir, receipt);
         return;
       }
@@ -276,7 +288,7 @@ export class CodexWorkerRuntime implements WorkerRuntime {
     }
   }
   private launchDeadline(receipt: Receipt): number | undefined {
-    return receipt.pendingInput?.launchDeadlineAt ?? receipt.launchDeadlineAt;
+    return receipt.launchDeadlineAt ?? receipt.pendingInput?.launchDeadlineAt;
   }
   private expiredBeforeLaunch(dir: string, receipt: Receipt): void {
     receipt.status = "failed"; receipt.summary = "后台会话已到期，本轮尚未开始执行。";

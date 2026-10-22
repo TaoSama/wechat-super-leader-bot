@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
-import { markdownForWeChat, markdownToWeChat } from "../index.js";
+import { markdownForWeChat, markdownToWeChat } from "../../../packages/wechat-text/index.js";
 
 const RENDERERS = [markdownToWeChat, markdownForWeChat];
 const FULL_SOURCE_BUDGET = Number.MAX_SAFE_INTEGER;
@@ -60,7 +60,7 @@ test("long matched code retains exact delimiter lengths, nested runs and all con
 });
 
 test("distinct unmatched backtick runs scale to the supported result size in a bounded worker", (t) => {
-  const moduleUrl = new URL("../index.js", import.meta.url).href;
+  const moduleUrl = new URL("../../../packages/wechat-text/index.js", import.meta.url).href;
   const script = `
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";

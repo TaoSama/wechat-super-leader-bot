@@ -3,7 +3,7 @@ import { CLAIM_LEASE_MS, type AutomationOutbox, type AutomationRepository, type 
 import { assertSameCreation } from "./identity.js";
 import { finishRun, newRun } from "./state.js";
 import { supplementOutbox, assertSameSupplement } from "./supplements.js";
-import { dueOccurrence } from "./timing.js";
+import { alignHashedCronNextAt, dueOccurrence } from "./timing.js";
 import { validateBodyRetention } from "./retention.js";
 import { AutomationConflictError } from "./errors.js";
 
@@ -88,6 +88,8 @@ export class PostgresAutomationRepository implements AutomationRepository {
         AND active_run_id IS NULL ORDER BY next_at LIMIT $2 FOR UPDATE SKIP LOCKED`, [now, limit]);
       const claimed: { schedule: Schedule; run: AutomationRun }[] = [];
       for (const { data: schedule } of due.rows) {
+        if (alignHashedCronNextAt(schedule, now)) await saveSchedule(client, schedule);
+        if (schedule.nextAt! > now) continue;
         const candidate = dueOccurrence(schedule, now);
         const previous = await client.query<{data: AutomationRun}>("SELECT data FROM automation_runs WHERE schedule_id=$1 AND scheduled_at=$2", [schedule.id, candidate.scheduledAt]);
         const skipped = previous.rows[0]?.data;
