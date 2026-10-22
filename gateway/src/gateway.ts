@@ -69,7 +69,6 @@ export class WeChatGateway {
   private readonly resultDispatcher?: ResultDispatcher;
   private readonly renewalNotifier?: RenewalNotifier;
   private readonly resultClient?: ResultClient;
-  private readonly resultOutbox?: FileResultOutbox;
   private notificationInterest?: { fetchedAt: number; chatIds: string[]; interested: string[] };
   private readonly activeInboundChats = new Set<string>();
   private flushingReplies = false;
@@ -99,7 +98,6 @@ export class WeChatGateway {
     this.notifications = options.notifications ?? false;
     if (options.resultClient && options.resultOutbox) {
       this.resultClient = options.resultClient;
-      this.resultOutbox = options.resultOutbox;
       const active = () => !this.stopped && this.stateManager.isReadyForActivePolling();
       const isReplyPending = (chatId: string) => this.isReplyPending(chatId);
       const canDispatch = (chatId: string, kind: "final" | "progress") => Boolean(this.stateManager.contextTokens[chatId]) && this.stateManager.canSendToChat(chatId, kind);
@@ -369,7 +367,6 @@ export class WeChatGateway {
       return !text || text.acknowledgedChunks < text.totalChunks;
     });
     return [...new Set([...(this.notificationInterest?.interested ?? []),
-      ...(this.resultOutbox?.references().filter(item => item.status !== "receipt").map(item => item.chatId) ?? []),
       ...pendingReplies.map(item => item.chatId)])];
   }
 
