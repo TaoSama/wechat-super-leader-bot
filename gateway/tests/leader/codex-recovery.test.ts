@@ -11,7 +11,8 @@ import { LeaderWorkspace, WorkspaceStore } from "../../src/leader/workspace.js";
 const request = { chatId: "chat", messageId: "message", text: "继续当前工作" };
 const usage = { input_tokens: 0, cached_input_tokens: 0, cache_write_input_tokens: 0,
   output_tokens: 0, reasoning_output_tokens: 0 };
-const noController = { forwardMessage: async () => { throw new Error("Unexpected Controller mutation"); } };
+const noController = { listTools: async () => ({ tools: [], instructions: "" }),
+  callTool: async (): Promise<never> => { throw new Error("Unexpected Controller mutation"); } };
 const noRecovery = { getMessageReply: async () => { throw new Error("Unexpected Controller recovery"); } };
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 
@@ -55,6 +56,34 @@ test("failed final journal write never exposes an unrecoverable reply or reruns 
   assert.equal(runs, 1);
   const workspace = await new WorkspaceStore(root).forChat("account", "chat");
   assert.equal(workspace.getReplyJournal()[hash("message")].stage, "started");
+});
+
+test("recovery waiting on an active failed final write reads the durable uncertain result", async t => {
+  const root = fixture(t);
+  let entered!: () => void;
+  let release!: () => void;
+  const active = new Promise<void>(resolve => { entered = resolve; });
+  const proceed = new Promise<void>(resolve => { release = resolve; });
+  let writes = 0;
+  const original = LeaderWorkspace.prototype.setReplyJournal;
+  t.mock.method(LeaderWorkspace.prototype, "setReplyJournal", function(this: LeaderWorkspace,
+    ...args: Parameters<LeaderWorkspace["setReplyJournal"]>) {
+    if (++writes === 2) throw new Error("Synthetic final journal failure");
+    return original.apply(this, args);
+  });
+  const engine = new CodexReplyEngine({ root, model: "test", sdkFactory: factory(async function* () {
+    entered();
+    await proceed;
+    yield* complete("未落盘结果");
+  }) });
+  const first = engine.reply("account", request, noController);
+  const rejected = assert.rejects(first, /Synthetic final journal failure/);
+  await active;
+  const recovery = engine.getReply("account", "chat", "message", noRecovery);
+  release();
+  await rejected;
+  assert.match((await recovery).text, /没有自动重跑/);
+  await engine.stop();
 });
 
 test("reply, recovery and delivery receipt serialize together without blocking another chat", async t => {

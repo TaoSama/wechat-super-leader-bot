@@ -3,7 +3,8 @@ import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { CHAT, OTHER_CHAT, TASK, TASK_RESULT, waitFor } from './fixture.mjs';
+import { CHAT, OTHER_CHAT, NODE, SESSION, TASK, TASK_RESULT, waitFor } from './fixture.mjs';
+import { TASK_PROMPT } from '../../support/reliability-model.mjs';
 import { currentSdkUserText } from '../../support/reliability-sdk-model.mjs';
 
 const ACCOUNT = 'synthetic-reliability-account';
@@ -19,7 +20,6 @@ const FIRST_TEXT = '合成SDK原聊天唯一成果';
 const FIRST_REPLY = 'SDK_FIRST_CHAT_RESULT';
 const STARTED_TEXT = '合成SDK执行中崩溃';
 const INBOX_CONTEXT = 'synthetic-inbox-context:原始消息';
-const ACK_REPLY = '[reliability-node] Synthetic reliability session\n\n合成任务已保存；请以本轮持久回执核对进度。';
 const CHUNK_CHARS = 64;
 const runtimeProvenanceCache = new Map();
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -28,6 +28,40 @@ const key = (chatId, messageId) => JSON.stringify([ACCOUNT, chatId, messageId]);
 const sdk = options => ({ leaderMode: 'codex', sdkModelOptions: options });
 const workspace = (h, chatId) => join(h.gatewayOptions.leaderRoot, hash(JSON.stringify([ACCOUNT, chatId])));
 const nativeThreadId = async (h, chatId) => JSON.parse(await readFile(join(workspace(h, chatId), '.thread.json'), 'utf8')).threadId;
+const taskSubmissions = h => h.control.requests.filter(item => item.method === 'POST' &&
+  item.path === '/v1/tools/call' && item.body?.name === 'execute_plan');
+
+async function taskReceipt(h, messageId) {
+  const submissions = taskSubmissions(h);
+  assert.equal(submissions.length, 1, 'Synthetic task must be submitted exactly once');
+  const body = submissions[0].body;
+  assert.match(body.callId, /^[a-f0-9]{64}$/);
+  assert.deepEqual(body, { chatId: CHAT, messageId, text: TASK, callId: body.callId, name: 'execute_plan',
+    arguments: { actions: [{ nodeId: NODE, sessionId: SESSION, prompt: TASK_PROMPT, dependsOn: [] }] },
+    authorization: { intent: 'task', automationOperations: [], backgroundOperations: [], memoryOperations: [], sendImages: false } });
+  const calls = h.control.requests.filter(item => item.method === 'POST' && item.path === '/v1/tools/call');
+  assert.deepEqual(calls.map(item => item.body.name), ['list_sessions', 'execute_plan']);
+  assert.equal(h.control.requests.filter(item => item.path === '/v1/messages').length, 0, 'SDK must not fall back to the Controller model');
+  assert.equal(h.model.calls.length, 0, 'Direct business tools must not call the inner model');
+  const id = (kind, callId) => `direct_${kind}_${hash(JSON.stringify([messageId, callId]))}`;
+  const ids = [id('turn'), id('start', body.callId), id('effect_start', 'dispatch'), id('effect_done', 'dispatch'), id('done', body.callId)];
+  const stored = await h.pool.query('SELECT message_id, text, reply_text FROM messages WHERE chat_id=$1 AND message_id=ANY($2::text[])', [CHAT, ids]);
+  assert.equal(stored.rowCount, ids.length, 'Direct turn, mutation start, effect and completion must all be durable');
+  const records = new Map(stored.rows.map(row => [row.message_id, row]));
+  assert.equal(records.get(ids[0]).text, TASK);
+  assert.equal(records.get(ids[0]).reply_text, 'bound');
+  const fingerprint = records.get(ids[1]).text;
+  assert.match(fingerprint, /^[a-f0-9]{64}$/);
+  for (const journalId of ids.slice(2)) assert.equal(records.get(journalId).text, fingerprint);
+  assert.equal(records.get(ids[3]).reply_text, records.get(ids[4]).reply_text);
+  const receipt = JSON.parse(records.get(ids[4]).reply_text).reply;
+  assert.equal(typeof receipt?.text, 'string');
+  assert.match(receipt.text, /计划：自动推进中/);
+  assert.match(receipt.text, /Synthetic reliability session/);
+  assert.match(receipt.text, /已接收不代表工作完成/);
+  h.evidence('sdk-direct-task-receipt', { request: body, records: stored.rows, receipt });
+  return receipt;
+}
 
 async function journal(h, chatId, messageId) {
   const entries = JSON.parse(await readFile(join(workspace(h, chatId), '.replies.json'), 'utf8'));
@@ -143,20 +177,18 @@ export const sdkScenarios = [
       h.healthy();
       const state = await h.wechat.readState();
       return (await h.wechat.readInbox()).items.length === 0 &&
-        state.delivery_outbox[originalKey] === undefined && h.wechat.sent.some(item => text(item) === ACK_REPLY);
+        state.delivery_outbox[originalKey] === undefined && h.wechat.sent.some(item => item.to_user_id === CHAT);
     }, 'disk inbox recovered and native reply acknowledged');
     assert.equal((await journal(h, CHAT, message.client_id)).stage, 'completed');
     assert.equal((await journal(h, CHAT, message.client_id)).delivery, 'accepted');
     assert.equal((await nativeExecutions(h)).length, 1);
-    const submissions = h.control.requests.filter(item => item.method === 'POST' && item.path === '/v1/messages');
-    assert.equal(submissions.length, 1);
-    assert.deepEqual(submissions[0].body, { chatId: CHAT, messageId: message.client_id, text: TASK });
-    const stored = await h.pool.query('SELECT chat_id, message_id, text FROM messages');
-    assert.equal(stored.rowCount, 1);
-    assert.deepEqual(stored.rows[0], { chat_id: CHAT, message_id: message.client_id, text: TASK });
+    const receipt = await taskReceipt(h, message.client_id);
+    const submissions = taskSubmissions(h);
     const commands = await h.pool.query('SELECT command_id FROM commands');
     assert.equal(commands.rowCount, 1); await h.native.waitForStarts(1);
-    assert.equal(h.wechat.sent.length, 1); assert.equal(text(h.wechat.sent[0]), ACK_REPLY);
+    assert.equal(receipt.commandId, commands.rows[0].command_id);
+    assert.equal(h.wechat.sent.length, 1); assert.equal(text(h.wechat.sent[0]), receipt.text);
+    assert.equal((await journal(h, CHAT, message.client_id)).reply.text, receipt.text);
     assert.equal(h.wechat.sent[0].to_user_id, CHAT); assert.equal(h.wechat.sent[0].context_token, INBOX_CONTEXT);
     await h.wechat.stop(recovered);
     const restartAudit = await h.wechat.readInboxAudit();
@@ -195,7 +227,8 @@ export const sdkScenarios = [
     assert.equal((await nativeExecutions(h)).length, 1);
     assert.equal(h.sdkModel.calls.length, modelCalls); assert.equal(h.model.calls.length, controllerCalls);
     assert.equal(h.native.starts.length, 1); assert.equal(h.wechat.sent.length, 2);
-    assert.equal(h.control.requests.filter(item => item.method === 'POST' && item.path === '/v1/messages').length, 1);
+    assert.equal(taskSubmissions(h).length, 1);
+    await taskReceipt(h, message.client_id);
     assert.equal((await h.pool.query('SELECT command_id FROM commands')).rowCount, 1);
     const replayPolls = h.wechat.polls.slice(replayPollStart);
     assert.equal(replayPolls.filter(item => item.count === 1 && item.cursor === committedCursor).length, 1);
@@ -203,10 +236,10 @@ export const sdkScenarios = [
     h.evidence('sdk-inbox-final-audit', { records: await h.wechat.readInboxAudit(), replayPolls });
     h.evidence('assertions', { leaderMode: 'codex', realRunLoop: true, inboxBeforeCursor: true,
       crashBoundary: 'cursor committed; native and model not started', originalInboxTupleRestored: true,
-      recoverySourceReplays: 0, completedSourceReplays: 1, nativeExecutions: 1, controllerSubmissions: 1, messages: 1, commands: 1,
+      recoverySourceReplays: 0, completedSourceReplays: 1, nativeExecutions: 1, controllerSubmissions: 1, durableDirectTurn: true, commands: 1,
       targetStarts: 1, acknowledgedReplies: 1, finalMessages: 1, correctChatAndContext: true,
       receipt: 'accepted', duplicateExecutions: 0 });
-  }, sdk({ control: true, reply: ACK_REPLY })],
+  }, sdk({ control: true })],
   ['sdk-started-turn-crash-no-blind-retry', async h => {
     const hold = h.sdkModel.holdNextResponse();
     const message = h.wechat.enqueue(STARTED_TEXT, { chatId: CHAT });
@@ -249,7 +282,7 @@ export const sdkScenarios = [
     assert.equal((await h.wechat.readState()).sync_buf, before.sync_buf);
     assert.equal((await nativeExecutions(h)).length, 0, 'Unavailable authorization still ran the SDK');
     await h.control.start(); await h.waitNode(true);
-    const fault = h.control.failHttp(entry => entry.path === '/v1/messages' && entry.method === 'POST');
+    const fault = h.control.failHttp(entry => entry.path === '/v1/tools/call' && entry.method === 'POST' && entry.body?.name === 'execute_plan');
     const processed = await h.poll();
     assert.equal(processed.code, 0, processed.stderr);
     assert.equal((await h.entered(fault.entered, 'SDK MCP Controller commit')).status, 200);
@@ -259,13 +292,12 @@ export const sdkScenarios = [
     assert.equal(uncertain.stage, 'started', 'Lost Controller stream was promoted to a completed native outcome');
     assert.equal(uncertain.delivery, 'accepted');
     assert(h.wechat.sent.some(item => item.to_user_id === CHAT && text(item).includes('执行结果待核实')));
-    const requests = h.control.requests.filter(item => item.path === '/v1/messages' && item.method === 'POST');
+    const requests = taskSubmissions(h);
     assert.equal(requests.length, 1, 'Ambiguous Controller stream was blindly submitted again');
-    for (const request of requests) assert.deepEqual(request.body, { chatId: CHAT, messageId: message.client_id, text: TASK });
-    const stored = await h.pool.query('SELECT message_id FROM messages WHERE chat_id=$1 AND message_id=$2', [CHAT, message.client_id]);
-    assert.equal(stored.rowCount, 1);
+    const receipt = await taskReceipt(h, message.client_id);
     const commands = await h.pool.query('SELECT command_id FROM commands');
     assert.equal(commands.rowCount, 1);
+    assert.equal(receipt.commandId, commands.rows[0].command_id);
     const sdkCalls = h.sdkModel.calls.length, controllerCalls = h.model.calls.length, sends = h.wechat.sent.length;
     h.wechat.enqueue(TASK, { chatId: CHAT, id: message.client_id });
     assert.equal((await h.poll()).code, 0);
@@ -282,8 +314,9 @@ export const sdkScenarios = [
     assert.equal(finals[0].context_token, `synthetic-context:${CHAT}`);
     assert.equal((await h.delivery(delivery.id)).status, 'accepted');
     assert.equal(h.native.starts.length, 1);
+    await taskReceipt(h, message.client_id);
     h.evidence('assertions', { leaderMode: 'codex', realNativeExecutions: 1, retainedOfflineCursor: true,
-      originalMcpRequestPreserved: true, httpAttempts: requests.length, messages: 1, commands: 1,
+      originalMcpRequestPreserved: true, httpAttempts: requests.length, durableDirectTurn: true, commands: 1,
       unknownControllerStreamNotRetried: true, recoveredJournalStage: 'started',
       targetStarts: 1, finalMessages: 1, correctChat: true, duplicateModelCalls: 0 });
   }, sdk({ control: true })],
@@ -338,6 +371,8 @@ export const sdkScenarios = [
     assert.equal((await h.wechat.readState()).delivery_outbox[originalKey], undefined);
     assert.equal((await nativeExecutions(h)).length, 2, 'Only the true new inbound may start the next native turn');
     assert.equal(h.control.requests.filter(item => item.path === '/v1/messages').length, 0);
+    assert.equal(h.control.requests.filter(item => item.path === '/v1/tools/call').length, 0);
+    assert.equal(h.model.calls.length, 0);
     const before = h.wechat.sent.length;
     assert.equal((await h.poll()).code, 0); assert.equal(h.wechat.sent.length, before);
     h.evidence('assertions', { leaderMode: 'codex', durableBeforeCrash: 'completed/pending', source: 'engine',
@@ -391,6 +426,8 @@ export const sdkScenarios = [
     assert.equal((await h.poll()).code, 0);
     assert.equal((await nativeExecutions(h)).length, 2); assert.equal(h.wechat.sent.length, 2);
     assert.equal(h.control.requests.filter(item => item.path === '/v1/messages').length, 0);
+    assert.equal(h.control.requests.filter(item => item.path === '/v1/tools/call').length, 0);
+    assert.equal(h.model.calls.length, 0);
     h.evidence('assertions', { leaderMode: 'codex', sameSourceIdAcrossChats: true, distinctPerChatJournals: true,
       exactReplies: true, correctChatAndContext: true, nativeExecutions: 2, duplicateNativeExecutions: 0, duplicateSends: 0 });
   }, sdk({ reply: body => currentSdkUserText(body) === FIRST_TEXT ? FIRST_REPLY : OTHER_REPLY })],

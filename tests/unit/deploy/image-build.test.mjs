@@ -64,8 +64,9 @@ function assertImageContract(source, component) {
   // An unqualified final FROM uses the requested target platform, not BUILDPLATFORM.
   assert.equal(runtime[0], `FROM ${BASE_IMAGE}`);
   assert.deepEqual(runtime.filter(line => /^RUN\s/i.test(line)).map(line => line.replace(/\s+/g, ' ')),
-    component === 'controller' ? [SKILL_RUNTIME_INSTALL, CONTROLLER_RUNTIME_INSTALL, SKILL_RUNTIME_PERMISSIONS] : [SKILL_RUNTIME_INSTALL, SKILL_RUNTIME_PERMISSIONS],
-    'runtime commands must preserve reviewed dependencies, pinned CLI, writable state and protected skills');
+    component === 'controller' ? [SKILL_RUNTIME_INSTALL, CONTROLLER_RUNTIME_INSTALL, SKILL_RUNTIME_PERMISSIONS]
+      : [SKILL_RUNTIME_INSTALL, SKILL_RUNTIME_PERMISSIONS],
+    'only reviewed target-platform skill dependencies, pinned CLI, writable directories and skill permissions may be installed');
   assert.ok(runtime.indexOf(SKILL_RUNTIME_PERMISSIONS) > runtime.indexOf('COPY deploy/skills/ /etc/codex/skills/'));
   assert.ok(runtime.indexOf(SKILL_RUNTIME_PERMISSIONS) < runtime.indexOf('USER node'));
   assert.ok(runtime.includes('USER node'));
@@ -104,10 +105,10 @@ test('Controller and Gateway compile natively and install skill dependencies for
 
 test('image contracts reject emulated toolchains, unpruned dependencies and leaked web tooling', () => {
   for (const [source, component] of [[controllerDockerfile, 'controller'], [gatewayDockerfile, 'gateway']]) {
-    assert.throws(() => assertImageContract(source.replace(SKILL_RUNTIME_PERMISSIONS, ''), component));
-    assert.throws(() => assertImageContract(source.replace('chmod -R go-w', 'chmod -R go+w'), component));
     assert.throws(() => assertImageContract(source.replace('--platform=$BUILDPLATFORM ', ''), component));
     assert.throws(() => assertImageContract(source.replace(`FROM ${BASE_IMAGE}\n`, `FROM ${BASE_IMAGE}\nRUN node --version\n`), component));
+    assert.throws(() => assertImageContract(source.replace(SKILL_RUNTIME_PERMISSIONS, ''), component));
+    assert.throws(() => assertImageContract(source.replace(SKILL_RUNTIME_PERMISSIONS, 'RUN chmod -R go+w /etc/codex/skills'), component));
     const unpruned = component === 'controller' ? source.replace(' && pnpm prune --prod', '') : source.replace('pnpm install --prod ', 'pnpm install ');
     assert.throws(() => assertImageContract(unpruned, component));
     assert.throws(() => assertImageContract(source.replace(`FROM ${BASE_IMAGE}\n`, `FROM --platform=$BUILDPLATFORM ${BASE_IMAGE}\n`), component));

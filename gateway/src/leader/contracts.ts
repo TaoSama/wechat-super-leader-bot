@@ -17,6 +17,9 @@ export class ReplyEngineConflictError extends Error {
   constructor() { super("Message identity has conflicting content"); this.name = "ReplyEngineConflictError"; }
 }
 
+export type ControllerToolClient = Pick<ControllerClient, "listTools" | "callTool"> &
+  Partial<Pick<ControllerClient, "getMessageReply">>;
+
 export interface ReplyEngineTurnOptions {
   progress?: (text: string, updateId: string) => Promise<{ sent: boolean; reason?: string }>;
 }
@@ -24,12 +27,13 @@ export interface ReplyEngineTurnOptions {
 export interface GatewayReplyEngine {
   readonly requestBudgetMs: number;
   reply(accountId: string, request: ControllerMessageRequest,
-    controller: Pick<ControllerClient, "forwardMessage">, options?: ReplyEngineTurnOptions): Promise<ControllerMessageResponse>;
+    controller: ControllerToolClient, options?: ReplyEngineTurnOptions): Promise<ControllerMessageResponse>;
   /** True means this inbound belongs to an existing query and has no separate final reply. */
   steer?(accountId: string, request: ControllerMessageRequest,
-    controller: Pick<ControllerClient, "forwardMessage">): Promise<boolean>;
+    controller: ControllerToolClient): Promise<boolean>;
   getReply(accountId: string, chatId: string, messageId: string,
     controller: Pick<ControllerClient, "getMessageReply">): Promise<ControllerMessageResponse>;
   ackReply(accountId: string, chatId: string, messageId: string,
     status: "accepted" | "uncertain" | "expired"): Promise<void>;
+  stop?(): Promise<void>;
 }

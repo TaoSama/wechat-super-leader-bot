@@ -8,6 +8,7 @@ import type { CodexOptions, ThreadEvent } from "@openai/codex-sdk";
 import { CodexReplyEngine, type CodexReplyEngineOptions } from "../../src/leader/codex.js";
 import { CONTROL_TOKEN_ENV } from "../../src/leader/control-mcp.js";
 import { WorkspaceStore } from "../../src/leader/workspace.js";
+import { directToolController, TEST_TOOL_NAME } from "./direct-tool-fixture.js";
 
 const request = { chatId: "chat", messageId: "message", text: "继续检查当前任务" };
 const key = createHash("sha256").update(request.messageId).digest("hex");
@@ -23,13 +24,13 @@ function fixture(t: TestContext): string {
   return root;
 }
 
-async function invoke(sdk: CodexOptions): Promise<string> {
+async function invoke(sdk: CodexOptions, requestMessageId = request.messageId): Promise<string> {
   const servers = sdk.config!.mcp_servers as Record<string, Record<string, string>>;
   const response = await fetch(servers.wechat_control.url, { method: "POST", headers: {
     Authorization: `Bearer ${sdk.env![CONTROL_TOKEN_ENV]}`, "Content-Type": "application/json",
     Accept: "application/json, text/event-stream",
   }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call",
-    params: { name: "control_current_request", arguments: {} } }) });
+    params: { name: TEST_TOOL_NAME, arguments: { arguments: {}, requestMessageId } } }) });
   assert.equal(response.status, 200);
   return response.text();
 }
@@ -66,7 +67,7 @@ for (const failure of ["failed", "throw", "empty", "aborted"] as const) {
           yield* nativeFailure(failure, signal);
         }) };
       const controller = {
-        forwardMessage: async () => { submits++; return original; },
+        ...directToolController(async () => { submits++; return { result: {}, reply: original }; }),
         getMessageReply: async (chatId: string, messageId: string) => {
           reads++;
           assert.equal(chatId, request.chatId);
@@ -112,12 +113,12 @@ test("native stream failure waits for a disconnected in-flight Controller receip
       throw new Error("Native stream disconnected before the tool result");
     }) };
   t.after(async () => { await tool; });
-  const reply = await new CodexReplyEngine(options).reply("account", request, { forwardMessage: async () => {
+  const reply = await new CodexReplyEngine(options).reply("account", request, directToolController(async () => {
     submits++;
     submitted();
     await pending;
-    return receipt;
-  } });
+    return { result: {}, reply: receipt };
+  }));
   assert.deepEqual(reply, receipt);
   const workspace = await new WorkspaceStore(root).forChat("account", "chat");
   assert.equal(workspace.getReplyJournal()[key].stage, "completed");
@@ -131,7 +132,7 @@ test("a failing native close still drains and preserves the confirmed Controller
       events: (async function* () { await invoke(sdk); yield { type: "turn.failed" as const, error: { message: "failed" } }; })(),
       close: async () => { throw new Error("Native close failure"); },
     }) });
-  assert.deepEqual(await engine.reply("account", request, { forwardMessage: async () => receipt }), receipt);
+  assert.deepEqual(await engine.reply("account", request, directToolController(async () => ({ result: {}, reply: receipt }))), receipt);
   const workspace = await new WorkspaceStore(root).forChat("account", "chat");
   assert.equal(workspace.getReplyJournal()[key].stage, "completed");
 });
@@ -145,7 +146,7 @@ test("unconfirmed Controller failure remains uncertain and cannot trigger automa
       await invoke(sdk);
       yield { type: "turn.failed", error: { message: "failed" } };
     }) };
-  const controller = { forwardMessage: async () => { submits++; throw new Error("Uncertain Controller response"); } };
+  const controller = directToolController(async () => { submits++; throw new Error("Uncertain Controller response"); });
   const reply = await new CodexReplyEngine(options).reply("account", request, controller);
   assert.match(reply.text, /执行结果待核实/);
   assert.equal(reply.commandId, undefined);
@@ -166,11 +167,11 @@ test("a failed steered native turn preserves the Controller message identity for
   const pending = new Promise<void>(resolve => { finish = resolve; });
   const original = { ...receipt, text: "https://console.example/#login=steered-delivery-only-token" };
   let submits = 0;
-  const controller = { forwardMessage: async (input: typeof request) => {
+  const controller = directToolController(async input => {
     submits++;
     assert.equal(input.messageId, additional.messageId);
-    return original;
-  } };
+    return { result: {}, reply: original };
+  });
   const engine = new CodexReplyEngine({ root, model: "test", codexPath: process.execPath,
     appServerFactory: async sdk => {
       started(sdk);
@@ -183,7 +184,7 @@ test("a failed steered native turn preserves the Controller message identity for
   const reply = engine.reply("account", request, controller);
   const sdk = await ready;
   assert.equal(await engine.steer("account", additional, controller), true);
-  await invoke(sdk);
+  await invoke(sdk, additional.messageId);
   finish();
   const expected = { ...original, imageSourceMessageId: additional.messageId };
   assert.deepEqual(await reply, expected);
@@ -201,4 +202,45 @@ test("a failed steered native turn preserves the Controller message identity for
     },
   }), expected);
   assert.equal(submits, 1);
+});
+
+
+test("query-only results cannot turn failed native analysis into an empty completed receipt", async t => {
+  const root = fixture(t);
+  const engine = new CodexReplyEngine({ root, model: "test", codexPath: process.execPath,
+    sdkFactory: factory(async function* (sdk) {
+      await invoke(sdk);
+      yield { type: "turn.failed", error: { message: "analysis unavailable" } };
+    }) });
+  const reply = await engine.reply("account", request, directToolController(async () => ({ result: { active: 3 } })));
+  assert.match(reply.text, /执行结果待核实/);
+  const workspace = await new WorkspaceStore(root).forChat("account", "chat");
+  assert.equal(workspace.getReplyJournal()[key].stage, "started");
+});
+
+test("an early durable Controller receipt keeps its accepted ACK after native close failure", async t => {
+  const root = fixture(t);
+  let release!: () => void;
+  const cleanup = new Promise<void>(resolve => { release = resolve; });
+  const engine = new CodexReplyEngine({ root, model: "test", codexPath: process.execPath,
+    appServerFactory: async sdk => ({ threadId: "thread", turnId: "turn", steer: async () => undefined,
+      events: (async function* (): AsyncIterable<ThreadEvent> {
+        await invoke(sdk);
+        yield { type: "item.completed", item: { type: "agent_message", id: "final", text: "已确认" } };
+        yield { type: "turn.completed", usage };
+      })(),
+      close: async () => { await cleanup; throw new Error("late close failure"); },
+    }) });
+  try {
+    const controller = directToolController(async () => ({ result: {}, reply: receipt }));
+    assert.deepEqual(await engine.reply("account", request, controller), receipt);
+    await engine.ackReply("account", "chat", request.messageId, "accepted");
+    const workspace = await new WorkspaceStore(root).forChat("account", "chat");
+    assert.equal(workspace.getReplyJournal()[key].delivery, "accepted");
+    release();
+    await engine.drain();
+    assert.equal(workspace.getReplyJournal()[key].stage, "completed");
+    assert.equal(workspace.getReplyJournal()[key].delivery, "accepted");
+    assert.deepEqual(workspace.getReplyJournal()[key].reply, receipt);
+  } finally { release(); await engine.drain(); }
 });

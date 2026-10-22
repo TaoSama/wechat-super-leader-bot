@@ -1,8 +1,39 @@
 diff --git a/dist/index.js b/dist/index.js
-index 04492aee5c59991ef0d40b0752a62d4b93a21338..70f616f7e5b06d8852d517e9307595ca20a5183b 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -269,52 +269,58 @@ var CodexExec = class {
+@@ -52,6 +52,15 @@
+     return { events: this.runStreamedInternal(input, turnOptions) };
+   }
+   async *runStreamedInternal(input, turnOptions = {}) {
++    const lifecycleStartedAt = performance.now();
++    const observeLifecycle = (type, details = {}) => {
++      if (!turnOptions.onLifecycleEvent) return;
++      try {
++        turnOptions.onLifecycleEvent({ type, elapsedMs: performance.now() - lifecycleStartedAt, ...details });
++      } catch {
++        process.emitWarning("Codex lifecycle observer failed", { code: "CODEX_LIFECYCLE_OBSERVER_FAILED" });
++      }
++    };
+     const { schemaPath, cleanup } = await createOutputSchemaFile(turnOptions.outputSchema);
+     const options = this._threadOptions;
+     const { prompt, images } = normalizeInput(input);
+@@ -70,6 +79,7 @@
+       cyberAccessProgram: turnOptions.cyberAccessProgram,
+       modelReasoningEffort: options?.modelReasoningEffort,
+       signal: turnOptions.signal,
++      onLifecycleEvent: observeLifecycle,
+       networkAccessEnabled: options?.networkAccessEnabled,
+       webSearchMode: options?.webSearchMode,
+       webSearchEnabled: options?.webSearchEnabled,
+@@ -93,6 +103,7 @@
+       }
+     } finally {
+       await cleanup();
++      observeLifecycle("cleanup_finished");
+     }
+   }
+   /** Provides the input to the agent and returns the completed turn. */
+@@ -269,52 +280,77 @@
        signal: args.signal
      });
      let spawnError = null;
@@ -19,20 +50,39 @@ index 04492aee5c59991ef0d40b0752a62d4b93a21338..70f616f7e5b06d8852d517e9307595ca
 -    }
 +    const onError = (err) => spawnError ??= err;
 +    child.on("error", onError);
++    child.once("exit", (code, signal) => args.onLifecycleEvent?.("child_exit", { exitCode: code, signal }));
++    child.stdout?.once("end", () => args.onLifecycleEvent?.("stdout_end"));
++    child.stderr?.once("end", () => args.onLifecycleEvent?.("stderr_end"));
 +    let closed = false;
 +    const closePromise = new Promise((resolve) => {
 +      child.once("close", (code, signal) => {
 +        closed = true;
++        args.onLifecycleEvent?.("child_close", { exitCode: code, signal });
 +        resolve({ code, signal });
 +      });
 +    });
 +    const terminationGraceMs = 1000;
 +    let killTimer;
++    let terminationRequested = false;
 +    const terminate = () => {
 +      if (closed) return;
++      if (!terminationRequested) {
++        terminationRequested = true;
++        args.onLifecycleEvent?.("termination_requested");
++      }
 +      if (!child.killed) child.kill();
 +      killTimer ??= setTimeout(() => {
-+        if (!closed) child.kill("SIGKILL");
++        if (!closed) {
++          args.onLifecycleEvent?.("termination_escalated");
++          child.kill("SIGKILL");
++          // An exited CLI can leave inherited pipes open in a descendant. Only
++          // forced termination discards these streams; normal drain stays intact.
++          args.onLifecycleEvent?.("stdio_forced_closed");
++          rl?.close();
++          child.stdin?.destroy();
++          child.stdout?.destroy();
++          child.stderr?.destroy();
++        }
 +      }, terminationGraceMs);
 +    };
 +    args.signal?.addEventListener("abort", terminate, { once: true });
@@ -90,3 +140,25 @@ index 04492aee5c59991ef0d40b0752a62d4b93a21338..70f616f7e5b06d8852d517e9307595ca
      }
    }
  };
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -169,3 +169,13 @@
+ type CyberAccessProgram = "standard" | "daybreak_blue" | "daybreak_red";
++/** Fixed metadata observed during one SDK turn; no process output is included. */
++type CodexLifecycleEvent = {
++    type: "stdout_end" | "stderr_end" | "child_exit" | "child_close" | "termination_requested" | "termination_escalated" | "stdio_forced_closed" | "cleanup_finished";
++    /** Monotonic milliseconds since this SDK turn began. */
++    elapsedMs: number;
++    exitCode?: number | null;
++    signal?: string | null;
++};
+ type TurnOptions = {
++    /** Optional process lifecycle observer. Observer errors produce a sanitized warning. */
++    onLifecycleEvent?: (event: CodexLifecycleEvent) => void;
+     /**
+@@ -290,2 +300,2 @@
+-
++
+-export { type AgentMessageItem, type ApprovalMode, Codex, type CodexOptions, type CommandExecutionItem, type CyberAccessProgram, type ErrorItem, type FileChangeItem, type Input, type ItemCompletedEvent, type ItemStartedEvent, type ItemUpdatedEvent, type McpToolCallItem, type ModelReasoningEffort, type ReasoningItem, type RunResult, type RunStreamedResult, type SandboxMode, Thread, type ThreadError, type ThreadErrorEvent, type ThreadEvent, type ThreadItem, type ThreadOptions, type ThreadStartedEvent, type TodoListItem, type TurnCompletedEvent, type TurnFailedEvent, type TurnOptions, type TurnStartedEvent, type Usage, type UserInput, type WebSearchItem, type WebSearchMode };
++export { type CodexLifecycleEvent, type AgentMessageItem, type ApprovalMode, Codex, type CodexOptions, type CommandExecutionItem, type CyberAccessProgram, type ErrorItem, type FileChangeItem, type Input, type ItemCompletedEvent, type ItemStartedEvent, type ItemUpdatedEvent, type McpToolCallItem, type ModelReasoningEffort, type ReasoningItem, type RunResult, type RunStreamedResult, type SandboxMode, Thread, type ThreadError, type ThreadErrorEvent, type ThreadEvent, type ThreadItem, type ThreadOptions, type ThreadStartedEvent, type TodoListItem, type TurnCompletedEvent, type TurnFailedEvent, type TurnOptions, type TurnStartedEvent, type Usage, type UserInput, type WebSearchItem, type WebSearchMode };

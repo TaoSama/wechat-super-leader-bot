@@ -9,11 +9,12 @@ import { CodexReplyEngine, type CodexReplyEngineOptions } from "../../src/leader
 import { AppServerRejectedError } from "../../src/leader/app-server.js";
 import { ReplyEngineConflictError } from "../../src/leader/contracts.js";
 import { WorkspaceStore } from "../../src/leader/workspace.js";
+import { directToolController, TEST_TOOL_NAME } from "./direct-tool-fixture.js";
 import { CONTROL_TOKEN_ENV } from "../../src/leader/control-mcp.js";
 
 const initial = { chatId: "chat", messageId: "first", text: "先分析问题" };
 const additional = { chatId: "chat", messageId: "second", text: "补充：也给出修复方案" };
-const controller = { forwardMessage: async () => ({ text: "首条控制结果" }) };
+const controller = directToolController(async () => ({ result: {}, reply: { text: "首条控制结果" } }));
 const usage = { input_tokens: 0, cached_input_tokens: 0, cache_write_input_tokens: 0,
   output_tokens: 0, reasoning_output_tokens: 0 };
 
@@ -51,6 +52,7 @@ function fixture(t: TestContext) {
       })() };
   };
   const engine = new CodexReplyEngine({ root, model: "test", codexPath: process.execPath, appServerFactory });
+  t.after(() => engine.stop());
   return { root, engine, started, finish, ready, calls, get runs() { return runs; },
     reject(error: Error) { rejection = error; },
     beforeReceipt(action: () => Promise<void>) { beforeSteerReceipt = action; } };
@@ -61,7 +63,7 @@ async function callTool(options: CodexOptions, name: string, args: object = {}) 
   const response = await fetch(config.wechat_control.url, { method: "POST", headers: {
     Authorization: `Bearer ${options.env![CONTROL_TOKEN_ENV]}`, "Content-Type": "application/json",
     Accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1,
-      method: "tools/call", params: { name, arguments: args } }) });
+      method: "tools/call", params: { name, arguments: name === "report_progress" ? args : { arguments: {}, ...args } } }) });
   assert.equal(response.status, 200);
   const body = await response.json() as { result: { isError?: boolean; content: Array<{ text: string }> } };
   if (body.result.isError) return { isError: true, text: body.result.content[0].text };
@@ -117,32 +119,61 @@ test("accepting a supplement prunes closed history before crossing the durable j
 test("steered original authority reaches Controller and model final incorporates all messages", async t => {
   const f = fixture(t);
   const forwarded: string[] = [];
-  const boundController = { forwardMessage: async (request: typeof initial) => {
-    forwarded.push(request.text); return { text: `Controller:${request.text}` };
-  } };
+  const boundController = directToolController(async request => {
+    forwarded.push(request.text); return { result: { text: `Controller:${request.text}` } };
+  });
   const reply = f.engine.reply("account", initial, boundController);
   const options = await f.started.promise;
   f.ready.resolve();
-  await callTool(options, "control_current_request");
+  await callTool(options, TEST_TOOL_NAME);
   assert.equal(await f.engine.steer("account", additional, boundController), true);
-  await callTool(options, "control_current_request");
+  await callTool(options, TEST_TOOL_NAME, { requestMessageId: additional.messageId });
   assert.deepEqual(forwarded, [initial.text, additional.text]);
   f.finish.resolve();
   assert.equal((await reply).text, "结合补充后的最终回答", "an earlier Controller response must not overwrite the steered model answer");
 });
 
+for (const consoleReceipt of [false, true]) test(`a ${consoleReceipt ? "console" : "business"} receipt keeps later steered explanation without another tool`, async t => {
+  const f = fixture(t);
+  const receipt = { text: consoleReceipt ? "控制台：https://console.test/#login=private-steer-token" : "已保存任务，尚未确认执行完成。",
+    commandId: "command-original", images: [{ id: "original-image", mime: "image/png" as const,
+      size: 5, sha256: "b".repeat(64) }] };
+  let calls = 0;
+  const boundController = directToolController(async () => { calls++; return { result: {}, reply: receipt }; });
+  const pendingReply = f.engine.reply("account", initial, boundController);
+  const options = await f.started.promise;
+  f.ready.resolve();
+  await callTool(options, TEST_TOOL_NAME);
+  assert.equal(await f.engine.steer("account", { ...additional, text: "补充：解释一下刚才的结果，无需再操作。" }, boundController), true);
+  f.finish.resolve();
+  const expected = { ...receipt, text: `结合补充后的最终回答\n\n${receipt.text}` };
+  assert.deepEqual(await pendingReply, expected);
+  assert.equal(calls, 1, "ordinary supplementation needs no additional business invocation");
+  const workspace = await new WorkspaceStore(f.root).forChat("account", initial.chatId);
+  assert.doesNotMatch(JSON.stringify(workspace.getReplyJournal()), /private-steer-token/);
+  const restarted = new CodexReplyEngine({ root: f.root, model: "test", codexPath: process.execPath });
+  assert.deepEqual(await restarted.getReply("account", initial.chatId, initial.messageId, {
+    getMessageReply: async (chatId, messageId) => {
+      assert.equal(consoleReceipt, true, "normal mixed replies recover from the Gateway journal");
+      assert.equal(chatId, initial.chatId);
+      assert.equal(messageId, initial.messageId, "the receipt keeps its original source across steering");
+      return receipt;
+    },
+  }), expected);
+});
+
 test("Controller calls arriving before native steer acknowledgement wait for exact added authority", async t => {
   const f = fixture(t);
   const forwarded: string[] = [];
-  const boundController = { forwardMessage: async (request: typeof initial) => {
-    forwarded.push(request.text); return { text: `Controller:${request.text}` };
-  } };
+  const boundController = directToolController(async request => {
+    forwarded.push(request.text); return { result: { text: `Controller:${request.text}` } };
+  });
   const reply = f.engine.reply("account", initial, boundController);
   const options = await f.started.promise;
   f.ready.resolve();
   let earlyTool!: Promise<Record<string, unknown>>;
   f.beforeReceipt(async () => {
-    earlyTool = callTool(options, "control_current_request");
+    earlyTool = callTool(options, TEST_TOOL_NAME, { requestMessageId: additional.messageId });
     await new Promise(resolve => setTimeout(resolve, 30));
     assert.deepEqual(forwarded, [], "unacknowledged supplementation must hold Controller selection");
   });
@@ -158,15 +189,15 @@ test("Controller calls arriving before native steer acknowledgement wait for exa
 test("unknown steer acknowledgement cannot release a queued Controller call with stale original authority", async t => {
   const f = fixture(t);
   const forwarded: string[] = [];
-  const boundController = { forwardMessage: async (request: typeof initial) => {
-    forwarded.push(request.text); return { text: "Unexpected old dispatch" };
-  } };
+  const boundController = directToolController(async request => {
+    forwarded.push(request.text); return { result: { text: "Unexpected old dispatch" } };
+  });
   const reply = f.engine.reply("account", initial, boundController);
   const options = await f.started.promise;
   f.ready.resolve();
   let earlyTool!: Promise<Record<string, unknown>>;
   f.beforeReceipt(async () => {
-    earlyTool = callTool(options, "control_current_request");
+    earlyTool = callTool(options, TEST_TOOL_NAME, { requestMessageId: additional.messageId });
     await new Promise(resolve => setTimeout(resolve, 30));
   });
   f.reject(new Error("acknowledgement lost"));
@@ -198,15 +229,16 @@ test("query progress remains a shared three-call allowance after successful stee
 test("console link produced by a steered message recovers by its original Controller message identity", async t => {
   const f = fixture(t);
   const consoleReply = { text: "https://console.test/#login=only-on-delivery" };
-  const boundController = { forwardMessage: async (request: typeof initial) => request.messageId === additional.messageId
-    ? consoleReply : { text: "已读取第一条" } };
+  const boundController = directToolController(async request => ({ result: {}, reply: request.messageId === additional.messageId
+    ? consoleReply : { text: "已读取第一条" } }));
   const reply = f.engine.reply("account", initial, boundController);
   const options = await f.started.promise;
   f.ready.resolve();
   assert.equal(await f.engine.steer("account", additional, boundController), true);
-  await callTool(options, "control_current_request");
+  await callTool(options, TEST_TOOL_NAME, { requestMessageId: additional.messageId });
   f.finish.resolve();
-  assert.deepEqual(await reply, consoleReply);
+  const expected = { text: `结合补充后的最终回答\n\n${consoleReply.text}` };
+  assert.deepEqual(await reply, expected);
   const workspace = await new WorkspaceStore(f.root).forChat("account", initial.chatId);
   assert.doesNotMatch(JSON.stringify(workspace.getReplyJournal()), /only-on-delivery/);
   const frozen = await f.engine.getReply("account", initial.chatId, initial.messageId, {
@@ -216,21 +248,21 @@ test("console link produced by a steered message recovers by its original Contro
       return consoleReply;
     },
   });
-  assert.deepEqual(frozen, consoleReply);
+  assert.deepEqual(frozen, expected);
 });
 
 test("steered screenshots keep the original attachment message identity through restart", async t => {
   const f = fixture(t);
   const images = [{ id: "image-steer", mime: "image/png" as const, size: 5, sha256: "a".repeat(64) }];
-  const boundController = { forwardMessage: async (request: typeof initial) => request.messageId === additional.messageId
-    ? { text: "截图完成", images } : { text: "已分析" } };
+  const boundController = directToolController(async request => ({ result: {}, reply: request.messageId === additional.messageId
+    ? { text: "截图完成", images } : { text: "已分析" } }));
   const reply = f.engine.reply("account", initial, boundController);
   const options = await f.started.promise;
   f.ready.resolve();
   assert.equal(await f.engine.steer("account", additional, boundController), true);
-  await callTool(options, "control_current_request");
+  await callTool(options, TEST_TOOL_NAME, { requestMessageId: additional.messageId });
   f.finish.resolve();
-  const expected = { text: "结合补充后的最终回答", images, imageSourceMessageId: additional.messageId };
+  const expected = { text: "结合补充后的最终回答\n\n截图完成", images, imageSourceMessageId: additional.messageId };
   assert.deepEqual(await reply, expected);
   const restarted = new CodexReplyEngine({ root: f.root, model: "test", codexPath: process.execPath });
   assert.deepEqual(await restarted.getReply("account", initial.chatId, initial.messageId, {

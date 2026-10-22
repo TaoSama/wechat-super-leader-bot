@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ControllerMessageResponse } from "../types.js";
+import { hasConsoleCredential } from "./control-mcp.js";
 import { validateImageAttachments } from "../wechat/media-delivery.js";
 
 export type MemoryFile = "task.md" | "memory.md" | "preference.md";
@@ -14,6 +15,7 @@ export type ReplyJournal = Record<string, {
   delivery?: "pending" | "accepted" | "uncertain" | "expired";
   provenance?: "codex" | "controller-console";
   controllerMessageId?: string;
+  consoleText?: string;
   steering?: {
     rootMessageId: string;
     threadId: string;
@@ -41,9 +43,11 @@ const MEMORY_TEMPLATES: Record<MemoryFile, string> = {
   "memory.md": "# 长期记忆\n\n记录跨任务有用的事实、决策和经验。\n\n",
   "preference.md": "# 用户偏好\n\n记录用户明确表达的偏好和协作习惯。\n\n",
 };
-const BASE_AGENT_INSTRUCTIONS = `# 微信 Leader 的持久记忆
+const LEGACY_MEMORY_INSTRUCTIONS = "此工作目录只属于一个账户和聊天。每轮先读取 task.md、memory.md、preference.md，必要时读取完整文件；每轮完成前维护相关文件，保证下一次恢复仍能继续。";
+export const LEADER_MEMORY_INSTRUCTIONS = "此工作目录只属于一个账户和聊天。每轮读取并实际使用 task.md、memory.md、preference.md；本轮从磁盘注入的完整快照满足读取要求，不必重复调用工具读取。仅当快照截断且处理本轮需要未展示内容时补读。每轮完成前维护新增或变化的相关事实，文件没有变化时不必重写；不为纯查询、重复结果或无需恢复的短时状态机械追加 task.md，也不把短时列表重复写入长期记忆。保证下一次恢复仍能继续。";
+const LEGACY_BASE_AGENT_INSTRUCTIONS = `# 微信 Leader 的持久记忆
 
-此工作目录只属于一个账户和聊天。每轮先读取 task.md、memory.md、preference.md，必要时读取完整文件；每轮完成前维护相关文件，保证下一次恢复仍能继续。
+${LEGACY_MEMORY_INSTRUCTIONS}
 
 - task.md：当前目标、用户明确的范围和限制、任务进度、已验证结果及证据、下一步、待确认事项。不要把“已派发”写成“已完成”。
 - memory.md：跨任务事实、决策和经验；记录来源与时间，纠正过期内容，避免重复和无关日志。
@@ -55,7 +59,7 @@ const BASE_AGENT_INSTRUCTIONS = `# 微信 Leader 的持久记忆
 
 使用当前 Codex 会话原生提供的工具与技能发现机制；发现可用 skill 时按其说明使用。不要虚构工具或 skill，不维护另一套静态工具清单。未来增加工具和 skill 时继续遵守同一套记忆与事实规则。
 `;
-const AGENT_INSTRUCTIONS = BASE_AGENT_INSTRUCTIONS + `
+const REPLY_AGENT_INSTRUCTIONS = `
 ## 时间与微信回复
 
 默认使用北京时间（Asia/Shanghai，UTC+08:00）。每轮以系统注入的当前时间为准，不沿用历史消息或记忆中的“现在”。历史时间带 UTC 或其他时区偏移时，换算为北京时间再说明；来源没有时区时，标注时区未知，不猜测。
@@ -64,6 +68,10 @@ const AGENT_INSTRUCTIONS = BASE_AGENT_INSTRUCTIONS + `
 
 默认不反复输出“桌面观测过期”“已失联”等技术状态。用户询问细节或能力时，如实解释当前限制；不要伪造在线状态或声称尚未验证的执行已经完成。
 `;
+const BASE_AGENT_INSTRUCTIONS = LEGACY_BASE_AGENT_INSTRUCTIONS.replace(LEGACY_MEMORY_INSTRUCTIONS, LEADER_MEMORY_INSTRUCTIONS);
+const AGENT_INSTRUCTIONS = BASE_AGENT_INSTRUCTIONS + REPLY_AGENT_INSTRUCTIONS;
+const LEGACY_DEFAULT_AGENT_INSTRUCTIONS = [LEGACY_BASE_AGENT_INSTRUCTIONS,
+  LEGACY_BASE_AGENT_INSTRUCTIONS + REPLY_AGENT_INSTRUCTIONS];
 
 function digest(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
@@ -106,7 +114,7 @@ function validateReplyJournal(value: unknown): ReplyJournal {
   let closed = 0;
   for (const [key, entry] of Object.entries(value)) {
     if (!/^[a-f0-9]{64}$/.test(key) || !object(entry) ||
-        Object.keys(entry).some(name => !["inputHash", "stage", "reply", "delivery", "provenance", "steering", "controllerMessageId"].includes(name)) ||
+        Object.keys(entry).some(name => !["inputHash", "stage", "reply", "delivery", "provenance", "steering", "controllerMessageId", "consoleText"].includes(name)) ||
         typeof entry.inputHash !== "string" || !/^[a-f0-9]{64}$/.test(entry.inputHash) ||
         (entry.stage !== "started" && entry.stage !== "completed") ||
         (entry.delivery !== undefined && !["pending", "accepted", "uncertain", "expired"].includes(entry.delivery as string)) ||
@@ -115,6 +123,10 @@ function validateReplyJournal(value: unknown): ReplyJournal {
         (entry.controllerMessageId !== undefined && (entry.provenance !== "controller-console" ||
           typeof entry.controllerMessageId !== "string" || !entry.controllerMessageId.trim() ||
           Buffer.byteLength(entry.controllerMessageId) > MAX_ID_BYTES)) ||
+        (entry.consoleText !== undefined && (entry.provenance !== "controller-console" ||
+          typeof entry.consoleText !== "string" || !entry.consoleText.includes("#login=[REDACTED]") ||
+          entry.consoleText.length > MAX_REPLY_CHARS)) ||
+        hasConsoleCredential(JSON.stringify(entry)) ||
         Buffer.byteLength(JSON.stringify(entry), "utf8") > MAX_REPLY_ENTRY_BYTES) return invalid();
     const steering = entry.steering;
     if (steering !== undefined && (!object(steering) ||
@@ -131,13 +143,15 @@ function validateReplyJournal(value: unknown): ReplyJournal {
     if (reply === undefined) {
       if (entry.stage === "completed") return invalid();
     } else if (!object(reply) || Object.keys(reply).some(name =>
-        !(entry.provenance === "controller-console" ? ["text"] : ["text", "commandId", "images", "imageSourceMessageId"]).includes(name)) ||
+        !(entry.provenance === "controller-console" && entry.consoleText === undefined ? ["text"] : ["text", "commandId", "images", "imageSourceMessageId"]).includes(name)) ||
         typeof reply.text !== "string" || reply.text.length > MAX_REPLY_CHARS ||
         (reply.commandId !== undefined && (typeof reply.commandId !== "string" ||
           !reply.commandId.trim() || reply.commandId.length > MAX_ID_BYTES)) ||
         (reply.imageSourceMessageId !== undefined && (typeof reply.imageSourceMessageId !== "string" ||
           !reply.imageSourceMessageId.trim() || Buffer.byteLength(reply.imageSourceMessageId) > MAX_ID_BYTES ||
           !Array.isArray(reply.images) || reply.images.length === 0))) return invalid();
+    if (entry.consoleText !== undefined && (!reply || typeof reply.text !== "string" ||
+        reply.text.split(entry.consoleText as string).length !== 2)) return invalid();
     let images: ControllerMessageResponse["images"];
     if (reply !== undefined && reply.images !== undefined) {
       try { images = validateImageAttachments(reply.images); } catch { return invalid(); }
@@ -145,6 +159,7 @@ function validateReplyJournal(value: unknown): ReplyJournal {
     entries.push([key, { inputHash: entry.inputHash, stage: entry.stage,
       ...(entry.delivery !== undefined ? { delivery: entry.delivery as ReplyJournal[string]["delivery"] } : {}),
       ...(entry.provenance !== undefined ? { provenance: entry.provenance as ReplyJournal[string]["provenance"] } : {}),
+      ...(entry.consoleText !== undefined ? { consoleText: entry.consoleText as string } : {}),
       ...(entry.controllerMessageId !== undefined ? { controllerMessageId: entry.controllerMessageId as string } : {}),
       ...(steering !== undefined ? { steering: steering as ReplyJournal[string]["steering"] } : {}),
       ...(reply !== undefined ? { reply: {
@@ -310,7 +325,7 @@ export class LeaderWorkspace {
         atomicWrite(instructions, AGENT_INSTRUCTIONS);
       } else {
         const existing = readMemoryPrefix(instructions);
-        if (!existing.truncated && existing.content === BASE_AGENT_INSTRUCTIONS) {
+        if (!existing.truncated && LEGACY_DEFAULT_AGENT_INSTRUCTIONS.includes(existing.content)) {
           atomicWrite(instructions, AGENT_INSTRUCTIONS);
         }
       }
