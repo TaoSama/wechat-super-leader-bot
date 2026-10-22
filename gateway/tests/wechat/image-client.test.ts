@@ -7,10 +7,33 @@ import { createHash } from "node:crypto";
 import { ILinkClient } from "../../src/wechat/client.js";
 import { StateManager } from "../../src/runtime/state.js";
 import type { ImageAttachment } from "../../src/wechat/media-delivery.js";
+import { LocalSendDeferredError } from "../../src/runtime/context-policy.js";
 
 const PNG = Buffer.from("89504e470d0a1a0a00000000", "hex");
 const IMAGE: ImageAttachment = { id: "image-one", mime: "image/png", size: PNG.length,
   sha256: createHash("sha256").update(PNG).digest("hex") };
+
+test("shared admission policy checks every image and yields a 3 -> 2 batch without an unknown send", async t => {
+  const f = fixture(t), client = f.client();
+  f.state.contextBudgets.chat.remaining = 3;
+  const images = [IMAGE, { ...IMAGE, id: "image-two" }];
+  client.setBeforeSendCheck((chatId, key) => {
+    assert.equal(chatId, "chat"); assert.equal(key, "priority-images");
+    if (f.state.remainingSendBudget(chatId) < 3) throw new LocalSendDeferredError("budget_exhausted");
+  });
+  await assert.rejects(client.sendImageReply("chat", images, {
+    deliveryKey: "priority-images", getImageBytes: async () => PNG,
+  }), LocalSendDeferredError);
+  assert.equal(f.sends.length, 1);
+  assert.equal(f.state.contextBudgets.chat.remaining, 2);
+  const restarted = new StateManager(f.credentials, f.statePath);
+  assert.equal(restarted.replyDeliveries["priority-images"].acknowledgedChunks, 1);
+  assert.equal(restarted.replyDeliveries["priority-images"].inFlight, false);
+  await f.client(restarted).sendImageReply("chat", images, {
+    deliveryKey: "priority-images", getImageBytes: async () => PNG,
+  });
+  assert.equal(f.sends.length, 2);
+});
 
 function fixture(t: TestContext) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-image-client-"));

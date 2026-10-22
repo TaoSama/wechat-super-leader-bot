@@ -78,6 +78,17 @@ export class ILinkClient {
   private readonly chatSends = new Map<string, Promise<void>>();
   private readonly imageUploader: ImageUploader;
   private readonly fileUploader: FileUploader;
+  private beforeSendCheck?: (chatId: string, deliveryKey?: string) => void;
+
+  /** Called synchronously under the chat send lock, before spending quota or persisting send intent. */
+  public setBeforeSendCheck(check: (chatId: string, deliveryKey?: string) => void): void {
+    this.beforeSendCheck = check;
+  }
+
+  private consumeSendBudget(chatId: string, deliveryKey?: string, kind: "final" | "progress" = "final"): void {
+    this.beforeSendCheck?.(chatId, deliveryKey);
+    this.stateManager.consumeSendBudget(chatId, kind);
+  }
 
   constructor(options: {
     stateManager: StateManager;
@@ -284,7 +295,7 @@ export class ILinkClient {
 
   public async sendSingleText(chatId: string, formattedText: string, clientIdOverride?: string, signal?: AbortSignal): Promise<void> {
     await this.withChatSend(chatId, () => {
-      this.stateManager.consumeSendBudget(chatId);
+      this.consumeSendBudget(chatId);
       return this.sendSingleTextNow(chatId, formattedText, clientIdOverride, signal);
     }, signal);
   }
@@ -380,7 +391,7 @@ export class ILinkClient {
             return this.imageUploader.upload(chatId, bytes, signal);
           },
           sendImage: (item, clientId) => this.sendMessageItem(chatId, item, clientId, signal),
-          beforeBeginChunk: () => this.stateManager.consumeSendBudget(chatId),
+          beforeBeginChunk: () => this.consumeSendBudget(chatId, options.deliveryKey),
           signal, shouldContinue,
         });
       }, signal);
@@ -396,7 +407,7 @@ export class ILinkClient {
       ...options, chatId, bytes, metadata, state: this.stateManager,
       upload: (input, attachment, signal) => this.fileUploader.upload(chatId, input, attachment, signal),
       withChatSend: (send, signal) => this.withChatSend(chatId, send, signal),
-      consumeBudget: () => this.stateManager.consumeSendBudget(chatId, options.kind ?? "final"),
+      consumeBudget: () => this.consumeSendBudget(chatId, options.deliveryKey, options.kind),
       send: (item, clientId, signal) => this.sendMessageItem(chatId, item, clientId, signal),
     });
   }
@@ -448,7 +459,7 @@ export class ILinkClient {
         if (options?.shouldContinue && !options.shouldContinue()) throw new Error("WeChat reply interrupted before completion");
         await this.withChatSend(chatId, async () => {
           if (options?.shouldContinue && !options.shouldContinue()) throw new Error("WeChat reply interrupted before completion");
-          this.stateManager.consumeSendBudget(chatId, options?.kind ?? "final");
+          this.consumeSendBudget(chatId, deliveryKey, options?.kind);
           // Persist intent before the network call. A crash or ambiguous response cannot trigger a replay.
           traceEvent("wechat.chunk.start", { chunkIndex: idx, chunkCount: chunks.length });
           await traceSpan("wechat.chunk.intent.persist", async () => this.stateManager.beginReplyChunk(deliveryKey, idx), { chunkIndex: idx });
