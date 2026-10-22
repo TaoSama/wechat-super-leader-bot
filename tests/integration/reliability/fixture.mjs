@@ -98,9 +98,9 @@ export async function withReliabilityFixture({ databaseUrl, evidence, name, sign
         assert.equal(result.nodeId, NODE); assert.equal(result.sessionId, native.sessionId); assert.equal(result.output, output);
         return result;
       },
-      async launchTask({ notifications = false } = {}) {
+      async launchTask() {
         const message = wechat.enqueue(TASK, { chatId: CHAT });
-        const result = await h.poll({ notifications });
+        const result = await h.poll();
         assert.equal(result.code, 0, result.stderr);
         await native.waitForStarts(1);
         const rows = await pool.query('SELECT command_id FROM commands WHERE action=$1', ['send']);

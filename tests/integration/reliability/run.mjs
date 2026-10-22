@@ -20,8 +20,8 @@ const scenarios = [...queueScenarios, ...recoveryScenarios, ...gatewayScenarios,
 if (values.help || !values.run) {
   console.log('Usage: node tests/integration/reliability/run.mjs --run [--suite all|controller|sdk] [--scenario NAME] [--evidence DIRECTORY]\n' +
     'Requires built Controller/Gateway, daemon/bin/super-leader-daemon, OpenSSL, and local Docker with postgres:16-alpine.\n' +
-    'Starts real processes and disposable durable PostgreSQL; all native sessions and WeChat endpoints are synthetic.\n' +
-    'SDK scenarios use the installed SDK and real native Codex with a local Responses SSE upstream.\n' +
+    'Starts real processes and disposable durable PostgreSQL; target sessions and WeChat endpoints are synthetic.\n' +
+    'SDK scenarios use the installed native Codex app-server with a local Responses SSE upstream.\n' +
     'Faults target only child handles, owned proxies, temporary state and databases. Never reads live credentials or deploys.\n' +
     'Scenarios: ' + scenarios.map(([name]) => name).join(', '));
 } else {
@@ -107,10 +107,10 @@ async function main() {
       expectedScenarios: chosen.length, completedScenarios: results.filter(item => item.name !== 'infrastructure-or-cleanup').length, cleanupComplete,
       interrupted: stop.signal.aborted,
       boundaries: { real: ['Gateway CLI', 'Controller HTTP/WS process', 'Go Daemon process', 'PostgreSQL', 'Gateway state files', 'Daemon bbolt journal',
-        ...(chosen.some(([, , options]) => options?.leaderMode === 'codex') ? ['installed Codex SDK', 'native Codex executable', 'SDK MCP control tool', 'per-chat reply journals'] : [])],
+        ...(chosen.some(([, , options]) => options?.leaderMode === 'codex') ? ['installed Codex runtime dependency', 'native Codex app-server RPC', 'bound MCP control tool', 'per-chat reply journals'] : [])],
         synthetic: ['WeChat iLink HTTPS endpoint', 'Codex app-server Unix WebSocket', 'model Responses endpoint'],
         unproven: ['physical phone receipt/read', 'live WeChat service outage', 'real Codex desktop owner', 'power loss or disk corruption',
-          ...(!chosen.some(([, , options]) => options?.leaderMode === 'codex') ? ['Gateway Codex SDK leader execution and reply journal recovery'] : []),
+          ...(!chosen.some(([, , options]) => options?.leaderMode === 'codex') ? ['Gateway native Codex reply engine execution and reply journal recovery'] : []),
           'messages without stable source IDs', 'replay beyond dedup retention'] },
       passed: results.filter(item => item.verdict === 'PASS').length, failed: results.filter(item => item.verdict === 'FAIL').length, results };
   }

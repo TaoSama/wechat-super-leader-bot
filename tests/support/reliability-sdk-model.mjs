@@ -53,7 +53,7 @@ function sendEvents(response, output) {
   response.end();
 }
 
-// The real Codex executable owns the SDK JSONL protocol; this server only speaks
+// The real Codex executable owns the app-server protocol; this server only speaks
 // its OpenAI-compatible upstream Responses SSE wire protocol.
 export async function createSdkModelFixture({ evidence = () => {}, reply = SDK_REPLY, control = false, respond } = {}) {
   const calls = [], errors = [], responseHolds = [], ownedHolds = new Set();

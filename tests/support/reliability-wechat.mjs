@@ -57,13 +57,76 @@ export async function createWechatFixture({ dir, env = verificationEnvironment()
   };
   const healthy = () => { if (errors.length) throw new AggregateError(errors, 'WeChat fixture handler failed'); };
   const cleanEnv = verificationEnvironment(env);
-  // Observe the real SDK subprocess. Only auxiliary external MCP/telemetry are
+  // Observe the real Codex subprocess. Only auxiliary external MCP/telemetry are
   // disabled; the native executable, main model and bound control MCP stay real.
   await writeFile(sdkAuditPath, `import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { appendFileSync } from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
 const childProcess = createRequire(import.meta.url)('node:child_process');
 const spawn = childProcess.spawn;
 const record = item => appendFileSync(${JSON.stringify(sdkLogPath)}, JSON.stringify(item) + '\\n');
+const MAX_RPC_FRAME_BYTES = 8 * 1024 * 1024;
+const MAX_PENDING_REQUESTS = 1024;
+function observeAppServer(child) {
+  const pending = new Map();
+  const decoders = { request: new StringDecoder('utf8'), response: new StringDecoder('utf8') };
+  const buffers = { request: '', response: '' };
+  const identity = params => Object.fromEntries(['threadId', 'expectedTurnId']
+    .filter(key => typeof params?.[key] === 'string').map(key => [key, params[key]]));
+  const auditError = reason => record({ event: 'rpc-audit-error', pid: child.pid, reason });
+  function frame(direction, line) {
+    let value;
+    try { value = JSON.parse(line); }
+    catch { auditError('Invalid JSON frame'); return; }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) { auditError('Invalid RPC object'); return; }
+    if (direction === 'request' && typeof value.method === 'string') {
+      if (value.id !== undefined) {
+        if (pending.size >= MAX_PENDING_REQUESTS) { auditError('Pending request limit exceeded'); return; }
+        pending.set(value.id, value.method);
+      }
+      record({ event: 'rpc-request', pid: child.pid, method: value.method, id: value.id,
+        params: identity(value.params) });
+    } else if (direction === 'response' && typeof value.method === 'string') {
+      const params = value.params;
+      record({ event: 'rpc-notification', pid: child.pid, method: value.method,
+        threadId: params?.threadId ?? params?.thread?.id,
+        turnId: params?.turnId ?? params?.turn?.id, status: params?.turn?.status ?? params?.status });
+    } else if (direction === 'response' && value.id !== undefined) {
+      const method = pending.get(value.id);
+      pending.delete(value.id);
+      record({ event: 'rpc-response', pid: child.pid, id: value.id, method,
+        resultThreadId: value.result?.thread?.id,
+        resultTurnId: value.result?.turn?.id ?? value.result?.turnId, errorCode: value.error?.code });
+    }
+  }
+  function observe(direction, bytes, encoding) {
+    const chunk = typeof bytes === 'string' ? Buffer.from(bytes, encoding) : bytes;
+    buffers[direction] += decoders[direction].write(chunk);
+    let newline;
+    while ((newline = buffers[direction].indexOf('\\n')) >= 0) {
+      const line = buffers[direction].slice(0, newline);
+      buffers[direction] = buffers[direction].slice(newline + 1);
+      if (Buffer.byteLength(line) > MAX_RPC_FRAME_BYTES) auditError('RPC frame limit exceeded');
+      else if (line.trim()) frame(direction, line);
+    }
+    if (Buffer.byteLength(buffers[direction]) > MAX_RPC_FRAME_BYTES) {
+      auditError('RPC buffer limit exceeded'); buffers[direction] = '';
+    }
+  }
+  const write = child.stdin.write;
+  child.stdin.write = function(...args) {
+    const result = write.apply(this, args);
+    observe('request', args[0], typeof args[1] === 'string' ? args[1] : undefined);
+    return result;
+  };
+  const onData = bytes => observe('response', bytes);
+  child.stdout.on('data', onData);
+  child.once('close', () => {
+    child.stdin.write = write;
+    child.stdout.removeListener('data', onData);
+    pending.clear(); buffers.request = ''; buffers.response = '';
+  });
+}
 childProcess.spawn = function(file, args, options) {
   const native = /(?:^|[/\\\\])codex(?:\\.exe)?$/.test(String(file));
   const [command, ...nativeArgs] = args;
@@ -72,7 +135,8 @@ childProcess.spawn = function(file, args, options) {
     '--config', 'check_for_update_on_startup=false', ...nativeArgs] : args;
   const child = spawn.call(this, file, forwarded, options);
   if (native) {
-    record({ event: 'spawn', pid: child.pid, executable: String(file), cwd: options?.cwd });
+    record({ event: 'spawn', pid: child.pid, executable: String(file), cwd: options?.cwd, transport: command });
+    if (command === 'app-server') observeAppServer(child);
     child.stderr.on('data', bytes => {
       let text = bytes.toString();
       for (const name of ['CODEX_API_KEY', 'OPENAI_API_KEY', 'LEADER_TURN_MCP_TOKEN']) {
@@ -154,7 +218,7 @@ syncBuiltinESMExports();
     assert(!active || active.child.exitCode !== null || active.child.signalCode !== null, 'Gateway fixture already running');
     lastOptions = { ...options };
     const { controllerUrl = 'http://127.0.0.1:1', controllerToken = env.CONTROLLER_TOKEN || 'synthetic-reliability-controller-token',
-      notifications = false, mode = '--run', pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
+      mode = '--run', pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
       pollTimeoutMs = DEFAULT_POLL_TIMEOUT_MS, sendBudget, contextWindowMs, maxChars, extraArgs = [],
       leaderMode = 'controller', leaderRoot = join(dir, 'leader'), leaderModel,
       sdkBaseUrl, sdkApiKey } = options;
@@ -166,7 +230,6 @@ syncBuiltinESMExports();
       assert(sdkBaseUrl?.startsWith('http://127.0.0.1:') && sdkApiKey, 'SDK fixture requires its own local model and synthetic key');
       args.push('--leader-root', leaderRoot, '--leader-model', leaderModel);
     }
-    if (notifications) args.push('--notifications');
     for (const [flag, value] of [['--send-budget', sendBudget], ['--context-window-ms', contextWindowMs], ['--max-chars', maxChars]]) {
       if (value !== undefined) args.push(flag, String(value));
     }

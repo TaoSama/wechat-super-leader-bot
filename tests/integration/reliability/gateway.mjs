@@ -44,7 +44,7 @@ export const gatewayScenarios = [
     h.wechat.enqueue('查询合成聊天归属', { chatId: OTHER_CHAT });
     assert.equal((await h.poll()).code, 0);
     await h.control.restart(); await h.waitNode(true);
-    assert.equal((await h.poll({ notifications: true })).code, 0);
+    assert.equal((await h.poll()).code, 0);
     const finalMessages = h.wechat.sent.filter(item => text(item).includes(TASK_RESULT));
     assert.equal(finalMessages.length, 1, 'Completed task result was lost or duplicated');
     assert.equal(finalMessages[0].to_user_id, CHAT, 'Task result crossed chat ownership');
@@ -52,7 +52,7 @@ export const gatewayScenarios = [
     assert.equal(accepted.status, 'accepted');
     assert.equal((await outbox(h)).items.length, 0, 'Accepted notification left a replayable transition');
     const sends = h.wechat.sent.length;
-    assert.equal((await h.poll({ notifications: true })).code, 0);
+    assert.equal((await h.poll()).code, 0);
     assert.equal(h.wechat.sent.length, sends);
     assert.equal(countTask(h), 1);
     const deliveries = await h.pool.query('SELECT chat_id, data FROM result_deliveries');
@@ -102,7 +102,7 @@ export const gatewayScenarios = [
   ['notification-claim-commit-response-lost', async h => {
     const { delivery } = await finishTask(h);
     const fault = h.control.failHttp(entry => entry.path === `/v1/deliveries/${delivery.id}/claim`);
-    const running = h.wechat.start({ ...h.gatewayOptions, notifications: true, mode: '--poll-once' });
+    const running = h.wechat.start({ ...h.gatewayOptions, mode: '--poll-once' });
     const committed = await h.entered(fault.entered, 'notification claim commit');
     assert.equal(committed.status, 200);
     await h.wechat.kill(running);
@@ -111,7 +111,7 @@ export const gatewayScenarios = [
     const attemptId = persisted.attemptId;
     await h.control.restart(); await h.waitNode(true);
     const before = h.wechat.sent.length;
-    assert.equal((await h.poll({ notifications: true })).code, 0);
+    assert.equal((await h.poll()).code, 0);
     const accepted = await h.delivery(delivery.id);
     assert.equal(accepted.status, 'accepted'); assert.equal(accepted.attemptId, attemptId);
     assert.equal(h.wechat.sent.length, before + 1);
@@ -124,7 +124,7 @@ export const gatewayScenarios = [
   ['notification-receipt-commit-response-lost', async h => {
     const { delivery } = await finishTask(h);
     const fault = h.control.failHttp(entry => entry.path === `/v1/deliveries/${delivery.id}/receipt`);
-    const running = h.wechat.start({ ...h.gatewayOptions, notifications: true, mode: '--poll-once' });
+    const running = h.wechat.start({ ...h.gatewayOptions, mode: '--poll-once' });
     const committed = await h.entered(fault.entered, 'notification receipt commit');
     assert.equal(committed.status, 200);
     await h.wechat.kill(running);
@@ -132,7 +132,7 @@ export const gatewayScenarios = [
     assert.equal((await h.delivery(delivery.id)).status, 'accepted');
     const before = h.wechat.sent.length;
     await h.control.restart(); await h.waitNode(true);
-    assert.equal((await h.poll({ notifications: true })).code, 0);
+    assert.equal((await h.poll()).code, 0);
     assert.equal(h.wechat.sent.length, before, 'Lost receipt response repeated an accepted notification');
     assert.equal((await outbox(h)).items.length, 0);
     h.evidence('assertions', { receiptIntentPersisted: true, controllerReceipt: 'accepted', resends: 0,
@@ -141,18 +141,18 @@ export const gatewayScenarios = [
   ['notification-send-unknown', async h => {
     const { delivery } = await finishTask(h);
     const send = h.wechat.nextSendFault('hold');
-    const running = h.wechat.start({ ...h.gatewayOptions, notifications: true, mode: '--poll-once' });
+    const running = h.wechat.start({ ...h.gatewayOptions, mode: '--poll-once' });
     await h.entered(send.entered, 'notification send in flight');
     assert(await recordedInFlight(h));
     await h.wechat.kill(running); send.drop();
     await h.control.restart(); await h.waitNode(true);
     const before = h.wechat.sent.length;
-    assert.equal((await h.poll({ notifications: true })).code, 0);
+    assert.equal((await h.poll()).code, 0);
     assert.equal((await h.delivery(delivery.id)).status, 'uncertain');
     assert.equal(h.wechat.sent.length, before, 'Unknown notification was blindly resent');
     assert.equal((await outbox(h)).items.length, 0);
     await delay(OBSERVE_MS);
-    assert.equal((await h.poll({ notifications: true })).code, 0);
+    assert.equal((await h.poll()).code, 0);
     assert.equal(h.wechat.sent.length, before);
     assert.equal(countTask(h), 1);
     h.evidence('assertions', { notificationStatus: 'uncertain', resends: 0, taskStarts: 1, phoneReceiptProven: false });
