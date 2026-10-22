@@ -6,11 +6,12 @@ import { createServer } from 'node:https';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { PROJECT_ROOT, verificationEnvironment } from '../../scripts/verify.mjs';
-import { stopTestProcess } from './cleanup.mjs';
+import { stopTestProcess, withTestCleanup } from './cleanup.mjs';
 
 const REQUEST_LIMIT_BYTES = 64 * 1024;
 const PROCESS_TIMEOUT_MS = 30_000;
 const OPENSSL_TIMEOUT_MS = 10_000;
+const PROCESS_GROUP_STOP_MS = 5_000;
 const DEFAULT_POLL_INTERVAL_MS = 25;
 const DEFAULT_POLL_TIMEOUT_MS = 100;
 const WECHAT_TOKEN = 'synthetic-reliability-wechat-token';
@@ -47,7 +48,8 @@ export async function createWechatFixture({ dir, env = verificationEnvironment()
   const config = join(dir, 'wechat-openssl.cnf');
   const accountPath = join(dir, 'wechat-account.json'), statePath = join(dir, 'wechat-state.json');
   const healthPath = join(dir, 'wechat-health.json');
-  const incoming = [], sent = [], polls = [], errors = [], processes = [], faults = [], held = new Set();
+  const sdkLogPath = join(dir, 'sdk-processes.jsonl'), sdkAuditPath = join(dir, 'sdk-spawn-audit.mjs');
+  const incoming = [], sent = [], polls = [], errors = [], processes = [], faults = [], pollFaults = [], held = new Set();
   let active, lastOptions, offline = false;
   const record = value => {
     const item = { at: new Date().toISOString(), ...value };
@@ -55,6 +57,36 @@ export async function createWechatFixture({ dir, env = verificationEnvironment()
   };
   const healthy = () => { if (errors.length) throw new AggregateError(errors, 'WeChat fixture handler failed'); };
   const cleanEnv = verificationEnvironment(env);
+  // Observe the real SDK subprocess. Only auxiliary external MCP/telemetry are
+  // disabled; the native executable, main model and bound control MCP stay real.
+  await writeFile(sdkAuditPath, `import { createRequire, syncBuiltinESMExports } from 'node:module';
+import { appendFileSync } from 'node:fs';
+const childProcess = createRequire(import.meta.url)('node:child_process');
+const spawn = childProcess.spawn;
+const record = item => appendFileSync(${JSON.stringify(sdkLogPath)}, JSON.stringify(item) + '\\n');
+childProcess.spawn = function(file, args, options) {
+  const native = /(?:^|[/\\\\])codex(?:\\.exe)?$/.test(String(file));
+  const [command, ...nativeArgs] = args;
+  const forwarded = native ? [command, '--config', 'mcp_servers.openaiDeveloperDocs.enabled=false',
+    '--config', 'analytics.enabled=false', '--config', 'feedback.enabled=false',
+    '--config', 'check_for_update_on_startup=false', ...nativeArgs] : args;
+  const child = spawn.call(this, file, forwarded, options);
+  if (native) {
+    record({ event: 'spawn', pid: child.pid, executable: String(file), cwd: options?.cwd });
+    child.stderr.on('data', bytes => {
+      let text = bytes.toString();
+      for (const name of ['CODEX_API_KEY', 'OPENAI_API_KEY', 'LEADER_TURN_MCP_TOKEN']) {
+        if (options?.env?.[name]) text = text.replaceAll(options.env[name], '[synthetic-secret]');
+      }
+      record({ event: 'stderr', pid: child.pid, text });
+    });
+    child.once('exit', (code, signal) => record({ event: 'exit', pid: child.pid, code, signal }));
+    child.once('error', error => record({ event: 'error', pid: child.pid, code: error.code, message: error.message }));
+  }
+  return child;
+};
+syncBuiltinESMExports();
+`, { mode: 0o600 });
   await writeFile(config, '[req]\ndistinguished_name=dn\n[dn]\n[v3]\nsubjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,digitalSignature,keyEncipherment,keyCertSign\nextendedKeyUsage=serverAuth\n', { mode: 0o600 });
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-sha256',
     '-subj', '/CN=127.0.0.1', '-config', config, '-extensions', 'v3', '-keyout', key, '-out', certificate],
@@ -74,6 +106,15 @@ export async function createWechatFixture({ dir, env = verificationEnvironment()
         const messages = incoming.slice(offset);
         polls.push({ cursor, count: messages.length });
         record({ event: 'wechat.poll', cursor, count: messages.length });
+        const faultIndex = pollFaults.findIndex(fault => polls.length >= fault.afterPolls);
+        if (faultIndex >= 0) {
+          const [fault] = pollFaults.splice(faultIndex, 1);
+          held.add(response); response.once('close', () => held.delete(response));
+          fault.response = response;
+          fault.value = { ret: 0, get_updates_buf: `${CURSOR_PREFIX}${incoming.length}`, msgs: messages };
+          fault.enter({ cursor, count: messages.length });
+          return;
+        }
         json(response, { ret: 0, get_updates_buf: `${CURSOR_PREFIX}${incoming.length}`, msgs: messages });
         return;
       }
@@ -114,18 +155,28 @@ export async function createWechatFixture({ dir, env = verificationEnvironment()
     lastOptions = { ...options };
     const { controllerUrl = 'http://127.0.0.1:1', controllerToken = env.CONTROLLER_TOKEN || 'synthetic-reliability-controller-token',
       notifications = false, mode = '--run', pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
-      pollTimeoutMs = DEFAULT_POLL_TIMEOUT_MS, sendBudget, contextWindowMs, maxChars, extraArgs = [] } = options;
-    const args = ['gateway/dist/index.js', mode, '--leader-mode', 'controller', '--controller-url', controllerUrl,
+      pollTimeoutMs = DEFAULT_POLL_TIMEOUT_MS, sendBudget, contextWindowMs, maxChars, extraArgs = [],
+      leaderMode = 'controller', leaderRoot = join(dir, 'leader'), leaderModel,
+      sdkBaseUrl, sdkApiKey } = options;
+    const args = [...(leaderMode === 'codex' ? ['--import', sdkAuditPath] : []),
+      'gateway/dist/index.js', mode, '--leader-mode', leaderMode, '--controller-url', controllerUrl,
       '--credentials-path', accountPath, '--state-path', statePath, '--health-path', healthPath,
       '--wechat-base-url', url, '--poll-interval-ms', String(pollIntervalMs), '--poll-timeout-ms', String(pollTimeoutMs)];
+    if (leaderMode === 'codex') {
+      assert(sdkBaseUrl?.startsWith('http://127.0.0.1:') && sdkApiKey, 'SDK fixture requires its own local model and synthetic key');
+      args.push('--leader-root', leaderRoot, '--leader-model', leaderModel);
+    }
     if (notifications) args.push('--notifications');
     for (const [flag, value] of [['--send-budget', sendBudget], ['--context-window-ms', contextWindowMs], ['--max-chars', maxChars]]) {
       if (value !== undefined) args.push(flag, String(value));
     }
     args.push(...extraArgs);
-    const child = spawn(process.execPath, args, { cwd: PROJECT_ROOT,
-      env: { ...cleanEnv, CONTROLLER_TOKEN: controllerToken, NODE_EXTRA_CA_CERTS: certificate }, stdio: ['ignore', 'pipe', 'pipe'] });
-    const running = { child, stdout: '', stderr: '' };
+    const processGroup = leaderMode === 'codex' && process.platform !== 'win32';
+    const child = spawn(process.execPath, args, { cwd: PROJECT_ROOT, detached: processGroup,
+      env: { ...cleanEnv, CONTROLLER_TOKEN: controllerToken, NODE_EXTRA_CA_CERTS: certificate,
+        ...(leaderMode === 'codex' ? { GATEWAY_LEADER_API_KEY: sdkApiKey, GATEWAY_LEADER_BASE_URL: sdkBaseUrl } : {}) },
+      stdio: ['ignore', 'pipe', 'pipe'] });
+    const running = { child, processGroup, stdout: '', stderr: '' };
     child.stdout.setEncoding('utf8').on('data', chunk => { running.stdout += chunk; record({ event: 'gateway.output', stream: 'stdout', text: chunk }); });
     child.stderr.setEncoding('utf8').on('data', chunk => { running.stderr += chunk; record({ event: 'gateway.output', stream: 'stderr', text: chunk }); });
     running.done = new Promise((resolve, reject) => {
@@ -141,15 +192,56 @@ export async function createWechatFixture({ dir, env = verificationEnvironment()
     record({ event: 'gateway.spawn', pid: child.pid, mode });
     return running;
   }
+  function groupAlive(running) {
+    if (!running.processGroup || running.groupCleaned || !running.child.pid) return false;
+    const output = execFileSync('ps', ['-axo', 'pid=,pgid=,stat='], { encoding: 'utf8', timeout: PROCESS_GROUP_STOP_MS });
+    running.groupMembers = output.trim().split('\n').map(line => line.trim().split(/\s+/))
+      .filter(([, group]) => Number(group) === running.child.pid)
+      .map(([pid, , state]) => ({ pid: Number(pid), state }));
+    if (running.groupMembers.length) return true;
+    running.groupCleaned = true;
+    return false;
+  }
+  function signalGroup(running, signal) {
+    try { process.kill(-running.child.pid, signal); }
+    catch (error) {
+      if (error.code === 'ESRCH') { running.groupCleaned = true; return; }
+      if (error.code === 'EPERM' && (!groupAlive(running) || running.groupMembers.every(item => item.state.startsWith('Z')))) {
+        record({ event: 'sdk.process-group-reaping', groupId: running.child.pid, members: running.groupMembers });
+        return;
+      }
+      throw error;
+    }
+  }
+  async function stopGroup(running, signal = 'SIGTERM') {
+    if (!groupAlive(running)) return;
+    signalGroup(running, signal);
+    for (const force of [false, true]) {
+      const end = Date.now() + PROCESS_GROUP_STOP_MS;
+      while (groupAlive(running) && Date.now() < end) await delay(DEFAULT_POLL_INTERVAL_MS);
+      if (!groupAlive(running)) {
+        record({ event: 'sdk.process-group-cleaned', groupId: running.child.pid });
+        return;
+      }
+      if (!force) signalGroup(running, 'SIGKILL');
+    }
+    throw new Error('Owned SDK process group remained after forced cleanup');
+  }
   async function stop(running = active) {
     if (!running) return;
-    await stopTestProcess(running.child);
-    await deadline(running.done, 'Gateway stop');
+    await withTestCleanup(() => stopTestProcess(running.child), [
+      { label: 'owned SDK process group', cleanup: () => stopGroup(running) },
+      { label: 'Gateway output pipes', cleanup: () => deadline(running.done, 'Gateway stop') },
+    ]);
   }
   async function kill(running = active) {
     if (!running) return;
-    if (running.child.exitCode === null && running.child.signalCode === null) assert(running.child.kill('SIGKILL'));
-    return deadline(running.done, 'Gateway crash');
+    if (running.child.exitCode === null && running.child.signalCode === null) {
+      if (running.processGroup) signalGroup(running, 'SIGKILL');
+      else assert(running.child.kill('SIGKILL'));
+    }
+    try { return await deadline(running.done, 'Gateway crash'); }
+    finally { await stopGroup(running, 'SIGKILL'); }
   }
   async function runOnce(options = {}) {
     const running = start({ ...options, mode: '--poll-once' });
@@ -181,6 +273,15 @@ export async function createWechatFixture({ dir, env = verificationEnvironment()
     faults.push(fault);
     return fault;
   }
+  function holdPoll({ afterPolls = polls.length + 1 } = {}) {
+    let enter;
+    const entered = new Promise(resolve => { enter = resolve; });
+    const fault = { afterPolls, enter, entered,
+      release() { assert(fault.response); json(fault.response, fault.value); },
+      drop() { assert(fault.response); fault.response.destroy(); } };
+    pollFaults.push(fault);
+    return fault;
+  }
   try {
     const baseline = start({ mode: '--establish-baseline' });
     const result = await deadline(baseline.done, 'Gateway baseline');
@@ -190,7 +291,11 @@ export async function createWechatFixture({ dir, env = verificationEnvironment()
     try { await close(); } catch (cleanupError) { throw new AggregateError([error, cleanupError], 'WeChat fixture initialization failed'); }
     throw error;
   }
-  return { url, accountPath, statePath, healthPath, certificate, incoming, sent, polls, errors, processes, start, runOnce, stop, kill, close, nextSendFault,
+  return { url, accountPath, statePath, healthPath, sdkLogPath, certificate, incoming, sent, polls, errors, processes, start, runOnce, stop, kill, close, nextSendFault, holdPoll,
+    async readSdkProcesses() {
+      try { return (await readFile(sdkLogPath, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line)); }
+      catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+    },
     healthy, readState: async () => JSON.parse(await readFile(statePath, 'utf8')),
     setOffline(value) { offline = Boolean(value); record({ event: 'wechat.offline', value: offline }); },
     async restart(options = lastOptions) { await stop(); return start(options); },

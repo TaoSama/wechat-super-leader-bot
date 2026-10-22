@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { delay, OBSERVE_MS, TASK_RESULT } from './fixture.mjs';
 
+const LATER_NATIVE_RESULT = 'SYNTHETIC_LATER_INDEPENDENT_RESULT_DO_NOT_ATTRIBUTE_TO_ORIGINAL';
+
 export const recoveryScenarios = [
   ['controller-claim-before-dispatch', async h => {
     const held = h.control.holdFrame(({ direction, frame }) => direction === 'controller-daemon' && frame.type === 'command');
@@ -30,13 +32,24 @@ export const recoveryScenarios = [
     await h.control.restart();
     held.release();
     h.native.complete(start.turnId, TASK_RESULT);
+    const later = h.native.appendExternalCompletedTurn({ prompt: '合成原任务之后的独立任务', output: LATER_NATIVE_RESULT });
+    assert.notEqual(later.id, start.turnId);
+    assert.equal(h.native.turns.at(-1).id, later.id, 'Independent synthetic turn must be the latest native history');
+    assert.equal(h.native.starts.length, 1, 'External synthetic history must not count as a Daemon dispatch');
     await h.native.startDaemon();
     await h.waitNode(true);
     const completed = await h.waitCommand(response.body.commandId, 'completed');
+    assert.equal(completed.commandId, response.body.commandId);
+    assert.equal(completed.requestId, response.body.requestId);
+    assert.equal(completed.nodeId, response.body.nodeId);
+    assert.equal(completed.sessionId, h.native.sessionId);
     assert.equal(completed.turnId, start.turnId); assert.equal(completed.output, TASK_RESULT);
+    assert.notEqual(completed.output, LATER_NATIVE_RESULT, 'Recovery substituted the latest unrelated native turn');
     await delay(OBSERVE_MS);
     assert.equal(h.native.starts.length, 1, 'Journal recovery started the original task twice');
-    h.evidence('assertions', { exactTurnRecovered: start.turnId, dispatches: 1, controllerCrash: true, daemonCrash: true });
+    h.evidence('assertions', { originalCommandId: completed.commandId, exactTurnRecovered: start.turnId,
+      latestIndependentTurn: later.id, nativeHistoryTurns: h.native.turns.length, latestTurnNotUsed: true,
+      dispatches: 1, controllerCrash: true, daemonCrash: true });
   }],
   ['native-start-unknown-no-blind-retry', async h => {
     h.native.holdNextStart();
