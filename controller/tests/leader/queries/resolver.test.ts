@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { NaturalLanguageResolver } from "../../../src/leader/queries/resolver.js";
 import { ScopedSession } from "../../../src/types.js";
+import { queueSendRoute } from "../../../src/commands/queue.js";
+import { selectSendRoute } from "../../../src/sessions/send-eligibility.js";
 
 describe("NaturalLanguageResolver", () => {
   const resolver = new NaturalLanguageResolver();
@@ -124,7 +126,7 @@ describe("NaturalLanguageResolver", () => {
     expect(res).toMatchObject({ action: "send_session", nodeId: "demoair", prompt: "pnpm test" });
   });
 
-  it("uses desktop eligibility for explicit, single and contextual targets without native fallback", () => {
+  it("admits known desktop routes for explicit, single and contextual targets while dispatch stays blocked", () => {
     const now = Date.now();
     const desktop: ScopedSession = { ...sessions[0], loaded: false, status: "notLoaded", capabilities: ["read"],
       sendAvailability: { route: "desktop-owner", state: "ready", observedAt: new Date(now).toISOString(), validUntil: new Date(now + 45000).toISOString() } };
@@ -138,6 +140,22 @@ describe("NaturalLanguageResolver", () => {
     desktop.status = "idle";
     desktop.capabilities = ["read", "send"];
     desktop.sendAvailability!.state = "blocked";
-    for (const entry of cases) expect(resolver.resolve(entry.text, entry.context).action).toBe("unknown");
+    for (const entry of cases) expect(resolver.resolve(entry.text, entry.context).action).toBe("send_session");
+    expect(queueSendRoute(desktop)).toBe("desktop-owner");
+    expect(selectSendRoute(desktop).ready).toBe(false);
+    desktop.sendAvailability!.reason = "busy";
+    desktop.sendAvailability!.observedAt = new Date(now - 180000).toISOString();
+    desktop.sendAvailability!.validUntil = new Date(now - 135000).toISOString();
+    desktop.desktopObservation = { source:"codex-desktop",status:"active",availability:"available",observedAt:new Date(now).toISOString() };
+    for (const entry of cases) expect(resolver.resolve(entry.text, entry.context).action).toBe("send_session");
+    expect(selectSendRoute(desktop).ready).toBe(false);
+  });
+
+  it("admits verified resume capability without treating unloaded as readonly", () => {
+    const resume: ScopedSession = { ...sessions[0], loaded:false,status:"notLoaded",capabilities:["read","resume-send"] };
+    expect(resolver.resolve("让 session-1 执行：fixture", {sessions:[resume]}).action).toBe("send_session");
+    expect(queueSendRoute(resume)).toBe("app-server-resume");
+    resume.capabilities=["read"];
+    expect(resolver.resolve("让 session-1 执行：fixture", {sessions:[resume]}).action).toBe("unknown");
   });
 });

@@ -16,9 +16,9 @@
 .header-actions button { min-width: 44px; min-height: 44px; display: inline-flex; justify-content: center; align-items: center; gap: 6px; padding: 8px; color: var(--text-secondary); border-radius: 8px; font-size: 12px; }
 .header-actions button:hover { background: var(--sidebar-hover); }
 .header-actions .utilities-toggle { display: none; }
-.header-connection { display: flex; align-items: center; gap: 8px; color: var(--accent-bright); font-size: 12px; margin-right: 8px; white-space: nowrap; }
+.header-connection { display: flex; align-items: center; gap: 8px; color: var(--status-success); font-size: 12px; margin-right: 8px; white-space: nowrap; }
 .header-connection small { display: block; margin-top: 2px; color: var(--text-secondary); font-size: 12px; }
-.connection-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent-bright); }
+.connection-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--status-success); }
 .header-connection.degraded, .degraded small { color: var(--warning); }
 .degraded .connection-dot { background: var(--warning); }
 @media (min-width: 720px) and (max-width: 1023px) {
@@ -35,11 +35,7 @@
   .primary-nav button.active { display: none; }
   .header-actions { margin-left: 0; position: static; }
   .header-actions .utilities-toggle { display: inline-flex; }
-  .utility-actions { display: none; position: absolute; right: max(12px, env(safe-area-inset-right, 0px)); top: calc(64px + env(safe-area-inset-top, 0px)); padding: 8px; min-width: 208px; align-items: stretch; flex-direction: column; background: var(--surface-0); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 8px 24px #0003; }
-  .utilities-open .utility-actions { display: flex; }
-  .utility-actions .header-connection { order: -1; padding: 8px; margin: 0; }
-  .utility-actions button { justify-content: flex-start; width: 100%; gap: 12px; font-size: 14px; }
-  .utility-actions .theme-toggle::after { content: "切换明暗外观"; }
+  .utility-actions { display: none; }
   .mobile-detail-open .app-header { display: none; }
   .main-workspace { overflow: hidden; }
 }

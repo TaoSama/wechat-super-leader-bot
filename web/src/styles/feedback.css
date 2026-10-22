@@ -5,11 +5,12 @@
 .history-context-notice { grid-column: 1 / -1; }
 .composer-error { font-size: 12px; margin-bottom: 8px; }
 .send-receipt { color: var(--text-secondary); font-size: 12px; border-left: 2px solid var(--accent-bright); padding: 6px 12px; margin-bottom: 12px; }
-.send-receipt > span { color: var(--accent-bright); }
+.send-receipt > span { color: var(--status-success); }
 .send-receipt p { margin-top: 4px; }
 .send-receipt pre { white-space: pre-wrap; max-height: 120px; overflow: auto; }
 .send-receipt summary { min-height: 44px; cursor: pointer; display: flex; align-items: center; }
 .receipt-uncertain { border-color: var(--warning); }
+.receipt-uncertain > span { color: var(--warning); }
 .receipt-details > summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; gap: 8px; }
 .receipt-failed { border-color: var(--danger); }
 .receipt-failed > span { color: var(--danger); }

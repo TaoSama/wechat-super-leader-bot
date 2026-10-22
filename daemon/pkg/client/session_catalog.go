@@ -103,13 +103,7 @@ func (d *Daemon) readSession(ctx context.Context, sessionID string) (string, err
 		return d.adapter.ReadSession(ctx, sessionID)
 	}
 	d.snapshotMu.RLock()
-	knownToControl := false
-	for _, session := range d.sessionSnapshot {
-		if session.ID == sessionID {
-			knownToControl = true
-			break
-		}
-	}
+	_, knownToControl := d.managedSessionLocked(sessionID)
 	d.snapshotMu.RUnlock()
 	if knownToControl {
 		readCtx, cancel := context.WithTimeout(ctx, sessionDiscoveryTimeout)

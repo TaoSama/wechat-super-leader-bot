@@ -58,7 +58,7 @@ it("keeps risks visible while secondary machine, mode and completed evidence sta
 it("summary counts filter actual command states and completed opens its evidence group", () => {
   setup();
   fireEvent.click(screen.getByRole("button", { name: "查看需要处理指令 3 条" }));
-  expect(screen.getByLabelText("按指令状态过滤")).toHaveValue("attention");
+  expect(screen.getByLabelText("按指令状态过滤")).toHaveTextContent("需要处理");
   expect(screen.getByTestId("command-item-input-written")).toBeVisible();
   expect(screen.queryByTestId("command-item-accepted")).toBeNull();
   expect(screen.queryByTestId("command-item-completed")).toBeNull();
@@ -72,7 +72,7 @@ it("summary counts filter actual command states and completed opens its evidence
   fireEvent.click(within(completed).getByText("指令详情与回执"));
   expect(within(completed).getByText("精确完成回执正文")).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "清空指令筛选" }));
-  expect(screen.getByLabelText("按指令状态过滤")).toHaveValue("ALL");
+  expect(screen.getByLabelText("按指令状态过滤")).toHaveTextContent("全部状态");
   expect(screen.getByTestId("command-item-uncertain")).toBeVisible();
 });
 
@@ -83,12 +83,13 @@ it("an empty status and machine combination can recover by clearing both filters
   expect(screen.getByText("暂无匹配的指令审计记录")).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "清空指令筛选" }));
   expect(props.onSelectNodeId).toHaveBeenCalledExactlyOnceWith(null);
-  expect(screen.getByLabelText("按指令状态过滤")).toHaveValue("ALL");
+  expect(screen.getByLabelText("按指令状态过滤")).toHaveTextContent("全部状态");
 });
 
 it("compact machine scope and expanded machine cards share the same selection callback", () => {
   const { props } = setup();
-  fireEvent.change(screen.getByLabelText("筛选看板机器"), { target: { value: "remote" } });
+  fireEvent.click(screen.getByRole("combobox", { name: "筛选看板机器" }));
+  fireEvent.click(screen.getByRole("option", { name: "remote" }));
   expect(props.onSelectNodeId).toHaveBeenLastCalledWith("remote");
   fireEvent.click(screen.getByText("机器状态"));
   fireEvent.click(screen.getByRole("button", { name: "按节点 local 筛选会话与指令" }));
@@ -99,8 +100,10 @@ it("compact machine scope and expanded machine cards share the same selection ca
 
 it("retains a disappeared machine selection with a visible recovery action", () => {
   const { props } = setup("missing");
-  expect(screen.getByLabelText("筛选看板机器")).toHaveValue("missing");
-  expect(screen.getByRole("option", { name: "missing · 未报告" })).toBeInTheDocument();
+  expect(screen.getByLabelText("筛选看板机器")).toHaveTextContent("missing · 未报告");
+  fireEvent.click(screen.getByRole("combobox", { name: "筛选看板机器" }));
+  expect(screen.getByRole("option", { name: "missing · 未报告" })).toHaveAttribute("aria-selected", "true");
+  fireEvent.click(screen.getByRole("button", { name: "关闭筛选看板机器" }));
   fireEvent.click(screen.getByRole("button", { name: "清除机器筛选" }));
   expect(props.onSelectNodeId).toHaveBeenCalledExactlyOnceWith(null);
 });
@@ -109,7 +112,8 @@ it("command status selection follows the parent state and reports selection chan
   const onStatusFilterChange = vi.fn();
   const props = { commands: data.commands, selectedNodeId: null, statusFilter: "accepted" as const, onStatusFilterChange };
   const { rerender } = render(<CommandsSection {...props} />);
-  fireEvent.change(screen.getByLabelText("按指令状态过滤"), { target: { value: "uncertain" } });
+  fireEvent.click(screen.getByRole("combobox", { name: "按指令状态过滤" }));
+  fireEvent.click(screen.getByRole("option", { name: /^状态存疑/ }));
   expect(onStatusFilterChange).toHaveBeenCalledExactlyOnceWith("uncertain");
   expect(screen.getByTestId("command-item-accepted")).toBeVisible();
   expect(screen.queryByTestId("command-item-uncertain")).toBeNull();

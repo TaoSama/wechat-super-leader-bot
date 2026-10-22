@@ -32,11 +32,11 @@ it("明暗外观切换即时生效，切换不重置当前草稿", async () => {
   await screen.findByText("可读的历史消息");
   fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "保留这段草稿" } });
   const shell = document.querySelector(".app-shell")!;
-  expect(shell).toHaveAttribute("data-theme", "dark");
-  fireEvent.click(screen.getByRole("button", { name: "切换明暗外观" }));
   expect(shell).toHaveAttribute("data-theme", "light");
   fireEvent.click(screen.getByRole("button", { name: "切换明暗外观" }));
   expect(shell).toHaveAttribute("data-theme", "dark");
+  fireEvent.click(screen.getByRole("button", { name: "切换明暗外观" }));
+  expect(shell).toHaveAttribute("data-theme", "light");
   expect(screen.getByLabelText("发送给当前会话")).toHaveValue("保留这段草稿");
 });
 
@@ -136,38 +136,43 @@ it("已有旧页游标时最新页413停止近顶自动加载，保留手动旧�
 it("机器和模型搜索可以交叉筛选，并提供匹配为空的反馈", async () => {
   render(<App />);
   await screen.findByTestId("session-row-local-session-one");
-  fireEvent.change(screen.getByLabelText("筛选机器"), { target: { value: "remote" } });
+  fireEvent.click(screen.getByLabelText("筛选机器"));
+  fireEvent.click(screen.getByRole("option", { name: "remote 在线" }));
   expect(screen.queryByTestId("session-row-local-session-one")).toBeNull();
   expect(screen.getByTestId("session-row-remote-session-two")).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("搜索会话"), { target: { value: "gpt-6.1-sol" } });
   expect(screen.getByText("没有匹配的会话")).toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText("筛选机器"), { target: { value: "" } });
+  fireEvent.click(screen.getByLabelText("筛选机器"));
+  fireEvent.click(screen.getByRole("option", { name: "全部机器" }));
   expect(screen.getByTestId("session-row-local-session-one")).toBeInTheDocument();
   expect(screen.queryByTestId("session-row-remote-session-two")).toBeNull();
 });
 
-it("紧凑机器与状态筛选保留原生选择语义、Tab焦点和选中后的控件身份", async () => {
+it("统一机器与状态筛选支持列表键盘选择、回焦点并保留控件身份", async () => {
   const user = userEvent.setup();
   render(<App />);
   await screen.findByTestId("session-row-local-session-one");
   const machine = screen.getByRole("combobox", { name: "筛选机器" });
-  expect(machine.tagName).toBe("SELECT");
+  expect(machine.tagName).toBe("BUTTON");
   expect(machine).toHaveClass("filter-select");
   screen.getByRole("textbox", { name: "搜索会话" }).focus();
   await user.tab({ shift: true });
   expect(machine).toHaveFocus();
-  await user.selectOptions(machine, "remote");
-  expect(machine).toHaveValue("remote");
+  await user.keyboard("{ArrowDown}");
+  expect(screen.getByRole("option", { name: "全部机器" })).toHaveFocus();
+  await user.keyboard("{End}{Enter}");
+  expect(machine).toHaveAttribute("data-value", "remote");
   expect(machine).toHaveFocus();
   expect(screen.getByRole("combobox", { name: "筛选机器" })).toBe(machine);
   expect(screen.queryByTestId("session-row-local-session-one")).toBeNull();
-  await user.click(screen.getByRole("button", { name: "Super Leader" }));
+  await user.click(screen.getByRole("button", { name: "工作看板" }));
   const status = screen.getByRole("combobox", { name: "按指令状态过滤" });
-  expect(status.tagName).toBe("SELECT");
+  expect(status.tagName).toBe("BUTTON");
   expect(status).toHaveClass("filter-select");
-  await user.selectOptions(status, "uncertain");
+  await user.click(status);
+  await user.click(screen.getByRole("option", { name: /状态存疑/ }));
   expect(status).toHaveFocus();
-  expect(status).toHaveValue("uncertain");
+  expect(status).toHaveAttribute("data-value", "uncertain");
   expect(screen.getByRole("combobox", { name: "按指令状态过滤" })).toBe(status);
   expect(screen.getByTestId("command-item-command-1")).toBeInTheDocument();
   expect(screen.queryByTestId("command-item-command-3")).toBeNull();
@@ -176,8 +181,8 @@ it("紧凑机器与状态筛选保留原生选择语义、Tab焦点和选中后�
 it("Leader按注意事项、进行中、完成分组且筛选不混淆执行状态", async () => {
   render(<App />);
   await screen.findByTestId("session-row-local-session-one");
-  fireEvent.click(screen.getByRole("button", { name: "Super Leader" }));
-  expect(screen.getByRole("button", { name: "Super Leader" })).toHaveAttribute("aria-current", "page");
+  fireEvent.click(screen.getByRole("button", { name: "工作看板" }));
+  expect(screen.getByRole("button", { name: "工作看板" })).toHaveAttribute("aria-current", "page");
   expect(screen.getByRole("region", { name: "需要处理" })).toHaveTextContent("不确定，需核验，勿自动重发");
   expect(within(screen.getByRole("region", { name: "执行中" })).getByTestId("command-status-command-3")).toHaveTextContent("已受理");
   const completed = screen.getByRole("region", { name: "最近完成" });
@@ -187,7 +192,8 @@ it("Leader按注意事项、进行中、完成分组且筛选不混淆执行状�
   expect(completedStatus).toBeVisible();
   expect(completedStatus).toHaveTextContent("执行完成");
   expect(screen.getByRole("region", { name: "Leader 运行模式" })).toHaveTextContent("leader-config-model");
-  fireEvent.change(screen.getByLabelText("按指令状态过滤"), { target: { value: "uncertain" } });
+  fireEvent.click(screen.getByLabelText("按指令状态过滤"));
+  fireEvent.click(screen.getByRole("option", { name: /状态存疑/ }));
   expect(screen.getByTestId("command-item-command-1")).toBeInTheDocument();
   expect(screen.queryByTestId("command-item-command-3")).toBeNull();
   expect(screen.queryByRole("region", { name: "最近完成" })).toBeNull();
@@ -198,7 +204,7 @@ it("Leader完整回执默认折叠，节点筛选和回到原会话保留草稿"
   fireEvent.click(await screen.findByTestId("session-row-local-session-one"));
   await screen.findByText("可读的历史消息");
   fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "继续这段草稿" } });
-  fireEvent.click(screen.getByRole("button", { name: "Super Leader" }));
+  fireEvent.click(screen.getByRole("button", { name: "工作看板" }));
   fireEvent.click(screen.getByText("查看已完成"));
   const completed = screen.getByTestId("command-item-command-5");
   const output = within(completed).getByText("完整输出只在详情中展开");

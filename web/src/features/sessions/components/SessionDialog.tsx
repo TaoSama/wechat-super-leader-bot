@@ -13,7 +13,7 @@ export function SessionDialog({ children, className, labelledBy, onClose, expand
     const rootOverflow = document.documentElement.style.overflow;
     closingRef.current = false;
     dialog.showModal();
-    dialog.querySelector<HTMLElement>("[data-dialog-close]")?.focus({ preventScroll: true });
+    (dialog.querySelector<HTMLElement>("[data-autofocus]") ?? dialog.querySelector<HTMLElement>("[data-dialog-close]"))?.focus({ preventScroll: true });
     document.body.style.overflow = "hidden";
     document.documentElement.style.overflow = "hidden";
     return () => {
@@ -32,7 +32,7 @@ export function SessionDialog({ children, className, labelledBy, onClose, expand
     onKeyDown={(event) => {
       if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); }
       if (event.key !== "Tab") return;
-      const elements = [...event.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex='0']")];
+      const elements = [...event.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex='0']")].filter(element => !element.closest("[hidden]"));
       const first = elements[0];
       const last = elements.at(-1);
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }

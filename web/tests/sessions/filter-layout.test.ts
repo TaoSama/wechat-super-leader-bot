@@ -19,7 +19,7 @@ const rule = (selector: string) => {
 };
 const declarations = (rule: Rule) => Object.fromEntries(rule.nodes.filter(node => node.type === "decl").map(node => [node.prop, node.value]));
 
-it("桌面原生筛选为32px紧凑控件，不填满剩余宽度或被flex拉伸", () => {
+it("桌面筛选触发器为32px紧凑控件，不填满剩余宽度或被flex拉伸", () => {
   expect(declarations(rule(".filter-select"))).toMatchObject({
     "min-height": "32px", "min-width": "44px", "max-width": "180px", width: "auto", flex: "0 1 auto",
     "align-self": "center", "line-height": "20px", padding: "4px 8px",
@@ -36,9 +36,9 @@ it("小屏和粗指针筛选保持44px触摸高度，横屏触摸设备也不缩
   expect(declarations(control)).toMatchObject({ "min-height": "44px", "padding-block": "10px" });
 });
 
-it("键盘select保留清晰焦点，节点筛选选中样式不增加尺寸", () => {
-  const focus = stylesheet.nodes.find(node => node.type === "rule" && node.selectors.includes("select:focus-visible"));
-  if (!focus || focus.type !== "rule") throw new Error("Missing native select keyboard focus rule");
+it("键盘筛选触发器保留清晰焦点，节点筛选选中样式不增加尺寸", () => {
+  const focus = stylesheet.nodes.find(node => node.type === "rule" && node.selectors.includes("button:focus-visible"));
+  if (!focus || focus.type !== "rule") throw new Error("Missing filter trigger keyboard focus rule");
   expect(declarations(focus)).toMatchObject({ outline: "3px solid var(--accent-teal)", "outline-offset": "3px" });
   for (const property of ["padding", "width", "height", "min-height", "transform"]) {
     expect(declarations(rule(".node-card.selected"))).not.toHaveProperty(property);
