@@ -205,6 +205,21 @@ export class ControllerServer {
     });
     this.app.use(createReadResponseCompression());
     this.app.use(express.json({ limit: "1mb" }));
+    this.app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
+      if (typeof error === "object" && error !== null && "status" in error && "type" in error) {
+        const tooLarge = error.status === 413 && error.type === "entity.too.large";
+        const unsupportedEncoding = error.status === 415 &&
+          (error.type === "charset.unsupported" || error.type === "encoding.unsupported");
+        if (tooLarge || unsupportedEncoding) {
+          console.error("Controller request failed:", tooLarge ? "JsonBodyTooLarge" : "UnsupportedJsonBodyEncoding");
+          res.status(tooLarge ? 413 : 415).json({
+            error: tooLarge ? "JSON body too large" : "Unsupported JSON body encoding",
+          });
+          return;
+        }
+      }
+      next(error);
+    });
     this.app.use("/auth", createConsoleAuthRouter(this.consoleAuth));
     this.app.use("/v1/result-artifacts", createResultArtifactRouter(this.taskNotifications.results, () => this.config.allowedChatIds, this.now));
     if (this.taskNotifications.backgroundArtifacts) {
