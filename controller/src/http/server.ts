@@ -272,7 +272,7 @@ export class ControllerServer {
 
       try {
         const command = await this.commands.submit(parsed.data, parsed.data.action === "read" ? 5000 : 0);
-        res.status(["queued","pending"].includes(command.status) ? 202 : 200).json(publicCommand(command));
+        res.status(["admitting","queued","pending"].includes(command.status) ? 202 : 200).json(publicCommand(command));
       } catch (error) {
         if (error instanceof CommandError || error instanceof ConflictError) {
           res.status(error instanceof ConflictError ? 409 : error.httpStatus).json({ error: error.message });

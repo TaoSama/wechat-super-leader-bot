@@ -52,6 +52,7 @@ export function nextCommandState(cmd: CommandRecord, status: CommandRecord["stat
   validateStoredCommandInput(cmd);
   validateCommandTurnBinding(cmd, status, turnId, inputReceipt, output, error);
   if (["completed", "failed", "input-written", "cancelled", "expired"].includes(cmd.status)) return cmd;
+  if (cmd.status === "admitting" && !["failed", "expired"].includes(status)) throw new ConflictError("Command admission has not completed");
   if (cmd.status === "queued" && !["failed", "expired", "cancelled"].includes(status)) throw new ConflictError("Queued command has not been dispatched");
   return { ...cmd, status, turnId: turnId ?? cmd.turnId,
     ...(inputReceipt ? { inputReceipt: structuredClone(inputReceipt) } : {}),
@@ -66,6 +67,8 @@ export function validateStoredCommandInput(cmd: CommandRecord): void {
   if (cmd.deliveryMode !== undefined) DeliveryModeSchema.parse(cmd.deliveryMode);
   if (cmd.deliveryMode === "steer" ? !isValidTurnId(cmd.expectedTurnId) : cmd.expectedTurnId !== undefined) throw new ConflictError("Invalid command delivery identity");
   if (cmd.authority !== undefined) CommandAuthoritySchema.parse(cmd.authority);
+  if (cmd.status === "admitting" && (cmd.action !== "send" || !cmd.authority || !cmd.sendRoute || cmd.sendRoute === "terminal-pane" ||
+      cmd.turnId !== undefined || cmd.inputReceipt !== undefined)) throw new ConflictError("Invalid admitting command");
   if (cmd.status === "queued" && (cmd.action !== "send" || !cmd.authority)) throw new ConflictError("Queued command requires durable authorization");
   if (cmd.sendRoute === "terminal-pane" || cmd.status === "input-written" || cmd.inputReceipt !== undefined) {
     validateCommandTurnBinding(cmd, cmd.status, cmd.turnId, cmd.inputReceipt, cmd.output, cmd.error);

@@ -38,7 +38,7 @@ export async function readExecutionView(store: Pick<IStore, "findCommandByReques
       const invalidReceipt = command.status === "input-written" || command.inputReceipt !== undefined ||
         command.sendRoute === "terminal-pane" || command.sessionId.startsWith("terminal:") ||
         (command.status === "completed" || command.status === "accepted") && !validTurn;
-      steps.push({ ...step, status: invalidReceipt ? "uncertain" : command.status,
+      steps.push({ ...step, status: invalidReceipt ? "uncertain" : command.status === "admitting" ? "claimed" : command.status,
         commandId: command.commandId, ...(validTurn ? { turnId: command.turnId } : {}),
         output: command.output, error: invalidReceipt ? "Execution receipt has no valid exact turn" : command.error });
     } else if (attempt) {
