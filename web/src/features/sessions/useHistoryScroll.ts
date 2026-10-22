@@ -108,6 +108,13 @@ export function useHistoryScroll(options: Options) {
   }
 
   function followViewportResize(element: HTMLDivElement) {
+    // Zero height is an unmeasured/hidden viewport, not a previous reading
+    // window. Its first usable size must not turn a reader's scroll into follow.
+    if (measuredViewportHeightRef.current <= 0) {
+      measuredViewportHeightRef.current = element.clientHeight;
+      return false;
+    }
+    if (element.clientHeight <= 0) return false;
     const resized = measuredViewportHeightRef.current !== element.clientHeight;
     if (resized && bottomRef.current && !readingIntentRef.current) {
       const maximum = Math.max(0, element.scrollHeight - element.clientHeight);
@@ -198,7 +205,8 @@ export function useHistoryScroll(options: Options) {
     const visibilityChanged = visibleRef.current !== visible;
     const elementChanged = elementRef.current !== element;
     const reopened = visible && (visibilityChanged || elementChanged);
-    const viewportResized = element && measuredViewportHeightRef.current !== element.clientHeight;
+    const viewportResized = element && measuredViewportHeightRef.current > 0 && element.clientHeight > 0 &&
+      measuredViewportHeightRef.current !== element.clientHeight;
     if (!ownerChanged && !visibilityChanged && !elementChanged && processedRef.current?.items === options.items &&
       processedRef.current.loadingOlder === options.loadingOlder && !viewportResized) return;
     processedRef.current = { items: options.items, loadingOlder: options.loadingOlder };

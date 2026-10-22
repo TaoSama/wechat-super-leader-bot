@@ -93,7 +93,7 @@ function fixture(t: TestContext, tool = false, sendBudget = 1) {
 }
 
 for (const remainsFull of [false, true]) {
-  test(`engine journal backpressure drains an old reply and ${remainsFull ? "retains cursor after one retry" : "retries new inbound once"}`, async t => {
+  test(`refreshed budget drains the old engine reply before admission and ${remainsFull ? "retains cursor after one bounded retry" : "admits the new request directly"}`, async t => {
     const f = fixture(t, false, 4);
     f.start.commitCursor("cursor-before-backpressure");
     f.start.recordInboundContext("old-window", CHAT, Date.now() - 2000, true, "old-context");
@@ -115,11 +115,8 @@ for (const remainsFull of [false, true]) {
         operations.push(`reply-${replyCalls}`);
         assert.ok(replyCalls <= 2, "one poll must not loop indefinitely while the engine remains full");
         assert.equal(input.messageId, MESSAGE);
-        if (replyCalls === 1) {
-          assert.equal(Object.keys(f.start.outbox).length, 128);
-          throw new ReplyEngineBackpressureError();
-        }
-        assert.equal(released, true, "old receipt must release engine capacity before retrying the new request");
+        assert.equal(Object.keys(f.start.outbox).length, 127);
+        assert.equal(released, true, "old receipt must release engine capacity before admitting the new request");
         if (remainsFull) throw new ReplyEngineBackpressureError();
         return { text: "new reply" };
       },
@@ -141,16 +138,16 @@ for (const remainsFull of [false, true]) {
       assert.equal(f.start.syncBuf, "cursor-before-backpressure");
       assert.equal(f.start.isMessageProcessed(f.key), false);
       assert.deepEqual(f.sends, ["old reply"]);
-      assert.deepEqual(operations, ["reply-1", "get-old-0", "ack-old-0", "reply-2"]);
+      assert.deepEqual(operations, ["get-old-0", "ack-old-0", "reply-1", "reply-2"]);
     } else {
       const result = await gateway.pollOnce();
       assert.equal(result.processedCount, 1);
       assert.equal(f.start.syncBuf, "cursor-after-message");
       assert.equal(f.start.isMessageProcessed(f.key), true);
       assert.deepEqual(f.sends, ["old reply", "new reply"]);
-      assert.deepEqual(operations, ["reply-1", "get-old-0", "ack-old-0", "reply-2", `ack-${MESSAGE}`]);
+      assert.deepEqual(operations, ["get-old-0", "ack-old-0", "reply-1", `ack-${MESSAGE}`]);
     }
-    assert.equal(replyCalls, 2);
+    assert.equal(replyCalls, remainsFull ? 2 : 1);
     assert.equal(f.start.outbox[oldKey], undefined);
     assert.equal(Object.keys(f.start.outbox).length, 127);
     assert.deepEqual(f.counts, { models: 0, controllerPosts: 0, controllerGets: 0 });

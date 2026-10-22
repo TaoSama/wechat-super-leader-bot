@@ -171,28 +171,71 @@ func (a *controllerReplayAdapter) ReadSession(context.Context, string) (string, 
 	return "new command result", nil
 }
 
+const controllerFixtureIdleTimeout = 5 * time.Second
+
+type controllerProgressReadConn struct {
+	net.Conn
+	enabled atomic.Bool
+}
+
+func (c *controllerProgressReadConn) Read(p []byte) (int, error) {
+	if c.enabled.Load() {
+		if err := c.Conn.SetReadDeadline(time.Now().Add(controllerFixtureIdleTimeout)); err != nil {
+			return 0, err
+		}
+	}
+	return c.Conn.Read(p)
+}
+
+type controllerProgressListener struct{ net.Listener }
+
+func (l controllerProgressListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &controllerProgressReadConn{Conn: conn}, nil
+}
+
+type controllerAckJournal struct {
+	commandJournal
+	commandID string
+	acked     chan struct{}
+	once      sync.Once
+}
+
+func (j *controllerAckJournal) Ack(ack protocol.ResultAckMessage) error {
+	if err := j.commandJournal.Ack(ack); err != nil {
+		return err
+	}
+	if ack.CommandID == j.commandID {
+		j.once.Do(func() { close(j.acked) })
+	}
+	return nil
+}
+
 func TestControllerDurableReplayKeepsReaderLiveAndRecoversAfterReconnect(t *testing.T) {
 	adapter := &controllerReplayAdapter{readStarted: make(chan struct{})}
 	result := protocol.DaemonResultMessage{Type: "result", CommandID: "saved-result", Status: protocol.StatusCompleted,
 		Output: strings.Repeat("<", 2*1024*1024)}
 	var attempts atomic.Int32
 	serverResults := make(chan error, 2)
+	acked := make(chan struct{})
 	upgrader := websocket.Upgrader{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			serverResults <- err
 			return
 		}
+		// HTTP hijacking uses deadlines to interrupt its background reader.
+		// Only take over deadline renewal after that handoff has completed.
+		conn.UnderlyingConn().(*controllerProgressReadConn).enabled.Store(true)
 		defer func() {
 			if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 				t.Log(err)
 			}
 		}()
-		if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-			serverResults <- err
-			return
-		}
 		var hello protocol.DaemonHelloMessage
 		if err := conn.ReadJSON(&hello); err != nil {
 			serverResults <- err
@@ -218,7 +261,7 @@ func TestControllerDurableReplayKeepsReaderLiveAndRecoversAfterReconnect(t *test
 		for {
 			var got protocol.DaemonResultMessage
 			if err := conn.ReadJSON(&got); err != nil {
-				serverResults <- err
+				serverResults <- fmt.Errorf("read replay: %w", err)
 				return
 			}
 			if got.Type != "result" {
@@ -233,11 +276,21 @@ func TestControllerDurableReplayKeepsReaderLiveAndRecoversAfterReconnect(t *test
 					serverResults <- errors.New("reconnect lost the exact original result")
 					return
 				}
-				serverResults <- nil
+				// Do not race socket teardown against the reader's durable ACK.
+				select {
+				case <-acked:
+					serverResults <- nil
+				case <-time.After(controllerFixtureIdleTimeout):
+					serverResults <- errors.New("replayed result ACK was not persisted")
+				}
 				return
 			}
 		}
 	}))
+	// Keep the same five-second stall bound while allowing ongoing network
+	// progress and JSON/journal work to outlast a whole-session test deadline.
+	server.Listener = controllerProgressListener{server.Listener}
+	server.Start()
 	defer server.Close()
 	cfg := persistenceConfig(t.TempDir())
 	cfg.ControllerURL = "ws" + strings.TrimPrefix(server.URL, "http")
@@ -245,7 +298,9 @@ func TestControllerDurableReplayKeepsReaderLiveAndRecoversAfterReconnect(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	d.journal = &controllerAckJournal{commandJournal: d.journal, commandID: result.CommandID, acked: acked}
 	defer closeDaemon(t, d)
+	defer d.workers.Wait()
 	cmd := persistenceCommand(time.Now().Add(time.Minute).Format(time.RFC3339Nano))
 	cmd.CommandID = result.CommandID
 	if _, created, err := d.journal.Begin(cmd); err != nil || !created {
@@ -255,14 +310,14 @@ func TestControllerDurableReplayKeepsReaderLiveAndRecoversAfterReconnect(t *test
 		t.Fatal(err)
 	}
 	for attempt := 1; attempt <= 2; attempt++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err := d.runOnce(ctx)
+		ctx, cancel := context.WithCancel(context.Background())
+		runErr := d.runOnce(ctx)
 		cancel()
-		if err == nil {
+		if runErr == nil {
 			t.Fatal("fixture disconnect was not reported")
 		}
 		if err := <-serverResults; err != nil {
-			t.Fatal(err)
+			t.Fatalf("attempt %d: fixture=%v daemon=%v", attempt, err, runErr)
 		}
 		pending, err := d.journal.Unacked()
 		if err != nil {

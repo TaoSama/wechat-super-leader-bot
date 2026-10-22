@@ -24,6 +24,18 @@ export function validateTiming(input: CreateSchedule, now: number, scheduleId: s
   }
 }
 
+/** Align an unclaimed legacy H occurrence before dispatching it on the seeded plan. */
+export function alignHashedCronNextAt(schedule: Schedule, now: number): boolean {
+  if (schedule.timing.type !== "cron" || !schedule.timing.expression.includes("H") || schedule.nextAt === null || schedule.activeRunId) return false;
+  const nextAt = CronExpressionParser.parse(schedule.timing.expression, {
+    currentDate: new Date(schedule.nextAt - 1), tz: schedule.timezone, hashSeed: schedule.id,
+  }).next().getTime();
+  if (nextAt === schedule.nextAt) return false;
+  schedule.nextAt = nextAt;
+  schedule.updatedAt = now;
+  return true;
+}
+
 /** A downtime gap becomes one newest occurrence, never a replay of every missed tick. */
 export function dueOccurrence(schedule: Schedule, now: number): { scheduledAt: number; nextAt: number | null } {
   if (schedule.timing.type === "at") return { scheduledAt: schedule.nextAt!, nextAt: null };

@@ -16,7 +16,7 @@ export interface WorkerInput {
 export interface WorkerInspectOptions {
   /** Maintenance can observe an invocation without causing queued work to start. */
   resumeQueued?: boolean;
-  /** Restore the caller's durable bounds for receipts written before deadline support. */
+  /** Restore or extend bounds authorized in the caller's durable schedule. */
   launchDeadlineAt?: number;
   executionDeadlineAt?: number;
 }
