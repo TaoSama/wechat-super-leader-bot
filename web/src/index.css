@@ -6,6 +6,7 @@
 @import "./styles/leader.css";
 @import "./styles/feedback.css";
 @import "./styles/controls.css";
+@import "./styles/composer.css";
 
 @tailwind base;
 @tailwind components;
