@@ -32,7 +32,7 @@ export function claimed(item = notification(), attemptId = ATTEMPT): Notificatio
   return { ...item, status: "claimed", attemptId, attemptedAt: now, attemptExpiresAt: Math.min(now + 60000, item.expiresAt) };
 }
 export function harness(t: TestContext, options: {
-  enabled?: boolean; items?: Notification[]; baseline?: boolean; policy?: Partial<ContextPolicy>;
+  items?: Notification[]; baseline?: boolean; policy?: Partial<ContextPolicy>;
 } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-notifications-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -100,6 +100,6 @@ export function harness(t: TestContext, options: {
     return json(hooks.send ? await hooks.send() : { ret: 0, errcode: 0 });
   } });
   const ilink = createILink();
-  const gateway = new WeChatGateway({ stateManager: state, controller, ilink, notifications: options.enabled ?? true });
+  const gateway = new WeChatGateway({ stateManager: state, controller, ilink });
   return { gateway, controller, ilink, createILink, state, records, requests, sends, typings, hooks, accountPath, statePath };
 }

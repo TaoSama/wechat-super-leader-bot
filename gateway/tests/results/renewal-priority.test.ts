@@ -30,7 +30,7 @@ function fixture(t: TestContext, remaining: number, body = "ordinary", source: "
   f.state.putOutbox({ kind: "reply", source, chatId: "chat", messageId: "message", deliveryKey: "ordinary",
     splitMaxChars: 2_000, splitMultiPart: false, status: "pending" });
   const create = (state = f.state) => new WeChatGateway({ stateManager: state, ilink: state === f.state ? f.ilink : f.createILink(state),
-    controller: f.controller, replyEngine, notifications: true, resultClient: client,
+    controller: f.controller, replyEngine, resultClient: client,
     resultOutbox: new FileResultOutbox(`${f.statePath}.results.json`, () => state.getLoginFingerprint()) });
   return { ...f, client, reads, acknowledgements, create, gateway: create() };
 }

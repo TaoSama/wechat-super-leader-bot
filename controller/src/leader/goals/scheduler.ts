@@ -1,3 +1,4 @@
+import type { NotificationSource } from "../../notifications/contracts.js";
 import { randomUUID, createHash } from "node:crypto";
 import type { IStore } from "../../store/interface.js";
 import type { CommandService } from "../../commands/service.js";
@@ -12,7 +13,7 @@ const DECISION_TIMEOUT_MS = 90_000;
 const CONCURRENT_GOALS = 2;
 type Options = { now?: () => number; isChatAllowed?: (chatId: string) => boolean;
   canDispatch?: (goal: GoalRecord, targetIndex: number) => boolean | Promise<boolean>;
-  onChanged?: () => void; onError?: (error: unknown) => void };
+  onProgress?: (source: NotificationSource, createdAt: number) => void; onChanged?: () => void; onError?: (error: unknown) => void };
 export type GoalDecider = (input: GoalDecisionInput, signal: AbortSignal) => Promise<GoalDecision>;
 
 export class GoalScheduler {
@@ -88,7 +89,7 @@ export class GoalScheduler {
     if (goal.status === "blocked") return;
     if (!this.allowed(goal)) { await this.block(goal, "authorization_revoked"); return; }
     const view = await readGoalView(this.store, goal, this.now());
-    await this.store.enqueueProgressNotification({type:"goal",id:goal.id},this.now());
+    this.options.onProgress?.({ type: "goal", id: goal.id }, goal.createdAt);
     if (view.actions.some(a => ["uncertain", "failed", "cancelled", "expired", "input-written"].includes(a.status))) { await this.block(goal, "result_unavailable_or_failed"); return; }
     const last = goal.actions.at(-1), lastView = view.actions.at(-1);
     if (last && lastView?.status !== "completed") {

@@ -29,7 +29,7 @@ const PROCESS_MS = 30_000;
 const hash = text => createHash('sha256').update(text).digest('hex');
 const { values } = parseArgs({ options: { run: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } });
 if (!values.run || values.help) {
-  console.log('Usage: node tests/integration/leader/sdk-result-gateway.mjs --run\nRequires built Controller/Gateway with the Codex reply/getReply/ackReply contract and installed real @openai/codex-sdk. Runs the actual Gateway CLI and SDK against a generated fake Codex executable, loopback model, HTTPS iLink and private temporary workspaces. Never uses real model credentials, native Codex or production sessions.');
+  console.log('Usage: node tests/integration/leader/sdk-result-gateway.mjs --run\nRequires built Controller/Gateway with the Codex reply/getReply/ackReply contract. Runs the actual Gateway CLI and app-server transport against a generated protocol fixture, loopback model, HTTPS iLink and private temporary workspaces. Never uses real model credentials, native Codex or production sessions.');
 } else {
   await verifySdkResultGateway().catch(error => { console.error(error); process.exitCode = 1; });
 }
@@ -44,35 +44,54 @@ async function jsonBody(request) {
 }
 function respond(response, body) { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify(body)); }
 
-// Native SDK subprocess fixture: parse the real SDK CLI arguments using the
-// standard parser and speak its JSONL protocol. All execution counts and tool
+// App-server subprocess fixture: parse the transport CLI arguments using the
+// standard parser and speak its JSON-RPC protocol. All execution counts and tool
 // evidence are written by the subprocess itself, not injected into the engine.
 function fakeCodexSource() {
   return `#!${process.execPath}
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
+const readline = require('node:readline');
 const { parseArgs } = require('node:util');
-const { values, positionals } = parseArgs({ allowPositionals: true, options: {
-  config: { type: 'string', multiple: true }, model: { type: 'string' }, cd: { type: 'string' },
-  'experimental-json': { type: 'boolean' }, 'skip-git-repo-check': { type: 'boolean' },
-  sandbox: { type: 'string' }, 'thread-source': { type: 'string' }, 'add-dir': { type: 'string', multiple: true },
-  'output-schema': { type: 'string' }, image: { type: 'string', multiple: true },
+const { values, positionals } = parseArgs({ strict: true, allowPositionals: true, options: {
+  config: { type: 'string', multiple: true, short: 'c' }, listen: { type: 'string' },
 } });
 const settings = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixture.json'), 'utf8'));
 const emit = event => process.stdout.write(JSON.stringify(event) + '\\n');
-async function main() {
-  assert.equal(positionals[0], 'exec'); assert.equal(values['experimental-json'], true);
-  assert(values.cd); assert.equal(process.env.HOME, values.cd);
-  assert.equal(process.env.CODEX_HOME, path.join(values.cd, '.codex'));
-  let prompt = ''; for await (const chunk of process.stdin) prompt += chunk;
+const THREAD_ID = 'synthetic-sdk-thread', TURN_ID = 'synthetic-sdk-turn-' + process.pid;
+const methods = [];
+let resumed = false;
+assert.deepEqual(positionals, ['app-server']); assert.equal(values.listen, 'stdio://');
+const notify = (method, params) => emit({ method, params: { threadId: THREAD_ID, turnId: TURN_ID, ...params } });
+async function handle(request) {
+  methods.push(request.method);
+  if (request.method === 'initialize') {
+    assert.equal(request.params.capabilities.experimentalApi, true);
+    emit({ id: request.id, result: {} }); return;
+  }
+  if (request.method === 'initialized') { assert.equal(request.id, undefined); return; }
+  if (['thread/start', 'thread/resume'].includes(request.method)) {
+    assert.equal(request.params.cwd, process.env.HOME);
+    assert.equal(process.env.CODEX_HOME, path.join(request.params.cwd, '.codex'));
+    assert.equal(request.params.approvalPolicy, 'never');
+    resumed = request.method === 'thread/resume';
+    if (resumed) assert.equal(request.params.threadId, THREAD_ID);
+    emit({ id: request.id, result: { thread: { id: THREAD_ID } } }); return;
+  }
+  assert.equal(request.method, 'turn/start');
+  assert.equal(request.params.threadId, THREAD_ID);
+  assert.equal(request.params.input.length, 1); assert.equal(request.params.input[0].type, 'text');
+  const prompt = request.params.input[0].text;
   const match = prompt.match(/<current_user_message>(.+)<\\/current_user_message>/);
   assert(match); const input = JSON.parse(match[1]).text;
-  fs.appendFileSync(settings.nativeLog, JSON.stringify({ input, pid: process.pid, resumed: positionals.includes('resume') }) + '\\n');
-  emit({ type: 'thread.started', thread_id: 'synthetic-sdk-thread' });
+  fs.appendFileSync(settings.nativeLog, JSON.stringify({ input, pid: process.pid, resumed, methods }) + '\\n');
+  emit({ id: request.id, result: { turn: { id: TURN_ID } } });
   if (settings.tool && input !== settings.renewText) {
-    const config = values.config.find(value => value.startsWith('mcp_servers.wechat_control.url='));
-    assert(config); const url = JSON.parse(config.slice(config.indexOf('=') + 1));
+    const config = values.config.find(value => value.startsWith('mcp_servers='));
+    assert(config);
+    const servers = JSON.parse(config.slice(config.indexOf('=') + 1).replace(/("[^"]+")=/g, '$1:'));
+    const url = servers.wechat_control.url;
     assert.equal(new URL(url).hostname, '127.0.0.1');
     const response = await fetch(url, { method: 'POST', headers: {
       Authorization: 'Bearer ' + process.env.LEADER_TURN_MCP_TOKEN,
@@ -83,16 +102,20 @@ async function main() {
     assert.equal(JSON.parse(result.content[0].text).text, settings.controllerAck);
     fs.appendFileSync(settings.toolLog, JSON.stringify({ input, sawControllerAck: true }) + '\\n');
   }
-  emit({ type: 'item.completed', item: { type: 'agent_message', id: 'final', text: input === settings.renewText ? settings.renewReply : settings.finalText } });
-  emit({ type: 'turn.completed', usage: { input_tokens: 0, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0 } });
+  notify('item/completed', { item: { type: 'agentMessage', id: 'commentary', text: 'Synthetic commentary must not replace the final answer.', phase: 'commentary' } });
+  notify('item/completed', { item: { type: 'agentMessage', id: 'final', phase: 'final_answer', text: input === settings.renewText ? settings.renewReply : settings.finalText } });
+  notify('turn/completed', { turn: { id: TURN_ID, status: 'completed' } });
 }
-main().catch(error => { console.error(error); process.exitCode = 1; });
+let pending = Promise.resolve();
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  pending = pending.then(() => handle(JSON.parse(line))).catch(error => { console.error(error); process.exit(1); });
+});
 `;
 }
 
 export async function verifySdkResultGateway() {
   for (const tool of [false, true]) await verifyScenario(tool);
-  console.log('PASS real Gateway CLI + real Codex SDK process: pure chat preserves SDK final and tool-backed recovery preserves exact Controller reply, frozen chunks and native execution identity');
+  console.log('PASS real Gateway CLI + app-server subprocess protocol: pure chat preserves the final answer and tool-backed recovery preserves exact Controller reply, frozen chunks and execution identity');
 }
 
 async function verifyScenario(tool) {
@@ -228,6 +251,8 @@ globalThis.fetch = (input, init) => {
     assert.equal(executions.filter(item => item.input === initialText).length, 1);
     assert.equal(executions.filter(item => item.input === RENEW_TEXT).length, 1);
     assert.equal(executions[1].resumed, true, 'New inbound abandoned saved SDK thread');
+    assert.deepEqual(executions[0].methods, ['initialize', 'initialized', 'thread/start', 'turn/start']);
+    assert.deepEqual(executions[1].methods, ['initialize', 'initialized', 'thread/resume', 'turn/start']);
     const fetches = await readLines(fetchLog);
     assert.equal(fetches.filter(item => item.path === '/v1/messages' && item.method === 'POST').length, tool ? 1 : 0);
     assert.equal(fetches.filter(item => item.path.startsWith('/v1/messages/') && item.method === 'GET').length, 0, 'Engine source incorrectly recovered through Controller GET');
@@ -235,7 +260,7 @@ globalThis.fetch = (input, init) => {
     if (tool) assert.deepEqual(await readLines(toolLog), [{ input: initialText, sawControllerAck: true }]);
     const sentBeforeFinalRestart = sent.length; await run('--poll-once', { budget: 100 });
     assert.equal(sent.length, sentBeforeFinalRestart); assert.equal((await readLines(nativeLog)).length, 2);
-    console.log(`PASS ${tool ? 'tool-backed exact Controller reply' : 'pure-chat SDK final'} actual SDK CLI: engine source, one original native execution, exhausted-budget restart and replay blocked, true inbound resumes full rendered reply SHA ${hash(displayedReply)}, raw Markdown journal retained, accepted, zero Controller GET fallback`);
+    console.log(`PASS ${tool ? 'tool-backed exact Controller reply' : 'pure-chat final'} app-server transport: engine source, one original execution, exhausted-budget restart and replay blocked, true inbound resumes full rendered reply SHA ${hash(displayedReply)}, raw Markdown journal retained, accepted, zero Controller GET fallback`);
   }, [
     { label: 'synthetic SDK Gateway CLI', cleanup: () => stopTestProcess(child) },
     { label: 'synthetic Controller process', cleanup: () => controller?.stop() },
