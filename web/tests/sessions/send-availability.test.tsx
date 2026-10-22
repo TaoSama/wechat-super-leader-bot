@@ -125,6 +125,19 @@ describe("workspace send route feedback", () => {
     expect(screen.getByText("执行完成 (Completed)")).toBeInTheDocument();
   });
 
+  it("accepts a queued submission while a freshly idle owner is being checked", async () => {
+    const checking = desktop({ sendAvailability: ready({ state: "blocked", reason: "checking",
+      observedAt: "1970-01-01T00:00:00Z", validUntil: "1970-01-01T00:00:00Z" }) });
+    const { fetchMock } = setup(checking, async () => response({ ...command, status: "queued", turnId: undefined, output: undefined }));
+    const send = screen.getByRole("button", { name: "发送消息" });
+    expect(send).toBeEnabled();
+    await act(async () => fireEvent.click(send));
+    expect(sendCalls(fetchMock)).toHaveLength(1);
+    expect(screen.getByText("发送通道：原桌面会话")).toBeInTheDocument();
+    expect(screen.getByLabelText("发送给当前会话")).toHaveValue("");
+    expect(screen.queryByText("执行完成 (Completed)")).toBeNull();
+  });
+
   it("expires readiness locally without waiting for a heartbeat and retains the draft", async () => {
     const { fetchMock, unmount } = setup(desktop({ sendAvailability: ready({ validUntil: iso(1000) }) }));
     expect(screen.getByRole("button", { name: "发送消息" })).toBeEnabled();

@@ -236,7 +236,7 @@ func projectDesktopHistory(state map[string]any, sessionID string) (desktopHisto
 				}
 				item = map[string]any{"id": serverID, "type": "userMessage", "content": item["input"]}
 			}
-			wrapper := map[string]any{"item": item, "turnId": outputTurnID}
+			wrapper := map[string]any{"item": item, "turnId": outputTurnID, "turnStatus": turn["status"]}
 			historyItemTimes(wrapper, turn, item)
 			public, include := threadstate.PublicHistoryItem(wrapper)
 			if !include {

@@ -20,6 +20,9 @@ const (
 func (d *Daemon) managedSessionLocked(id string) (protocol.Session, bool) {
 	for _, session := range d.sessionSnapshot {
 		if session.ID == id {
+			if verified, ok := d.verifiedNativeRecoveryLocked(session, time.Now()); ok {
+				return verified, true
+			}
 			return session, true
 		}
 	}
@@ -35,12 +38,31 @@ func (d *Daemon) managedSessionLocked(id string) (protocol.Session, bool) {
 	return protocol.Session{}, false
 }
 
+// Only an explicitly unloaded, unresolved native row may be replaced by a
+// fresh exact read. A loaded or active writer always keeps native authority.
+func nativeRecoveryCandidate(session protocol.Session) bool {
+	return session.Provider == codex.ProviderCodexApp && session.Loaded != nil && !*session.Loaded && session.Status == "unknown"
+}
+
+func freshUnloadedResumeProof(session protocol.Session, now time.Time) bool {
+	return session.Loaded != nil && !*session.Loaded && freshManagedResumeTarget(session, now)
+}
+
+func (d *Daemon) verifiedNativeRecoveryLocked(session protocol.Session, now time.Time) (protocol.Session, bool) {
+	verified, ok := d.managedCatalog[session.ID]
+	return verified, ok && nativeRecoveryCandidate(session) && freshUnloadedResumeProof(verified, now) &&
+		!freshDesktopOwner(d.desktopSnapshot[session.ID], now)
+}
+
 // Caller holds snapshotMu. File metadata remains read-only until an exact live
-// thread/read succeeds. Native discovery always takes precedence.
+// thread/read succeeds. Resolved native discovery always takes precedence.
 func (d *Daemon) managedSessionsLocked() []protocol.Session {
 	sessions := cloneSessions(d.sessionSnapshot)
 	present := make(map[string]bool, len(sessions))
-	for _, session := range sessions {
+	for i, session := range sessions {
+		if verified, ok := d.verifiedNativeRecoveryLocked(session, time.Now()); ok {
+			sessions[i] = cloneSessions([]protocol.Session{verified})[0]
+		}
 		present[session.ID] = true
 	}
 	for _, stored := range d.catalogSnapshot {
@@ -57,7 +79,7 @@ func (d *Daemon) catalogRecoveryTargets(now time.Time, next map[string]time.Time
 	defer d.snapshotMu.Unlock()
 	known, native := map[string]bool{}, map[string]bool{}
 	for _, session := range d.sessionSnapshot {
-		native[session.ID] = true
+		native[session.ID] = !nativeRecoveryCandidate(session)
 	}
 	ids := []string{}
 	for _, session := range d.catalogSnapshot {
@@ -101,7 +123,15 @@ func (d *Daemon) completeCatalogRecovery(result catalogRecoveryResult, updates c
 	for _, stored := range d.catalogSnapshot {
 		known = known || stored.ID == result.id
 	}
-	if known && result.err == nil && result.session.ID == result.id && result.session.Provider == codex.ProviderCodexApp &&
+	nativePermitsRecovery := true
+	for _, session := range d.sessionSnapshot {
+		if session.ID == result.id {
+			nativePermitsRecovery = nativeRecoveryCandidate(session) && freshUnloadedResumeProof(result.session, time.Now()) &&
+				!freshDesktopOwner(d.desktopSnapshot[result.id], time.Now())
+			break
+		}
+	}
+	if known && nativePermitsRecovery && result.err == nil && result.session.ID == result.id && result.session.Provider == codex.ProviderCodexApp &&
 		!isTerminalSession(result.id) {
 		d.managedCatalog[result.id] = cloneSessions([]protocol.Session{result.session})[0]
 	}

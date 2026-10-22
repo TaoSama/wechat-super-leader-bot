@@ -161,11 +161,10 @@ func TestHistoryRegistryBoundsExpiryAndCancelableGate(t *testing.T) {
 	}
 	msg.HistoryContext = ""
 	for i := 0; i < maxHistoryContexts; i++ {
-		binding, _, err := h.acquire(context.Background(), msg, protocol.HistorySourceControl)
+		_, _, err := h.acquire(context.Background(), msg, protocol.HistorySourceControl)
 		if err != nil {
 			t.Fatal(err)
 		}
-		<-binding.gate
 	}
 	if _, _, err := h.acquire(context.Background(), msg, protocol.HistorySourceControl); err == nil || err.Error() != protocol.HistoryBusy {
 		t.Fatal("registry capacity not enforced")
@@ -173,6 +172,35 @@ func TestHistoryRegistryBoundsExpiryAndCancelableGate(t *testing.T) {
 	h.reset()
 	if h.current(first) {
 		t.Fatal("reset did not revoke context")
+	}
+}
+
+func TestHistoryRegistryEvictsOnlyLeastRecentlyUsedIdleContext(t *testing.T) {
+	h := newHistoryContexts()
+	msg := routedHistoryRequest()
+	var oldest *historyBinding
+	for i := 0; i < maxHistoryContexts; i++ {
+		binding, _, err := h.acquire(context.Background(), msg, protocol.HistorySourceControl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			oldest = binding
+			binding.expiresAt = time.Now().Add(time.Minute)
+			<-binding.gate
+		}
+	}
+	newest, _, err := h.acquire(context.Background(), msg, protocol.HistorySourceControl)
+	if err != nil || newest == nil || len(h.bindings) != maxHistoryContexts || h.current(oldest) {
+		t.Fatalf("idle cache prevented a new history target: %v", err)
+	}
+	<-newest.gate
+	msg.HistoryContext = oldest.token
+	if _, _, err := h.acquire(context.Background(), msg, protocol.HistorySourceControl); err == nil || err.Error() != protocol.HistoryContextExpired {
+		t.Fatal("evicted context was reused or silently rebound")
+	}
+	if len(h.bindings) != maxHistoryContexts {
+		t.Fatal("invalid context changed the bounded registry")
 	}
 }
 

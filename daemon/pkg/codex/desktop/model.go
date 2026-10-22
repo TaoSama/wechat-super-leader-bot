@@ -12,7 +12,7 @@ const maxDesktopModelMetadataBytes = 256
 
 // Keep the existing identity/status decoder unchanged. Only model metadata uses
 // exact JSON keys: struct decoding otherwise folds unknown casing into a match.
-// The temporary raw map is discarded; state retains only the four allowed values.
+// The temporary raw map is discarded; only bounded scalar metadata is retained.
 func (s *desktopRuntimeState) UnmarshalJSON(raw []byte) error {
 	type runtimeStatus desktopRuntimeState
 	var decoded runtimeStatus
@@ -27,6 +27,13 @@ func (s *desktopRuntimeState) UnmarshalJSON(raw []byte) error {
 	decoded.LatestReasoningEffort = fields["latestReasoningEffort"]
 	decoded.ModelProvider = fields["modelProvider"]
 	decoded.LatestCollaborationMode = fields["latestCollaborationMode"]
+	if metadata, err := desktopTurnMetadataSnapshot(fields); err == nil {
+		decoded.TurnMetadata = metadata
+	} else {
+		// Unknown history shapes revoke only exact-turn proof, not the scalar
+		// runtime observation that this subscription independently established.
+		decoded.TurnMetadata = nil
+	}
 	*s = desktopRuntimeState(decoded)
 	return nil
 }

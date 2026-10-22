@@ -48,7 +48,7 @@ beforeEach(() => {
 afterEach(() => { resetAuthHelperForTesting(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("会话工作台交互与安全", () => {
-  it.each([150, 800])("滚动至 %i 时，失效提示固定在头部，保留内容且仅显式重读更换来源", async (scrollTop) => {
+  it.each([150, 700])("滚动至 %i 时，失效提示固定在头部，保留内容且仅显式重读更换来源", async (scrollTop) => {
     let reads = 0;
     const fetchMock = installFetch(url => {
       if (!url.includes("/history")) return;
@@ -84,6 +84,28 @@ describe("会话工作台交互与安全", () => {
     expect(screen.queryByText("完成分析")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
     expect(historyCalls()[2][0]).not.toContain("historyContext");
+  });
+
+  it("停在最新底部800时上下文过期自动恢复准确同会话新页，不保留旧cursor", async () => {
+    let reads = 0;
+    const fetchMock = installFetch(url => {
+      if (!url.includes("/history")) return;
+      reads++;
+      if (reads === 2) return Promise.resolve(response({ code: "history_context_expired" }, 409));
+      if (reads >= 3) return Promise.resolve(response({ ...page, historyContext: "15c9ef38-59cc-410c-a0f0-6a54bcd7f41a", items: [{ ...page.items[0], text: "自动恢复的最新内容" }] }));
+    });
+    render(<App />);
+    await openSession();
+    const scroll = screen.getByLabelText("会话历史");
+    Object.defineProperties(scroll, { scrollHeight: { value: 1000, configurable: true }, clientHeight: { value: 200, configurable: true } });
+    scroll.scrollTop = 800; fireEvent.scroll(scroll);
+    await refreshHistory();
+    await screen.findByText("自动恢复的最新内容");
+    expect(screen.queryByText("完成分析")).toBeNull();
+    expect(screen.queryByText(/历史读取上下文已失效/)).toBeNull();
+    const historyCalls = fetchMock.mock.calls.filter(([url]) => url.includes("/history"));
+    expect(historyCalls[2][0]).not.toContain("historyContext");
+    expect(historyCalls[2][0]).not.toContain("cursor=");
   });
 
   it("带历史间隙的上下文失效后保留间隙提示，隐藏分页入口且只保留头部重读入口", async () => {

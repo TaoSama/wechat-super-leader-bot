@@ -74,8 +74,17 @@ func (h *historyContexts) acquire(ctx context.Context, msg protocol.ReadHistoryM
 	binding := h.bindings[msg.HistoryContext]
 	if msg.HistoryContext == "" {
 		if len(h.bindings) >= maxHistoryContexts {
-			h.mu.Unlock()
-			return nil, "", errors.New(protocol.HistoryBusy)
+			var oldest *historyBinding
+			for _, candidate := range h.bindings {
+				if len(candidate.gate) == 0 && (oldest == nil || candidate.expiresAt.Before(oldest.expiresAt)) {
+					oldest = candidate
+				}
+			}
+			if oldest == nil {
+				h.mu.Unlock()
+				return nil, "", errors.New(protocol.HistoryBusy)
+			}
+			delete(h.bindings, oldest.token)
 		}
 		token, err := protocol.NewDispatchID()
 		if err != nil {
@@ -225,7 +234,38 @@ func (d *Daemon) readRoutedHistory(ctx context.Context, msg protocol.ReadHistory
 		return history, err
 	}
 	history.Source, history.HistoryContext = binding.source, binding.token
+	if binding.source != protocol.HistorySourceTerminal {
+		d.overlayDesktopActiveHistory(msg.SessionID, &history)
+	}
 	return history, nil
+}
+
+// An exact current owner observation outranks a persisted native history status
+// for that turn alone. Session-level activity cannot rename any historical turn.
+func (d *Daemon) overlayDesktopActiveHistory(sessionID string, history *protocol.SessionHistory) {
+	d.snapshotMu.RLock()
+	observation := d.desktopSnapshot[sessionID]
+	d.snapshotMu.RUnlock()
+	if observation.Source != protocol.HistorySourceDesktop || observation.Status != "active" ||
+		!protocol.ValidTurnID(observation.OwnerID) || !protocol.ValidTurnID(observation.ActiveTurnID) || !freshDesktopOwner(observation, time.Now()) {
+		return
+	}
+	turnID := observation.ActiveTurnID
+	for i := range history.Items {
+		if history.Items[i].TurnID == turnID {
+			history.Items[i].TurnStatus = "inProgress"
+		}
+	}
+	if history.TurnStatuses == nil {
+		history.TurnStatuses = make(map[string]string)
+	}
+	if _, exists := history.TurnStatuses[turnID]; !exists && len(history.TurnStatuses) >= protocol.MaxHistoryTurnStatuses {
+		for id := range history.TurnStatuses {
+			delete(history.TurnStatuses, id)
+			break
+		}
+	}
+	history.TurnStatuses[turnID] = "inProgress"
 }
 
 func (d *Daemon) readFileOrDesktopHistory(ctx context.Context, msg protocol.ReadHistoryMessage, binding *historyBinding, cursor string, limit int) (protocol.SessionHistory, error) {

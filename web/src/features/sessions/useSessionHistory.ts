@@ -4,7 +4,7 @@ import { ScopedSession, SessionHistory } from "../../types";
 import { HISTORY_CONTEXT_EXPIRED_MESSAGE, isHistoryContext, isSessionHistorySource, terminalHistoryBlockReason } from "./history-contract";
 import { isTerminalSession, MAX_TERMINAL_OBSERVATION_AGE_MS } from "./terminal-session";
 import { HistoryCache, readSharedHistory } from "./history-cache";
-import { mergeHistoryPage } from "./history-page";
+import { applyHistoryTurnStatuses, mergeHistoryPage } from "./history-page";
 
 const HISTORY_POLL_MS = 2000;
 const MAX_RETRY_MS = 30_000;
@@ -41,6 +41,7 @@ interface CachedHistory {
   gaps: Gap[];
   provider: string;
   historySource?: ScopedSession["historySource"];
+  hasOlderWindow: boolean;
 }
 const EMPTY: HistoryState = { owner: "", history: null, loading: false, loadingOlder: false, loadingLatest: false, error: null, gap: false, gapBeforeId: null, gapBeforeIds: [], memoryGap: false, pollingPaused: false, contextExpired: false, windowNotice: null };
 
@@ -55,6 +56,8 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
   const authRef = useRef(onAuthFailure);
   const connectedRef = useRef(connected);
   const sessionRef = useRef(session);
+  const readingLatestRef = useRef({ owner, latest: true });
+  if (readingLatestRef.current.owner !== owner) readingLatestRef.current = { owner, latest: true };
   connectedRef.current = connected;
   sessionRef.current = session;
   authRef.current = onAuthFailure;
@@ -75,19 +78,22 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
     let olderSeen = cached?.olderSeen ?? new Set<string>();
     let gaps: Gap[] = cached?.gaps ?? [];
     let memoryGap = cached?.state.memoryGap ?? false;
+    let hasOlderWindow = cached?.hasOlderWindow ?? false;
     let paginationError: string | null = null;
     let failures = 0;
     let contextExpired = false;
     let needsReset = false;
+    let recoveringContext = false;
     let requestedSource: "control-socket" | undefined;
     let sizeBlocked = false;
     const queue: Job[] = [];
+    const readingLatest = () => readingLatestRef.current.owner === owner && readingLatestRef.current.latest;
     const readable = () => !!sessionRef.current && sessionKey(sessionRef.current) === owner && !terminalHistoryBlockReason(sessionRef.current);
     const available = () => connectedRef.current && readable() && navigator.onLine !== false && document.visibilityState !== "hidden";
     setState({ ...published, loading: !latest && available(), pollingPaused: !available() });
 
     function publish(error: string | null = null) {
-      const cursor = contextExpired ? null : gaps.length && !memoryGap ? gaps[gaps.length - 1].cursor : oldestCursor;
+      const cursor = contextExpired || needsReset ? null : gaps.length && !memoryGap ? gaps[gaps.length - 1].cursor : oldestCursor;
       published = { owner, history: latest ? { ...latest, nextCursor: cursor } : null, loading: !!active,
         loadingOlder: !!active?.job.older, loadingLatest: !!active && !active.job.older, error: error ?? paginationError,
         gap: gaps.length > 0, gapBeforeId: gaps[0]?.beforeId ?? null, gapBeforeIds: gaps.map((gap) => gap.beforeId),
@@ -123,8 +129,9 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
       publish();
       let loaded = false;
       let error: string | null = null;
+      let recoverContext = false;
+      const historyContext = needsReset ? undefined : latest?.historyContext;
       try {
-        const historyContext = needsReset ? undefined : latest?.historyContext;
         const page = await readSharedHistory(target.nodeId, target.id, cursor ?? undefined, controller.signal, historyContext, requestedSource);
         const current = sessionRef.current;
         if (disposed || controller.signal.aborted || active !== flight || !current || !available()) return;
@@ -136,15 +143,23 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
               isTerminalSession(target) && page.session.provider !== latest?.session.provider)) {
           throw new Error("历史响应与当前读取来源或上下文不匹配");
         }
+        if (recoveringContext && !readingLatest()) {
+          contextExpired = true;
+          paginationError = error = HISTORY_CONTEXT_EXPIRED_MESSAGE;
+          return;
+        }
         if (!latest || job.reset || needsReset) {
           latest = { ...page, items: [...new Map(page.items.map((item) => [item.id, item])).values()] };
           oldestCursor = page.nextCursor;
           gaps = [];
           memoryGap = false;
+          hasOlderWindow = false;
           paginationError = null;
           olderSeen = new Set();
           needsReset = false;
+          recoveringContext = false;
         } else if (job.older) {
+          hasOlderWindow = true;
           const seen = bridge?.seen ?? olderSeen;
           seen.add(cursor!);
           const next = page.nextCursor;
@@ -161,11 +176,14 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
           paginationError = error;
         } else if (page.items.length) {
           const ids = new Set(latest.items.map((item) => item.id));
+          const pageIds = new Set(page.items.map((item) => item.id));
+          hasOlderWindow ||= latest.items.some((item) => !pageIds.has(item.id));
           const overlap = page.items.some((item) => ids.has(item.id));
           if (latest.items.length && !overlap) gaps.push({ beforeId: page.items[0].id, cursor: page.nextCursor, previousIds: ids, seen: new Set() });
           if (!latest.items.length) { oldestCursor = page.nextCursor; olderSeen.clear(); }
           latest = { ...page, items: mergeHistoryPage(latest.items, page.items, latest.items.length), truncated: latest.truncated || page.truncated };
         } else latest = { ...latest, fetchedAt: page.fetchedAt, session: page.session };
+        latest = { ...latest, items: applyHistoryTurnStatuses(latest.items, page.turnStatuses) };
         if (latest.items.length > MAX_DISPLAY_ITEMS) {
           latest = { ...latest, items: [...latest.items.slice(0, MAX_DISPLAY_ITEMS - LIVE_TAIL_ITEMS), ...latest.items.slice(-LIVE_TAIL_ITEMS)] };
           memoryGap = true;
@@ -198,8 +216,18 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
           for (const queued of queue.splice(0)) queued.resolve(false);
         }
         if (reason instanceof ApiHistoryError && reason.statusCode === 409) {
-          contextExpired = true;
-          paginationError = error = HISTORY_CONTEXT_EXPIRED_MESSAGE;
+          // A tail-only reader can safely replace its page. Older reading windows
+          // need an explicit reset so expiration never discards their scroll position.
+          recoverContext = !isTerminalSession(target) && historyContext !== undefined && readingLatest() && !job.older && !hasOlderWindow && !gaps.length && !memoryGap;
+          contextExpired = !recoverContext;
+          paginationError = error = recoverContext ? null : HISTORY_CONTEXT_EXPIRED_MESSAGE;
+          if (recoverContext) {
+            needsReset = true;
+            recoveringContext = true;
+            oldestCursor = null;
+            olderSeen.clear();
+            cacheRef.current.delete(owner);
+          }
           window.clearTimeout(timer);
           for (const queued of queue.splice(0)) queued.resolve(false);
         }
@@ -208,7 +236,8 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
         if (!disposed && active === flight) {
           active = null;
           publish(error);
-          if (queue.length) void pump(); else schedule();
+          if (recoverContext) void request();
+          else if (queue.length) void pump(); else schedule();
         }
       }
     }
@@ -220,6 +249,7 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
         cancel();
         contextExpired = false;
         needsReset = true;
+        recoveringContext = false;
         paginationError = null;
         failures = 0;
         sizeBlocked = false;
@@ -276,7 +306,7 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
         // memory without serializing a large history on every background poll.
         const bytes = latest.items.reduce((total, item) => total + item.text.length * 2 + 1024, 0);
         cacheRef.current.set(owner, { state: { ...published, loading: false, loadingOlder: false, loadingLatest: false },
-          oldestCursor, olderSeen, gaps, provider: target.provider, historySource: target.historySource }, bytes);
+          oldestCursor, olderSeen, gaps, hasOlderWindow, provider: target.provider, historySource: target.historySource }, bytes);
       } else cacheRef.current.delete(owner);
       window.clearTimeout(observationTimer);
       detach();
@@ -287,6 +317,10 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
   }, [owner]);
 
   useEffect(() => lifecycleRef.current(), [connected, session?.historySource, terminalObservedAt, session?.provider]);
+  const setReadingLatest = useCallback((latest: boolean) => {
+    const current = sessionRef.current;
+    readingLatestRef.current = { owner: current ? sessionKey(current) : "", latest };
+  }, []);
   const refresh = useCallback(() => requestRef.current(), []);
   const loadOlder = useCallback(() => requestRef.current(true), []);
   const resetLatest = useCallback(() => requestRef.current(false, true), []);
@@ -294,5 +328,5 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
   const useAutomaticHistory = useCallback(() => sourceRef.current(), []);
   const readBlockReason = session ? terminalHistoryBlockReason(session) : null;
   return { ...(state.owner === owner ? state : { ...EMPTY, owner, loading: !!owner }),
-    canRead: !!session && connected && !readBlockReason, readBlockReason, refresh, loadOlder, resetLatest, usePagedHistory, useAutomaticHistory };
+    canRead: !!session && connected && !readBlockReason, readBlockReason, setReadingLatest, refresh, loadOlder, resetLatest, usePagedHistory, useAutomaticHistory };
 }

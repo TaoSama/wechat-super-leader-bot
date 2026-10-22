@@ -86,7 +86,27 @@ func (r *DesktopHistoryReader) acquire(sessionID, generation string) (*desktopHi
 	}
 	if entry == nil {
 		if len(r.entries) >= desktopHistoryTargetLimit {
-			return nil, historyError(protocol.HistoryBusy)
+			// Idle subscriptions are a cache, not a limit on how many sessions a
+			// user may browse. Preserve all active readers and evict the oldest
+			// unused generation before opening a different target.
+			var oldest *desktopHistoryEntry
+			var oldestUsed time.Time
+			for _, candidate := range r.entries {
+				candidate.mu.Lock()
+				idle := candidate.active == 0
+				lastUsed := candidate.lastUsed
+				candidate.mu.Unlock()
+				if idle && (oldest == nil || lastUsed.Before(oldestUsed)) {
+					oldest = candidate
+					oldestUsed = lastUsed
+				}
+			}
+			if oldest == nil {
+				return nil, historyError(protocol.HistoryBusy)
+			}
+			oldest.cancel()
+			<-oldest.done
+			delete(r.entries, oldest.sessionID)
 		}
 		id, err := protocol.NewDispatchID()
 		if err != nil {
@@ -212,6 +232,23 @@ func (entry *desktopHistoryEntry) pageLocked(cursor string, limit int) (protocol
 	}
 	for _, item := range history.Items {
 		history.Truncated = history.Truncated || item.Truncated
+	}
+	// Include known state changes for previously read turns outside this tail
+	// page, so an older in-progress row can settle without losing its position.
+	statuses := make(map[string]string)
+	remember := func(item protocol.HistoryItem) {
+		if item.TurnStatus != "" && len(statuses) < protocol.MaxHistoryTurnStatuses {
+			statuses[item.TurnID] = item.TurnStatus
+		}
+	}
+	for _, item := range history.Items {
+		remember(item)
+	}
+	for i := len(entry.view.items) - 1; i >= 0 && len(statuses) < protocol.MaxHistoryTurnStatuses; i-- {
+		remember(entry.view.items[i])
+	}
+	if len(statuses) > 0 {
+		history.TurnStatuses = statuses
 	}
 	if err := threadstate.BoundHistoryResponse(&history); err != nil {
 		return protocol.SessionHistory{}, err
