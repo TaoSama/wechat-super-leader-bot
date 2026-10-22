@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { CHAT, OTHER_CHAT, TASK, TASK_RESULT } from './fixture.mjs';
+import { CHAT, OTHER_CHAT, TASK, TASK_RESULT, waitFor } from './fixture.mjs';
 import { currentSdkUserText } from '../../support/reliability-sdk-model.mjs';
 
 const ACCOUNT = 'synthetic-reliability-account';
@@ -18,6 +19,7 @@ const FIRST_TEXT = '合成SDK原聊天唯一成果';
 const FIRST_REPLY = 'SDK_FIRST_CHAT_RESULT';
 const STARTED_TEXT = '合成SDK执行中崩溃';
 const CHUNK_CHARS = 64;
+const runtimeProvenanceCache = new Map();
 const hash = value => createHash('sha256').update(value).digest('hex');
 const text = message => message.item_list?.[0]?.text_item?.text ?? '';
 const key = (chatId, messageId) => JSON.stringify([ACCOUNT, chatId, messageId]);
@@ -33,17 +35,32 @@ async function journal(h, chatId, messageId) {
   return entry;
 }
 
+async function runtimeProvenance(executable) {
+  const identity = info => JSON.stringify([info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs]);
+  const before = identity(await stat(executable)), cached = runtimeProvenanceCache.get(executable);
+  if (cached?.identity === before) return cached.provenance;
+  const digest = createHash('sha256');
+  let bytes = 0;
+  for await (const chunk of createReadStream(executable)) { digest.update(chunk); bytes += chunk.length; }
+  assert.equal(identity(await stat(executable)), before, 'Native executable changed while recording provenance');
+  const provenance = { executable, sha256: digest.digest('hex'), bytes,
+    platform: process.platform, arch: process.arch, transport: 'app-server',
+    auxiliaryExternalMcpAndTelemetryDisabled: true, nativeExecutableReplaced: false };
+  runtimeProvenanceCache.set(executable, { identity: before, provenance });
+  return provenance;
+}
+
 async function nativeExecutions(h) {
   const records = await h.wechat.readSdkProcesses();
-  assert(!records.some(item => item.event === 'error'), JSON.stringify(records));
+  assert(!records.some(item => ['error', 'rpc-audit-error'].includes(item.event)), JSON.stringify(records));
   const executions = records.filter(item => item.event === 'spawn');
-  assert(executions.every(item => item.pid && /[/\\]codex(?:\.exe)?$/.test(item.executable)));
+  assert(executions.every(item => item.pid && item.transport === 'app-server' && /[/\\]codex(?:\.exe)?$/.test(item.executable)));
+  const starts = records.filter(item => item.event === 'rpc-request' && item.method === 'turn/start');
+  assert.equal(starts.length, executions.length, 'Each native app-server query must start exactly one turn');
+  assert(executions.every(item => starts.filter(start => start.pid === item.pid).length === 1),
+    'Native app-server turn/start ownership did not match its recorded process');
   if (executions.length && !h.sdkRuntimeRecorded) {
-    const executable = executions[0].executable;
-    const bytes = await readFile(executable);
-    h.evidence('sdk-runtime-provenance', { executable, sha256: createHash('sha256').update(bytes).digest('hex'),
-      bytes: bytes.length, platform: process.platform, arch: process.arch,
-      auxiliaryExternalMcpAndTelemetryDisabled: true, nativeExecutableReplaced: false });
+    h.evidence('sdk-runtime-provenance', await runtimeProvenance(executions[0].executable));
     h.sdkRuntimeRecorded = true;
   }
   h.evidence('sdk-native-processes', { records });
@@ -99,9 +116,12 @@ export const sdkScenarios = [
     assert.equal((await h.entered(fault.entered, 'SDK MCP Controller commit')).status, 200);
     await h.native.waitForStarts(1);
     assert.equal((await nativeExecutions(h)).length, 1);
-    assert.equal((await journal(h, CHAT, message.client_id)).stage, 'completed');
+    const uncertain = await journal(h, CHAT, message.client_id);
+    assert.equal(uncertain.stage, 'started', 'Lost Controller stream was promoted to a completed native outcome');
+    assert.equal(uncertain.delivery, 'accepted');
+    assert(h.wechat.sent.some(item => item.to_user_id === CHAT && text(item).includes('执行结果待核实')));
     const requests = h.control.requests.filter(item => item.path === '/v1/messages' && item.method === 'POST');
-    assert(requests.length >= 2, 'Lost MCP response did not cross the HTTP retry boundary');
+    assert.equal(requests.length, 1, 'Ambiguous Controller stream was blindly submitted again');
     for (const request of requests) assert.deepEqual(request.body, { chatId: CHAT, messageId: message.client_id, text: TASK });
     const stored = await h.pool.query('SELECT message_id FROM messages WHERE chat_id=$1 AND message_id=$2', [CHAT, message.client_id]);
     assert.equal(stored.rowCount, 1);
@@ -117,7 +137,7 @@ export const sdkScenarios = [
     await h.complete(commands.rows[0].command_id);
     const delivery = await h.waitResult();
     assert.equal(delivery.chatId, CHAT);
-    assert.equal((await h.poll({ notifications: true })).code, 0);
+    assert.equal((await h.poll()).code, 0);
     const finals = h.wechat.sent.filter(item => text(item).includes(TASK_RESULT));
     assert.equal(finals.length, 1); assert.equal(finals[0].to_user_id, CHAT);
     assert.equal(finals[0].context_token, `synthetic-context:${CHAT}`);
@@ -125,14 +145,22 @@ export const sdkScenarios = [
     assert.equal(h.native.starts.length, 1);
     h.evidence('assertions', { leaderMode: 'codex', realNativeExecutions: 1, retainedOfflineCursor: true,
       originalMcpRequestPreserved: true, httpAttempts: requests.length, messages: 1, commands: 1,
+      unknownControllerStreamNotRetried: true, recoveredJournalStage: 'started',
       targetStarts: 1, finalMessages: 1, correctChat: true, duplicateModelCalls: 0 });
   }, sdk({ control: true })],
   ['sdk-persisted-reply-restart-recovery', async h => {
     const message = h.wechat.enqueue(SAFE_TEXT, { chatId: CHAT });
+    const originalKey = key(CHAT, message.client_id);
     const barrier = h.wechat.holdPoll({ afterPolls: h.wechat.polls.length + 2 });
     const running = h.wechat.start({ ...h.gatewayOptions, mode: '--run', sendBudget: 1, maxChars: CHUNK_CHARS });
-    await h.entered(barrier.entered, 'SDK completed reply safely deferred before next poll');
-    const originalKey = key(CHAT, message.client_id), persisted = await journal(h, CHAT, message.client_id);
+    await h.entered(barrier.entered, 'native reply polling isolated behind the owned HTTP barrier');
+    await waitFor(async () => {
+      h.healthy();
+      const state = await h.wechat.readState(), delivery = state.reply_deliveries[originalKey];
+      return delivery?.acknowledgedChunks === 1 && delivery.inFlight === false &&
+        state.delivery_outbox[originalKey]?.source === 'engine';
+    }, 'native completed reply and acknowledged first chunk persisted before crash');
+    const persisted = await journal(h, CHAT, message.client_id);
     const state = await h.wechat.readState();
     assert.equal(persisted.stage, 'completed'); assert.equal(persisted.delivery, 'pending');
     assert.equal(persisted.reply.text, SAFE_REPLY);
@@ -155,6 +183,13 @@ export const sdkScenarios = [
     assert.equal((await journal(h, CHAT, renewal.client_id)).stage, 'completed');
     assert.equal(h.wechat.sent.filter(item => text(item) === RENEW_REPLY).length, 1);
     assert.equal(await nativeThreadId(h, CHAT), originalThreadId, 'True inbound abandoned the saved native SDK thread');
+    const nativeRecords = await h.wechat.readSdkProcesses();
+    const requests = nativeRecords.filter(item => item.event === 'rpc-request');
+    const resumes = requests.filter(item => item.method === 'thread/resume');
+    assert.equal(resumes.length, 1); assert.equal(resumes[0].params.threadId, originalThreadId);
+    const resumed = nativeRecords.filter(item => item.event === 'rpc-response' && item.method === 'thread/resume');
+    assert.equal(resumed.length, 1); assert.equal(resumed[0].resultThreadId, originalThreadId);
+    assert.equal(requests.filter(item => item.method === 'thread/start').length, 1);
     const chunks = h.wechat.sent.filter(item => text(item) !== RENEW_REPLY);
     assert.equal(chunks.map(text).join(''), SAFE_REPLY, 'Restart changed or dropped the frozen SDK reply');
     assert.equal(chunks.length, Math.ceil(SAFE_REPLY.length / CHUNK_CHARS));
@@ -203,6 +238,8 @@ export const sdkScenarios = [
     h.wechat.enqueue(OTHER_TEXT, { chatId: OTHER_CHAT, id: first.client_id });
     assert.equal((await h.poll()).code, 0);
     assert.equal((await nativeExecutions(h)).length, 2);
+    assert.notEqual(await nativeThreadId(h, CHAT), await nativeThreadId(h, OTHER_CHAT),
+      'Independent chats shared one native app-server thread');
     for (const [chatId, expected] of [[CHAT, FIRST_REPLY], [OTHER_CHAT, OTHER_REPLY]]) {
       const sent = h.wechat.sent.filter(item => item.to_user_id === chatId);
       assert.equal(sent.length, 1); assert.equal(text(sent[0]), expected);

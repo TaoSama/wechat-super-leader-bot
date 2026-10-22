@@ -497,9 +497,9 @@ node tests/integration/reliability/run.mjs --help
 Gateway 状态文件及 Daemon journal；只在自建代理和子进程注入断网、回包丢失与 SIGKILL。
 覆盖离线排队、忙时接收、FIFO、取消、真实时钟过期、持久 claim/回执/成果恢复、
 重复入站及完成回执、通知重放和未知结果禁止盲重发，核对准确 command、turn 与聊天归属。
-SDK 场景使用已安装的 Codex SDK 和真实原生 Codex 二进制，仅将上游模型替换为本地 Responses SSE。
-通过私有启动审计记录原生进程与二进制 SHA；关闭辅助文档 MCP 和遥测的外网连接。
-覆盖 SDK 执行中崩溃、完成 journal 后重启续传、原 MCP 请求重试、稳定消息重放、
+Codex 场景通过已安装的运行依赖启动真实原生 app-server，仅将上游模型替换为本地 Responses SSE。
+通过私有旁路审计记录原生进程、二进制 SHA 与 turn/thread RPC；关闭辅助文档 MCP 和遥测的外网连接。
+覆盖执行中崩溃、完成 journal 后重启续传、原 MCP 请求提交后断流、稳定消息重放、
 不同聊天相同消息 ID 的成果归属，以及发送结果未知时的 journal 隔离和禁止盲重发。
 失败场景返回非零；未运行完成或清理失败不能报告通过。
 匿名原始日志、协议帧、数据库快照和断言写入
