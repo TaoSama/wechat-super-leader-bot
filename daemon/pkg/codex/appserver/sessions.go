@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -69,6 +70,7 @@ func sessionFromThread(thread map[string]any, loaded bool, observedAt string) pr
 
 func (a *AppServerAdapter) discoverPages(ctx context.Context, rc *rpcConn, loadedSet map[string]bool) ([]protocol.Session, error) {
 	nowISO := time.Now().UTC().Format(time.RFC3339Nano)
+	sourceKinds := []string{"cli", "vscode", "appServer"}
 	sessions := []protocol.Session{}
 	seenIDs, seenCursors := map[string]bool{}, map[string]bool{}
 	cursor := ""
@@ -76,7 +78,7 @@ func (a *AppServerAdapter) discoverPages(ctx context.Context, rc *rpcConn, loade
 		if page >= maxDiscoveryPages {
 			return nil, errors.New("session pagination limit exceeded")
 		}
-		params := map[string]any{"limit": DefaultListLimit, "useStateDbOnly": true, "sourceKinds": []string{"cli", "vscode", "appServer"}}
+		params := map[string]any{"limit": DefaultListLimit, "useStateDbOnly": true, "sourceKinds": sourceKinds}
 		if cursor != "" {
 			params["cursor"] = cursor
 		}
@@ -108,7 +110,8 @@ func (a *AppServerAdapter) discoverPages(ctx context.Context, rc *rpcConn, loade
 			break
 		}
 	}
-	// Loaded threads omitted by the state DB still need current native metadata.
+	// Loaded membership includes internal agents excluded by the filtered list.
+	// Supplement only exact identities with a verified user-facing source.
 	missingIDs := []string{}
 	for id := range loadedSet {
 		if !seenIDs[id] {
@@ -118,9 +121,16 @@ func (a *AppServerAdapter) discoverPages(ctx context.Context, rc *rpcConn, loade
 	sort.Strings(missingIDs)
 	for _, id := range missingIDs {
 		res, err := rc.call(ctx, "thread/read", map[string]any{"threadId": id, "includeTurns": false}, a.rpcTimeout)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		thread, ok := res["thread"].(map[string]any)
-		if err != nil || !ok || threadstate.ExtractString(thread, "id") != id {
-			thread = map[string]any{"id": id, "title": id, "status": "unknown"}
+		if err != nil || !ok || thread["id"] != id {
+			continue
+		}
+		source, ok := thread["source"].(string)
+		if !ok || !slices.Contains(sourceKinds, source) {
+			continue
 		}
 		sessions = append(sessions, sessionFromThread(thread, true, nowISO))
 	}
