@@ -45,7 +45,8 @@ export function verificationPlan(suite = 'all') {
     step('daemon-build', 'go', ['build', './...'], 'daemon'),
     step('daemon-linux-build', 'go', ['build', './...'], 'daemon', { GOOS: 'linux', GOARCH: 'amd64', CGO_ENABLED: '0' })];
   const integration = [
-    step('compose-tests', process.execPath, ['--test', 'tests/integration/deploy/config.test.mjs', 'tests/integration/deploy/gateway.test.mjs']),
+    step('compose-tests', process.execPath, ['--test', 'tests/integration/deploy/config.test.mjs', 'tests/integration/deploy/gateway.test.mjs',
+      'tests/integration/deploy/background-model.test.mjs']),
     step('synthetic-integration', process.execPath, ['tests/integration/run.mjs']),
     step('console-auth-integration', process.execPath, ['tests/integration/console-auth.mjs', '--run']),
     step('wechat-interaction', process.execPath, ['tests/integration/leader/wechat-interaction.mjs', '--run']),
