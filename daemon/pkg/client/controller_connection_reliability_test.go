@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/config"
+	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/journal"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 	"github.com/gorilla/websocket"
 )
@@ -199,9 +200,35 @@ func (l controllerProgressListener) Accept() (net.Conn, error) {
 
 type controllerAckJournal struct {
 	commandJournal
-	commandID string
-	acked     chan struct{}
-	once      sync.Once
+	commandID     string
+	acked         chan struct{}
+	ackOnce       sync.Once
+	replayBlocked chan struct{}
+	releaseReplay chan struct{}
+	replayOnce    sync.Once
+	commandBegun  chan struct{}
+	beginOnce     sync.Once
+}
+
+func (j *controllerAckJournal) Unacked() ([]protocol.DaemonResultMessage, error) {
+	results, err := j.commandJournal.Unacked()
+	if err != nil {
+		return nil, err
+	}
+	j.replayOnce.Do(func() {
+		close(j.replayBlocked)
+		<-j.releaseReplay
+	})
+	return results, nil
+}
+
+func (j *controllerAckJournal) Begin(cmd protocol.ControllerCommandMessage) (journal.Entry, bool, error) {
+	if cmd.CommandID == "new-command" {
+		// Observe dispatch before the real transaction can wait for disk or a
+		// concurrent journal read. This event proves that the reader parsed it.
+		j.beginOnce.Do(func() { close(j.commandBegun) })
+	}
+	return j.commandJournal.Begin(cmd)
 }
 
 func (j *controllerAckJournal) Ack(ack protocol.ResultAckMessage) error {
@@ -209,7 +236,7 @@ func (j *controllerAckJournal) Ack(ack protocol.ResultAckMessage) error {
 		return err
 	}
 	if ack.CommandID == j.commandID {
-		j.once.Do(func() { close(j.acked) })
+		j.ackOnce.Do(func() { close(j.acked) })
 	}
 	return nil
 }
@@ -217,10 +244,14 @@ func (j *controllerAckJournal) Ack(ack protocol.ResultAckMessage) error {
 func TestControllerDurableReplayKeepsReaderLiveAndRecoversAfterReconnect(t *testing.T) {
 	adapter := &controllerReplayAdapter{readStarted: make(chan struct{})}
 	result := protocol.DaemonResultMessage{Type: "result", CommandID: "saved-result", Status: protocol.StatusCompleted,
-		Output: strings.Repeat("<", 2*1024*1024)}
+		Output: strings.Repeat("<", 128*1024)}
 	var attempts atomic.Int32
 	serverResults := make(chan error, 2)
 	acked := make(chan struct{})
+	replayBlocked, releaseReplay, commandBegun := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	allowReplay := func() { releaseOnce.Do(func() { close(releaseReplay) }) }
+	defer allowReplay()
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -242,19 +273,35 @@ func TestControllerDurableReplayKeepsReaderLiveAndRecoversAfterReconnect(t *test
 			return
 		}
 		if attempts.Add(1) == 1 {
+			// Hold the production flush inside Unacked before sending any result.
+			// This makes the reader assertion independent of payload size, TCP
+			// buffering, JSON encoding speed and journal transaction latency.
+			<-replayBlocked
+			defer allowReplay()
 			cmd := persistenceCommand(time.Now().Add(time.Minute).Format(time.RFC3339Nano))
 			cmd.CommandID, cmd.Action, cmd.Prompt = "new-command", protocol.ActionRead, ""
 			if err := conn.WriteJSON(cmd); err != nil {
 				serverResults <- err
 				return
 			}
-			// Do not consume the large replay until its independent reader has
-			// dispatched the command. A synchronous initial flush deadlocks here.
+			select {
+			case <-commandBegun:
+				select {
+				case <-releaseReplay:
+					serverResults <- errors.New("initial replay gate was released before the command was read")
+					return
+				default:
+				}
+				allowReplay()
+			case <-time.After(controllerFixtureIdleTimeout):
+				serverResults <- errors.New("reader never reached command Begin while the initial replay gate was held")
+				return
+			}
 			select {
 			case <-adapter.readStarted:
 				serverResults <- nil
-			case <-time.After(time.Second):
-				serverResults <- errors.New("initial durable replay blocked the command reader")
+			case <-time.After(controllerFixtureIdleTimeout):
+				serverResults <- errors.New("command reached Begin but did not complete journal dispatch")
 			}
 			return
 		}
@@ -298,7 +345,8 @@ func TestControllerDurableReplayKeepsReaderLiveAndRecoversAfterReconnect(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.journal = &controllerAckJournal{commandJournal: d.journal, commandID: result.CommandID, acked: acked}
+	d.journal = &controllerAckJournal{commandJournal: d.journal, commandID: result.CommandID, acked: acked,
+		replayBlocked: replayBlocked, releaseReplay: releaseReplay, commandBegun: commandBegun}
 	defer closeDaemon(t, d)
 	defer d.workers.Wait()
 	cmd := persistenceCommand(time.Now().Add(time.Minute).Format(time.RFC3339Nano))

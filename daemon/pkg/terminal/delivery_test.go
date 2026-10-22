@@ -303,16 +303,23 @@ func TestDeliveryBudgetIncludesWaitingAndCancelsBlockedRead(t *testing.T) {
 	t.Run("retained-preparation", func(t *testing.T) {
 		h := newRegressionHost(t, func(r testRequest, _ int) []byte { return regressionResponse(t, r) })
 		d, id := discoveredDelivery(t, h)
-		d.observer.operationTimeout = 50 * time.Millisecond
 		p, err := d.PrepareDelivery(context.Background(), id, regressionRequestID, "safe")
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer closeDelivery(t, p)
-		<-p.ctx.Done()
+		deadline, ok := p.ctx.Deadline()
+		if !ok || !p.deadline.Equal(deadline) || time.Until(deadline) > d.observer.operationTimeout {
+			t.Fatal("preparation did not retain its original absolute budget")
+		}
+		// Expire the retained absolute boundary without making successful Unix
+		// dial/handshake/preflight depend on a 50ms wall-clock scheduling window.
+		// Context cancellation is covered by the blocked-RPC cases below.
+		p.deadline = time.Now().Add(-time.Second)
+		preflightReads := h.count("agent.get")
 		receipt, err := p.Dispatch(context.Background())
 		assertRegressionFailure(t, receipt, err, false)
-		if h.count(deliveryPromptMethod) != 0 {
+		if h.count(deliveryPromptMethod) != 0 || h.count("agent.get") != preflightReads {
 			t.Fatal("waiting reset total budget")
 		}
 	})

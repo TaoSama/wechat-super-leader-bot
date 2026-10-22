@@ -8,6 +8,7 @@ import { stopTestProcess } from './cleanup.mjs';
 import { localDockerEnvironment } from '../../scripts/verify.mjs';
 
 const POSTGRES_IMAGE = 'postgres:16-alpine';
+const POSTGRES_OWNER_LABEL = 'super-leader.test.fixture-owner';
 const DOCKER_TIMEOUT_MS = 30_000;
 const READINESS_TIMEOUT_MS = 25_000;
 const POLL_INTERVAL_MS = 100;
@@ -23,8 +24,9 @@ export async function waitFor(predicate, label) {
 
 export function createPostgresFixture({ env = process.env } = {}) {
   const password = randomBytes(24).toString('hex');
-  const name = `super-leader-test-${randomUUID()}`;
-  let containerCreated = false;
+  const owner = randomUUID();
+  const name = `super-leader-test-${owner}`;
+  let runAttempted = false;
   let dockerEnv;
   const docker = args => execFileSync('docker', args, {
     encoding: 'utf8', env: dockerEnv, timeout: DOCKER_TIMEOUT_MS,
@@ -34,9 +36,10 @@ export function createPostgresFixture({ env = process.env } = {}) {
     password,
     async start() {
       dockerEnv = localDockerEnvironment({ ...env, POSTGRES_PASSWORD: password });
-      docker(['run', '--detach', '--rm', '--name', name, '-e', 'POSTGRES_PASSWORD',
+      // Docker may create the container even when its client times out before returning.
+      runAttempted = true;
+      docker(['run', '--detach', '--rm', '--name', name, '--label', `${POSTGRES_OWNER_LABEL}=${owner}`, '-e', 'POSTGRES_PASSWORD',
         '-e', 'POSTGRES_USER=leader', '-e', 'POSTGRES_DB=leader', '-p', '127.0.0.1::5432', POSTGRES_IMAGE]);
-      containerCreated = true;
       const port = docker(['port', name, '5432/tcp']).split(':').at(-1);
       await waitFor(async () => {
         try { docker(['exec', name, 'pg_isready', '-h', '127.0.0.1', '-U', 'leader', '-d', 'leader']); return true; }
@@ -45,9 +48,17 @@ export function createPostgresFixture({ env = process.env } = {}) {
       return `postgresql://leader:${password}@127.0.0.1:${port}/leader`;
     },
     stop() {
-      if (!containerCreated) return;
-      docker(['stop', '--time', '5', name]);
-      containerCreated = false;
+      if (!runAttempted) return;
+      const id = docker(['ps', '--all', '--filter', `name=^/${name}$`, '--format', '{{.ID}}']);
+      if (!id) return;
+      const container = JSON.parse(docker(['inspect', '--type', 'container', '--format',
+        `{"id":{{json .Id}},"name":{{json .Name}},"owner":{{json (index .Config.Labels "${POSTGRES_OWNER_LABEL}")}}}`, id]));
+      if (container.name !== `/${name}` || container.owner !== owner) {
+        throw new Error('Refusing to clean a PostgreSQL container not owned by this fixture');
+      }
+      // Remove by immutable identity, including a container left created but not running.
+      docker(['rm', '--force', '--volumes', container.id]);
+      runAttempted = false;
     },
   };
 }
