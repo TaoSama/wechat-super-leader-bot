@@ -1,7 +1,7 @@
 .history-controls { display: flex; align-items: center; justify-content: space-between; color: var(--text-secondary); font-size: 12px; margin-top: 2px; }
 .history-controls button { min-height: 44px; display: inline-flex; align-items: center; gap: 8px; padding: 8px 0 8px 12px; color: var(--text-secondary); border-radius: 6px; font-size: 12px; }
 .history-controls button:hover { color: var(--accent-bright); }
-.history-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; min-height: 0; overflow-anchor: none; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--surface-3) transparent; }
+.history-scroll { position: relative; flex: 1; overflow-y: auto; overflow-x: hidden; min-height: 0; overflow-anchor: none; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--surface-3) transparent; }
 .history-content { max-width: var(--content-max-width); margin: 0 auto; padding: 16px 16px; }
 .history-message { margin-bottom: 16px; }
 .message-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; color: var(--text-secondary); font-size: 12px; font-weight: 500; }
@@ -100,28 +100,7 @@
 .history-loading { padding: 32px 0; text-align: center; color: var(--text-secondary); font-size: 14px; }
 .history-window-notice { padding: 12px 0; color: var(--text-secondary); font-size: 12px; }
 .history-gap { margin: 24px 0; border-radius: 8px; }
-.session-bottom-slot { flex-shrink: 0; min-width: 0; max-height: 55%; overflow-y: auto; background: var(--surface-0); }
-.composer { width: min(100%, var(--content-max-width)); margin: 0 auto; padding: 8px 16px max(12px, env(safe-area-inset-bottom, 0px)); background: var(--surface-0); }
-.composer-label { font-size: 12px; font-weight: 500; }
-.composer-route { color: var(--text-secondary); font-size: 12px; line-height: 1.6; margin-bottom: 8px; }
-.composer-input { display: flex; flex-direction: column; gap: 12px; background: var(--surface-1); border: 1px solid var(--border-accent); border-radius: 16px; padding: 16px 16px 12px; }
-.composer-input:focus-within { border-color: var(--surface-3); }
-.composer textarea { resize: none; display: block; width: 100%; min-height: 46px; max-height: 160px; padding: 0; background: transparent; border: 0; font-size: 15px; line-height: 1.4; color: var(--text); }
-.composer textarea:focus-visible { outline-offset: -4px; }
-.composer textarea::placeholder { color: var(--text-secondary); }
-.composer textarea:disabled { opacity: .65; }
-.composer-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-inline: -6px; min-height: 28px; }
-.composer-model { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: 12px; line-height: 20px; }
-.composer-model > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.composer-effort { color: var(--text-secondary); }
-.composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.composer-footer:has(> span:empty) { display: none; }
-.composer-footer > span { padding-top: 8px; font-size: 12px; color: var(--text-secondary); line-height: 1.5; overflow-wrap: anywhere; }
-.send-button { position: relative; display: grid; place-items: center; width: 44px; height: 44px; min-height: 44px; min-width: 44px; margin: -8px -8px -8px 0; padding: 8px; color: var(--on-accent); background: transparent; border-radius: 50%; flex-shrink: 0; }
-.send-button-chrome { display: grid; place-items: center; width: 28px; height: 28px; background: var(--accent); border-radius: 50%; }
-.send-button:disabled { opacity: .5; }
-.send-button:hover:enabled { opacity: .9; }
-.send-button:active:enabled { background: transparent; opacity: .75; }
+.session-bottom-slot { flex-shrink: 0; min-width: 0; max-height: 55%; overflow-y: auto; background: var(--workspace); }
 .latest-message-slot { display: flex; justify-content: center; padding: 8px 16px 0; }
 .new-message-button { padding: 8px 16px; min-height: 44px; display: flex; align-items: center; gap: 8px; background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 24px; font-size: 12px; white-space: nowrap; }
 @media (max-width: 719px) {
@@ -134,9 +113,6 @@
   .message-actions { margin-top: 2px; gap: 4px; }
   .role-user .message-actions { opacity: 1; }
   .markdown p, .markdown ul, .markdown ol, .markdown pre, .markdown blockquote, .markdown table { margin-block: 12px; }
-  .composer { padding: 8px max(12px, env(safe-area-inset-right, 0px)) max(12px, env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px)); }
-  .composer-input { padding: 8px 12px; box-shadow: 0 1px 2px #0000000d; }
-  .composer textarea { font-size: 16px; }
 }
 @media (pointer: coarse) {
   .message-action, .message-time-button { min-width: 44px; min-height: 44px; }
