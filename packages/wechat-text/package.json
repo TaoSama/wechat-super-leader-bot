@@ -1,5 +1,6 @@
 {
   "name": "@super-leader/wechat-text",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "version": "1.0.0",
   "private": true,
   "type": "module",

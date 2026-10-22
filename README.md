@@ -34,15 +34,15 @@ Gateway 独立维护微信登录与同步状态；Codex 回复模式为每个账
 持续目标的后续决策、隔离后台执行等独立任务仍可使用模型；独立 Controller 回复模式保留原有行为。
 Daemon 原生运行在 Mac/Linux 宿主机，连接已有会话；用户仍可在原客户端操作这些会话。
 
-远端 Docker 运行 Controller、Web、PostgreSQL 和独立 Gateway；宿主机主动连接 WSS，
-不需要给 Mac 开公网入站端口。桌面控制优先使用已有 owner；未加载会话可通过配置的
+一种部署方式是在 Linux 服务器上用 Docker 运行 Controller、Web、PostgreSQL 和独立 Gateway；
+Agent 所在宿主机主动连接 WSS，无需开放公网入站端口。桌面控制优先使用已有 owner；未加载会话可通过配置的
 app-server 按原 ID 恢复后发送，不创建替代会话。已有 writer 冲突时明确失败，不抢占、不自动换路。
 
 ## 入口与代码布局
 
 | 入口 | 用途 |
 | --- | --- |
-| [leader.example.com](https://leader.example.com) | 线上控制台，通过微信一次性链接登录 |
+| `https://leader.example.com` | 控制台域名示例，部署时替换为自己的域名，通过微信一次性链接登录 |
 | `http://127.0.0.1:8790` | 独立本机 Controller / Web |
 | `/health` | Controller 存活检查 |
 | `/v1/daemon` | 认证 Daemon WebSocket |
@@ -155,7 +155,7 @@ node scripts/local.mjs --sessions
 
 `--up` 构建本机 Controller / Web / PostgreSQL；启动器默认使用独立 `docker-compose`。
 `--daemon` 为前台开发运行；已有用户服务在运行时，通过该服务管理节点。
-`--down` 停止本机容器并保留数据库卷。已连接远端的节点使用远端查询入口，
+`--down` 停止本机容器并保留数据库卷。已连接远端 Controller 的节点使用远端查询入口，
 不要再启动第二个编排权威；`--gateway` 会真实轮询微信，必须先配置并核实允许名单。
 
 ## 原生 Daemon
@@ -195,7 +195,10 @@ Linux 用户服务不自动启用 linger；服务在线不代表原会话可控�
 微信独立服务为 `deploy/compose.gateway.yaml`，仅显式选择 `wechat` profile 才启动。
 镜像入口为 `deploy/Dockerfile.controller` 和 `deploy/Dockerfile.gateway`。
 
-私有生产配置位于 `.runtime/controller.env`。只读检查使用以下命令，避免输出展开后的密钥：
+将生产配置保存在私有的 `.runtime/controller.env` 中。部署前必须按自己的环境设置
+`CONSOLE_PUBLIC_URL`（控制台公开 HTTPS origin）、`CONTROLLER_URL`（Gateway 可访问的 Controller URL）
+和 `RESULT_PUBLIC_ORIGIN`（成果下载链接公开 HTTPS origin）。文档与 Compose 中的 `example.com` 域名为示例。
+已有部署沿用自己的私有配置。只读检查使用以下命令，避免输出展开后的密钥：
 
 ```sh
 docker compose --env-file .runtime/controller.env \
@@ -216,7 +219,7 @@ Compose 未单独配置时沿用 `LEADER_MODEL_API_KEY`、`LEADER_MODEL_BASE_URL
 `GATEWAY_LEADER_MODE=controller` 可显式选择原 Controller 回复入口。
 Codex SDK 与原生 CLI 固定在 `0.163.0`；镜像安装时显式选择目标架构的 CLI 包，不能直接复制开发机原生 CLI。
 默认通过原生 app-server 执行轮次并支持追加消息；SDK 注入路径保持相同的回复持久化和异步清理约束。
-远端生产主机为 `linux/amd64`，开发机为 ARM 时构建需显式指定 `--platform linux/amd64`。
+按目标宿主机架构构建镜像。例如，目标为 `linux/amd64`、开发机为 ARM 时，显式指定 `--platform linux/amd64`。
 
 Codex 记忆根目录为 `GATEWAY_LEADER_ROOT=/var/lib/super-leader-gateway/leader`，
 位于已有 `WECHAT_STATE_DIR` 持久挂载中。账户和聊天按摘要分目录，每个目录保存
@@ -389,7 +392,7 @@ Plan/Goal 创建满 30 秒后，独立进度调度器可把已持久保存的等
 
 ### 跨机器观察原生 Codex 定时任务
 
-例如：“每天上午十点，检查 节点 A 和 节点 B 上今天的日报定时任务，等它们执行完汇总给我；
+例如：“每天上午十点，检查机器 A 和机器 B 上今天的日报定时任务，等它们执行完汇总给我；
 最晚十一点交付，缺的说明原因。”模型先列出机器与原生任务，让来源绑定到实际发现的 ID。
 各机器 Daemon 需要配置该用户实际的 `--codex-home`，通过认证 WSS 只读返回任务和执行证据。
 它不会向源会话发送催促、重跑任务或修改其定时设置。
@@ -541,7 +544,7 @@ Codex 场景通过已安装的运行依赖启动真实原生 app-server，仅将
 后台容器额外验收使用 `node tests/integration/leader/background-worker-container.mjs --run --native-only`，
 在已构建镜像和已加载安全策略上运行真实 CLI，核对接续、越界拒读及完成/取消后的子进程清理。
 省略 `--native-only` 时从标准输入接收临时模型配置，验证真实模型两轮接续、工作区读写和联网。
-两种模式已在本地 Linux ARM 容器通过；生产宿主的架构、安全策略和网络仍需部署时单独核验。
+部署前在自己的目标架构和安全策略下运行验收，核对网络、工作区隔离和会话接续。
 
 | 回执 | 能证明什么 |
 | --- | --- |
@@ -558,8 +561,16 @@ Codex 场景通过已安装的运行依赖启动真实原生 app-server，仅将
 涉及新通知格式、分段 checkpoint 或大结果 journal 的升级，产生新数据后优先向前修复，不能直接换回旧版二进制。
 
 持续目标的“完成”是模型依据记录判断条件满足，不等于独立业务验收。
-请在自己的环境逐项验收微信登录链接、真实手机会话控制、跨物理机闭环、
-CLI 与用户服务，并分别记录证据。
-原生定时观察需核对各机器实际的 heartbeat 和 cron 配置、准确轮次及完成结果；
-具体任务及节点以自己的环境为准。cron 的准确轮次匹配已有合成认证 WSS 链路验证，
-尚不能据此宣称不同物理机器上的真实 cron 执行均已验收。
+请在自己的环境逐项验收微信登录链接、真实手机会话控制、跨物理机闭环、CLI 与用户服务。
+原生定时观察还需核对各机器实际的 heartbeat 和 cron 配置、准确轮次及完成结果。
+合成链路验证只覆盖其测试场景；真实机器、微信投递和升级后的兼容性需分别记录验收结果。
+
+## 许可与商业授权
+
+本项目以 **PolyForm Noncommercial License 1.0.0** 公开源码（source-available）。
+本次公开发行中，TaoSama 有权许可的第一方代码及随仓库公开的历史版本均按该许可提供。
+此前已有效授予的其他许可，继续适用于其对应副本和版本。
+非商业使用及其他已许可用途以 [LICENSE](LICENSE) 原文为准。超出该许可范围的商业用途，
+包括企业内部业务使用，须先取得 TaoSama 的单独书面授权。请通过
+[GitHub Issues](https://github.com/TaoSama/wechat-super-leader-bot/issues) 联系商业授权。
+第三方组件保留各自的原始许可、版权和通知；本项目许可仅适用于有权授予许可的第一方内容。

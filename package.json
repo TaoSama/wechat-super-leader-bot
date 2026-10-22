@@ -1,5 +1,6 @@
 {
   "name": "super-leader",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "private": true,
   "type": "module",
   "engines": { "node": ">=24" },

@@ -1,5 +1,6 @@
 {
   "name": "controller",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "version": "1.0.0",
   "description": "Super Leader Agent Controller",
   "type": "module",
