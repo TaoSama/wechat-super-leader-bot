@@ -1,24 +1,25 @@
 .session-workspace { display: grid; grid-template-columns: 300px minmax(0, 1fr); height: 100%; min-height: 0; }
-.session-sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid var(--border); background: var(--sidebar); }
+.session-sidebar { --sidebar-muted: color-mix(in srgb, var(--text-secondary) 60%, var(--text)); display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid var(--border); background: var(--sidebar); }
 .sidebar-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 12px; }
 .sidebar-heading { display: flex; align-items: center; min-height: 44px; min-width: 0; }
 .sidebar-heading h2 { font-size: 14px; font-weight: 500; }
-.sidebar-heading h2 > span { font-size: 12px; color: var(--text-secondary); font-weight: 400; margin-left: 4px; }
-.search-field { display: flex; align-items: center; gap: 8px; margin: 0 12px 8px; padding: 0 12px; min-height: 34px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-secondary); background: var(--surface-1); }
+.sidebar-heading h2 > span { font-size: 12px; color: var(--sidebar-muted); font-weight: 400; margin-left: 4px; }
+.search-field { display: flex; align-items: center; gap: 8px; margin: 0 12px 8px; padding: 0 12px; min-height: 34px; border: 1px solid var(--border); border-radius: 6px; color: var(--sidebar-muted); background: var(--surface-1); }
 .search-field:focus-within { border-color: var(--border-accent); background: var(--surface-2); }
 .search-field input { min-width: 0; width: 100%; background: transparent; border: 0; font-size: 14px; padding: 8px 0; color: var(--text); }
-.search-field input::placeholder { color: var(--text-secondary); }
+.search-field input::placeholder { color: var(--sidebar-muted); }
 .machine-filter { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--text-secondary); font-size: 12px; }
+.session-sidebar .machine-filter { color: var(--sidebar-muted); }
 .machine-filter > span { flex-shrink: 0; }
-.sidebar-toolbar .filter-select { border: 0; background: transparent; max-width: 140px; }
+.sidebar-toolbar .filter-select { border: 0; background: transparent; max-width: 140px; color: var(--sidebar-muted); }
 .session-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 8px max(8px, env(safe-area-inset-bottom, 0px)); scrollbar-width: thin; scrollbar-color: var(--surface-3) transparent; }
-.sidebar-sort-hint { margin: 0; padding: 0 16px 6px; font-size: 12px; color: var(--text-secondary); }
-.search-clear { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; margin-right: -12px; color: var(--text-secondary); border-radius: 6px; }
+.sidebar-sort-hint { margin: 0; padding: 0 16px 6px; font-size: 12px; color: var(--sidebar-muted); }
+.search-clear { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; margin-right: -12px; color: var(--sidebar-muted); border-radius: 6px; }
 .search-clear:hover { color: var(--text); background: var(--surface-2); }
 .project-group { padding-block: 4px; }
 .project-group + .project-group { border-top: 1px solid var(--border); }
 .project-group h3 { margin: 0; }
-.project-toggle { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 44px; padding: 8px 6px; border: 0; border-radius: 6px; text-align: left; color: var(--text-secondary); background: transparent; font-size: 12px; }
+.project-toggle { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 44px; padding: 8px 6px; border: 0; border-radius: 6px; text-align: left; color: var(--sidebar-muted); background: transparent; font-size: 12px; }
 .project-toggle:hover:enabled { background: var(--sidebar-hover); }
 .project-toggle:disabled { opacity: 1; cursor: default; }
 .project-chevron { transition: transform 150ms; }
@@ -28,15 +29,16 @@
 .project-group-name { font-weight: 600; color: var(--text); }
 .project-group-name, .project-group-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .project-machine { overflow-wrap: anywhere; }
+.project-machine.offline { color: color-mix(in srgb, var(--warning) 60%, var(--text)); }
 .project-count { flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .project-session-list { list-style: none; margin: 0; padding: 0; }
-.session-number { min-width: 2ch; flex-shrink: 0; font-size: 12px; color: var(--text-secondary); text-align: right; font-variant-numeric: tabular-nums; }
+.session-number { min-width: 2ch; flex-shrink: 0; font-size: 12px; color: var(--sidebar-muted); text-align: right; font-variant-numeric: tabular-nums; }
 .session-choice.project-session-choice { align-items: center; gap: 8px; margin-bottom: 2px; }
 .project-session-choice .session-title { flex: 1; min-width: 0; opacity: 1; }
-.session-compact-status { flex-shrink: 0; min-width: 2em; font-size: 12px; line-height: 20px; color: var(--text-secondary); text-align: right; }
-.session-compact-status.state-active, .session-compact-status.state-busy, .session-compact-status.state-running { color: var(--status-running); }
-.session-compact-status.state-blocked, .session-compact-status.state-awaiting_input { color: var(--warning); }
-.session-compact-status.state-error { color: var(--danger); }
+.session-compact-status { flex-shrink: 0; min-width: 2em; font-size: 12px; line-height: 20px; color: var(--sidebar-muted); text-align: right; }
+.session-compact-status.state-active, .session-compact-status.state-busy, .session-compact-status.state-running { color: color-mix(in srgb, var(--status-running) 60%, var(--text)); }
+.session-compact-status.state-blocked, .session-compact-status.state-awaiting_input { color: color-mix(in srgb, var(--warning) 60%, var(--text)); }
+.session-compact-status.state-error { color: color-mix(in srgb, var(--danger) 60%, var(--text)); }
 .session-choice { display: flex; align-items: flex-start; text-align: left; gap: 8px; width: 100%; min-height: 44px; padding: 8px 12px 8px 8px; border: 0; border-radius: 8px; margin-bottom: 4px; }
 .session-choice:hover { background: var(--sidebar-hover); }
 .session-choice.selected { background: var(--sidebar-selected); }
