@@ -27,7 +27,7 @@ it("loads the completed two-step HTTP relay and refreshes its plan status withou
   render(<App />);
 
   const card = await screen.findByTestId(`execution-${plan.id}`);
-  fireEvent.click(screen.getByRole("button", { name: "Super Leader" }));
+  fireEvent.click(screen.getByRole("button", { name: "工作看板" }));
   expect(card).toHaveTextContent("已完成 2 / 2 步");
   expect(card).toHaveTextContent("步骤完成，计划待核对");
   expect(screen.queryByTestId("telemetry-error-banner")).toBeNull();

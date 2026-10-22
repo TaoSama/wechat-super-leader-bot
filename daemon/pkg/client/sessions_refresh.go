@@ -58,7 +58,7 @@ func sessionsChanged(previous, current []protocol.Session) bool {
 func (d *Daemon) cachedSessions() []protocol.Session {
 	d.snapshotMu.RLock()
 	defer d.snapshotMu.RUnlock()
-	sessions := mergeSessionSources(d.sessionSnapshot, d.catalogSnapshot)
+	sessions := mergeSessionSources(d.managedSessionsLocked(), d.catalogSnapshot)
 	for i := range sessions {
 		if !d.canResumeSendLocked(sessions[i].ID, time.Now()) {
 			sessions[i].Capabilities = slices.DeleteFunc(sessions[i].Capabilities, func(capability protocol.ActionType) bool {

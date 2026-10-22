@@ -41,8 +41,8 @@ function DeliveryCard({ item }: { item: ConsoleDelivery }) {
     {item.status === "uncertain" && <p className="section-description">发送结果未确认，请先核验微信；完整成果保存在这里。</p>}
     {item.messages[0] && content === undefined && <p className="execution-preview" aria-label="成果摘要">{item.messages[0].slice(0, PREVIEW_CHARS)}{item.messages[0].length > PREVIEW_CHARS ? "…" : ""}</p>}
     <p className="execution-times">记录于 {formatTimestamp(new Date(item.createdAt).toISOString())}<span>成果保留至 {formatTimestamp(new Date(item.retainedUntil).toISOString())}</span></p>
-    <div className="notification-actions"><button type="button" className="text-button" disabled={loading || expired} onClick={() => void load()}>{expired ? "成果保存期已结束" : loading ? "正在加载完整成果…" : expanded ? "收起完整成果" : error ? "重试加载完整成果" : "查看完整成果"}</button>
-      {loading && <button type="button" className="text-button" onClick={() => { request.current?.abort(); request.current = null; setLoading(false); }}>取消加载</button>}
+    <div className="notification-actions"><button type="button" className="ui-button ghost" disabled={loading || expired} onClick={() => void load()}>{expired ? "成果保存期已结束" : loading ? "正在加载完整成果…" : expanded ? "收起完整成果" : error ? "重试加载完整成果" : "查看完整成果"}</button>
+      {loading && <button type="button" className="ui-button ghost" onClick={() => { request.current?.abort(); request.current = null; setLoading(false); }}>取消加载</button>}
     </div>
     {error && <p role="alert" className="command-error">{error}</p>}
     {expanded && content !== undefined && <pre className="notification-full-content" aria-label="完整成果">{content || "成果内容为空。"}</pre>}

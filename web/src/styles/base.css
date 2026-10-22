@@ -17,7 +17,7 @@ button:active:enabled { background-color: var(--interaction-highlight); }
 .icon-button { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; border-radius: 8px; color: var(--text-secondary); gap: 6px; }
 .icon-button:hover { background: var(--surface-2); }
 .filter-select { min-width: 44px; min-height: 32px; max-width: 180px; width: auto; flex: 0 1 auto; align-self: center; border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; background: var(--surface-2); color: var(--text-secondary); font-size: 12px; line-height: 20px; cursor: pointer; touch-action: manipulation; }
-.online { color: var(--accent-bright); }
+.online { color: var(--status-success); }
 .offline { color: var(--warning); }
 .text-button { min-height: 44px; color: var(--accent-teal); font-size: 12px; }
 .muted, .image-placeholder { color: var(--text-secondary); font-size: 12px; }

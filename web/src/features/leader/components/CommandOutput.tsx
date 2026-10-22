@@ -39,9 +39,9 @@ export function CommandOutput({ command, expanded }: { command: CommandRecord; e
     {output !== undefined ? output ? <pre>{output}</pre> : <p>结果为空。</p> : <>
       <p>完整结果已保存，展开时按需读取。{command.outputTruncated ? "以下仅为摘要。" : ""}</p>
       {command.outputPreview && <pre aria-label="结果摘要">{command.outputPreview}</pre>}
-      {state.loading ? <><p role="status">正在加载完整结果…</p><button type="button" className="text-button" onClick={() => {
+      {state.loading ? <><p role="status">正在加载完整结果…</p><button type="button" className="ui-button ghost" onClick={() => {
         active.current?.abort(); active.current = null; setState({ loading: false, cancelled: true });
-      }}>取消加载</button></> : <button type="button" className="text-button" onClick={() => setAttempt(value => value + 1)}>{state.error ? "重试加载完整结果" : "加载完整结果"}</button>}
+      }}>取消加载</button></> : <button type="button" className="ui-button ghost" onClick={() => setAttempt(value => value + 1)}>{state.error ? "重试加载完整结果" : "加载完整结果"}</button>}
       {state.cancelled && <p role="status">加载已取消，完整结果仍可按需读取。</p>}
       {state.error && <p role="alert" className="command-error">{state.error}</p>}
     </>}

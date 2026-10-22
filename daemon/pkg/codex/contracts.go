@@ -24,6 +24,12 @@ type ResumeSender interface {
 	ResumeSend(context.Context, string, string) (string, error)
 }
 
+// SessionInspector verifies a catalog identity against the configured live
+// server without restoring the thread or reading conversation bodies.
+type SessionInspector interface {
+	InspectSession(context.Context, string) (protocol.Session, error)
+}
+
 // SteerSender appends input to an exact active turn and never starts a new one.
 // SteerPrompt returns the accepted native turn ID.
 type SteerSender interface {

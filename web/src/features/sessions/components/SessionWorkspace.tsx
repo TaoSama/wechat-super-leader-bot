@@ -115,7 +115,7 @@ export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = t
         <SessionHistory session={selected} terminal={selectedTerminal} showHistory={showHistory} history={history} scroll={scroll} />
         <div className="session-bottom-slot">
           {showHistory && scroll.newContent && <div className="latest-message-slot"><button type="button" className="new-message-button" onClick={scroll.jumpLatest}><ArrowDown size={16} aria-hidden="true" />有新消息 · 跳到最新</button></div>}
-          <SessionComposer session={selected} model={selectedModel!} messages={messages} terminal={selectedTerminal} mobile={mobile} connected={connected} busy={["active", "busy", "running"].includes(selectedObservation!.executionStatus)} blockReason={blockReason} pending={pending} onSend={send} onRecover={() => void messages.submit(true)} />
+          <SessionComposer key={selectedKey} session={selected} model={selectedModel!} messages={messages} terminal={selectedTerminal} mobile={mobile} connected={connected} busy={["active", "busy", "running"].includes(selectedObservation!.executionStatus)} blockReason={blockReason} pending={pending} onSend={send} onRecover={() => void messages.submit(true)} />
         </div>
         {detailsOpen && <SessionInfo session={selected} model={selectedModel!} connected={connected} terminal={selectedTerminal} now={observationNow} blockReason={blockReason} showHistory={showHistory} history={history} onClose={() => setDetailsOpen(false)} />}
       </>}

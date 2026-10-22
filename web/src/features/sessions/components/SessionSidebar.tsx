@@ -7,6 +7,7 @@ import { selectExecutionObservation } from "../session-observation";
 import { modelSourceLabel, selectModelObservation } from "../model-observation";
 import { sessionKey } from "../useSessionHistory";
 import { SessionStatus } from "./SessionStatus";
+import { ChoiceSelect } from "../../../components/ui/ChoiceSelect";
 
 interface Props {
   sessions: ScopedSession[];
@@ -33,7 +34,7 @@ export function SessionSidebar({ sessions, nodes, now, selectedKey, listRef, onS
 
   return <aside className="session-sidebar" aria-label="机器与会话">
     <div className="sidebar-toolbar"><div className="sidebar-heading"><h2>会话 <span>{visibleSessions.length}</span></h2></div>
-    <label className="machine-filter"><span>机器</span><select className="filter-select" aria-label="筛选机器" value={nodeFilter} onChange={event => setNodeFilter(event.target.value)}><option value="">全部机器</option>{nodes.map(node => <option key={node.nodeId} value={node.nodeId}>{node.nodeId}{node.connected ? " · 在线" : " · 离线"}</option>)}</select></label>
+    <div className="machine-filter"><ChoiceSelect label="筛选机器" value={nodeFilter} onChange={setNodeFilter} options={[{ value: "", label: "全部机器" }, ...nodes.map(node => ({ value: node.nodeId, label: node.nodeId, description: node.connected ? "在线" : "离线" }))]} /></div>
     </div>
     <label className="search-field"><Search size={14} aria-hidden="true" /><input aria-label="搜索会话" placeholder="搜索会话" value={query} onChange={event => setQuery(event.target.value)} /></label>
     <div className="session-list" ref={listRef} onScroll={event => onScroll(event.currentTarget.scrollTop)}>

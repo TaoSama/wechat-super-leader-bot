@@ -15,8 +15,7 @@ export function isSessionMessageTarget(session: ScopedSession): boolean {
 
 // Queue admission proves target identity and capability, never current dispatch authority.
 export function canQueueSession(session: ScopedSession, connected: boolean, now = Date.now()): boolean {
-  if (isTerminalSession(session) || !isSessionMessageTarget(session) ||
-      !KNOWN_SESSION_STATES.has(session.status) || !Number.isFinite(now)) return false;
+  if (isTerminalSession(session) || !isSessionMessageTarget(session) || !Number.isFinite(now)) return false;
   const observed = (timestamp: unknown) => isIsoTimestamp(timestamp) && Date.parse(timestamp) <= now &&
     (!connected || now - Date.parse(timestamp) <= MAX_SEND_AVAILABILITY_AGE_MS);
   if (session.desktopObservation !== undefined) {
@@ -26,6 +25,15 @@ export function canQueueSession(session: ScopedSession, connected: boolean, now 
   }
   const availability = normalizeSendAvailability(session.sendAvailability);
   if (availability) {
+    // Busy invalidation preserves the last preflight's timestamps. Queueing is
+    // backed by the current owner observation; dispatch still needs a new check.
+    const observedAt = Date.parse(availability.observedAt), validUntil = Date.parse(availability.validUntil);
+    const desktop = normalizeDesktopObservation(session.desktopObservation);
+    if (connected && desktop && isDesktopObservationFresh(desktop, now) && desktop.status === "active" &&
+        availability.route === "desktop-owner" && availability.state === "blocked" && availability.reason === "busy" &&
+        isIsoTimestamp(availability.observedAt) && isIsoTimestamp(availability.validUntil) &&
+        observedAt <= now && validUntil >= observedAt && validUntil - observedAt <= MAX_SEND_AVAILABILITY_AGE_MS) return true;
+    if (!KNOWN_SESSION_STATES.has(session.status)) return false;
     if (availability.route !== "desktop-owner" || !observed(availability.observedAt) || !isIsoTimestamp(availability.validUntil) ||
         Date.parse(availability.validUntil) <= Date.parse(availability.observedAt) ||
         Date.parse(availability.validUntil) - Date.parse(availability.observedAt) > MAX_SEND_AVAILABILITY_AGE_MS ||
@@ -33,6 +41,7 @@ export function canQueueSession(session: ScopedSession, connected: boolean, now 
         availability.state !== "ready" && availability.reason !== "busy") return false;
     return !connected || availability.reason === "busy" || session.desktopObservation?.status === "active";
   }
+  if (!KNOWN_SESSION_STATES.has(session.status)) return false;
   if (!observed(session.observedAt)) return false;
   const native = session.capabilities.includes("send") && session.loaded === true && session.status !== "notLoaded";
   const resume = session.provider === "codex-app" && session.capabilities.includes("resume-send") && typeof session.loaded === "boolean";

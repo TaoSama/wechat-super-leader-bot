@@ -23,17 +23,23 @@ beforeEach(() => {
 });
 afterEach(() => { resetAuthHelperForTesting(); vi.unstubAllGlobals(); });
 
-it("默认深色，菜单支持明暗切换、Escape回焦点和外部点击关闭", async () => {
+it("默认浅色，菜单支持明暗切换、Escape回焦点和外部点击关闭", async () => {
   const { container } = render(<App />);
   await screen.findByTestId("session-row-local-shell-session");
   const shell = container.querySelector(".app-shell")!;
   const options = screen.getByRole("button", { name: "工作台选项" });
-  expect(shell).toHaveAttribute("data-theme", "dark");
+  expect(shell).toHaveAttribute("data-theme", "light");
+  expect(document.documentElement).toHaveAttribute("data-theme", "light");
   expect(options).toHaveAttribute("aria-expanded", "false");
   fireEvent.click(options);
   expect(options).toHaveAttribute("aria-expanded", "true");
+  const menu = screen.getByRole("dialog", { name: "工作台选项" });
+  expect(menu).toHaveAttribute("aria-modal", "true");
+  expect(document.body.style.overflow).toBe("hidden");
+  fireEvent.keyDown(screen.getByRole("button", { name: "关闭工作台选项" }), { key: "ArrowUp" });
+  expect(screen.getByRole("button", { name: "退出控制台登录" })).toHaveFocus();
   fireEvent.click(screen.getByRole("button", { name: "切换明暗外观" }));
-  expect(shell).toHaveAttribute("data-theme", "light");
+  expect(shell).toHaveAttribute("data-theme", "dark");
   fireEvent.keyDown(screen.getByRole("button", { name: "切换明暗外观" }), { key: "Escape" });
   expect(options).toHaveAttribute("aria-expanded", "false");
   expect(options).toHaveFocus();
@@ -54,7 +60,7 @@ it("会话详情进入沉浸态，返回与看板往返保留会话草稿", asyn
   fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "保留这段草稿" } });
   fireEvent.click(screen.getByRole("button", { name: "返回会话列表" }));
   await waitFor(() => expect(shell).not.toHaveClass("mobile-detail-open"));
-  fireEvent.click(screen.getByRole("button", { name: "Super Leader" }));
+  fireEvent.click(screen.getByRole("button", { name: "工作看板" }));
   expect(shell).toHaveAttribute("data-view", "leader");
   fireEvent.click(screen.getByRole("button", { name: "会话" }));
   fireEvent.click(row);
