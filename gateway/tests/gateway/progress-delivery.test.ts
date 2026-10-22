@@ -70,7 +70,7 @@ test("new claim permits a complete multipart notification beyond the ordinary 60
   f.hooks.claim = claimed => ({ ...claimed, attemptExpiresAt: Math.min(claimed.expiresAt, claimed.attemptedAt! + NOTIFICATION_ATTEMPT_MS) });
   f.hooks.send = () => new Promise(resolve => setTimeout(() => resolve({ ret: 0 }), 14_000));
   const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink,
-    notifications: true, splitMaxChars: 1 });
+    splitMaxChars: 1 });
   const pending = gateway.deliverNotificationsOnce();
   for (let step = 0; step < 80; step++) await Promise.resolve();
   for (let part = 0; part < item.text.length; part++) {
@@ -88,7 +88,7 @@ test("legacy claim reserves receipt time and records incomplete multipart timeou
   const f = harness(t, { items: [item] });
   f.hooks.send = () => new Promise(resolve => setTimeout(() => resolve({ ret: 0 }), 14_000));
   const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink,
-    notifications: true, splitMaxChars: 1 });
+    splitMaxChars: 1 });
   const pending = gateway.deliverNotificationsOnce();
   for (let step = 0; step < 80; step++) await Promise.resolve();
   for (let part = 0; part < 2; part++) {

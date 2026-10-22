@@ -94,7 +94,7 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
   const keyPath = join(dir, 'localhost-key.pem');
   const preloadPath = join(dir, 'synthetic-cdn.mjs');
   const sent = [], incoming = [], inputs = [], deliveries = [], acknowledgements = [], modelCalls = [], errors = [], logs = [];
-  const recordedResults = [], historyReads = [], confirmationCalls = [];
+  const recordedResults = [], historyReads = [], confirmationCalls = [], progressCalls = [], progressToolResults = [];
   const receiptRace = { armed: true, verified: false, held: undefined };
   const wireEvents = [], notificationClientIds = new Set(), fault = { remaining: 0, mode: null };
   const uploads = new Map();
@@ -157,7 +157,38 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
         modelCalls.push(last);
         wireEvents.push({ kind: 'model', text: last.content });
         let output;
-        if (body.input[0]?.content?.startsWith('你负责根据刚刚核查的真实执行记录')) {
+        if (body.input[0]?.content?.startsWith('你负责向用户报告后台任务进展')) {
+          assert.deepEqual(body.tools.map(tool => tool.name), ['report_progress'], 'Background model received unrelated tools');
+          const context = JSON.parse(body.input.find(item => item.role === 'user').content);
+          assert.equal(context.kind, 'untrusted_progress_evidence');
+          assert.equal(context.chatId, CHAT); assert.equal(context.source.type, 'plan');
+          if (last.type === 'function_call_output') {
+            const result = JSON.parse(last.output);
+            const call = progressCalls.find(item => item.callId === last.call_id);
+            assert(call, 'Background progress returned an unknown model tool call');
+            assert.equal(result.status, 'queued', 'Model progress was not durably committed');
+            assert.equal(result.remaining, context.remaining - 1); assert.equal(result.limit, 3);
+            progressToolResults.push({ sourceId: context.source.id, eventKey: context.eventKey, ...result });
+            output = [{ type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: '' }] }];
+          } else {
+            assert.equal(last.role, 'user');
+            assert(context.evidence.length > 0, 'Background progress lacked persisted evidence');
+            for (const item of context.evidence) {
+              if (item.status === 'waiting') { assert.equal(item.commandId, undefined); continue; }
+              const command = (await controller.request('/v1/commands/' + item.commandId)).body;
+              assert.equal(command.prompt, item.prompt);
+              assert([item.status, ...(item.status === 'accepted' ? ['completed'] : [])].includes(command.status));
+              if (item.status === 'completed') assert.equal(item.output, command.output);
+            }
+            const completed = context.evidence.filter(item => item.status === 'completed').map(item => item.step);
+            const accepted = context.evidence.filter(item => item.status === 'accepted').map(item => item.step);
+            const text = `核对到的执行进展：${completed.length ? `已完成第 ${completed.join('、')} 项` : '尚无已完成步骤'}；` +
+              `${accepted.length ? `第 ${accepted.join('、')} 项已接收，等待完成回执` : '其余步骤等待调度'}。`;
+            const callId = 'synthetic-model-progress-' + context.eventKey;
+            progressCalls.push({ ...context, text, callId });
+            output = [{ type: 'function_call', call_id: callId, name: 'report_progress', arguments: JSON.stringify({ text }) }];
+          }
+        } else if (body.input[0]?.content?.startsWith('你负责根据刚刚核查的真实执行记录')) {
           assert.deepEqual(body.tools, [], 'Confirmation model received mutation tools');
           const evidence = JSON.parse(last.content);
           const observations = await Promise.all(evidence.targets.map(async (target, index) => {
@@ -468,7 +499,7 @@ globalThis.fetch = async (input, init) => {
     const runGateway = async (mode, { expectedExit = 0, gatewayEnv = {} } = {}) => {
       healthy();
       let output = '', stderr = '';
-      gatewayChild = spawn(process.execPath, ['--import', preloadPath, 'gateway/dist/index.js', mode, '--notifications', '--controller-url', gatewayControllerUrl,
+      gatewayChild = spawn(process.execPath, ['--import', preloadPath, 'gateway/dist/index.js', mode, '--controller-url', gatewayControllerUrl,
         '--credentials-path', accountPath, '--state-path', statePath, '--health-path', join(dir, 'health.json')],
       { cwd: ROOT, env: { ...env, CONTROLLER_TOKEN: token, NODE_EXTRA_CA_CERTS: certPath,
         ...(budgetOnly ? {} : { GATEWAY_SEND_BUDGET: '1000' }), ...gatewayEnv }, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -755,7 +786,8 @@ globalThis.fetch = async (input, init) => {
       sendFrame, statePath, fault, wireEvents, evidence, healthy, chatId: CHAT, contextToken: CONTEXT,
       directTask: DIRECT_TASK, nodeId: NODE, sessionId: SESSION, clientId,
       restartController, setSessionStatus, databaseUrl, query: QUERY,
-      getDelivery, fullResult, artifactText, elapseDispatchInterval, resultClientId, waitForAccepted, waitForTyping });
+      getDelivery, fullResult, artifactText, elapseDispatchInterval, resultClientId, waitForAccepted, waitForTyping,
+      progressCalls, progressToolResults });
     healthy();
     assert(confirmationCalls.length > 0, 'Interaction did not exercise model-generated confirmation');
     evidence('PASS', { realControllerProcess: true, realGatewayCli: true, disposablePostgres: true,

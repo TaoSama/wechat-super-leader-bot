@@ -89,8 +89,8 @@ export async function verifyGoalNotifications({ base, token, request, store, res
     };
     writePrivateJsonSync(credentials, { token: 'synthetic-token', accountId: 'synthetic-account', baseUrl: PROVIDER });
     const state = new StateManager(credentials, statePath, { sendBudget: SYNTHETIC_SEND_BUDGET }); state.markBaselineEstablished();
-    const make = (notifications = true) => {
-      const instance = new WeChatGateway({ stateManager: state, notifications,
+    const make = () => {
+      const instance = new WeChatGateway({ stateManager: state,
         controller: new ControllerClient({ controllerUrl: base, controllerToken: token }),
         ilink: new ILinkClient({ stateManager: state, fetchImpl: provider }) });
       gateways.push(instance); return instance;
@@ -99,7 +99,6 @@ export async function verifyGoalNotifications({ base, token, request, store, res
     await make().deliverNotificationsOnce();
     assert.deepEqual(await pending(), initial); assert.equal(sent.length, 0);
     state.recordInboundContext('synthetic-goal-budget-input', GOAL_CHAT, Date.now(), true, 'synthetic-goal-context');
-    await make(false).deliverNotificationsOnce(); assert.equal(sent.length, 0);
     const gateway = make();
     for (let index = 0; (await pending()).length && index < MAX_DRAINS; index++) await gateway.deliverNotificationsOnce();
     assert.equal((await pending()).length, 0);
@@ -119,7 +118,7 @@ export async function verifyGoalNotifications({ base, token, request, store, res
     assert.equal(sent.length, sentBeforeRestart, 'Controller/Gateway restart replayed a goal notification');
     assert.deepEqual(await store.getNotification(uncertainId, Date.now()), unknown);
     assert.equal((await request('/v1/notifications/' + uncertainId + '/claim', { attemptId: randomUUID() })).status, 409);
-    console.log('PASS exact HTTP/model/WS completed goals → durable goal notifications → real Gateway/HTTP → simulated WeChat; blocked snapshot survives cancel, explicit cancel silent, no-context/default-off, unknown and restart never replay');
+    console.log('PASS exact HTTP/model/WS completed goals → durable goal notifications → real Gateway/HTTP → simulated WeChat; blocked snapshot survives cancel, explicit cancel silent, no-context guarded, automatic delivery, unknown and restart never replay');
   }, [
     { label: 'goal notification gateways', cleanup: () => { for (const gateway of gateways) gateway.stop(); } },
     { label: 'goal notification synthetic directory', cleanup: () => rm(dir, { recursive: true, force: true }) },

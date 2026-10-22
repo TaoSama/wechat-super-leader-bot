@@ -95,7 +95,7 @@ test('with --profile wechat, gateway is configured with exact production constra
   assert.equal(gateway.environment.WECHAT_CREDENTIALS_PATH, '/etc/super-leader/wechat-account.json');
   assert.equal(gateway.environment.WECHAT_STATE_PATH, '/var/lib/super-leader-gateway/state.json');
   assert.equal(gateway.environment.GATEWAY_HEALTH_PATH, '/var/lib/super-leader-gateway/health.json');
-  assert.equal(gateway.environment.GATEWAY_NOTIFICATIONS, 'false');
+  assert.equal(gateway.environment.GATEWAY_NOTIFICATIONS, undefined);
   assert.equal(gateway.environment.GATEWAY_MAX_CHARS, '3800');
   assert.equal(gateway.environment.GATEWAY_CONTEXT_WINDOW_MS, '82800000');
   assert.equal(gateway.environment.GATEWAY_SEND_BUDGET, '10');
@@ -161,14 +161,16 @@ test('bind policy rejects explicit host path creation after Compose normalizatio
   }
 });
 
-test('plan and goal notifications require an explicit gateway-only opt-in', () => {
-  const parsed = JSON.parse(execCompose([
-    '--env-file', '/dev/null',
-    '--profile', 'wechat', '-f', composeYamlPath, '-f', composeProdPath, '-f', composeGatewayPath,
-    'config', '--format', 'json',
-  ], { encoding: 'utf8', timeout: 10000, env: { ...fakeEnv, GATEWAY_NOTIFICATIONS: 'true' } }));
-  assert.equal(parsed.services.gateway.environment.GATEWAY_NOTIFICATIONS, 'true');
-  assert.equal(parsed.services.controller.environment.GATEWAY_NOTIFICATIONS, undefined);
+test('legacy notification environment cannot configure or disable product notifications', () => {
+  for (const value of ['true', 'false']) {
+    const parsed = JSON.parse(execCompose([
+      '--env-file', '/dev/null',
+      '--profile', 'wechat', '-f', composeYamlPath, '-f', composeProdPath, '-f', composeGatewayPath,
+      'config', '--format', 'json',
+    ], { encoding: 'utf8', timeout: 10000, env: { ...fakeEnv, GATEWAY_NOTIFICATIONS: value } }));
+    assert.equal(parsed.services.gateway.environment.GATEWAY_NOTIFICATIONS, undefined);
+    assert.equal(parsed.services.controller.environment.GATEWAY_NOTIFICATIONS, undefined);
+  }
 });
 
 test('local WeChat policy overrides reach only Gateway', () => {
