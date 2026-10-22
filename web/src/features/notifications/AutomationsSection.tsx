@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 import { CalendarClock } from "lucide-react";
 import { changeAutomationStatus } from "../../api/automations";
 import { ApiAuthError } from "../../api/errors";
@@ -19,11 +20,11 @@ function AutomationCard({ item }: { item: ConsoleAutomation }) {
   async function change(status: "active" | "paused" | "cancelled") {
     if (busy) return;
     setBusy(true); setError(undefined);
-    try { setCurrent(await changeAutomationStatus(current, status)); setCancelConfirm(false); }
+    try { setCurrent(await changeAutomationStatus(current, status)); }
     catch (cause) {
       if (cause instanceof ApiAuthError) setUnauthenticatedSession("expired");
       else setError(cause instanceof Error ? cause.message : "操作未确认，请刷新核验");
-    } finally { setBusy(false); }
+    } finally { setBusy(false); setCancelConfirm(false); }
   }
 
   const mutable = current.status === "active" || current.status === "paused";
@@ -35,9 +36,10 @@ function AutomationCard({ item }: { item: ConsoleAutomation }) {
     {current.kind === "background" && <p className="section-description">每轮独立执行；会话默认保留 24 小时，可在微信中追问或明确延期。</p>}
     <p className="execution-times">{current.status === "paused" ? "后续执行已暂停" : current.status === "active" && current.nextAt !== null ? `下次执行 ${formatTimestamp(new Date(current.nextAt).toISOString())}` : "没有后续执行安排"}{current.activeRunId && <span>本轮正在执行</span>}{current.lastOutcome && <span>上轮{current.lastOutcome === "completed" ? "执行完成" : "执行失败"}</span>}</p>
     {mutable && <div className="notification-actions">
-      <button type="button" className="text-button" disabled={busy} onClick={() => void change(current.status === "active" ? "paused" : "active")}>{current.status === "active" ? "暂停" : "恢复"}</button>
-      {!cancelConfirm ? <button type="button" className="text-button" disabled={busy} onClick={() => setCancelConfirm(true)}>取消任务</button> : <><span>{cancellationPrompt}</span><button type="button" className="text-button" disabled={busy} onClick={() => void change("cancelled")}>确认取消</button><button type="button" className="text-button" disabled={busy} onClick={() => setCancelConfirm(false)}>保留任务</button></>}
+      <button type="button" className="ui-button ghost" disabled={busy} onClick={() => void change(current.status === "active" ? "paused" : "active")}>{current.status === "active" ? "暂停" : "恢复"}</button>
+      <button type="button" className="ui-button ghost" disabled={busy} onClick={() => setCancelConfirm(true)}>取消任务</button>
     </div>}
+    {cancelConfirm && mutable && <ConfirmDialog title={`取消任务「${current.title}」`} description={cancellationPrompt} confirmLabel="确认取消" onConfirm={() => void change("cancelled")} onClose={() => setCancelConfirm(false)} busy={busy} destructive />}
     {busy && <p role="status" className="section-description">正在保存…</p>}
     {error && <p role="alert" className="command-error">{error}</p>}
     {current.activeRunId && <p className="section-description">{current.kind === "background"

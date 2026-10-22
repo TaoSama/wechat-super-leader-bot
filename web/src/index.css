@@ -5,6 +5,7 @@
 @import "./styles/history.css";
 @import "./styles/leader.css";
 @import "./styles/feedback.css";
+@import "./styles/controls.css";
 
 @tailwind base;
 @tailwind components;

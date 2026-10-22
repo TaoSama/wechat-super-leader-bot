@@ -17,6 +17,20 @@ function view(commands = snapshot()) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("persisted web queue cancellation", () => {
+  it("keeps the queued request untouched until explicit confirmation and can dismiss the dialog", () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    render(view());
+    fireEvent.click(screen.getByRole("button", { name: "取消排队" }));
+    expect(screen.getByRole("dialog", { name: "取消排队消息" })).toBeVisible();
+    expect(screen.getByText("仅移除这条尚未发送的消息；如果请求已开始发送，将无法取消。")).toBeVisible();
+    expect(fetchMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "保留" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.getByTestId(`command-status-${queued.commandId}`)).toHaveTextContent("等待发送");
+  });
+
   it("can cancel a persisted Web queue after remount from status alone, without a loaded session or original draft", async () => {
     const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => response({ ...queued, status: "cancelled" }));
     vi.stubGlobal("fetch", fetchMock);
@@ -24,7 +38,8 @@ describe("persisted web queue cancellation", () => {
     page.unmount();
     render(view(snapshot()));
     expect(screen.getByRole("button", { name: "取消排队" })).toBeVisible();
-    await act(async () => fireEvent.click(screen.getByRole("button", { name: "取消排队" })));
+    fireEvent.click(screen.getByRole("button", { name: "取消排队" }));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "确认取消排队" })));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]).toMatchObject(["/v1/sessions/offline/original/messages", {
       method: "POST", credentials: "same-origin", body: JSON.stringify({ cancelCommandId: queued.commandId }),
@@ -38,7 +53,9 @@ describe("persisted web queue cancellation", () => {
     const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => response({}, 409));
     vi.stubGlobal("fetch", fetchMock);
     render(view());
-    await act(async () => fireEvent.click(screen.getByRole("button", { name: "取消排队" })));
+    fireEvent.click(screen.getByRole("button", { name: "取消排队" }));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "确认取消排队" })));
+    expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.getByRole("alert")).toHaveTextContent("请求已开始发送，或不属于当前登录");
     expect(screen.getByTestId(`command-status-${queued.commandId}`)).toHaveTextContent("等待发送");
     expect(screen.queryByText("已取消", { selector: ".status-badge" })).toBeNull();
@@ -64,16 +81,18 @@ describe("persisted web queue cancellation", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(view());
     fireEvent.click(screen.getByRole("button", { name: "取消排队" }));
-    fireEvent.click(screen.getByRole("button", { name: "正在取消…" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认取消排队" }));
+    fireEvent.click(screen.getByRole("button", { name: "正在保存…" }));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     await act(async () => resolve(response({ ...queued, status: "cancelled" })));
-    expect(screen.queryByRole("button", { name: "正在取消…" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "正在保存…" })).toBeNull();
   });
 
   it("rejects a mismatched cancellation receipt without changing the displayed command", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => response({ ...queued, sessionId: "other", status: "cancelled" })));
     render(view());
-    await act(async () => fireEvent.click(screen.getByRole("button", { name: "取消排队" })));
+    fireEvent.click(screen.getByRole("button", { name: "取消排队" }));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "确认取消排队" })));
     expect(screen.getByRole("alert")).toHaveTextContent("取消结果尚未确认");
     expect(screen.getByTestId(`command-status-${queued.commandId}`)).toHaveTextContent("等待发送");
   });
@@ -84,7 +103,8 @@ describe("persisted web queue cancellation", () => {
     try {
       vi.stubGlobal("fetch", vi.fn(async () => response({}, 401)));
       render(view());
-      await act(async () => fireEvent.click(screen.getByRole("button", { name: "取消排队" })));
+      fireEvent.click(screen.getByRole("button", { name: "取消排队" }));
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "确认取消排队" })));
       expect(subscriber).toHaveBeenCalledWith({ status: "unauthenticated", reason: "expired" });
     } finally { unsubscribe(); }
   });

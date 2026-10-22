@@ -12,18 +12,20 @@ const RESTORE_DRAFT_STATUSES = ["failed", "uncertain", "cancelled", "expired"];
 interface Submission {
   requestId: string;
   prompt: string;
+  draftRevision: number;
   command?: CommandRecord;
   uncertain: boolean;
 }
 interface MessageState {
   draft: string;
+  draftRevision: number;
   sending: boolean;
   cancelling?: boolean;
   error?: string;
   submission?: Submission;
   pollingStopped?: boolean;
 }
-const EMPTY: MessageState = { draft: "", sending: false };
+const EMPTY: MessageState = { draft: "", draftRevision: 0, sending: false };
 
 export function sendBlockReason(session: ScopedSession | null, connected: boolean, stale: boolean, now = Date.now()): string | null {
   if (!session) return "请选择一个会话";
@@ -60,7 +62,7 @@ export function useSessionMessages(session: ScopedSession | null, onAuthFailure:
     const prior = state.submission;
     if (recover && !prior) return;
     if (!recover && prior && (prior.uncertain || POLLING_STATUSES.includes(prior.command?.status ?? "") || prior.command?.status === "uncertain")) return;
-    const submission: Submission = recover && prior ? prior : { requestId: crypto.randomUUID(), prompt: state.draft.trim(), uncertain: true };
+    const submission: Submission = recover && prior ? prior : { requestId: crypto.randomUUID(), prompt: state.draft.trim(), draftRevision: state.draftRevision, uncertain: true };
     if (!submission.prompt) return;
     const target = session;
     const key = owner;
@@ -76,7 +78,12 @@ export function useSessionMessages(session: ScopedSession | null, onAuthFailure:
       if (controller.signal.aborted) return;
       if (command.nodeId !== target.nodeId || command.sessionId !== target.id || command.action !== "send") throw new Error("回执与目标会话不匹配");
       const uncertain = command.status === "uncertain";
-      update(key, { submission: { ...submission, command, uncertain }, draft: RESTORE_DRAFT_STATUSES.includes(command.status) ? state.draft || submission.prompt : "", error: command.error });
+      setStates(previous => {
+        const current = previous[key] ?? EMPTY;
+        const editedWhileSending = current.draftRevision !== submission.draftRevision;
+        const draft = editedWhileSending ? current.draft : RESTORE_DRAFT_STATUSES.includes(command.status) ? current.draft || submission.prompt : "";
+        return { ...previous, [key]: { ...current, submission: { ...submission, command, uncertain }, draft, error: command.error } };
+      });
     } catch (error) {
       if (controller.signal.aborted) return;
       if (error instanceof ApiAuthError) { authRef.current(); return; }
@@ -103,8 +110,11 @@ export function useSessionMessages(session: ScopedSession | null, onAuthFailure:
     try {
       const command = await cancelSessionMessage(session.nodeId, session.id, submission.command.commandId, controller.signal);
       if (controller.signal.aborted) return;
-      update(key, { submission: { ...submission, command, uncertain: command.status === "uncertain" },
-        ...(RESTORE_DRAFT_STATUSES.includes(command.status) ? { draft: state.draft || submission.prompt } : {}), error: command.error });
+      setStates(previous => {
+        const current = previous[key] ?? EMPTY;
+        return { ...previous, [key]: { ...current, submission: { ...submission, command, uncertain: command.status === "uncertain" },
+          ...(RESTORE_DRAFT_STATUSES.includes(command.status) && current.draftRevision === submission.draftRevision ? { draft: current.draft || submission.prompt } : {}), error: command.error } };
+      });
     } catch (error) {
       if (controller.signal.aborted) return;
       if (error instanceof ApiAuthError) { authRef.current(); return; }
@@ -135,7 +145,7 @@ export function useSessionMessages(session: ScopedSession | null, onAuthFailure:
         setStates((previous) => {
           const current = previous[owner];
           if (!current?.submission || current.submission.command?.commandId !== targetCommand.commandId) return previous;
-          const needsDraft = RESTORE_DRAFT_STATUSES.includes(receipt.status);
+          const needsDraft = RESTORE_DRAFT_STATUSES.includes(receipt.status) && current.draftRevision === current.submission.draftRevision;
           return { ...previous, [owner]: { ...current, draft: needsDraft ? current.draft || current.submission.prompt : current.draft, submission: { ...current.submission, command: receipt, uncertain: receipt.status === "uncertain" }, error: receipt.error } };
         });
         if (!disposed && POLLING_STATUSES.includes(receipt.status)) {
@@ -153,5 +163,8 @@ export function useSessionMessages(session: ScopedSession | null, onAuthFailure:
     return () => { disposed = true; window.clearTimeout(timer); controller?.abort(); };
   }, [owner, command?.commandId, command?.status, state.sending, state.cancelling, state.pollingStopped, update]);
 
-  return { ...state, setDraft: (draft: string) => update(owner, { draft }), submit, cancel };
+  return { ...state, setDraft: (draft: string) => setStates(previous => {
+    const current = previous[owner] ?? EMPTY;
+    return { ...previous, [owner]: { ...current, draft, draftRevision: current.draftRevision + 1 } };
+  }), submit, cancel };
 }

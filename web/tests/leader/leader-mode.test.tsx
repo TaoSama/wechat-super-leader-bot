@@ -33,7 +33,7 @@ it.each([
 
   render(<App />);
 
-  fireEvent.click(await screen.findByRole("button", { name: "Super Leader" }));
+  fireEvent.click(await screen.findByRole("button", { name: "工作看板" }));
   const region = await screen.findByRole("region", { name: "Leader 运行模式" });
   expect(region).toHaveTextContent(label);
   expect(region).toHaveTextContent(detail);

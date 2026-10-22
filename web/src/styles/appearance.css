@@ -1,4 +1,4 @@
-:root, .app-shell[data-theme="dark"] {
+.app-shell[data-theme="dark"], :root[data-theme="dark"] {
   --surface-0: #181b1a;
   --surface-1: #1e2120;
   --surface-2: #272a29;
@@ -15,6 +15,7 @@
   --border-accent: #2f3534;
   --accent: #20744a;
   --accent-bright: #7ccba0;
+  --status-success: #6cb17b;
   --primary: #fafafa;
   --primary-foreground: #181b1a;
   --danger: #c64f43;
@@ -26,7 +27,7 @@
   --interaction-highlight: rgb(255 255 255 / 8%);
   color-scheme: dark;
 }
-.app-shell[data-theme="light"] {
+:root, .app-shell[data-theme="light"] {
   --surface-0: #fff;
   --surface-1: #fafafa;
   --surface-2: #f4f4f5;
@@ -43,6 +44,7 @@
   --border-accent: #ececf1;
   --accent: #20744a;
   --accent-bright: #239956;
+  --status-success: #3e704a;
   --primary: #18181b;
   --primary-foreground: #fafafa;
   --danger: #b04138;

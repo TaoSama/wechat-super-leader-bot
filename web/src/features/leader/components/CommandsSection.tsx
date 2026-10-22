@@ -1,3 +1,4 @@
+import { ChoiceSelect } from "../../../components/ui/ChoiceSelect";
 import { useMemo, useState } from "react";
 import { ArrowUpRight, CheckCircle2, ChevronDown, Clock, AlertTriangle, Radio, XCircle } from "lucide-react";
 import { CommandRecord, COMMAND_STATUS_SEMANTICS, ScopedSession } from "../../../types";
@@ -34,10 +35,13 @@ export function CommandsSection({ commands, selectedNodeId, sessions = [], onOpe
 
   return <section className="command-section" aria-labelledby="commands-heading">
     <div className="section-heading"><h2 id="commands-heading">指令动态 <span>{filtered.length}</span></h2>
-      <label className="status-filter">状态筛选<select className="filter-select" aria-label="按指令状态过滤" value={statusFilter} onChange={(event) => onStatusFilterChange(event.target.value as CommandFilter)}><option value="ALL">全部状态</option><option value="attention">需要处理</option><option value="running">执行中</option>{Object.entries(COMMAND_STATUS_SEMANTICS).map(([key, value]) => <option key={key} value={key}>{value.label}</option>)}</select></label>
+      <div className="status-filter"><span>状态筛选</span><ChoiceSelect label="按指令状态过滤" value={statusFilter} onChange={value => onStatusFilterChange(value as CommandFilter)} options={[
+        { value: "ALL", label: "全部状态" }, { value: "attention", label: "需要处理" }, { value: "running", label: "执行中" },
+        ...Object.entries(COMMAND_STATUS_SEMANTICS).map(([value, semantics]) => ({ value, label: semantics.label, description: semantics.description })),
+      ]} /></div>
     </div>
     <div className="command-filter-summary"><p className="section-description">最近 {RECENT_COMMAND_LIMIT} 条 · 异常与执行中优先，已完成收起。</p>
-      {hasFilter && <button type="button" className="text-button" onClick={clearFilters}>{selectedNodeId && !onClearNodeFilter ? "清除状态筛选" : "清空指令筛选"}</button>}
+      {hasFilter && <button type="button" className="ui-button ghost" onClick={clearFilters}>{selectedNodeId && !onClearNodeFilter ? "清除状态筛选" : "清空指令筛选"}</button>}
     </div>
     {!filtered.length && <div role="status" className="empty-panel"><Clock size={24} aria-hidden="true" /><h3>暂无匹配的指令审计记录</h3><p>{commands.length ? "更换状态或机器筛选，查看其他记录。" : "从微信或已有会话发送消息后，指令状态会显示在这里。"}</p></div>}
     {GROUPS.map((group) => {
