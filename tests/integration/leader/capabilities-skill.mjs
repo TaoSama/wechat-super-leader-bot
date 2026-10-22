@@ -120,7 +120,11 @@ async function main() {
     }); };
     async function serve(req, res) {
       assert.equal(req.headers.authorization, `Bearer ${TOKEN}`);
-      let raw = ''; for await (const chunk of req) { raw += chunk; assert(raw.length <= MAX_BODY); }
+      const chunks = []; let bodyBytes = 0;
+      for await (const chunk of req) {
+        bodyBytes += chunk.length; assert(bodyBytes <= MAX_BODY); chunks.push(chunk);
+      }
+      const raw = Buffer.concat(chunks, bodyBytes).toString('utf8');
       const body = JSON.parse(raw || '{}');
       const send = data => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(data)); };
       if (req.url === '/v1/responses') {
@@ -179,8 +183,8 @@ async function main() {
       const roots = new Map([...catalog.matchAll(/^- `(r\d+)` = `([^`]+)`$/gm)].map(match => [match[1], match[2]]));
       const alias = catalog.match(/^- super-leader-capabilities:[^\n]*\(file: (r\d+)\/super-leader-capabilities\/SKILL\.md\)/m)?.[1];
       assert.equal(roots.get(alias), dirname(skillRoot), 'Native skill catalog must expose the installed skill path');
-      assert(observed.some(item => textInput(item.body).includes('帮助用户了解功能')), 'Skill was not read');
-      assert(observed.some(item => textInput(item.body).includes('后台追问与延期')), 'Reference was not read');
+      assert(observed.some(item => textInput(item.body).includes('帮助用户了解功能')), 'Skill content is missing from model context');
+      assert(observed.some(item => textInput(item.body).includes('后台追问与延期')), 'Reference content is missing from model context');
       const calls = observed.flatMap(item => item.body.input || []).filter(item => /tool_call$/.test(item.type || ''));
       assert(!calls.some(item => /create_goal|control_current_request/.test(item.name || '') || /\b(create_goal|control_current_request)\s*\(/.test(item.input || item.arguments || '')), 'Help executed a control action');
       const journal = JSON.parse(await readFile(join(workspace, '.replies.json'), 'utf8'));
