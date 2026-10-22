@@ -241,6 +241,12 @@ Goals 用于本轮目标管理，`exec` 完成后的自动续轮未作保证。�
 不将验证页视为文章，不启动浏览器。完整命令及边界见技能目录内的 `SKILL.md`。
 聊天工作目录 `.agents/skills` 的原生发现仍保留。
 
+微信主会话通过 `/etc/codex/skills/super-leader-capabilities` 提供功能介绍。
+询问“你能做什么”“有哪些功能”或某项功能的用法时，Codex 读取该技能和场景资料，
+先展示“分组、功能、你交代什么、机器人负责什么”四列表格，再按同一顺序给出微信指令和处理过程。
+功能按基础功能、任务执行、多会话协作、定时与后台分组；介绍使用短句和正向表述。
+每轮提示均包含技能使用约定，新建和续接的微信 Codex 会话共用此入口，沿用原会话 ID 与记忆。
+
 延期回复按来源读取冻结结果，不重新调用模型或执行控制；发送完成凭证先持久保存，再确认和清理回复记录。
 每个聊天保留最多 128 条待交付或结果不明的记录，另保留最近 64 条已关闭记录，总日志上限 16 MiB。
 待交付记录不会被滚动淘汰；容量不足时先尝试发送旧回复，仍不足则保留入站游标，等待恢复。
@@ -488,6 +494,16 @@ node scripts/verify.mjs --list              # 查看计划，不运行检查
 完整验证使用本地 Unix Docker socket 和 `postgres:16-alpine`，拒绝远端 Docker engine。
 验证清除真实业务配置与 LIVE 开关，使用合成模型、微信和桌面目标；
 不部署或触达正式会话。CI 在 Ubuntu 运行全量、macOS 运行 unit，使用 Node 24。
+
+功能介绍可通过真实 Gateway CLI 与固定版本 Codex 验收：
+
+```sh
+node tests/integration/leader/capabilities-skill.mjs --run
+```
+
+该入口使用隔离聊天与本地微信、Controller 接口，检查新建和续接会话读取技能、四列分组表格与场景顺序。
+加 `--live` 可通过环境中的 `LIVE_MODEL_BASE_URL`、`LIVE_MODEL_API_KEY` 验证实际模型回答；
+容器内加 `--system-skill` 可核对镜像中的管理员技能目录。验证结果保存在 `.runtime/capabilities-*`。
 
 可靠性故障注入另有进程级入口，先按本机开发说明构建 Controller、Gateway 和
 `daemon/bin/super-leader-daemon`，再运行：
