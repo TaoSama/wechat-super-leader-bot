@@ -70,6 +70,24 @@ test('flat native MCP names and array text outputs retain the direct protocol wr
   });
 });
 
+test('real app-server timing block is separated from the JSON discovery and receipt payloads', async () => {
+  await withFixture({ control: true }, async fixture => {
+    const input = [user(TASK)];
+    const nativeOutput = (call, payload) => ({ type: 'function_call_output', call_id: call.call_id,
+      output: [{ type: 'input_text', text: 'Wall time: 0.0720 seconds\nOutput:' },
+        { type: 'input_text', text: JSON.stringify(payload) }] });
+    const list = (await post(fixture, request(input))).output[0];
+    input.push(list, nativeOutput(list, discovery));
+    const dispatch = (await post(fixture, request(input))).output[0];
+    assert.equal(dispatch.name, 'execute_plan');
+    assert.equal(JSON.parse(dispatch.arguments).arguments.actions[0].sessionId, SESSION);
+    const receipt = '原样持久回执：已接收，等待完成。';
+    input.push(dispatch, nativeOutput(dispatch, { result: {}, reply: { text: receipt } }));
+    const final = (await post(fixture, request(input))).output[0];
+    assert.equal(final.content[0].text, receipt); fixture.healthy();
+  });
+});
+
 test('a dispatch MCP failure returns uncertainty without a replacement execution', async () => {
   await withFixture({ control: true }, async fixture => {
     const input = [user(TASK)];

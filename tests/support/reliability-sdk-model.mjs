@@ -8,6 +8,7 @@ export const SDK_MODEL = 'synthetic-native-sdk-model';
 export const SDK_API_KEY = 'synthetic-native-sdk-api-key';
 export const SDK_REPLY = '合成 SDK 原生进程回复：本轮处理完成。';
 const TOOL_OUTPUT_TYPES = new Set(['function_call_output', 'custom_tool_call_output']);
+const NATIVE_TOOL_TIMING_HEADER = /^Wall time: \d+(?:\.\d+)? seconds\r?\nOutput:\s*$/;
 const QUERY_AUTHORIZATION = { intent: 'query', automationOperations: [], backgroundOperations: [], memoryOperations: [], sendImages: false };
 
 function businessTool(tools, name) {
@@ -19,7 +20,10 @@ function businessTool(tools, name) {
 function toolPayload(value) {
   if (typeof value === 'string') return toolPayload(JSON.parse(value));
   if (Array.isArray(value)) {
-    const text = value.filter(part => ['text', 'input_text'].includes(part.type)).map(part => part.text).join('');
+    const parts = value.filter(part => ['text', 'input_text'].includes(part.type)).map(part => part.text);
+    // Native app-server prepends a distinct timing block before MCP content.
+    if (parts.length > 1 && NATIVE_TOOL_TIMING_HEADER.test(parts[0])) parts.shift();
+    const text = parts.join('');
     assert(text, 'Native SDK discovery output has no text content');
     return toolPayload(text);
   }
@@ -47,7 +51,8 @@ function taskOutput(body, tools, outputs) {
   for (const [index, result] of outputs.entries()) {
     const expected = businessTool(tools, index === 0 ? 'list_sessions' : 'execute_plan');
     const call = body.input.find(item => item.type === 'function_call' && item.call_id === result.call_id);
-    assert(call && call.name === expected.name, 'SDK task fixture received an out-of-order or unrelated tool result');
+    assert(call && call.name === expected.name,
+      `SDK task fixture received an out-of-order or unrelated tool result: expected ${expected.name}, observed ${call?.name ?? 'missing call'}`);
   }
   if (outputs.length === 2) {
     const completed = toolPayload(outputs[1].output);
@@ -173,6 +178,7 @@ export async function createSdkModelFixture({ evidence = () => {}, reply = SDK_R
       if (!response.destroyed && !stopping) sendEvents(response, output);
     })().catch(error => {
       errors.push(error);
+      evidence('sdk-model-error', { message: error.message, stack: error.stack });
       if (response.destroyed || stopping) return;
       if (!response.headersSent) response.writeHead(500, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ error: { message: error.message } }));
