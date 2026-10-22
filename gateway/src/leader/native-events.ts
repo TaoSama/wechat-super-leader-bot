@@ -1,5 +1,5 @@
 import { performance } from "node:perf_hooks";
-import type { ThreadEvent, ThreadItem } from "@openai/codex-sdk";
+import type { CodexLifecycleEvent, ThreadEvent, ThreadItem } from "@openai/codex-sdk";
 import { traceEvent } from "../runtime/telemetry.js";
 
 const MAX_ACTIVE_ITEMS = 128;
@@ -19,9 +19,19 @@ export class NativeEventTrace {
   private firstAgentMessage = true;
   private completedAt?: number;
   private overflow = 0;
+  private exitObserved = false;
 
   constructor() {
     traceEvent("codex.stream.begin", { nativeTurnIdAvailable: false, ttftAvailable: false });
+  }
+
+  public get itemsSettled(): boolean { return this.active.size === 0 && this.overflow === 0; }
+
+  public observeProcess(event: CodexLifecycleEvent): void {
+    if (event.type === "child_exit") this.exitObserved = true;
+    traceEvent(`codex.process.${event.type}`, {
+      processElapsedMs: event.elapsedMs, exitCode: event.exitCode, signal: event.signal,
+    });
   }
 
   public observe(event: ThreadEvent): void {
@@ -76,14 +86,14 @@ export class NativeEventTrace {
     }
   }
 
-  /** Clean SDK exhaustion includes CLI exit and SDK cleanup, whose exact split is unavailable. */
+  /** Process callbacks provide exit/stdio/cleanup boundaries when the runner supports them. */
   public finish(drained: boolean): void {
     traceEvent(drained ? "codex.stream.drained" : "codex.stream.interrupted", {
       durationMs: performance.now() - this.startedAt,
       streamDrainMs: this.completedAt === undefined ? undefined : performance.now() - this.completedAt,
       turnCompletedObserved: this.completedAt !== undefined, firstEventObserved: !this.first,
       pendingItems: this.active.size, untrackedItemStarts: this.overflow,
-      cliExitTimeAvailable: false,
+      cliExitTimeAvailable: this.exitObserved,
     });
     this.active.clear();
   }

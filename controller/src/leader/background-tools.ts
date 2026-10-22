@@ -90,6 +90,9 @@ export const BACKGROUND_TOOLS: ModelTool[] = [
   tool("follow_up_background_task", "Queue user-requested follow-up on the same isolated run; requires current human authorization and discovered run ID", FollowupSchema),
   tool("extend_background_task", "Extend a discovered run's expiry only when explicitly requested by the current human; expiresAt must be ISO time with offset", ExtendSchema),
 ];
+export const BACKGROUND_ARGUMENTS = { list_source_automations: NodeSchema, inspect_source_automation: InspectSchema,
+  list_background_tasks: EmptySchema, query_background_task: RunSchema, follow_up_background_task: FollowupSchema,
+  extend_background_task: ExtendSchema };
 export const BACKGROUND_TOOL_NAMES = new Set(BACKGROUND_TOOLS.map(item => item.function.name));
 
 /** The create_automation adapter must check source IDs against this turn's trusted discovery. */

@@ -97,6 +97,12 @@ export const LeaderDataSchema = z.object({
   commandIds: z.array(z.string()).max(64).default([]),
   receipts: z.array(z.object({ messageId: z.string(), inputHash: z.string(), text: z.string(), commandId: z.string().optional(), images: ReplyImagesSchema.optional() })).max(MAX_RECEIPTS).default([]),
   inflight: z.object({ messageId: z.string(), inputHash: z.string(), expiresAt: z.number(), plan: PlanSchema.optional(), goal: GoalProposalSchema.optional() }).optional(),
+  directPreview: z.object({ id: z.string(), messageId: z.string(), followupMessageId: z.string().optional() }).optional(),
+  directContext: z.object({ messageId: z.string(), inputHash: z.string(), expiresAt: z.number(),
+    discoveredRunIds: z.array(z.string().uuid()).max(100).default([]),
+    discoveredSources: z.record(z.string(), z.array(z.string()).max(1000)).default({}),
+    discoveredSessions: z.array(z.object({ nodeId: z.string(), id: z.string(), title: z.string().optional() })).max(1000).default([]),
+  }).optional(),
 });
 export type LeaderData = z.infer<typeof LeaderDataSchema>;
 export type LeaderReply = { text: string; commandId?: string; images?: ReplyImage[] };

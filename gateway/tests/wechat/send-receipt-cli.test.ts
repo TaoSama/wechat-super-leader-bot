@@ -13,7 +13,8 @@ import { StateManager, writePrivateJsonSync } from "../../src/runtime/state.js";
 import type { ResultDelivery } from "../../src/results/contracts.js";
 
 const WAIT_MS = 5_000;
-const TEST_MS = 20_000;
+const STARTUP_WAIT_MS = 15_000;
+const TEST_MS = 45_000;
 const POLL_INTERVAL_MS = 10;
 const POLL_TIMEOUT_MS = 500;
 const BODY_LIMIT_BYTES = 64 * 1024;
@@ -358,16 +359,25 @@ async function fixture(t: TestContext, options: Options = {}) {
     });
     const running = { child, output, done }; children.push(running); return running;
   }
-  async function waitFor(running: Running, condition: () => boolean): Promise<void> {
-    const end = Date.now() + WAIT_MS;
+  async function waitUntil(running: Running, condition: () => boolean, budgetMs: number, phase: string): Promise<void> {
+    const end = Date.now() + budgetMs;
     while (!condition()) {
       if (errors.length) throw new AggregateError(errors, "Loopback handler failed");
       assert.equal(running.child.exitCode, null, `CLI exited early: ${running.output.stderr}`);
       assert.equal(running.child.signalCode, null, "CLI terminated early");
-      assert.ok(Date.now() < end, `Fixture condition timed out: ${running.output.stderr}`);
+      assert.ok(Date.now() < end, `Fixture ${phase} timed out: ${running.output.stderr}`);
       await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
     }
     if (errors.length) throw new AggregateError(errors, "Loopback handler failed");
+  }
+  async function waitFor(running: Running, condition: () => boolean): Promise<void> {
+    // CLI loading and the first fetch initialize a fresh Node/TLS runtime on
+    // every restart. Keep that readiness budget separate from business progress.
+    await waitUntil(running, () => running.output.stderr.split("\n").slice(0, -1).some(line => {
+      const event = parseTelemetry(line);
+      return event?.stage === "wechat.poll.end" && event.outcome === "ok";
+    }), STARTUP_WAIT_MS, "startup (first successful poll)");
+    await waitUntil(running, condition, WAIT_MS, "business condition");
   }
   function assertPrivate(running: Running): void {
     const output = running.output.stdout + running.output.stderr + fs.readFileSync(healthPath, "utf8");

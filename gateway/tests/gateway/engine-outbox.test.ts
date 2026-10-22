@@ -1,3 +1,4 @@
+import { syntheticTool } from "../leader/direct-tool-fixture.js";
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -44,7 +45,7 @@ function fixture(t: TestContext, tool = false, sendBudget = 1) {
       const response = await fetch(servers.wechat_control.url, { method: "POST", headers: {
         Authorization: `Bearer ${sdk.env![CONTROL_TOKEN_ENV]}`, "Content-Type": "application/json",
         Accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1,
-        method: "tools/call", params: { name: "control_current_request", arguments: {} } }) });
+        method: "tools/call", params: { name: "test_business", arguments: { arguments: {} } } }) });
       assert.equal(response.status, 200);
       assert.ok((await response.text()).includes("Controller 原始会话标题"));
     }
@@ -58,10 +59,20 @@ function fixture(t: TestContext, tool = false, sendBudget = 1) {
       const url = new URL(String(input));
       if (url.pathname === "/v1/chats/authorize") return Response.json({ allowed: true });
       if (init?.method === "GET") { counts.controllerGets++; return Response.json({ text: "WRONG Controller recovery text" }); }
-      assert.equal(url.pathname, "/v1/messages");
+      const body = JSON.parse(String(init?.body));
+      assert.deepEqual({ chatId: body.chatId, messageId: body.messageId, text: body.text },
+        { chatId: CHAT, messageId: MESSAGE, text: REQUEST });
+      if (url.pathname === "/v1/tools/list") {
+        assert.deepEqual(body, { chatId: CHAT, messageId: MESSAGE, text: REQUEST });
+        return Response.json({ tools: [syntheticTool()], instructions: "Synthetic business tools",
+          context: { history: [], memories: {} } });
+      }
+      assert.equal(url.pathname, "/v1/tools/call");
       counts.controllerPosts++;
-      assert.deepEqual(JSON.parse(String(init?.body)), { chatId: CHAT, messageId: MESSAGE, text: REQUEST });
-      return Response.json({ text: CONTROLLER_REPLY });
+      assert.equal(body.name, "test_business");
+      assert.deepEqual(body.arguments, {});
+      assert.match(body.callId, /^[a-f0-9]{64}$/);
+      return Response.json({ result: { checked: true }, reply: { text: CONTROLLER_REPLY } });
     } });
   const gateway = (current: StateManager, replyEngine: GatewayReplyEngine | undefined = engine(), splitMaxChars = 3) => {
     const ilink = new ILinkClient({ stateManager: current, configuredBaseUrl: "https://synthetic.invalid",

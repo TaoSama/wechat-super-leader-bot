@@ -1,3 +1,4 @@
+import { directToolController } from "./direct-tool-fixture.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
@@ -19,7 +20,7 @@ test("Controller session titles and checked acknowledgements survive native rewr
         Authorization: `Bearer ${sdk.env![CONTROL_TOKEN_ENV]}`, "Content-Type": "application/json",
         Accept: "application/json, text/event-stream",
       }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call",
-        params: { name: "control_current_request", arguments: {} } }) });
+        params: { name: "test_business", arguments: { arguments: {} } } }) });
       assert.equal(response.status, 200);
       await response.text();
       yield { type: "item.completed" as const, item: { type: "agent_message" as const,
@@ -30,7 +31,7 @@ test("Controller session titles and checked acknowledgements survive native rewr
     return { startThread: () => ({ runStreamed }), resumeThread: () => ({ runStreamed }) };
   } });
   const request = { chatId: "chat", messageId: "message", text: "让原会话检查通知交付" };
-  const controller = { forwardMessage: async () => { controllerCalls++; return original; } };
+  const controller = directToolController(async () => { controllerCalls++; return { result: { saved: true }, reply: original }; });
   assert.deepEqual(await engine().reply("account", request, controller), original);
   assert.deepEqual(await engine().reply("account", request, controller), original);
   assert.deepEqual(await engine().getReply("account", "chat", "message", {

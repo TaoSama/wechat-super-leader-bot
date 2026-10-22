@@ -6,6 +6,8 @@ import * as path from "node:path";
 import { runCli } from "../../src/cli/run.js";
 import { HealthTracker } from "../../src/runtime/health.js";
 import { StateManager } from "../../src/runtime/state.js";
+import { CodexReplyEngine } from "../../src/leader/codex.js";
+import { WeChatGateway } from "../../src/gateway.js";
 
 const ENV = { CONTROLLER_TOKEN: "synthetic-controller-token", GATEWAY_LEADER_API_KEY: "synthetic-model-key" };
 const INVALID_IDS = [
@@ -91,4 +93,40 @@ test("Codex healthcheck remains independent of account credentials", async t => 
   tracker.recordPollSuccess();
   fs.rmSync(path.join(f.directory, "account.json"));
   assert.equal(await runCli([...f.args, "--healthcheck", "--health-path", healthPath, "--leader-mode", "codex"], {}), 0);
+});
+
+for (const mode of ["--poll-once", "--run"]) {
+  test(`Codex ${mode} drains background cleanup before returning`, async t => {
+    const f = fixture(t, "synthetic-account");
+    t.mock.method(globalThis, "fetch", async () => { assert.fail("Synthetic shutdown must not access the network"); });
+    t.mock.method(WeChatGateway.prototype, "pollOnce", async () => ({
+      polledCount: 0, processedCount: 0, skippedCount: 0, nextSyncBuf: "synthetic-cursor",
+    }));
+    t.mock.method(WeChatGateway.prototype, "deliverNotificationsOnce", async () => ({ accepted: 0, uncertain: 0, skipped: 0 }));
+    t.mock.method(WeChatGateway.prototype, "runLoop", async () => {});
+    let entered!: () => void;
+    let release!: () => void;
+    const stopped = new Promise<void>(resolve => { entered = resolve; });
+    const cleanup = new Promise<void>(resolve => { release = resolve; });
+    t.after(() => release());
+    let stopCalls = 0;
+    t.mock.method(CodexReplyEngine.prototype, "stop", async () => { stopCalls++; entered(); await cleanup; });
+    let finished = false;
+    const result = runCli([...f.args, mode, "--leader-mode", "codex"], ENV).finally(() => { finished = true; });
+    await stopped;
+    assert.equal(finished, false);
+    release();
+    assert.equal(await result, 0);
+    assert.equal(stopCalls, 1);
+  });
+}
+
+test("Codex poll failure still drains background work and preserves the polling error", async t => {
+  const f = fixture(t, "synthetic-account");
+  const error = new Error("synthetic polling failure");
+  t.mock.method(WeChatGateway.prototype, "pollOnce", async () => { throw error; });
+  let stopped = false;
+  t.mock.method(CodexReplyEngine.prototype, "stop", async () => { stopped = true; });
+  await assert.rejects(runCli([...f.args, "--poll-once", "--leader-mode", "codex"], ENV), caught => caught === error);
+  assert.equal(stopped, true);
 });
