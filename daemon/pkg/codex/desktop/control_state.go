@@ -24,6 +24,19 @@ var errDesktopCanonicalDuplicateReference = errors.New("duplicate canonical desk
 
 const desktopTurnInspectionFrameLimit = 64 * 1024 * 1024
 
+const (
+	desktopUserThreadSource         = "user"
+	desktopAgentCreatedThreadSource = "agent_created_thread"
+)
+
+func ordinaryDesktopThreadSource(source any) bool {
+	if source == nil {
+		return true
+	}
+	value, ok := source.(string)
+	return ok && (value == desktopUserThreadSource || value == desktopAgentCreatedThreadSource)
+}
+
 func (s desktopControlSettings) ordinaryResumed() bool {
 	// Explicit null defaults to user in the native ordinary-thread predicate.
 	// Missing or unknown values remain unavailable rather than being defaulted.
@@ -34,7 +47,7 @@ func (s desktopControlSettings) ordinaryResumed() bool {
 	if err := json.Unmarshal(s.ThreadSource, &source); err != nil {
 		return false
 	}
-	return s.ResumeState == "resumed" && s.Mode == "default" && (source == nil || *source == "user")
+	return s.ResumeState == "resumed" && s.Mode == "default" && (source == nil || ordinaryDesktopThreadSource(*source))
 }
 
 type desktopControlTurn struct {
