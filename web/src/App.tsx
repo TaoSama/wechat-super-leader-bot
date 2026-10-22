@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useSyncExternalStore } from "react";
-import { Ellipsis, LockKeyhole, LogOut, RefreshCw, Layers, LayoutDashboard, MessagesSquare, Moon, Sun, X } from "lucide-react";
+import { CalendarClock, Ellipsis, LockKeyhole, LogOut, RefreshCw, Layers, LayoutDashboard, MessagesSquare, Moon, Sun, X } from "lucide-react";
 import { LeaderOverview } from "./features/leader/components/LeaderOverview";
+import { AutomationsSection } from "./features/notifications/AutomationsSection";
 import { SessionWorkspace } from "./features/sessions/components/SessionWorkspace";
 import { useStatusPolling } from "./features/status/useStatusPolling";
 import { getAuthSessionSnapshot, getOrInitAuthSession, isCurrentAuthGeneration, setUnauthenticatedSession, subscribeAuthSession } from "./auth/bootstrap";
@@ -17,7 +18,7 @@ export function App({ pollIntervalMs = POLL_INTERVAL_MS }: AppProps) {
   const { state: authState, generation: authGeneration } = useSyncExternalStore(subscribeAuthSession, getAuthSessionSnapshot, getAuthSessionSnapshot);
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
-  const [view, setView] = useState<"sessions" | "leader">("sessions");
+  const [view, setView] = useState<"sessions" | "leader" | "automations">("sessions");
   const [requestedSessionKey, setRequestedSessionKey] = useState<string | null>(null);
   const [requestedSessionRevision, setRequestedSessionRevision] = useState(0);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -93,10 +94,10 @@ export function App({ pollIntervalMs = POLL_INTERVAL_MS }: AppProps) {
   </>;
 
   return <div data-theme={theme} data-view={view} className={`app-shell ${authenticated ? "is-authenticated" : ""} ${view === "sessions" && detailVisible ? "mobile-detail-open" : ""}`} style={viewportHeight ? { height: viewportHeight } : undefined}>
-    <a href="#main-workspace" className="skip-link">跳转至会话工作区</a>
+    <a href="#main-workspace" className="skip-link">跳转至工作区</a>
     <header className="app-header">
       <div className="brand"><span className="brand-mark"><Layers size={22} aria-hidden="true" /></span><div><h1>Super Leader</h1><span>你的随身工作台</span></div></div>
-      {authenticated && <nav className="primary-nav" aria-label="主导航"><button type="button" className={view === "sessions" ? "active" : ""} aria-current={view === "sessions" ? "page" : undefined} onClick={() => setView("sessions")}><MessagesSquare size={17} aria-hidden="true" />会话</button><button type="button" aria-label="工作看板" className={view === "leader" ? "active" : ""} aria-current={view === "leader" ? "page" : undefined} onClick={() => setView("leader")}><LayoutDashboard size={17} aria-hidden="true" />工作看板</button></nav>}
+      {authenticated && <nav className="primary-nav" aria-label="主导航"><button type="button" className={view === "sessions" ? "active" : ""} aria-current={view === "sessions" ? "page" : undefined} onClick={() => setView("sessions")}><MessagesSquare size={17} aria-hidden="true" />会话</button><button type="button" aria-label="工作看板" className={view === "leader" ? "active" : ""} aria-current={view === "leader" ? "page" : undefined} onClick={() => setView("leader")}><LayoutDashboard size={17} aria-hidden="true" />工作看板</button><button type="button" className={view === "automations" ? "active" : ""} aria-current={view === "automations" ? "page" : undefined} onClick={() => setView("automations")}><CalendarClock size={17} aria-hidden="true" />定时任务</button></nav>}
       <div ref={utilityRef} className={`header-actions ${utilitiesOpen ? "utilities-open" : ""}`} onKeyDown={(event) => {
         if (event.key === "Escape") { setUtilitiesOpen(false); utilityRef.current?.querySelector<HTMLButtonElement>(".utilities-toggle")?.focus(); }
         if (utilitiesOpen && ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
@@ -125,6 +126,7 @@ export function App({ pollIntervalMs = POLL_INTERVAL_MS }: AppProps) {
       {authenticated && telemetry.data && <>
         <div hidden={view !== "sessions"} className="workspace-panel"><SessionWorkspace data={telemetry.data} nodes={telemetry.derivedNodes} active={view === "sessions"} requestedSessionKey={requestedSessionKey} requestedSessionRevision={requestedSessionRevision} stale={!!telemetry.error || telemetry.controllerHealthy === false} onAuthFailure={handleAuthFailure} onDetailVisibilityChange={setDetailVisible} /></div>
         <section className="leader-panel" hidden={view !== "leader"} aria-label="运行状态与发送记录"><LeaderOverview data={telemetry.data} nodes={telemetry.derivedNodes} selectedNodeId={selectedNodeId} onSelectNodeId={setSelectedNodeId} onOpenSession={openSession} onBrowseSessions={() => setView("sessions")} /></section>
+        <section className="leader-panel" hidden={view !== "automations"} aria-label="定时任务"><div className="leader-workspace"><AutomationsSection items={telemetry.data.automations ?? []} /></div></section>
       </>}
     </main>
   </div>;
