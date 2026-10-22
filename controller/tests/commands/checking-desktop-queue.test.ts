@@ -7,7 +7,10 @@ const NOW = Date.parse("2026-10-23T00:00:00Z");
 const iso = (offset = 0) => new Date(NOW + offset).toISOString();
 afterEach(() => vi.useRealTimers());
 
-it("persists a checking desktop submission, waits through revoked proof, and dispatches once on its fixed route", async () => {
+it.each([
+  { state: "blocked" as const, reason: "checking" as const },
+  { state: "unavailable" as const, reason: "unavailable" as const },
+])("persists a $state/$reason desktop submission, waits through revoked proof, and dispatches once on its fixed route", async availability => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(NOW);
   const store = new MemoryStore();
@@ -15,7 +18,7 @@ it("persists a checking desktop submission, waits through revoked proof, and dis
     id: "original", provider: "codex-app", title: "Original", cwd: "/fixture", loaded: false,
     status: "notLoaded", capabilities: ["read"], observedAt: iso(),
     desktopObservation: { source: "codex-desktop", status: "idle", availability: "available", observedAt: iso() },
-    sendAvailability: { route: "desktop-owner", state: "blocked", reason: "checking",
+    sendAvailability: { route: "desktop-owner", ...availability,
       observedAt: "1970-01-01T00:00:00Z", validUntil: "1970-01-01T00:00:00Z" },
   };
   await store.upsertNodeSessions("air", [session]);

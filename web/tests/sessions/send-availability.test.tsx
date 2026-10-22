@@ -125,8 +125,11 @@ describe("workspace send route feedback", () => {
     expect(screen.getByText("执行完成 (Completed)")).toBeInTheDocument();
   });
 
-  it("accepts a queued submission while a freshly idle owner is being checked", async () => {
-    const checking = desktop({ sendAvailability: ready({ state: "blocked", reason: "checking",
+  it.each([
+    { state: "blocked" as const, reason: "checking" as const },
+    { state: "unavailable" as const, reason: "unavailable" as const },
+  ])("accepts a queued submission while a freshly idle owner's preflight is $state/$reason", async availability => {
+    const checking = desktop({ sendAvailability: ready({ ...availability,
       observedAt: "1970-01-01T00:00:00Z", validUntil: "1970-01-01T00:00:00Z" }) });
     const { fetchMock } = setup(checking, async () => response({ ...command, status: "queued", turnId: undefined, output: undefined }));
     const send = screen.getByRole("button", { name: "发送消息" });
