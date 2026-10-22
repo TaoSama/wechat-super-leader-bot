@@ -234,7 +234,7 @@ export function useHistoryScroll(options: Options) {
       if (visible && element && !resumeRef.current) element.scrollTop = element.scrollHeight;
     }
     if (!visible || !element || !options.items.length) return;
-    followViewportResize(element);
+    if (!ownerChanged && !reopened) followViewportResize(element);
     const resume = resumeRef.current;
     if (resume) {
       // Restore only when the retained rows still overlap this reading window.

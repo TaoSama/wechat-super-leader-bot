@@ -6,6 +6,7 @@ const BASE_IMAGE = 'node:24-bookworm-slim';
 const NATIVE_TOOLCHAIN = `FROM --platform=$BUILDPLATFORM ${BASE_IMAGE} AS toolchain`;
 const CONTROLLER_RUNTIME_INSTALL = 'RUN npm install --global @openai/codex@0.163.0 && mkdir -p /var/lib/super-leader-background /var/lib/super-leader-artifacts && chown node:node /var/lib/super-leader-background /var/lib/super-leader-artifacts';
 const SKILL_RUNTIME_INSTALL = 'RUN apt-get update && apt-get install -y --no-install-recommends python3 curl python3-bs4 python3-html2text && rm -rf /var/lib/apt/lists/*';
+const SKILL_RUNTIME_PERMISSIONS = 'RUN chmod -R go-w /etc/codex/skills';
 const controllerDockerfile = readFileSync(new URL('../../../deploy/Dockerfile.controller', import.meta.url), 'utf8');
 const gatewayDockerfile = readFileSync(new URL('../../../deploy/Dockerfile.gateway', import.meta.url), 'utf8');
 
@@ -63,8 +64,10 @@ function assertImageContract(source, component) {
   // An unqualified final FROM uses the requested target platform, not BUILDPLATFORM.
   assert.equal(runtime[0], `FROM ${BASE_IMAGE}`);
   assert.deepEqual(runtime.filter(line => /^RUN\s/i.test(line)).map(line => line.replace(/\s+/g, ' ')),
-    component === 'controller' ? [SKILL_RUNTIME_INSTALL, CONTROLLER_RUNTIME_INSTALL] : [SKILL_RUNTIME_INSTALL],
-    'only reviewed target-platform skill dependencies, pinned CLI and writable directories may be installed');
+    component === 'controller' ? [SKILL_RUNTIME_INSTALL, CONTROLLER_RUNTIME_INSTALL, SKILL_RUNTIME_PERMISSIONS] : [SKILL_RUNTIME_INSTALL, SKILL_RUNTIME_PERMISSIONS],
+    'runtime commands must preserve reviewed dependencies, pinned CLI, writable state and protected skills');
+  assert.ok(runtime.indexOf(SKILL_RUNTIME_PERMISSIONS) > runtime.indexOf('COPY deploy/skills/ /etc/codex/skills/'));
+  assert.ok(runtime.indexOf(SKILL_RUNTIME_PERMISSIONS) < runtime.indexOf('USER node'));
   assert.ok(runtime.includes('USER node'));
   assert.ok(runtime.includes('WORKDIR /app'));
   const sourceStage = buildNames[0];
@@ -101,6 +104,8 @@ test('Controller and Gateway compile natively and install skill dependencies for
 
 test('image contracts reject emulated toolchains, unpruned dependencies and leaked web tooling', () => {
   for (const [source, component] of [[controllerDockerfile, 'controller'], [gatewayDockerfile, 'gateway']]) {
+    assert.throws(() => assertImageContract(source.replace(SKILL_RUNTIME_PERMISSIONS, ''), component));
+    assert.throws(() => assertImageContract(source.replace('chmod -R go-w', 'chmod -R go+w'), component));
     assert.throws(() => assertImageContract(source.replace('--platform=$BUILDPLATFORM ', ''), component));
     assert.throws(() => assertImageContract(source.replace(`FROM ${BASE_IMAGE}\n`, `FROM ${BASE_IMAGE}\nRUN node --version\n`), component));
     const unpruned = component === 'controller' ? source.replace(' && pnpm prune --prod', '') : source.replace('pnpm install --prod ', 'pnpm install ');

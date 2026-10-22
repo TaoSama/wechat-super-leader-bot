@@ -45,19 +45,19 @@ beforeEach(() => {
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-function Window({ owner = "session" }: { owner?: string }) {
-  const scroll = useHistoryScroll({ owner, items: rows, loadingOlder: false, nextCursor: null,
+function Window({ owner = "session", visible = true }: { owner?: string; visible?: boolean }) {
+  const scroll = useHistoryScroll({ owner, visible, items: rows, loadingOlder: false, nextCursor: null,
     loadOlder: async () => false, onReadingLatestChange: latestChanged });
-  return <div data-reading-window aria-label="history" onScroll={scroll.onScroll} onWheel={scroll.onWheel}
+  return <div data-reading-window hidden={!visible} aria-label="history" onScroll={scroll.onScroll} onWheel={scroll.onWheel}
     onKeyDown={scroll.onKeyDown} ref={element => {
       scroll.scrollRef.current = element;
       if (!element) return;
       let top = element.scrollTop;
       Object.defineProperties(element, {
-        clientHeight: { configurable: true, get: () => viewportHeight },
-        scrollHeight: { configurable: true, get: contentHeight },
+        clientHeight: { configurable: true, get: () => element.hidden ? 0 : viewportHeight },
+        scrollHeight: { configurable: true, get: () => element.hidden ? 0 : contentHeight() },
         scrollTop: { configurable: true,
-          get: () => Math.min(top, Math.max(0, contentHeight() - viewportHeight)),
+          get: () => element.hidden ? 0 : Math.min(top, Math.max(0, contentHeight() - viewportHeight)),
           set: (value: number) => { top = Math.max(0, Math.min(value, contentHeight() - viewportHeight)); },
         },
       });
@@ -69,6 +69,21 @@ function deliverResize() {
     for (const observer of observers) if (!observer.disconnected) observer.callback([], {} as ResizeObserver);
   });
 }
+
+it("隐藏后尺寸变化再打开时，先恢复保存的阅读锚点，不捕获临时归零位置", () => {
+  const view = render(<Window />);
+  const container = screen.getByLabelText("history");
+  container.scrollTop = 350;
+  fireEvent.scroll(container);
+  viewportHeight = SMALL_VIEWPORT_HEIGHT;
+  deliverResize();
+  view.rerender(<Window visible={false} />);
+  expect(container.scrollTop).toBe(0);
+  viewportHeight = INITIAL_VIEWPORT_HEIGHT;
+  view.rerender(<Window />);
+  expect(container.scrollTop).toBe(350);
+  expect(container.querySelector('[data-history-id="3"]')!.getBoundingClientRect().top).toBe(-50);
+});
 
 it("首次从不可测高度变为可测高度不覆盖用户刚选择的阅读位置", () => {
   viewportHeight = 0;
