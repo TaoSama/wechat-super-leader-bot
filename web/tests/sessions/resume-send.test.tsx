@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeCommand, normalizeSession } from "../../src/api/normalizers";
 import { canResumeSession, sendRouteLabel, sessionSendBlockReason } from "../../src/features/sessions/send-availability";
@@ -64,11 +64,13 @@ describe("resume composer semantics", () => {
     vi.stubGlobal("fetch", fetchMock);
     const { unmount } = render(<SessionWorkspace data={{ nodes, sessions: [session], commands: [], goals: emptyGoals(), executions: emptyExecutions() }}
       nodes={nodes} stale={false} onAuthFailure={vi.fn()} />);
-    fireEvent.click(screen.getByTestId("session-row-air-original"));
+    const row = screen.getByTestId("session-row-air-original");
+    expect(within(row).getByText("未载")).toBeInTheDocument();
+    fireEvent.click(row);
     fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "继续" } });
     await act(async () => {});
     expect(screen.queryByText("未加载")).toBeNull();
-    expect(screen.getAllByRole("img", { name: "状态未知" })).toHaveLength(2);
+    expect(document.querySelector(".detail-title .session-status-dot")).toHaveAccessibleName("状态未知");
     fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
     expect(screen.getByText("会话需要时会自动恢复，发送前检查是否正在使用。")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "关闭会话详情" }));
