@@ -189,7 +189,13 @@ export class BackgroundService {
           if (this.stopping()) return worker.initialOutcome ?? running();
           if (terminal(beforeCancel)) worker = await this.recordReceipt(worker, invocation, beforeCancel, save);
           else if (beforeCancel.status === "queued" || this.now() >= worker.expiresAt + WORKER_SHUTDOWN_GRACE_MS) {
-            worker = await save(current => { current.phase = "expired"; });
+            let cancellationClaimed = false;
+            worker = await save(current => {
+              const grace = beforeCancel.status === "queued" ? 0 : WORKER_SHUTDOWN_GRACE_MS;
+              if (this.now() < current.expiresAt + grace) return;
+              current.phase = "expired"; cancellationClaimed = true;
+            });
+            if (!cancellationClaimed) return worker.initialOutcome ?? running();
             await this.options.runtime.cancel(worker.id, invocation.id);
             const afterCancel = await this.options.runtime.inspect(worker.id, invocation.id, { ...bounds, resumeQueued: false });
             if (this.stopping()) return worker.initialOutcome ?? running();
@@ -298,43 +304,39 @@ export class BackgroundService {
     const artifacts = receipt.receiptMissing || quarantined ? [] : await this.options.runtime.exportArtifacts(worker.id, invocation.id);
     const links = artifacts.length ? await this.options.artifactLinks?.(worker, invocation, artifacts) : [];
     if (artifacts.length && !links) throw new Error("Artifact delivery links are unavailable; exported results remain retained");
-    let summary = receipt.summary?.trim() || fallbackSummary(worker, receipt.error ?? "后台任务未提供完整结果。");
-    if (receipt.status === "waiting" && invocation.kind === "initial" && this.now() >= worker.deadlineAt) {
-      summary = `已到本轮汇报截止时间，跟踪已结束；以下为现有结果及缺项。\n${summary}`;
-    }
-    const text = [summary, ...(links ?? [])].join("\n\n");
-    if (receipt.status === "waiting" && this.now() < (invocation.kind === "initial" ? worker.deadlineAt : worker.expiresAt)) {
-      const requestedAt = receipt.nextCheckAt ? Date.parse(receipt.nextCheckAt) : NaN;
-      return save(current => {
-        const active = current.invocations.find(item => item.id === invocation.id)!;
-        active.status = "completed"; active.receipt = { ...receipt, artifacts }; active.exported = true;
+    const summary = receipt.summary?.trim() || fallbackSummary(worker, receipt.error ?? "后台任务未提供完整结果。");
+    const requestedAt = receipt.nextCheckAt ? Date.parse(receipt.nextCheckAt) : NaN;
+    const failed = ["failed", "needs_attention", "unknown"].includes(receipt.status);
+    // Artifacts belong in the durable receipt even when result delivery has not succeeded yet.
+    const durableReceipt = { ...receipt, artifacts };
+    return save(current => {
+      const now = this.now();
+      const deadlineAt = Math.min(current.expiresAt, invocation.kind === "initial" ? current.deadlineAt : current.expiresAt);
+      const continuing = receipt.status === "waiting" && !quarantined && current.phase !== "expired" &&
+        current.phase !== "quarantined" && now < deadlineAt;
+      const resultSummary = receipt.status === "waiting" && invocation.kind === "initial" && now >= current.deadlineAt ?
+        `已到本轮汇报截止时间，跟踪已结束；以下为现有结果及缺项。\n${summary}` : summary;
+      const text = [resultSummary, ...(links ?? [])].join("\n\n");
+      const active = current.invocations.find(item => item.id === invocation.id)!;
+      active.status = failed ? "failed" : "completed"; active.receipt = durableReceipt; active.exported = !quarantined;
+      delete current.activeInvocationId;
+      if (continuing) {
         if (artifacts.length) active.result = { text, meaningful: true };
-        delete current.activeInvocationId;
-        current.phase = !current.initialOutcome ? "observing" : current.initialOutcome.status === "failed" ? "failed" : "completed";
-        const fallback = this.now() + current.spec.checkIntervalsMs[Math.min(current.checkCount++, current.spec.checkIntervalsMs.length - 1)];
-        const nextAt = Math.min(Number.isFinite(requestedAt) && requestedAt > this.now() ? requestedAt : fallback,
-          invocation.kind === "initial" ? current.deadlineAt : current.expiresAt, current.expiresAt);
+        const fallback = now + current.spec.checkIntervalsMs[Math.min(current.checkCount++, current.spec.checkIntervalsMs.length - 1)];
+        const nextAt = Math.min(Number.isFinite(requestedAt) && requestedAt > now ? requestedAt : fallback, deadlineAt);
         if (invocation.kind === "initial") current.nextCheckAt = nextAt;
         else {
           const prompt = current.prompts.find(item => item.invocationId === invocation.id);
           if (!prompt) throw new Error("Follow-up continuation lost its queued prompt");
           prompt.invocationId = randomUUID(); prompt.notBefore = nextAt;
         }
-      });
-    }
-    const failed = ["failed", "needs_attention", "unknown"].includes(receipt.status);
-    const result: RunResult = { text, meaningful: true, ...(failed ? { error: receipt.error ?? receipt.status } : {}) };
-    // Artifacts belong in the durable receipt even when result delivery has not succeeded yet.
-    const durableReceipt = { ...receipt, artifacts };
-    return save(current => {
-      const active = current.invocations.find(item => item.id === invocation.id)!;
-      active.status = failed ? "failed" : "completed"; active.receipt = durableReceipt; active.result = result; active.exported = !quarantined;
-      delete current.activeInvocationId;
-      if (invocation.kind === "initial") {
-        current.initialOutcome = { status: failed ? "failed" : "completed", result };
-        current.phase = failed ? "failed" : "completed";
-      } else current.phase = !current.initialOutcome ? "observing" : current.initialOutcome.status === "failed" ? "failed" : "completed";
-      if (quarantined) current.phase = "quarantined";
+      } else {
+        const result: RunResult = { text, meaningful: true, ...(failed ? { error: receipt.error ?? receipt.status } : {}) };
+        active.result = result;
+        if (invocation.kind === "initial") current.initialOutcome = { status: failed ? "failed" : "completed", result };
+      }
+      if (quarantined || current.phase === "quarantined") current.phase = "quarantined";
+      else if (current.phase !== "expired") current.phase = !current.initialOutcome ? "observing" : current.initialOutcome.status === "failed" ? "failed" : "completed";
     });
   }
   private async deliverFollowups(worker: BackgroundWorker,
@@ -352,10 +354,14 @@ export class BackgroundService {
   }
   private async expire(worker: BackgroundWorker,
     save: (mutate: (current: BackgroundWorker) => void) => Promise<BackgroundWorker>): Promise<BackgroundWorker> {
-    if (!worker.initialOutcome) {
-      worker = await save(current => { current.phase = "expired"; current.initialOutcome = { status: "failed", result: {
-        text: fallbackSummary(current, "24 小时保留期已结束，本轮跟踪结束。"), error: "worker_expired" } }; });
-    }
+    let expiryClaimed = false;
+    worker = await save(current => {
+      if (current.expiresAt > this.now() || current.activeInvocationId) return;
+      current.phase = "expired"; expiryClaimed = true;
+      current.initialOutcome ??= { status: "failed", result: {
+        text: fallbackSummary(current, "24 小时保留期已结束，本轮跟踪结束。"), error: "worker_expired" } };
+    });
+    if (!expiryClaimed) return worker;
     worker = await this.deliverFollowups(worker, save);
     if ((!worker.initialAcceptedAt && !worker.initialDiscardedAt) || worker.activeInvocationId || worker.invocations.some(item => item.result && !item.acceptedAt && !item.discardedAt)) return worker;
     // Unstarted queued work is reported through the same outbox before disposing its workspace.
@@ -378,6 +384,12 @@ export class BackgroundService {
   /** Revoked chats cannot receive results. Expiry explicitly discards bodies after safe export and shutdown. */
   private async expireRevoked(worker: BackgroundWorker,
     save: (mutate: (current: BackgroundWorker) => void) => Promise<BackgroundWorker>): Promise<BackgroundWorker> {
+    let expiryClaimed = false;
+    worker = await save(current => {
+      if (current.expiresAt > this.now()) return;
+      current.phase = "expired"; expiryClaimed = true;
+    });
+    if (!expiryClaimed) return worker;
     if (worker.activeInvocationId) {
       const invocation = worker.invocations.find(item => item.id === worker.activeInvocationId)!;
       await this.options.runtime.cancel(worker.id, invocation.id);
