@@ -1,5 +1,5 @@
 import { ScopedSession } from "../../types.js";
-import { selectSendRoute } from "../../sessions/send-eligibility.js";
+import { queueSendRoute } from "../../commands/queue.js";
 import { isTerminalSession } from "../../sessions/terminal.js";
 
 export type NLActionType =
@@ -186,10 +186,10 @@ export class NaturalLanguageResolver {
 
     if (targetCheck.session) {
       if (isTerminalSession(targetCheck.session)) return terminalInputRequiresConfirmation();
-      if (!selectSendRoute(targetCheck.session).ready) {
+      if (!queueSendRoute(targetCheck.session)) {
         return {
           action: "unknown",
-          replyText: `会话 [${targetCheck.session.nodeId}] ${targetCheck.session.id} 当前不支持 send 指令（资格不可用或已过期）。`,
+          replyText: `会话 [${targetCheck.session.nodeId}] ${targetCheck.session.id} 当前不支持 send 指令（未取得可用发送路线）。`,
         };
       }
 
@@ -206,7 +206,7 @@ export class NaturalLanguageResolver {
       if (ctx.sessions.length === 1) {
         const s = ctx.sessions[0];
         if (isTerminalSession(s)) return terminalInputRequiresConfirmation();
-        if (!selectSendRoute(s).ready) {
+        if (!queueSendRoute(s)) {
           return {
             action: "unknown",
             replyText: `会话 [${s.nodeId}] ${s.id} 当前不具备 send 资格。`,
@@ -226,7 +226,7 @@ export class NaturalLanguageResolver {
         );
         if (prev) {
           if (isTerminalSession(prev)) return terminalInputRequiresConfirmation();
-          if (!selectSendRoute(prev).ready) {
+          if (!queueSendRoute(prev)) {
             return {
               action: "unknown",
               replyText: `上下文会话 [${prev.nodeId}] ${prev.id} 当前不具备 send 资格。`,

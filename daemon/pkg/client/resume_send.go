@@ -32,12 +32,8 @@ func (d *Daemon) canResumeSendLocked(id string, now time.Time) bool {
 		freshDesktopOwner(d.desktopSnapshot[id], now) {
 		return false
 	}
-	for _, session := range d.sessionSnapshot {
-		if session.ID == id {
-			return freshManagedResumeTarget(session, now)
-		}
-	}
-	return false
+	session, exists := d.managedSessionLocked(id)
+	return exists && freshManagedResumeTarget(session, now)
 }
 
 func (d *Daemon) sendWithResume(ctx context.Context, cmd protocol.ControllerCommandMessage, prompt string) (string, error) {

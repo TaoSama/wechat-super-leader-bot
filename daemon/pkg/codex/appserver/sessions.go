@@ -14,6 +14,24 @@ import (
 
 const maxDiscoveryPages = 100
 
+func (a *AppServerAdapter) InspectSession(ctx context.Context, sessionID string) (protocol.Session, error) {
+	if !protocol.ValidHistoryIdentity(sessionID) {
+		return protocol.Session{}, errors.New("invalid session identity")
+	}
+	rc, err := a.connect(ctx)
+	if err != nil {
+		return protocol.Session{}, err
+	}
+	defer rc.closeLogged()
+	thread, err := a.readSendTarget(ctx, rc, sessionID)
+	if err != nil {
+		return protocol.Session{}, err
+	}
+	// Reading a thread proves its current state, not loaded membership. Explicit
+	// resume-send will check membership and acquire the writer before sending.
+	return sessionFromThread(thread, false, time.Now().UTC().Format(time.RFC3339Nano)), nil
+}
+
 func pageCursor(raw any, seen map[string]bool) (string, error) {
 	if raw == nil || raw == "" {
 		return "", nil

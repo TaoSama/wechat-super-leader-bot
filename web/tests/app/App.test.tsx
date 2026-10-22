@@ -497,7 +497,7 @@ describe("Super Leader 会话工作台", () => {
     });
 
     // Filter by node macair
-    fireEvent.click(screen.getByRole("button", { name: "Super Leader" }));
+    fireEvent.click(screen.getByRole("button", { name: "工作看板" }));
     fireEvent.click(
       screen.getByRole("button", { name: "按节点 macair 筛选会话与指令" })
     );

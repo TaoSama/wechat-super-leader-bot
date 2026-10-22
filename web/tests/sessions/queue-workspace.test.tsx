@@ -30,11 +30,16 @@ it("忙碌会话明确提示排队，取消仅针对原消息，取消后可编�
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "发送消息" })));
   expect(screen.getByText("消息已排队，会在会话可以继续时发送。")).toBeVisible();
   expect(screen.getByRole("button", { name: "发送消息" })).toBeDisabled();
+  expect(screen.getByLabelText("发送给当前会话")).toBeEnabled();
+  fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "下一条草稿" } });
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "取消排队" })));
+  expect(fetchMock.mock.calls.filter(([url]) => url.endsWith("/messages"))).toHaveLength(1);
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "确认取消排队" })));
   expect(screen.getByText("已取消", { selector: ".send-receipt > span" })).toBeVisible();
   const posts = fetchMock.mock.calls.filter(([url]) => url.endsWith("/messages"));
   expect(posts).toHaveLength(2);
   expect(JSON.parse(String(posts[1][1]?.body))).toEqual({ cancelCommandId: queued.commandId });
+  expect(screen.getByLabelText("发送给当前会话")).toHaveValue("下一条草稿");
   fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "新的消息" } });
   expect(screen.getByRole("button", { name: "发送消息" })).toBeEnabled();
 });

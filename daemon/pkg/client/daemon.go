@@ -53,6 +53,7 @@ type Daemon struct {
 	sessionSnapshot    []protocol.Session
 	sessionCatalog     sessionCatalog
 	catalogSnapshot    []protocol.Session
+	managedCatalog     map[string]protocol.Session
 	terminalObserver   sessionCatalog
 	terminalHistory    terminalHistoryReader
 	terminalSnapshot   []protocol.Session
@@ -81,6 +82,7 @@ func NewDaemon(cfg *config.Config, adapter codex.SessionAdapter) *Daemon {
 		outbox:             make(map[string]protocol.DaemonResultMessage),
 		pendingPersistence: make(map[string]protocol.DaemonResultMessage),
 		desktopSnapshot:    make(map[string]protocol.DesktopObservation),
+		managedCatalog:     make(map[string]protocol.Session),
 		sendReadiness:      make(map[string]desktopReadinessRecord),
 		desktopGeneration:  make(map[string]uint64),
 		historyContexts:    newHistoryContexts(),

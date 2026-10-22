@@ -21,6 +21,30 @@ const delivery = (id: string, status: ConsoleDelivery["status"]): ConsoleDeliver
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("task notification console", () => {
+  it("preserves the automation when the cancellation dialog is dismissed", () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<AutomationsSection items={[schedule()]} />);
+    fireEvent.click(screen.getByRole("button", { name: "取消任务" }));
+    expect(screen.getByRole("dialog", { name: "取消任务「每天研究更新」" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "保留" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.getByText("已启用")).toBeInTheDocument();
+  });
+
+  it("exposes a cancellation failure after closing the dialog without claiming success", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 409 }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<AutomationsSection items={[schedule()]} />);
+    fireEvent.click(screen.getByRole("button", { name: "取消任务" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认取消" }));
+    expect(await screen.findByRole("alert")).toBeVisible();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByText("已启用")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps task completion separate from waiting and uncertain delivery, loading full content only on request", async () => {
     const full = "# 完整研究\n" + "正文包含所有细节。".repeat(300);
     const fetchMock = vi.fn(async () => new Response(full, { headers: { "Content-Type": "text/markdown" } }));
