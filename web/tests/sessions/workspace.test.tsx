@@ -1,5 +1,5 @@
 import { emptyGoals, emptyExecutions  } from "../fixtures/status-fixtures";
-import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../../src/App";
 import { resetAuthHelperForTesting } from "../../src/auth/bootstrap";
@@ -113,8 +113,14 @@ describe("会话工作台交互与安全", () => {
     const { container } = render(<App />);
     await screen.findByTestId("session-row-air-same-id");
     expect(fetchMock.mock.calls.filter(([url]) => url.includes("/history"))).toHaveLength(0);
-    expect(screen.getByTestId("session-row-air-same-id")).toHaveTextContent("gpt-6.1-sol");
+    expect(screen.getByTestId("session-row-air-same-id")).not.toHaveTextContent("gpt-6.1-sol");
     await openSession();
+    fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
+    const details = screen.getByRole("dialog", { name: "会话详情" });
+    expect(within(details).getByText("模型").nextElementSibling).toHaveTextContent("gpt-6.1-sol");
+    expect(within(details).getByText("Provider").nextElementSibling).toHaveTextContent("company");
+    expect(within(details).getByText("模型来源").nextElementSibling).toHaveTextContent("控制接口记录");
+    fireEvent.click(screen.getByRole("button", { name: "关闭会话详情" }));
     expect(container.querySelector(".markdown strong")).toHaveTextContent("完成分析");
     expect(screen.getByRole("table")).toBeInTheDocument();
     expect(container.querySelector("img")).toBeNull();

@@ -250,15 +250,15 @@ describe("Super Leader 会话工作台", () => {
 
     // Sessions and capabilities
     const alphaRow = screen.getByTestId("session-row-demomini-sess_alpha");
-    expect(alphaRow).toHaveTextContent("模型未报告");
-    expect(within(alphaRow).getByRole("img", { name: "执行中" })).toBeInTheDocument();
+    expect(alphaRow).not.toHaveTextContent("模型未报告");
+    expect(within(alphaRow).getByText("忙")).toBeInTheDocument();
     expect(alphaRow).toHaveTextContent("重构 控制平面状态存储");
 
     const roRow = screen.getByTestId("session-row-demomini-sess_readonly");
-    expect(within(roRow).getByRole("img", { name: "空闲" })).toBeInTheDocument();
+    expect(within(roRow).getByText("闲")).toBeInTheDocument();
 
     const noneRow = screen.getByTestId("session-row-linux-worker-9-sess_legacy");
-    expect(within(noneRow).getByRole("img", { name: "状态未知" })).toBeInTheDocument();
+    expect(within(noneRow).getByText("未知")).toBeInTheDocument();
 
     // Command 5 statuses check:
     // 1) pending
@@ -289,6 +289,11 @@ describe("Super Leader 会话工作台", () => {
     expect(screen.getByTestId("command-item-cmd_105_uncertain")).toHaveTextContent(
       "不确定，需核验，勿自动重发"
     );
+
+    await act(async () => { fireEvent.click(alphaRow); });
+    fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
+    const details = screen.getByRole("dialog", { name: "会话详情" });
+    expect(within(details).getByText("模型").nextElementSibling).toHaveTextContent("模型未报告");
   });
 
   it("3. 未选择会话时仅查询状态，不调用任何管理写入入口", async () => {

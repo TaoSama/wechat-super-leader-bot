@@ -88,10 +88,10 @@ describe("workspace execution indicators", () => {
       active={false} onAuthFailure={vi.fn()} />);
     const row = screen.getByTestId("session-row-node-session");
     const label = status === "active" ? "执行中" : "空闲";
-    expect(within(row).getByRole("img", { name: label })).toHaveClass(`state-${status}`);
+    expect(within(row).getByText(status === "active" ? "忙" : "闲")).toHaveClass(`state-${status}`);
     expect(row.querySelector(".session-observation")).toBeNull();
     expect(row.querySelector(".session-preview")).toBeNull();
-    expect(row.children).toHaveLength(2);
+    expect(row.children).toHaveLength(3);
     fireEvent.click(row);
     expect(document.querySelector(".detail-title .session-status-dot")).toHaveAccessibleName(label);
     fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
@@ -114,7 +114,7 @@ describe("workspace execution indicators", () => {
     render(<SessionWorkspace data={{ nodes, sessions: [raw], commands: [], goals: emptyGoals(), executions: emptyExecutions() }}
       nodes={nodes} stale={false} active={false} onAuthFailure={vi.fn()} />);
     const row = screen.getByTestId("session-row-node-session");
-    expect(within(row).getByRole("img", { name: "状态未知" })).not.toHaveClass("state-idle");
+    expect(within(row).getByText("未载")).toHaveClass("state-notLoaded");
     expect(row).not.toHaveTextContent(/桌面|未加载|空闲/);
     fireEvent.click(row);
     expect(document.querySelector(".detail-title")).not.toHaveTextContent(/桌面|未加载|空闲/);
@@ -130,11 +130,11 @@ describe("workspace execution indicators", () => {
     const { unmount } = render(<SessionWorkspace data={{ nodes, sessions: [session("notLoaded", desktop())], commands: [], goals: emptyGoals(), executions: emptyExecutions() }}
       nodes={nodes} stale={false} onAuthFailure={vi.fn()} />);
     const row = screen.getByTestId("session-row-node-session");
-    expect(within(row).getByRole("img", { name: "执行中" })).toBeInTheDocument();
+    expect(within(row).getByText("忙")).toBeInTheDocument();
     await act(async () => { await vi.advanceTimersByTimeAsync(MAX_DESKTOP_OBSERVATION_AGE_MS); });
-    expect(within(row).getByRole("img", { name: "执行中" })).toBeInTheDocument();
+    expect(within(row).getByText("忙")).toBeInTheDocument();
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-    expect(within(row).getByRole("img", { name: "状态未知" })).not.toHaveClass("state-idle");
+    expect(within(row).getByText("未载")).toHaveClass("state-notLoaded");
     expect(row).not.toHaveTextContent(/观测已过期|空闲/);
     unmount();
     expect(vi.getTimerCount()).toBe(0);
@@ -148,14 +148,14 @@ describe("workspace execution indicators", () => {
     const { rerender, unmount } = render(<SessionWorkspace data={data} nodes={nodes} stale={false} onAuthFailure={vi.fn()} />);
     expect(vi.getTimerCount()).toBe(1);
     await act(async () => { await vi.advanceTimersByTimeAsync(MAX_DESKTOP_OBSERVATION_AGE_MS - 999); });
-    expect(within(screen.getByTestId("session-row-node-first")).getByRole("img", { name: "状态未知" })).toBeInTheDocument();
-    expect(within(screen.getByTestId("session-row-node-second")).getByRole("img", { name: "执行中" })).toBeInTheDocument();
+    expect(within(screen.getByTestId("session-row-node-first")).getByText("未载")).toBeInTheDocument();
+    expect(within(screen.getByTestId("session-row-node-second")).getByText("忙")).toBeInTheDocument();
     expect(vi.getTimerCount()).toBe(1);
     rerender(<SessionWorkspace data={data} nodes={nodes} stale={false} active={false} onAuthFailure={vi.fn()} />);
     expect(vi.getTimerCount()).toBe(0);
     await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
     rerender(<SessionWorkspace data={data} nodes={nodes} stale={false} active={true} onAuthFailure={vi.fn()} />);
-    expect(within(screen.getByTestId("session-row-node-second")).getByRole("img", { name: "状态未知" })).toBeInTheDocument();
+    expect(within(screen.getByTestId("session-row-node-second")).getByText("未载")).toBeInTheDocument();
     expect(vi.getTimerCount()).toBe(0);
     unmount();
   });
