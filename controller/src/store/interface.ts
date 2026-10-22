@@ -1,3 +1,4 @@
+import type { ProgressContext, ProgressDraft } from "../notifications/progress.js";
 import { CommandRecord, CommandAuthority, MessageRecord, ScopedSession, Session, SendRoute } from "../types.js";
 import { InputReceipt } from "../sessions/input-receipt.js";
 import { LeaderState } from "../leader/state.js";
@@ -101,7 +102,8 @@ export interface IStore extends IConsoleAuthStore, MessageImageStore {
   listNotificationCandidates(chatIds: readonly string[], now: number, afterId?: string, limit?: number): Promise<StoredNotification[]>;
   getNotificationParts(source: NotificationSource): Promise<StoredNotification[]>;
   markNotificationPrepared(id: string, resultId: string): Promise<void>;
-  enqueueProgressNotification(source: NotificationSource, now?: number): Promise<Notification | null>;
+  getProgressNotificationContext(source: NotificationSource, now?: number): Promise<ProgressContext | null>;
+  enqueueProgressNotification(source: NotificationSource, now?: number, draft?: ProgressDraft): Promise<Notification | null>;
   getNotification(id: string, now: number): Promise<Notification | null>;
   claimNotification(id: string, attemptId: string, chatIds: readonly string[], now: number): Promise<Notification | null>;
   recordNotificationReceipt(id: string, attemptId: string, status: NotificationReceiptStatus, now: number): Promise<Notification | null>;

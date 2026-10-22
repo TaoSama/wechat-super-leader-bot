@@ -4,10 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { CommandRecord } from "../../src/types.js";
 import { createExecution, executionRequestId, type ExecutionRecord } from "../../src/leader/plans/execution.js";
 import { createGoal, goalRequestId } from "../../src/leader/goals/goal.js";
-import { createProgressNotification, notificationSource, progressNotificationEligible,
+import { createProgressNotification as commitProgress, progressNotificationContext, notificationSource, progressNotificationEligible,
   NOTIFICATION_PROGRESS_INITIAL_DELAY_MS, NOTIFICATION_PROGRESS_INTERVAL_MS } from "../../src/notifications/progress.js";
 import { normalizeNotification, createTerminalNotification, NOTIFICATION_TTL_MS, type StoredNotification } from "../../src/notifications/contracts.js";
-import { pgEnqueueProgressNotification } from "../../src/store/notification-progress-postgres.js";
+import { pgEnqueueProgressNotification as commitPgProgress } from "../../src/store/notification-progress-postgres.js";
 import { pgClaimNotification, pgListPendingNotifications, pgRecordNotificationReceipt } from "../../src/store/notification-postgres.js";
 import { ConflictError } from "../../src/store/interface.js";
 import { MemoryStore } from "../../src/store/memory.js";
@@ -94,6 +94,16 @@ class ProgressPool {
   }
 }
 
+function createProgressNotification(record: ExecutionRecord | ReturnType<typeof createGoal>, commands: CommandRecord[], notifications: StoredNotification[], now: number) {
+  const context = progressNotificationContext(record, commands, notifications, now);
+  return commitProgress(record, commands, notifications, now, { eventKey: context?.eventKey ?? "stale", text: "模型根据真实证据生成的进展" });
+}
+function pgEnqueueProgressNotification(pool: pg.Pool, source: ReturnType<typeof notificationSource>, reader: ProgressPool["reader"], now: number) {
+  const fixture = pool as unknown as ProgressPool;
+  const context = progressNotificationContext(fixture.record, fixture.commands, [...fixture.notifications.values()].map(item => item.data), now);
+  return commitPgProgress(pool, source, reader, now, { eventKey: context?.eventKey ?? "stale", text: "模型基于回执报告的进展" });
+}
+
 describe("progress notification evidence and budgets", () => {
   it("waits thirty seconds, sixty seconds between changed facts, and consumes at most three permanent slots", () => {
     const record = execution(), commands = [command(record)], existing: StoredNotification[] = [];
@@ -119,7 +129,7 @@ describe("progress notification evidence and budgets", () => {
   });
   it("uses completed exact receipts and suppresses inactive sources and existing terminal events", () => {
     const record = execution(), receipt = { ...command(record), status: "completed" as const }, next = createProgressNotification(record, [receipt], [], FIRST)!;
-    expect(next.text).toContain("精确完成回执"); expect(next.text).toContain("1/4");
+    expect(next.text).toBe("模型根据真实证据生成的进展");
     for (const status of ["completed", "failed", "cancelled", "expired"] as const) {
       expect(createProgressNotification({ ...record, status }, [receipt], [], FIRST)).toBeNull();
       expect(progressNotificationEligible(next, { ...record, status }, FIRST)).toBe(false);
@@ -201,10 +211,12 @@ it("memory skips command reads outside its progress budget and snapshots pending
   const store = new MemoryStore(), record = execution();
   await store.createExecutionIfAbsent({ ...record, attempts: record.attempts.map(() => null) });
   await store.compareAndSetExecution({ ...record, revision: 2 }, 1, NOW);
-  const reads = vi.spyOn(store, "findCommandByRequestId").mockImplementation(async id => command(record, record.plan.actions.findIndex((_a, index) => executionRequestId(record, index) === id)));
+  const receipts = record.plan.actions.map((_action, index) => command(record, index));
+  const reads = vi.spyOn(store, "findCommandByRequestId").mockImplementation(async id => receipts.find(item => item.requestId === id) ?? null);
   expect(await store.enqueueProgressNotification(notificationSource(record), FIRST - 1)).toBeNull();
   expect(reads).not.toHaveBeenCalled();
-  expect(await store.enqueueProgressNotification(notificationSource(record), FIRST)).not.toBeNull();
+  const context = await store.getProgressNotificationContext(notificationSource(record), FIRST);
+  expect(await store.enqueueProgressNotification(notificationSource(record), FIRST, { eventKey: context!.eventKey, text: "模型正文" })).not.toBeNull();
   reads.mockClear();
   expect(await store.enqueueProgressNotification(notificationSource(record), FIRST + NOTIFICATION_PROGRESS_INTERVAL_MS - 1)).toBeNull();
   expect(reads).not.toHaveBeenCalled();
@@ -212,4 +224,20 @@ it("memory skips command reads outside its progress budget and snapshots pending
   const values = vi.spyOn(notifications, "values");
   await store.listPendingNotifications(["chat"], FIRST);
   expect(values).toHaveBeenCalledTimes(1);
+});
+
+
+it("offers durable goal decision waiting evidence without inventing a native receipt", () => {
+  const goal = createGoal("chat", proposal(NOW), NOW);
+  const context = progressNotificationContext(goal, [], [], FIRST)!;
+  expect(context.evidence).toEqual([{ prompt: goal.proposal.objective, status: "waiting_for_decision" }]);
+  expect(createProgressNotification(goal, [], [], FIRST)?.kind).toBe("progress");
+});
+
+
+it("binds model drafts to the exact bounded completed excerpt", () => {
+  const record = execution(), receipt = { ...command(record), status: "completed" as const, output: "已核验的第一份结果" };
+  const context = progressNotificationContext(record, [receipt], [], FIRST)!;
+  expect(commitProgress(record, [{ ...receipt, output: "不同的结果正文" }], [], FIRST,
+    { eventKey: context.eventKey, text: "基于旧结果生成的进度" })).toBeNull();
 });

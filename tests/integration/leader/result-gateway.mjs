@@ -147,7 +147,7 @@ globalThis.fetch = async (input, init) => {
 };\n`, { mode: 0o600 });
     const runGateway = async (mode = '--poll-once', { allowFailure = false, budget = 10 } = {}) => {
       healthy(); let output = '', stderr = '';
-      gatewayChild = spawn(process.execPath, ['--import', preloadPath, 'gateway/dist/index.js', mode, '--notifications',
+      gatewayChild = spawn(process.execPath, ['--import', preloadPath, 'gateway/dist/index.js', mode,
         '--controller-url', controller.base, '--credentials-path', accountPath, '--state-path', statePath,
         '--health-path', join(dir, 'health.json')], {
         cwd: ROOT, env: { ...env, CONTROLLER_TOKEN: token, NODE_EXTRA_CA_CERTS: certPath,

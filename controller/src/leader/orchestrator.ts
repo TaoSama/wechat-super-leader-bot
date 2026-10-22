@@ -1,3 +1,4 @@
+import { REPORT_PROGRESS_TOOL, progressText, type QueryProgressReporter } from "../notifications/model-progress.js";
 import { traceEvent, traceSpan } from "../runtime/telemetry.js";
 import { isConsoleLinkQuery, parseSessionDirectoryQuery } from "@super-leader/wechat-text";
 import { createHash, randomUUID } from "node:crypto";
@@ -88,7 +89,7 @@ export class LeaderOrchestrator {
     this.goals = new GoalConversation(store, hub, goals ?? new GoalScheduler(store, commands, createGoalDecider(model), { now }), now);
   }
 
-  handle(chatId: string, messageId: string, text: string): Promise<LeaderReply> {
+  handle(chatId: string, messageId: string, text: string, progress?: QueryProgressReporter): Promise<LeaderReply> {
     const inputHash = hash(text);
     const active = this.active.get(chatId);
     if (active) {
@@ -96,14 +97,14 @@ export class LeaderOrchestrator {
       return Promise.reject(new CommandError(409, "该聊天上一条请求仍在处理中，请稍后再试"));
     }
     if (this.active.size >= 64) return Promise.reject(new CommandError(503, "Leader 当前繁忙"));
-    const promise = this.run(chatId, messageId, text, inputHash);
+    const promise = this.run(chatId, messageId, text, inputHash, progress);
     this.active.set(chatId, { messageId, inputHash, promise });
     const release = () => { this.active.delete(chatId); };
     promise.then(release, release);
     return promise;
   }
 
-  private async run(chatId: string, messageId: string, text: string, inputHash: string): Promise<LeaderReply> {
+  private async run(chatId: string, messageId: string, text: string, inputHash: string, progress?: QueryProgressReporter): Promise<LeaderReply> {
     const saved = await this.store.getLeaderState(chatId);
     const data = LeaderDataSchema.parse(saved?.data ?? {});
     const pendingGoalBefore = data.pendingGoal;
@@ -204,7 +205,7 @@ export class LeaderOrchestrator {
       const backgroundTurn: BackgroundTurn = { mutations: [], errors: [] };
       let execution: ReasonedReply["execution"];
       try {
-        const reasoned = await this.reason(chatId, text, data, linkContext, trace, previousPlan, automationTurn, claimed.revision, backgroundTurn);
+        const reasoned = await this.reason(chatId, text, data, linkContext, trace, previousPlan, automationTurn, claimed.revision, backgroundTurn, progress);
         execution = reasoned.execution;
         directory = reasoned.directory ?? false;
         reply = { text: reasoned.text, commandId: reasoned.commandId, ...(reasoned.images ? { images: reasoned.images } : {}) };
@@ -383,7 +384,7 @@ export class LeaderOrchestrator {
 
   private async reason(chatId: string, text: string, data: LeaderData, linkContext: LinkContext, trace: QueryTrace, previousPlan?: Plan,
     automationTurn: AutomationTurn = { attempted: false, ids: new Set(), errors: [] }, claimRevision?: number,
-    backgroundTurn: BackgroundTurn = { mutations: [], errors: [] }): Promise<ReasonedReply> {
+    backgroundTurn: BackgroundTurn = { mutations: [], errors: [] }, progress?: QueryProgressReporter): Promise<ReasonedReply> {
     const signal = AbortSignal.timeout(TURN_TIMEOUT_MS);
     const sanitizedUserPrompt = sanitizeConsoleLinkSecrets(text);
     const directoryQuery = parseSessionDirectoryQuery(text);
@@ -423,6 +424,7 @@ export class LeaderOrchestrator {
       ...(previousPlan ? [{ role: "assistant" as const, content: JSON.stringify({ previousUnconfirmedPlan: previousPlan }) }] : []),
       { role: "user", content: sanitizedUserPrompt },
     ];
+    let progressRemaining = 3;
     let toolCount = 0;
     let authorization: ReturnType<typeof classifyUserAuthorization> | undefined;
     let automationAuthorization: ReturnType<typeof classifyAutomationAuthorization> | undefined;
@@ -447,7 +449,7 @@ export class LeaderOrchestrator {
       let answer;
       try {
         answer = await traceSpan("leader.model", () => this.model.complete(messages,
-          [...LEADER_TOOLS, ...(this.automations ? AUTOMATION_TOOLS : []), ...(this.background ? BACKGROUND_TOOLS : [])], signal), { purpose: "reason", attempt: step });
+          [...LEADER_TOOLS, ...(progress ? [REPORT_PROGRESS_TOOL] : []), ...(this.automations ? AUTOMATION_TOOLS : []), ...(this.background ? BACKGROUND_TOOLS : [])], signal), { purpose: "reason", attempt: step });
       } finally {
         trace.lastModelMs = Date.now() - modelStartedAt;
         trace.totalModelMs += trace.lastModelMs;
@@ -464,6 +466,24 @@ export class LeaderOrchestrator {
         toolCount++;
         trace.toolCalls = toolCount;
         trace.lastTool = Object.hasOwn(ToolArguments, call.function.name) ? call.function.name : "unsupported";
+        if (call.function.name === "report_progress") {
+          trace.lastTool = call.function.name;
+          let output: unknown = { status: "unavailable", remaining: 0, limit: 3 };
+          if (progress && progressRemaining > 0) {
+            let text: string | undefined;
+            try { text = progressText(call.function.arguments); }
+            catch { output = { status: "invalid", remaining: progressRemaining, limit: 3 }; }
+            if (text !== undefined) {
+              try {
+                const result = await progress(text);
+                progressRemaining = Math.max(0, Math.min(progressRemaining - (result.sent || result.status === "queued" ? 1 : 0), result.remaining));
+                output = { ...result, remaining: progressRemaining, limit: 3 };
+              } catch { progressRemaining--; output = { status: "uncertain", remaining: progressRemaining, limit: 3 }; }
+            }
+          } else if (progress) output = { status: "budget_exhausted", remaining: 0, limit: 3 };
+          messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(output) });
+          continue;
+        }
         if (this.background && BACKGROUND_TOOL_NAMES.has(call.function.name)) {
           trace.lastTool = call.function.name;
           const mutating = call.function.name === "follow_up_background_task" || call.function.name === "extend_background_task";

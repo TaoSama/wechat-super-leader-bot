@@ -138,7 +138,7 @@ it("permanently excludes converted history so a new progress item is collected i
   const active = (await store.compareAndSetExecution({ ...initial, revision: 2,
     attempts: [{ token: id(900), startedAt: NOW, expiresAt: NOW + 15_000 }] }, 1, NOW))!;
   await store.createCommandIfAbsent({ ...command(active), status: "accepted", output: undefined });
-  const progress = (await store.enqueueProgressNotification({ type: "plan", id: initial.id }, NOW + 30_000))!;
+  const progress = (await store.enqueueProgressNotification({ type: "plan", id: initial.id }, NOW + 30_000, { eventKey: (await store.getProgressNotificationContext({ type: "plan", id: initial.id }, NOW + 30_000))!.eventKey, text: "模型进展" }))!;
   const restarted = new NotificationResultCollector(store, f.results);
   expect(await restarted.collect(["chat"], NOW + 30_000)).toMatchObject({ scanned: 1, prepared: 1, failures: [] });
   expect(await f.repository.get(progress.id)).toMatchObject({ kind: "progress" });
@@ -182,10 +182,10 @@ describe("candidate store lifecycle", () => {
       attempts: [{ token: id(99), startedAt: NOW, expiresAt: NOW + 15_000 }] }, 1, NOW))!;
     const receipt = { ...command(active), status: "accepted" as const, output: undefined };
     await store.createCommandIfAbsent(receipt);
-    const first = (await store.enqueueProgressNotification({ type: "plan", id: initial.id }, NOW + 30_000))!;
+    const first = (await store.enqueueProgressNotification({ type: "plan", id: initial.id }, NOW + 30_000, { eventKey: (await store.getProgressNotificationContext({ type: "plan", id: initial.id }, NOW + 30_000))!.eventKey, text: "模型进展" }))!;
     vi.useFakeTimers({ now: NOW + 90_000 });
     await store.updateCommandStatus(receipt.commandId, "completed", "真实结果", undefined, "exact-turn");
-    const second = (await store.enqueueProgressNotification({ type: "plan", id: initial.id }, NOW + 90_000))!;
+    const second = (await store.enqueueProgressNotification({ type: "plan", id: initial.id }, NOW + 90_000, { eventKey: (await store.getProgressNotificationContext({ type: "plan", id: initial.id }, NOW + 90_000))!.eventKey, text: "模型报告新进展" }))!;
     expect(second.id).not.toBe(first.id);
     expect((await store.listNotificationCandidates(["chat"], NOW + 90_000)).map(item => item.id)).toEqual([second.id]);
     const input = notificationResultInput(normalizeNotification(second), []);

@@ -1,3 +1,6 @@
+import { PROGRESS_OUTPUT_LIMIT, progressNotificationBudgetAvailable, progressNotificationContext, type ProgressContext, type ProgressDraft } from "../notifications/progress.js";
+import { notificationCommands, planNotificationRequestIds, goalNotificationRequestIds } from "../notifications/presentation.js";
+import { notificationFromRow, type NotificationRow } from "./notification-postgres.js";
 import pg from "pg";
 import { CommandRecord, MessageRecord, ScopedSession, Session, SendRouteSchema, validateCommandSendRoute } from "../types.js";
 import { InputReceipt, InputReceiptSchema } from "../sessions/input-receipt.js";
@@ -8,7 +11,7 @@ import { nextCommandState, inspectionLimit, validateStoredCommandInput } from ".
 import { validateNodeSessionInventory, withNodeSessionsLock } from "./node-sessions.js";
 import type { CreateExecutionResult, ExecutionRecord } from "../leader/plans/execution.js";
 import type { ExecutionConfirmationAuthority } from "../leader/plans/confirmation.js";
-import type { Notification, StoredNotification, NotificationReceiptStatus, NotificationDeferReason } from "../notifications/contracts.js";
+import { NotificationSourceSchema, validateNotificationTime, type Notification, type StoredNotification, type NotificationReceiptStatus, type NotificationDeferReason } from "../notifications/contracts.js";
 import type { GoalRecord, GoalConfirmationAuthority, CreateGoalResult } from "../leader/goals/goal.js";
 import { pgConfirmGoal, pgGetGoal, pgGetLatestGoal, pgCompareAndSetGoal, pgListRunnableGoals, pgListRecentGoals } from "./goal-postgres.js";
 import { pgListPendingNotifications, pgGetNotification, pgClaimNotification, pgRecordNotificationReceipt, pgDeferNotification } from "./notification-postgres.js";
@@ -390,10 +393,10 @@ export class PostgresStore implements IStore {
   compareAndSetGoal(next: GoalRecord, revision: number, now = Date.now): Promise<GoalRecord | null> {
     return pgCompareAndSetGoal(this.pool, next, revision, client => this.notificationCommandReader(client), now);
   }
-  private notificationCommandReader(client: pg.PoolClient, metadataOnly = false): Pick<IStore, "findCommandByRequestId"> {
+  private notificationCommandReader(client: Pick<pg.PoolClient, "query">, metadataOnly = false): Pick<IStore, "findCommandByRequestId"> {
     return { findCommandByRequestId: async requestId => {
-      const columns = metadataOnly ? "command_id,request_id,node_id,session_id,action,prompt,status,expires_at,created_at,updated_at,skills,turn_id,send_route,input_receipt,delivery_mode,expected_turn_id" : "*";
-      const progressStatus = metadataOnly ? " AND status IN ('accepted','completed')" : "";
+      const columns = metadataOnly ? `command_id,request_id,node_id,session_id,action,prompt,status,expires_at,created_at,updated_at,skills,turn_id,send_route,input_receipt,delivery_mode,expected_turn_id,authority,queue_order,CASE WHEN status='completed' THEN substring(output from 1 for ${PROGRESS_OUTPUT_LIMIT}) END AS output` : "*";
+      const progressStatus = metadataOnly ? " AND status IN ('queued','pending','accepted','completed')" : "";
       const result = await client.query(`SELECT ${columns} FROM commands WHERE request_id = $1${progressStatus}`, [requestId]);
       return result.rows[0] ? this.mapCommandRow(result.rows[0]) : null;
     } };
@@ -433,8 +436,20 @@ export class PostgresStore implements IStore {
   markNotificationPrepared(id: string, resultId: string): Promise<void> {
     return pgMarkNotificationPrepared(this.pool, id, resultId);
   }
-  enqueueProgressNotification(source: NotificationSource, now = Date.now()): Promise<Notification | null> {
-    return pgEnqueueProgressNotification(this.pool,source,client=>this.notificationCommandReader(client,true),now);
+  async getProgressNotificationContext(source: NotificationSource, now = Date.now()): Promise<ProgressContext | null> {
+    NotificationSourceSchema.parse(source); validateNotificationTime(now);
+    const record = source.type === "plan" ? await this.getExecution(source.id) : await this.getGoal(source.id);
+    if (!record) return null;
+    const column = source.type === "plan" ? "execution_id" : "goal_id";
+    const rows = await this.pool.query<NotificationRow>(`SELECT * FROM leader_notifications WHERE ${column}=$1 ORDER BY created_at ASC,id ASC`, [source.id]);
+    const notifications = rows.rows.map(notificationFromRow);
+    if (!progressNotificationBudgetAvailable(record, notifications, now)) return null;
+    const commands = await notificationCommands(this.notificationCommandReader(this.pool, true),
+      "plan" in record ? planNotificationRequestIds(record) : goalNotificationRequestIds(record));
+    return progressNotificationContext(record, commands, notifications, now);
+  }
+  enqueueProgressNotification(source: NotificationSource, now = Date.now(), draft?: ProgressDraft): Promise<Notification | null> {
+    return pgEnqueueProgressNotification(this.pool,source,client=>this.notificationCommandReader(client,true),now,draft);
   }
   async getNotification(id: string, now: number): Promise<Notification | null> {
     return pgGetNotification(this.pool, id, now);
