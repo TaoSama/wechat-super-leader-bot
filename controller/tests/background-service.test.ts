@@ -26,6 +26,19 @@ function setup() {
 const watched = (f: ReturnType<typeof setup>) => ({ ...f.spec, sources: [{ nodeId: "mini", automationId: "daily", offsetMs: -3_600_000, windowMs: 60_000 }] });
 
 describe("24-hour isolated background workers", () => {
+  it.each([undefined, 2 * 3_600_000])("starts partial analysis at the default one-hour or explicit deadline (%s)", async deadlineMs => {
+    const f = setup();
+    const spec = BackgroundSpecSchema.parse({ prompt: "汇总跨机器任务结果", sources: watched(f).sources, deadlineMs });
+    const duration = deadlineMs ?? 3_600_000;
+    await f.service.start(f.run, spec);
+    expect((await f.worker())!.deadlineAt).toBe(BASE + duration);
+    expect((await f.worker())!.expiresAt).toBe(BASE + WORKER_LIFETIME_MS);
+    f.setTime(BASE + duration - 1); await f.service.inspect(f.run);
+    expect(f.runtime.start).not.toHaveBeenCalled();
+    f.setTime(BASE + duration); await f.service.inspect(f.run);
+    expect(f.runtime.start).toHaveBeenCalledTimes(1);
+    expect(f.runtime.start.mock.calls[0]).toMatchObject([{ input: { deadlineReached: true, missing: [{ status: "waiting" }] } }]);
+  });
   it("creates one worker per run, keeps expiry fixed, and starts a new worker for the next run", async () => {
     const f = setup();
     await f.service.start(f.run, f.spec);
