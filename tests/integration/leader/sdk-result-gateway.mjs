@@ -10,7 +10,6 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { verificationEnvironment } from '../../../scripts/verify.mjs';
-import { createControllerFixture } from '../../support/control-plane-fixture.mjs';
 import { stopTestProcess, withTestCleanup } from '../../support/cleanup.mjs';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
@@ -29,7 +28,7 @@ const PROCESS_MS = 30_000;
 const hash = text => createHash('sha256').update(text).digest('hex');
 const { values } = parseArgs({ options: { run: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } });
 if (!values.run || values.help) {
-  console.log('Usage: node tests/integration/leader/sdk-result-gateway.mjs --run\nRequires built Controller/Gateway with the Codex reply/getReply/ackReply contract. Runs the actual Gateway CLI and app-server transport against a generated protocol fixture, loopback model, HTTPS iLink and private temporary workspaces. Never uses real model credentials, native Codex or production sessions.');
+  console.log('Usage: node tests/integration/leader/sdk-result-gateway.mjs --run\nRequires built Gateway with the Codex reply/getReply/ackReply contract. Runs the actual Gateway CLI and app-server transport against a generated protocol fixture, synthetic Controller HTTP tools, HTTPS iLink and private temporary workspaces. Never uses real model credentials, native Codex or production sessions.');
 } else {
   await verifySdkResultGateway().catch(error => { console.error(error); process.exitCode = 1; });
 }
@@ -96,10 +95,10 @@ async function handle(request) {
     const response = await fetch(url, { method: 'POST', headers: {
       Authorization: 'Bearer ' + process.env.LEADER_TURN_MCP_TOKEN,
       'Content-Type': 'application/json', Accept: 'application/json, text/event-stream',
-    }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'control_current_request', arguments: {} } }) });
+    }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_sessions', arguments: { arguments: {} } } }) });
     assert.equal(response.status, 200); const body = await response.text();
     const result = JSON.parse(body).result;
-    assert.equal(JSON.parse(result.content[0].text).text, settings.controllerAck);
+    assert.equal(JSON.parse(result.content[0].text).reply.text, settings.controllerAck);
     fs.appendFileSync(settings.toolLog, JSON.stringify({ input, sawControllerAck: true }) + '\\n');
   }
   notify('item/completed', { item: { type: 'agentMessage', id: 'commentary', text: 'Synthetic commentary must not replace the final answer.', phase: 'commentary' } });
@@ -115,7 +114,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
 
 export async function verifySdkResultGateway() {
   for (const tool of [false, true]) await verifyScenario(tool);
-  console.log('PASS real Gateway CLI + app-server subprocess protocol: pure chat preserves the final answer and tool-backed recovery preserves exact Controller reply, frozen chunks and execution identity');
+  console.log('PASS real Gateway CLI + app-server subprocess protocol + synthetic Controller tool server: pure chat preserves the final answer and tool-backed recovery preserves exact Controller reply, frozen chunks and execution identity');
 }
 
 async function verifyScenario(tool) {
@@ -135,7 +134,7 @@ async function verifyScenario(tool) {
   const deliveryKey = JSON.stringify([ACCOUNT, CHAT, initialId]);
   const workspace = join(leaderRoot, hash(JSON.stringify([ACCOUNT, CHAT])));
   const journalPath = join(workspace, '.replies.json');
-  const incoming = [], sent = [], errors = [], logs = [], modelCalls = [];
+  const incoming = [], sent = [], errors = [], logs = [], unexpectedCalls = [];
   let controller, model, wechat, child, cursor = 0;
   const healthy = () => { if (errors.length) throw errors[0]; };
   const readLines = async path => (await readFile(path, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
@@ -148,21 +147,49 @@ async function verifyScenario(tool) {
       finalText: FINAL_TEXT, controllerAck: CONTROLLER_ACK, renewText: RENEW_TEXT, renewReply: RENEW_REPLY }), { mode: 0o600 });
     model = createServer(async (request, response) => {
       try {
-        assert.equal(request.url, '/v1/responses');
-        const body = await jsonBody(request); modelCalls.push(body);
-        assert.equal(body.input.at(-1).content, initialText, 'Controller was called for recovery or a different user message');
-        respond(response, { status: 'completed', output: [{ type: 'message', role: 'assistant', status: 'completed',
-          content: [{ type: 'output_text', text: CONTROLLER_ACK }] }] });
+        assert.equal(request.headers.authorization, `Bearer ${token}`);
+        if (request.url === '/v1/chats/notification-interest') {
+          assert.equal(request.method, 'GET');
+          respond(response, { chatIds: [CHAT], interested: [] }); return;
+        }
+        assert.equal(request.method, 'POST');
+        const body = await jsonBody(request);
+        if (['/v1/notifications/pending', '/v1/deliveries/pending'].includes(request.url)) {
+          assert.deepEqual(body, { chatIds: [CHAT] });
+          respond(response, { items: [] }); return;
+        }
+        if (request.url === '/v1/deliveries/resume') {
+          assert.equal(body.chatId, CHAT);
+          assert(Object.keys(body).every(key => ['chatId', 'generation'].includes(key)));
+          assert(body.generation === undefined || typeof body.generation === 'string' && body.generation.length > 0 && body.generation.length <= 512);
+          respond(response, { resumed: 0 }); return;
+        }
+        if (request.url === '/v1/deliveries/blocked') {
+          assert.deepEqual(Object.keys(body).sort(), ['chatId', 'reason']);
+          assert.equal(body.chatId, CHAT);
+          assert(typeof body.reason === 'string' && body.reason.length > 0 && body.reason.length <= 128);
+          respond(response, { blocked: 0 }); return;
+        }
+        assert.equal(body.chatId, CHAT);
+        if (request.url === '/v1/chats/authorize') { respond(response, { allowed: true }); return; }
+        if (request.url === '/v1/tools/list') {
+          respond(response, { context: { history: [], memories: {} }, tools: [{ name: 'list_sessions', description: 'Synthetic read-only inventory.',
+            inputSchema: { type: 'object', properties: { arguments: { type: 'object', properties: {}, additionalProperties: false } },
+              required: ['arguments'], additionalProperties: false }, annotations: { readOnlyHint: true } }], instructions: 'Read-only fixture.' });
+          return;
+        }
+        if (request.url === '/v1/tools/call') {
+          assert.equal(body.messageId, initialId); assert.equal(body.text, initialText);
+          assert.equal(body.name, 'list_sessions'); assert.deepEqual(body.arguments, {});
+          assert.match(body.callId, /^[a-f0-9]{64}$/);
+          respond(response, { result: { sessions: [] }, reply: { text: CONTROLLER_ACK } }); return;
+        }
+        unexpectedCalls.push(body);
+        throw new Error('Unexpected Controller route or inner model request');
       } catch (error) { errors.push(error); response.writeHead(500); response.end(); }
     });
     const modelPort = await listen(model);
-    const cleared = Object.fromEntries(Object.keys(process.env).map(key => [key, undefined]));
-    controller = await createControllerFixture({ logs, secrets: [token], env: { ...cleared, ...env,
-      PERSISTENCE_MODE: 'memory', CONTROLLER_TOKEN: token, NODE_TOKENS: '{}', ALLOWED_CHAT_IDS: CHAT,
-      LEADER_MODE: 'model', LEADER_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1`,
-      LEADER_MODEL_API_KEY: 'synthetic-controller-key', LEADER_MODEL_NAME: 'synthetic-controller-model',
-    } });
-    await controller.start();
+    controller = { base: `http://127.0.0.1:${modelPort}` };
     wechat = createHttpsServer({ key: await readFile(keyPath), cert: await readFile(certPath) }, async (request, response) => {
       try {
         const body = await jsonBody(request);
@@ -226,7 +253,7 @@ globalThis.fetch = (input, init) => {
     assert.equal(initialJournal.reply.text, originalReply);
     assert.equal(sent.length, 1); assert.equal(textOf(sent[0]), expectedChunks[0]);
     assert.equal((await readLines(nativeLog)).length, 1);
-    assert.equal(modelCalls.length, tool ? 1 : 0);
+    assert.equal(unexpectedCalls.length, 0, 'Synthetic tool server received an unexpected route');
     assert.equal((await readFile(statePath, 'utf8')).includes(originalReply), false, 'Gateway reference state copied full engine response');
 
     // Both calls start a fresh Gateway process. A different chunk option and a
@@ -254,18 +281,18 @@ globalThis.fetch = (input, init) => {
     assert.deepEqual(executions[0].methods, ['initialize', 'initialized', 'thread/start', 'turn/start']);
     assert.deepEqual(executions[1].methods, ['initialize', 'initialized', 'thread/resume', 'turn/start']);
     const fetches = await readLines(fetchLog);
-    assert.equal(fetches.filter(item => item.path === '/v1/messages' && item.method === 'POST').length, tool ? 1 : 0);
+    assert.equal(fetches.filter(item => item.path === '/v1/messages' && item.method === 'POST').length, 0);
+    assert.equal(fetches.filter(item => item.path === '/v1/tools/call' && item.method === 'POST').length, tool ? 1 : 0);
     assert.equal(fetches.filter(item => item.path.startsWith('/v1/messages/') && item.method === 'GET').length, 0, 'Engine source incorrectly recovered through Controller GET');
-    assert.equal(modelCalls.length, tool ? 1 : 0);
+    assert.equal(unexpectedCalls.length, 0, 'Synthetic tool server received an unexpected route');
     if (tool) assert.deepEqual(await readLines(toolLog), [{ input: initialText, sawControllerAck: true }]);
     const sentBeforeFinalRestart = sent.length; await run('--poll-once', { budget: 100 });
     assert.equal(sent.length, sentBeforeFinalRestart); assert.equal((await readLines(nativeLog)).length, 2);
     console.log(`PASS ${tool ? 'tool-backed exact Controller reply' : 'pure-chat final'} app-server transport: engine source, one original execution, exhausted-budget restart and replay blocked, true inbound resumes full rendered reply SHA ${hash(displayedReply)}, raw Markdown journal retained, accepted, zero Controller GET fallback`);
   }, [
     { label: 'synthetic SDK Gateway CLI', cleanup: () => stopTestProcess(child) },
-    { label: 'synthetic Controller process', cleanup: () => controller?.stop() },
     { label: 'synthetic HTTPS iLink', cleanup: () => closeServer(wechat) },
-    { label: 'synthetic Controller model', cleanup: () => closeServer(model) },
+    { label: 'synthetic Controller HTTP tools', cleanup: () => closeServer(model) },
     { label: 'private SDK fixture files', cleanup: () => rm(directory, { recursive: true, force: true }) },
   ]).catch(error => { console.error('Controller diagnostic tail:', logs.join('').slice(-4000)); throw error; });
 }

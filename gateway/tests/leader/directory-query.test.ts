@@ -1,13 +1,15 @@
+import { directToolController } from "./direct-tool-fixture.js";
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import { createHash } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isConsoleLinkQuery, parseSessionDirectoryQuery } from "@super-leader/wechat-text";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import { CodexReplyEngine, type CodexReplyEngineOptions } from "../../src/leader/codex.js";
 import { WorkspaceStore } from "../../src/leader/workspace.js";
-import { ReplyEngineConflictError } from "../../src/leader/contracts.js";
+import { ReplyEngineConflictError, ReplyEngineUnavailableError } from "../../src/leader/contracts.js";
 import { createMessageTrace, runWithTrace } from "../../src/runtime/telemetry.js";
 
 const request = { chatId: "directory-chat", messageId: "directory-message", text: "列出当前会话" };
@@ -43,22 +45,24 @@ test("shared parser accepts only standalone directories and preserves requested 
   }
 });
 
-test("directory forwards frozen original only after durable started record, without native execution", async t => {
+test("directory calls deterministic business tool only after durable started record, without native execution", async t => {
   const root = fixture(t);
   const options = { root, model: "synthetic", sdkFactory: neverNative() };
   const response = { text: "项目（机器）\n1. [闲] 原始标题" };
   const events: Record<string, unknown>[] = [];
   let calls = 0;
-  const controller = { forwardMessage: async (actual: typeof request) => {
+  const controller = directToolController(async actual => {
     calls++;
-    assert.deepEqual(actual, request);
-    assert.ok(Object.isFrozen(actual));
+    assert.deepEqual({ chatId: actual.chatId, messageId: actual.messageId, text: actual.text }, request);
+    assert.equal(actual.name, "list_sessions");
+    assert.deepEqual(actual.arguments, {});
+    assert.ok(actual.callId);
     const workspace = await new WorkspaceStore(root).forChat("account", request.chatId);
     const entry = Object.values(workspace.getReplyJournal())[0];
     assert.equal(entry.stage, "started");
     assert.equal(entry.delivery, "pending");
-    return response;
-  } };
+    return { result: { sessions: [] }, reply: response };
+  }, ["list_sessions"]);
   assert.deepEqual(await runWithTrace(createMessageTrace(request.chatId, request.messageId, event => events.push(event)),
     () => new CodexReplyEngine(options).reply("account", request, controller)), response);
   assert.equal(calls, 1);
@@ -87,12 +91,13 @@ test("real console query skips native and reuses Controller receipt without jour
   let issues = 0;
   let recoveries = 0;
   const controller = {
-    forwardMessage: async (actual: typeof request) => {
-      assert.deepEqual(actual, consoleRequest);
-      assert.ok(Object.isFrozen(actual));
+    ...directToolController(async actual => {
+      assert.deepEqual({ chatId: actual.chatId, messageId: actual.messageId, text: actual.text }, consoleRequest);
+      assert.equal(actual.name, "get_console_link");
+      assert.deepEqual(actual.arguments, {});
       issues++;
-      return response;
-    },
+      return { result: { issued: true }, reply: response };
+    }, ["get_console_link"]),
     getMessageReply: async (chatId: string, messageId: string) => {
       assert.equal(chatId, request.chatId);
       assert.equal(messageId, request.messageId);
@@ -104,8 +109,10 @@ test("real console query skips native and reuses Controller receipt without jour
   const workspace = await new WorkspaceStore(root).forChat("account", request.chatId);
   assert.equal(workspace.getThreadId(), undefined);
   const journal = workspace.getReplyJournal();
-  assert.equal(Object.values(journal)[0].provenance, "controller-console");
-  assert.match(Object.values(journal)[0].reply!.text, /上次已生成一次性控制台链接/);
+  const entry = Object.values(journal)[0];
+  assert.equal(entry.provenance, "controller-console");
+  assert.equal(entry.consoleText, "控制台登录链接：https://console.example/#login=[REDACTED]");
+  assert.deepEqual(entry.reply, { text: entry.consoleText });
   assert.doesNotMatch(JSON.stringify(journal), /console-delivery-secret/);
   assert.deepEqual(await new CodexReplyEngine(options).reply("account", consoleRequest, controller), response);
   assert.deepEqual(await new CodexReplyEngine(options).getReply("account", request.chatId, request.messageId, controller), response);
@@ -118,7 +125,7 @@ test("directory journal survives restart, replays once and retains conflict and 
   const options = { root, model: "synthetic", sdkFactory: neverNative() };
   let calls = 0;
   const response = { text: "1. [闲] 原始标题" };
-  const controller = { forwardMessage: async () => { calls++; return response; } };
+  const controller = directToolController(async () => { calls++; return { result: { sessions: [] }, reply: response }; }, ["list_sessions"]);
   await new CodexReplyEngine(options).reply("account", request, controller);
   assert.deepEqual(await new CodexReplyEngine(options).reply("account", request, controller), response);
   assert.deepEqual(await new CodexReplyEngine(options).getReply("account", request.chatId, request.messageId,
@@ -135,7 +142,7 @@ test("directory failures keep started journal and never fall back to native or r
   const root = fixture(t);
   const options = { root, model: "synthetic", sdkFactory: neverNative() };
   let calls = 0;
-  const controller = { forwardMessage: async () => { calls++; throw new Error("synthetic-private-provider-error"); } };
+  const controller = directToolController(async () => { calls++; throw new Error("synthetic-private-provider-error"); }, ["list_sessions"]);
   const failed = await new CodexReplyEngine(options).reply("account", request, controller);
   assert.doesNotMatch(failed.text, /synthetic-private-provider-error/);
   assert.deepEqual(await new CodexReplyEngine(options).reply("account", request, controller), failed);
@@ -148,14 +155,39 @@ test("unexpected directory console credential follows existing recovery provenan
   const root = fixture(t);
   const options = { root, model: "synthetic", sdkFactory: neverNative() };
   const text = "https://console.example/#login=synthetic-delivery-secret";
-  const controller = { forwardMessage: async () => ({ text }) };
+  const controller = directToolController(async () => ({ result: {}, reply: { text } }), ["list_sessions"]);
   assert.deepEqual(await new CodexReplyEngine(options).reply("account", request, controller), { text });
   const workspace = await new WorkspaceStore(root).forChat("account", request.chatId);
   const journal = workspace.getReplyJournal();
   assert.equal(Object.values(journal)[0].provenance, "controller-console");
   assert.doesNotMatch(JSON.stringify(journal), /synthetic-delivery-secret/);
+  const entry = Object.values(journal)[0];
+  assert.equal(entry.consoleText, "https://console.example/#login=[REDACTED]");
+  assert.deepEqual(entry.reply, { text: entry.consoleText });
+  const restarted = new CodexReplyEngine(options);
+  await assert.rejects(restarted.getReply("account", request.chatId, request.messageId,
+    { getMessageReply: async () => ({ text: "https://different-console.example/#login=unexpected-secret" }) }),
+    ReplyEngineUnavailableError);
+  assert.deepEqual(workspace.getReplyJournal(), journal, "a mismatched receipt must not replace the durable reply");
+  assert.deepEqual(await restarted.getReply("account", request.chatId, request.messageId,
+    { getMessageReply: async () => ({ text }) }), { text });
+});
+
+test("legacy console journals without a credential segment recover their original Controller receipt", async t => {
+  const root = fixture(t);
+  const options = { root, model: "synthetic", sdkFactory: neverNative() };
+  const workspace = await new WorkspaceStore(root).forChat("account", request.chatId);
+  const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+  workspace.setReplyJournal({ [hash(request.messageId)]: { inputHash: hash(request.text),
+    stage: "completed", delivery: "pending", provenance: "controller-console",
+    reply: { text: "上次已生成一次性控制台链接，请从原消息查看。" } } });
+  const original = { text: "控制台：https://console.example/#login=legacy-delivery-secret" };
+  let recoveries = 0;
   assert.deepEqual(await new CodexReplyEngine(options).getReply("account", request.chatId, request.messageId,
-    { getMessageReply: async () => ({ text: "recovered through Controller" }) }), { text: "recovered through Controller" });
+    { getMessageReply: async () => { recoveries++; return original; } }), original);
+  assert.equal(recoveries, 1);
+  assert.equal(Object.values(workspace.getReplyJournal())[0].consoleText, undefined);
+  assert.doesNotMatch(JSON.stringify(workspace.getReplyJournal()), /legacy-delivery-secret/);
 });
 
 test("compound and ordinary requests retain native tools with complete memory snapshot guidance", async t => {
@@ -172,7 +204,7 @@ test("compound and ordinary requests retain native tools with complete memory sn
     resumeThread: () => { assert.fail("Synthetic native request should start a thread"); },
   });
   const engine = new CodexReplyEngine({ root, model: "synthetic", sdkFactory });
-  const controller = { forwardMessage: async () => { assert.fail("Native path controls whether to invoke Controller"); } };
+  const controller = directToolController();
   for (const [index, text] of ["列出会话并发送", "记住：先说结论", "查看项目A的会话进度", "比较会话的模型"].entries()) {
     assert.deepEqual(await engine.reply("account", { ...request, messageId: `native-${index}`, text }, controller), { text: "原生处理" });
   }

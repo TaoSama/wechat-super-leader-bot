@@ -12,6 +12,7 @@ export class SessionTitles {
   private readonly prefix = `⟦session:${randomUUID()}:`;
   private readonly sessions = new Map<string, SessionTitle>();
   private readonly refs = new Map<string, string>();
+  private referenceLabels?: Map<string, string>;
   private readonly listed = new Set<string>();
   private readonly focused = new Set<string>();
   private independentQuery = false;
@@ -22,6 +23,7 @@ export class SessionTitles {
     const id = key(session);
     this.sessions.set(id, { ...this.sessions.get(id), ...session,
       title: session.title ?? this.sessions.get(id)?.title });
+    this.referenceLabels = undefined;
     this.independentQuery = false;
     if (!this.refs.has(id)) this.refs.set(id, `${this.prefix}${this.refs.size + 1}⟧`);
     if (focus) this.focused.add(id);
@@ -56,6 +58,19 @@ export class SessionTitles {
     }
     this.focused.clear();
     return { candidates: this.focus(targets, (nodeId, sessionId) => this.sessions.get(JSON.stringify([nodeId, sessionId]))?.title) };
+  }
+
+  snapshot(): SessionTitle[] { return [...this.sessions.values()].map(session => ({ ...session })); }
+
+  renderReferences(text: string): string {
+    if (!text.includes("⟦session:")) return text;
+    if (!this.referenceLabels) {
+      const entries = [...this.sessions.entries()];
+      const labels = sessionLabels(entries.map(([, session]) => ({ nodeId: session.nodeId, sessionId: session.id })),
+        (nodeId, sessionId) => this.sessions.get(JSON.stringify([nodeId, sessionId]))?.title);
+      this.referenceLabels = new Map(entries.map(([id], index) => [this.refs.get(id)!, labels[index]]));
+    }
+    return text.replace(/⟦session:[^⟧\r\n]+⟧/gu, ref => this.referenceLabels!.get(ref) ?? "[未知会话引用]");
   }
 
   render(text: string): string {

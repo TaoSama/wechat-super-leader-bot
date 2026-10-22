@@ -23,7 +23,7 @@ const FIELD_NAMES = new Set([
   "nativeTurnIdAvailable", "ttftAvailable", "usageAvailable", "pendingItems", "coverage", "commandId",
   "cacheWriteInputTokens", "reasoningOutputTokens", "queued", "isTool", "startObserved",
   "turnCompletedObserved", "firstEventObserved", "untrackedItemStarts", "cliExitTimeAvailable",
-  "aborted", "emptyReply", "failed",
+  "aborted", "emptyReply", "failed", "cleanupPending", "replyAlreadyReady", "processElapsedMs", "signal", "pendingRuns",
 ]);
 let warned = false;
 

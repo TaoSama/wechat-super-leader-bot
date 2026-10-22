@@ -1,3 +1,4 @@
+import { directToolController, syntheticTool } from "./direct-tool-fixture.js";
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -16,7 +17,7 @@ import { WeChatGateway } from "../../src/gateway.js";
 const request = { chatId: "chat", messageId: "message", text: "记住：以后先说结论" };
 const usage = { input_tokens: 0, cached_input_tokens: 0, cache_write_input_tokens: 0,
   output_tokens: 0, reasoning_output_tokens: 0 };
-const noController = { forwardMessage: async () => { throw new Error("Unexpected controller call"); } };
+const noController = directToolController();
 
 function fixture(t: TestContext) {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "codex-reply-"));
@@ -45,8 +46,8 @@ test("native memory edits, early thread ID and restart resume persist in isolate
     assert.equal(settings.networkAccessEnabled, undefined);
     assert.equal(sdk.config?.default_permissions, "wechat_memory");
     const mcpServers = sdk.config?.mcp_servers as Record<string, Record<string, unknown>>;
-    assert.deepEqual(mcpServers.wechat_control.enabled_tools, ["control_current_request", "report_progress"]);
-    assert.deepEqual(mcpServers.wechat_control.tools, { control_current_request: { approval_mode: "approve" },
+    assert.deepEqual(mcpServers.wechat_control.enabled_tools, ["test_business", "report_progress"]);
+    assert.deepEqual(mcpServers.wechat_control.tools, { test_business: { approval_mode: "approve" },
       report_progress: { approval_mode: "approve" } });
     const permissionProfile = sdk.configOverrides?.find(override => override.startsWith("permissions.wechat_memory="));
     assert.ok(permissionProfile);
@@ -154,8 +155,9 @@ test("conflicting message is replied without tools and later messages in the pol
   const sent: string[] = [];
   const controller = new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic",
     fetchImpl: async url => {
-      assert.ok(String(url).endsWith("/v1/chats/authorize"), "conflict must not forward to Controller tools");
-      return new Response(JSON.stringify({ allowed: true }));
+      if (String(url).endsWith("/v1/chats/authorize")) return new Response(JSON.stringify({ allowed: true }));
+      assert.ok(String(url).endsWith("/v1/tools/list"), "conflict must not execute Controller tools");
+      return new Response(JSON.stringify({ tools: [syntheticTool()], instructions: "Synthetic business tools", context: { history: [], memories: {} } }));
     } });
   const ilink = new ILinkClient({ stateManager: state, configuredBaseUrl: "https://ilink.example",
     fetchImpl: async (url, init) => {
@@ -219,7 +221,7 @@ test("Controller tool preserves attachments, command ID and original credential 
     const url = servers.wechat_control.url;
     const response = await fetch(url, { method: "POST", headers: {
       Authorization: `Bearer ${sdk.env![CONTROL_TOKEN_ENV]}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream" }, body: JSON.stringify({
-      jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "control_current_request", arguments: {} },
+      jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "test_business", arguments: { arguments: {} } },
     }) });
     assert.equal(response.status, 200);
     const modelContent = await response.text();
@@ -228,15 +230,20 @@ test("Controller tool preserves attachments, command ID and original credential 
     yield* complete("已查询，结果见图");
   });
   const engine = new CodexReplyEngine({ root, model: "test-model", sdkFactory });
-  const reply = await engine.reply("account", request, { forwardMessage: async input => {
+  const reply = await engine.reply("account", request, directToolController(async input => {
     calls++;
-    assert.deepEqual(input, request);
-    return { text: originalText, commandId: "cmd-1", images: [image] };
-  } });
+    assert.equal(input.chatId, request.chatId);
+    assert.equal(input.messageId, request.messageId);
+    assert.equal(input.text, request.text);
+    assert.equal(input.name, "test_business");
+    assert.deepEqual(input.arguments, {});
+    return { result: { delivered: true }, reply: { text: originalText, commandId: "cmd-1", images: [image] } };
+  }));
   assert.deepEqual(reply, { text: originalText, commandId: "cmd-1", images: [image] });
   assert.equal(calls, 1);
   const workspace = await new WorkspaceStore(root).forChat("account", "chat");
   assert.doesNotMatch(JSON.stringify(workspace.getReplyJournal()), /delivery-only-token/);
+  await engine.drain();
   await assert.rejects(engine.reply("account", request, noController), ReplyEngineUnavailableError);
   let lookups = 0;
   const replay = await engine.getReply("account", "chat", request.messageId, { getMessageReply: async (chatId, messageId) => {
@@ -266,7 +273,7 @@ for (const useControl of [false, true]) {
         const response = await fetch(servers.wechat_control.url, { method: "POST", headers: {
           Authorization: `Bearer ${sdk.env![CONTROL_TOKEN_ENV]}`, "Content-Type": "application/json",
           Accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1,
-          method: "tools/call", params: { name: "control_current_request", arguments: {} } }) });
+          method: "tools/call", params: { name: "test_business", arguments: { arguments: {} } } }) });
         assert.equal(response.status, 200);
         await response.text();
       }
@@ -275,11 +282,12 @@ for (const useControl of [false, true]) {
     const options = { root, model: "test-model", sdkFactory };
     const workspace = await new WorkspaceStore(root).forChat("account", "chat");
     fs.writeFileSync(path.join(workspace.workspacePath, "memory.md"), "旧链接 #login=remembered-secret\n");
-    const controller = { forwardMessage: async (input: typeof request) => {
+    const controller = directToolController(async input => {
       controlCalls++;
-      assert.deepEqual(input, secretRequest, "Controller remains bound to the immutable original request");
-      return { text: "普通查询结果", commandId: "ordinary-command" };
-    } };
+      assert.deepEqual({ chatId: input.chatId, messageId: input.messageId, text: input.text }, secretRequest,
+        "Controller remains bound to the immutable original request");
+      return { result: { checked: true }, reply: { text: "普通查询结果", commandId: "ordinary-command" } };
+    });
     const reply = await new CodexReplyEngine(options).reply("account", secretRequest, controller);
     assert.equal(reply.text, useControl ? "普通查询结果" : "不要公开：https://console.example/#login=[REDACTED]");
     assert.equal(controlCalls, useControl ? 1 : 0);
@@ -310,18 +318,19 @@ test("disconnected Controller call keeps lock and started journal until submissi
     const pending = fetch(servers.wechat_control.url, { method: "POST", headers: {
       Authorization: `Bearer ${sdk.env![CONTROL_TOKEN_ENV]}`, "Content-Type": "application/json",
       Accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1,
-      method: "tools/call", params: { name: "control_current_request" } }),
+      method: "tools/call", params: { name: "test_business", arguments: { arguments: {} } } }),
     }).then(() => "response", () => "disconnected");
     await entered;
-    yield* complete("模型过早声称完成");
+    yield { type: "item.completed", item: { type: "agent_message", id: "early", text: "模型过早声称完成" } };
     terminal();
+    yield { type: "turn.completed", usage };
     void pending;
   });
   const engine = new CodexReplyEngine({ root, model: "test-model", sdkFactory });
   let resolved = false;
-  const reply = engine.reply("account", request, { forwardMessage: async () => {
+  const reply = engine.reply("account", request, directToolController(async () => {
     submitted(); await blocked; throw new Error("uncertain-controller-secret");
-  } }).then(value => { resolved = true; return value; });
+  })).then(value => { resolved = true; return value; });
   await nativeTerminated;
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(resolved, false);
