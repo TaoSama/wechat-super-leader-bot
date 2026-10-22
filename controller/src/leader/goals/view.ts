@@ -30,7 +30,7 @@ export async function readGoalView(store: GoalCommandReader, goal: GoalRecord, n
           catch { actions.push({ ...base, status: "uncertain" }); continue; }
         }
       }
-      actions.push({ ...base, status: command.status === "preparing" ? "claimed" : command.status, commandId: command.commandId,
+      actions.push({ ...base, status: command.status === "admitting" ? "claimed" : command.status, commandId: command.commandId,
         ...(command.turnId ? { turnId: command.turnId } : {}), ...(result ? { result } : {}) });
     } else if (action.attempt) actions.push({ ...base, status: action.attempt.expiresAt <= now ? "uncertain" : "claimed" });
     else actions.push({ ...base, status: goal.status === "active" ? "waiting" : goal.status === "completed" ? "uncertain" : goal.status });

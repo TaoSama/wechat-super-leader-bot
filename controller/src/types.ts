@@ -50,7 +50,7 @@ export const DaemonResultStatusSchema = z.enum([
 export type DaemonResultStatus = z.infer<typeof DaemonResultStatusSchema>;
 
 export const CommandStatusSchema = z.enum([
-  "preparing",
+  "admitting",
   "queued",
   "cancelled",
   "expired",

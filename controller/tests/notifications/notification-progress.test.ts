@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { describe, expect, it, vi } from "vitest";
 import type { CommandRecord } from "../../src/types.js";
@@ -27,6 +27,17 @@ function command(record: ExecutionRecord, index = 0, now = NOW): CommandRecord {
   return { commandId: randomUUID(), requestId: executionRequestId(record, index), nodeId: action.nodeId, sessionId: action.sessionId,
     prompt: action.prompt, action: "send", sendRoute: action.sendRoute, status: "accepted", turnId: `exact-${index}`,
     createdAt: stamp, updatedAt: stamp, expiresAt: new Date(NOW + 60 * 60_000).toISOString() };
+}
+function progressFixture(kind: "plan" | "goal") {
+  if (kind === "plan") {
+    const record = execution();
+    return { record, receipt: command(record) };
+  }
+  const record = createGoal("chat", proposal(NOW), NOW), target = record.proposal.targets[0];
+  record.actions.push({ index: 1, target: 1, prompt: "任务", sourceActions: [], input: { prompt: "frozen", sources: [] },
+    attempt: { token: randomUUID(), startedAt: NOW, expiresAt: NOW + 15_000 } });
+  return { record, receipt: { ...command(execution()), requestId: goalRequestId(record, 0),
+    nodeId: target.nodeId, sessionId: target.sessionId, prompt: "frozen" } };
 }
 function row(notification: StoredNotification) {
   return { id: notification.id, execution_id: notification.source.type === "plan" ? notification.source.id : null,
@@ -144,6 +155,52 @@ describe("progress notification evidence and budgets", () => {
     const receipt = { ...command(execution()), requestId: goalRequestId(goal, 0), nodeId: target.nodeId, sessionId: target.sessionId, prompt: "frozen" };
     expect(createProgressNotification(goal, [receipt], [], FIRST)).toMatchObject({ source: { type: "goal", id: goal.id }, kind: "progress" });
     expect(createProgressNotification(goal, [{ ...receipt, prompt: "wrong" }], [], FIRST)).toBeNull();
+  });
+});
+
+describe.each(["plan", "goal"] as const)("%s admission progress evidence", kind => {
+  it("normalizes admission to claimed before hashing, deduplicates unchanged facts and rejects a draft after publication", () => {
+    const { record, receipt } = progressFixture(kind);
+    const admitting: CommandRecord = { ...receipt, status: "admitting", turnId: undefined, output: "not a completed result" };
+    const context = progressNotificationContext(record, [admitting], [], FIRST)!;
+    const evidence = [{ step: 1, prompt: "plan" in record ? record.plan.actions[0].prompt : record.actions[0].prompt,
+      status: "claimed", commandId: admitting.commandId }];
+    expect(context).not.toBeNull();
+    expect(context.evidence).toEqual(evidence);
+    expect(context.eventKey).toBe(createHash("sha256").update(JSON.stringify(evidence)).digest("hex"));
+    expect(admitting.status).toBe("admitting");
+    expect(progressNotificationContext(record, [{ ...admitting, updatedAt: new Date(NOW + 1).toISOString(),
+      output: "different non-result body" }], [], FIRST)?.eventKey).toBe(context.eventKey);
+    const notification = createProgressNotification(record, [admitting], [], FIRST)!;
+    expect(notification).not.toBeNull();
+    expect(progressNotificationContext(record, [admitting], [notification], FIRST + NOTIFICATION_PROGRESS_INTERVAL_MS)).toBeNull();
+    const queued: CommandRecord = { ...admitting, status: "queued" };
+    const next = progressNotificationContext(record, [queued], [], FIRST)!;
+    expect(next.evidence[0].status).toBe("queued");
+    expect(next.eventKey).not.toBe(context.eventKey);
+    expect(commitProgress(record, [queued], [], FIRST, { eventKey: context.eventKey, text: "stale admission draft" })).toBeNull();
+    expect(commitProgress(record, [queued], [], FIRST, { eventKey: next.eventKey, text: "current queued draft" })).not.toBeNull();
+  });
+
+  it.each(["queued", "pending", "accepted", "completed"] as const)("preserves %s evidence without broadening completion proof", status => {
+    const { record, receipt } = progressFixture(kind);
+    const context = progressNotificationContext(record, [{ ...receipt, status, output: "exact completed output" }], [], FIRST)!;
+    expect(context.evidence[0]).toMatchObject({ status });
+    if (status === "completed") expect(context.evidence[0].output).toBe("exact completed output");
+    else expect(context.evidence[0]).not.toHaveProperty("output");
+  });
+
+  it("keeps admitting subject to exact identity, timestamp and native-only safety filters", () => {
+    const { record, receipt } = progressFixture(kind);
+    const admitting: CommandRecord = { ...receipt, status: "admitting", turnId: undefined };
+    const invalid: CommandRecord[] = [
+      { ...admitting, requestId: "unrelated-request" }, { ...admitting, prompt: "unrelated-prompt" },
+      { ...admitting, updatedAt: "invalid-timestamp" }, { ...admitting, updatedAt: new Date(FIRST + 1).toISOString() },
+      { ...admitting, sendRoute: "terminal-pane" }, { ...admitting, sessionId: "terminal:unrelated" },
+      { ...admitting, inputReceipt: { kind: "terminal-input-written", sessionId: admitting.sessionId,
+        requestId: randomUUID(), promptSHA256: "a".repeat(64), responseRevision: 0, observedRevision: 1 } },
+    ];
+    for (const command of invalid) expect(progressNotificationContext(record, [command], [], FIRST)).toBeNull();
   });
 });
 

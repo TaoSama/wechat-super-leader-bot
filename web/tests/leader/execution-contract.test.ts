@@ -51,6 +51,7 @@ describe("required bounded console execution contract", () => {
     ["too many steps", value => { value.items[0].steps = Array(5).fill(value.items[0].steps[0]); return value; }],
     ["invalid position", value => { value.items[0].steps[0].step = 2; return value; }],
     ["unknown step status", value => { Object.assign(value.items[0].steps[0], { status: "busy" }); return value; }],
+    ["unprojected admitting command", value => { Object.assign(value.items[0].steps[0], { status: "admitting" }); return value; }],
     ["empty target", value => { value.items[0].steps[0].nodeId = ""; return value; }],
     ["nonstring prompt", value => { Object.assign(value.items[0].steps[0], { prompt: null }); return value; }],
     ["oversized prompt", value => { value.items[0].steps[0].prompt = "😀".repeat(513); return value; }],

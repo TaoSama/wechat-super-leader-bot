@@ -6,7 +6,7 @@ import { sessionKey } from "./useSessionHistory";
 import { canQueueSession, isSessionMessageTarget, sessionSendBlockReason } from "./send-availability";
 
 const MAX_COMMAND_POLLS = 60;
-const POLLING_STATUSES = ["queued", "pending", "accepted"];
+const POLLING_STATUSES = ["admitting", "queued", "pending", "accepted"];
 const RESTORE_DRAFT_STATUSES = ["failed", "uncertain", "cancelled", "expired"];
 
 interface Submission {
