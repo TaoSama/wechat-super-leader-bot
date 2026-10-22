@@ -31,9 +31,11 @@ const (
 // AppServerAdapter connects to an existing Codex App Unix domain WebSocket.
 // It never spawns a fallback stdio server or silently resumes unloaded sessions.
 type AppServerAdapter struct {
-	socketPath  string
-	dialTimeout time.Duration
-	rpcTimeout  time.Duration
+	socketPath     string
+	dialTimeout    time.Duration
+	rpcTimeout     time.Duration
+	historyTurnsMu sync.Mutex
+	historyTurns   map[string]*historyTurnCache
 }
 
 func NewAppServerAdapter(socketPath string) *AppServerAdapter {

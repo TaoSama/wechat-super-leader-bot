@@ -12,6 +12,7 @@ const (
 	MaxHistoryIdentityLength = 128
 	MaxHistoryResponseBytes  = 1024 * 1024
 	MaxHistoryTextLength     = 16000
+	MaxHistoryTurnStatuses   = 2048
 	HistoryInvalidRequest    = "Invalid history request"
 	HistoryUnavailable       = "History API unavailable"
 	HistoryFailed            = "History request failed"
@@ -65,23 +66,25 @@ type DaemonHistoryMessage struct {
 }
 
 type SessionHistory struct {
-	HistoryContext string        `json:"historyContext"`
-	Source         string        `json:"source"`
-	Session        Session       `json:"session"`
-	Items          []HistoryItem `json:"items"`
-	NextCursor     *string       `json:"nextCursor"`
-	FetchedAt      string        `json:"fetchedAt"`
-	Truncated      bool          `json:"truncated"`
+	HistoryContext string            `json:"historyContext"`
+	Source         string            `json:"source"`
+	Session        Session           `json:"session"`
+	Items          []HistoryItem     `json:"items"`
+	NextCursor     *string           `json:"nextCursor"`
+	FetchedAt      string            `json:"fetchedAt"`
+	Truncated      bool              `json:"truncated"`
+	TurnStatuses   map[string]string `json:"turnStatuses,omitempty"`
 }
 
 type HistoryItem struct {
-	ID        string `json:"id"`
-	TurnID    string `json:"turnId"`
-	Kind      string `json:"kind"`
-	Type      string `json:"type"`
-	Text      string `json:"text"`
-	Title     string `json:"title,omitempty"`
-	Status    string `json:"status,omitempty"`
-	Timestamp string `json:"timestamp,omitempty"`
-	Truncated bool   `json:"truncated,omitempty"`
+	ID         string `json:"id"`
+	TurnID     string `json:"turnId"`
+	TurnStatus string `json:"turnStatus,omitempty"`
+	Kind       string `json:"kind"`
+	Type       string `json:"type"`
+	Text       string `json:"text"`
+	Title      string `json:"title,omitempty"`
+	Status     string `json:"status,omitempty"`
+	Timestamp  string `json:"timestamp,omitempty"`
+	Truncated  bool   `json:"truncated,omitempty"`
 }

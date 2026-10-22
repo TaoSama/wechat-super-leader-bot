@@ -78,6 +78,7 @@ export interface ScopedSession {
 export interface HistoryItem {
   id: string;
   turnId: string;
+  turnStatus?: "inProgress" | "completed" | "failed" | "interrupted";
   kind: "user" | "assistant" | "tool" | "system";
   type: string;
   text: string;
@@ -94,6 +95,7 @@ export interface SessionHistory {
   historyContext: string;
   source: HistorySource;
   items: HistoryItem[];
+  turnStatuses?: Record<string, NonNullable<HistoryItem["turnStatus"]>>;
   nextCursor: string | null;
   fetchedAt: string;
   truncated: boolean;

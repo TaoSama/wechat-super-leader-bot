@@ -76,8 +76,9 @@ type DesktopObservation struct {
 	ModelProvider   string `json:"modelProvider,omitempty"`
 	ReasoningEffort string `json:"reasoningEffort,omitempty"`
 	// Internal observer proof, never part of public telemetry or send authority.
-	OwnerID  string `json:"-"`
-	Revision uint64 `json:"-"`
+	OwnerID      string `json:"-"`
+	Revision     uint64 `json:"-"`
+	ActiveTurnID string `json:"-"`
 }
 
 // DaemonHelloMessage: {type:"hello",version:1,nodeId:"macair",sessions:[Session]}

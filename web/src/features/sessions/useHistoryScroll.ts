@@ -12,9 +12,12 @@ interface Options {
   loadingOlder: boolean;
   automaticLoadPaused?: boolean;
   loadOlder: () => Promise<boolean>;
+  onReadingLatestChange?: (latest: boolean) => void;
 }
-interface Anchor { element: HTMLElement; offset: number }
-interface ReadingPosition { top: number; bottom: boolean; ids: string[]; tail: string }
+interface Anchor { element: HTMLElement; offset: number; fallback?: { element: HTMLElement; offset: number } }
+interface RowGeometry { element: HTMLElement; top: number; bottom: number; summary?: RowGeometry }
+interface SavedAnchor { id: string; group: boolean; offset: number; fallbackGroup?: string }
+interface ReadingPosition { top: number; bottom: boolean; ids: string[]; tail: string; anchor?: SavedAnchor }
 
 export function useHistoryScroll(options: Options) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -29,6 +32,12 @@ export function useHistoryScroll(options: Options) {
   const busyRef = useRef(false);
   const blockedRef = useRef(false);
   const anchorRef = useRef<Anchor | null>(null);
+  const geometryRef = useRef<RowGeometry[]>([]);
+  const geometryByElementRef = useRef(new Map<HTMLElement, RowGeometry>());
+  const measuredContentSizeRef = useRef({ width: 0, height: 0 });
+  const observerRef = useRef<{ element: HTMLDivElement; owner: string; observer: ResizeObserver } | null>(null);
+  const readingIntentRef = useRef(false);
+  const touchYRef = useRef<number | null>(null);
   const tailRef = useRef("");
   const idsRef = useRef<string[]>([]);
   const positionsRef = useRef(new Map<string, ReadingPosition>());
@@ -39,17 +48,59 @@ export function useHistoryScroll(options: Options) {
   function remember(element: HTMLDivElement) {
     const positions = positionsRef.current;
     positions.delete(optionsRef.current.owner);
-    positions.set(optionsRef.current.owner, { top: element.scrollTop, bottom: bottomRef.current, ids: idsRef.current, tail: tailRef.current });
+    const anchor = anchorRef.current;
+    const measured = anchor && geometryByElementRef.current.get(anchor.element);
+    const savedAnchor = anchor && measured && measured.bottom > measured.top ? {
+      id: anchor.element.dataset.historyId ?? anchor.element.dataset.historyGroup!,
+      group: anchor.element.dataset.historyGroup !== undefined, offset: anchor.offset,
+      fallbackGroup: anchor.element.closest<HTMLElement>("[data-history-turn]")?.dataset.historyTurn,
+    } : undefined;
+    positions.set(optionsRef.current.owner, { top: element.scrollTop, bottom: bottomRef.current, ids: idsRef.current, tail: tailRef.current, anchor: savedAnchor });
     while (positions.size > MAX_READING_POSITIONS) positions.delete(positions.keys().next().value!);
+  }
+
+  function measure(element: HTMLDivElement) {
+    const top = element.getBoundingClientRect().top;
+    const rows: RowGeometry[] = [...element.querySelectorAll<HTMLElement>("[data-history-id], [data-history-group]")].map(row => {
+      const rect = row.getBoundingClientRect();
+      return { element: row, top: rect.top - top + element.scrollTop, bottom: rect.bottom - top + element.scrollTop };
+    });
+    const summaries = new Map(rows.filter(row => row.element.dataset.historyGroup !== undefined).map(row => [row.element.dataset.historyGroup, row]));
+    for (const row of rows) row.summary = summaries.get(row.element.closest<HTMLElement>("[data-history-turn]")?.dataset.historyTurn);
+    geometryRef.current = rows;
+    geometryByElementRef.current = new Map(rows.map(row => [row.element, row]));
+    const content = element.querySelector(".history-content") ?? element;
+    const size = content.getBoundingClientRect();
+    measuredContentSizeRef.current = { width: size.width, height: size.height };
   }
 
   function capture(): Anchor | null {
     const container = scrollRef.current;
     if (!container) return null;
-    const top = container.getBoundingClientRect().top;
-    const messages = [...container.querySelectorAll<HTMLElement>("[data-history-id]")];
-    const visible = messages.find((element) => element.getBoundingClientRect().bottom > top) ?? messages[0];
-    return visible ? { element: visible, offset: visible.getBoundingClientRect().top - top } : null;
+    if (!geometryRef.current.length || geometryRef.current.at(-1)!.bottom <= 0) measure(container);
+    const rows = geometryRef.current;
+    // Scroll events reuse content coordinates: no layout read for every row.
+    let low = 0;
+    let high = rows.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (rows[middle].bottom <= container.scrollTop) low = middle + 1;
+      else high = middle;
+    }
+    const row = rows[Math.min(low, rows.length - 1)];
+    if (!row) return null;
+    const fallback = row.summary;
+    return { element: row.element, offset: row.top - container.scrollTop,
+      fallback: fallback ? { element: fallback.element, offset: Math.max(0, fallback.top - container.scrollTop) } : undefined };
+
+  }
+
+  function restore(element: HTMLDivElement) {
+    const current = anchorRef.current;
+    const anchor = current?.element.isConnected ? current : current?.fallback?.element.isConnected ? current.fallback : null;
+    if (!anchor) return;
+    const delta = anchor.element.getBoundingClientRect().top - element.getBoundingClientRect().top - anchor.offset;
+    if (Math.abs(delta) > 0.5) element.scrollTop += delta;
   }
 
   const loadOlder = useCallback(async (): Promise<boolean> => {
@@ -76,16 +127,45 @@ export function useHistoryScroll(options: Options) {
   const onScroll = useCallback(() => {
     const element = scrollRef.current;
     if (!element || optionsRef.current.visible === false) return;
-    bottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < NEAR_BOTTOM_PX;
+    const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
+    if (distance <= 1) readingIntentRef.current = false;
+    bottomRef.current = !readingIntentRef.current && distance < NEAR_BOTTOM_PX;
+    optionsRef.current.onReadingLatestChange?.(bottomRef.current);
+    anchorRef.current = bottomRef.current ? null : capture();
     remember(element);
-    if (busyRef.current) anchorRef.current = bottomRef.current ? null : capture();
     if (bottomRef.current) setNewContent(false);
     if (element.scrollTop < NEAR_TOP_PX && !blockedRef.current && !optionsRef.current.automaticLoadPaused) void loadOlder();
   }, [loadOlder]);
 
+  const stopFollowing = useCallback(() => {
+    readingIntentRef.current = true;
+    bottomRef.current = false;
+    anchorRef.current = capture();
+    optionsRef.current.onReadingLatestChange?.(false);
+  }, []);
+  const onWheel = useCallback((event: { deltaY: number }) => {
+    if (event.deltaY < 0) stopFollowing();
+  }, [stopFollowing]);
+  const onTouchStart = useCallback((event: { touches: ArrayLike<{ clientY: number }> }) => {
+    touchYRef.current = event.touches[0]?.clientY ?? null;
+  }, []);
+  const onTouchMove = useCallback((event: { touches: ArrayLike<{ clientY: number }> }) => {
+    const y = event.touches[0]?.clientY;
+    if (y !== undefined && touchYRef.current !== null && y > touchYRef.current) stopFollowing();
+    touchYRef.current = y ?? null;
+  }, [stopFollowing]);
+  const onKeyDown = useCallback((event: { key: string }) => {
+    if (["ArrowUp", "PageUp", "Home"].includes(event.key)) stopFollowing();
+  }, [stopFollowing]);
+  const onClickCapture = useCallback((event: { target: EventTarget | null }) => {
+    if (event.target instanceof Element && event.target.closest(".turn-tools-toggle, .tool-message-trigger")) stopFollowing();
+  }, [stopFollowing]);
+
   const jumpLatest = useCallback(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     bottomRef.current = true;
+    readingIntentRef.current = false;
+    optionsRef.current.onReadingLatestChange?.(true);
     if (scrollRef.current) remember(scrollRef.current);
     anchorRef.current = null;
     setNewContent(false);
@@ -107,11 +187,14 @@ export function useHistoryScroll(options: Options) {
       generationRef.current++;
       busyRef.current = false;
       anchorRef.current = null;
+      geometryRef.current = [];
+      geometryByElementRef.current.clear();
     }
     if (ownerChanged || reopened) {
       ownerRef.current = options.owner;
       resumeRef.current = positionsRef.current.get(options.owner);
       bottomRef.current = true;
+      readingIntentRef.current = false;
       blockedRef.current = false;
       tailRef.current = "";
       idsRef.current = [];
@@ -130,6 +213,14 @@ export function useHistoryScroll(options: Options) {
       if (options.items.some(item => item.id === resume.ids[0])) {
         bottomRef.current = resume.bottom;
         element.scrollTop = resume.top;
+        if (!resume.bottom && resume.anchor) {
+          measure(element);
+          const saved = resume.anchor;
+          const row = geometryRef.current.find(row => (saved.group ? row.element.dataset.historyGroup : row.element.dataset.historyId) === saved.id);
+          const fallback = !row && geometryRef.current.find(row => row.element.dataset.historyGroup === saved.fallbackGroup);
+          if (row) element.scrollTop = row.top - saved.offset;
+          else if (fallback) element.scrollTop = fallback.top;
+        }
         idsRef.current = resume.ids;
         tailRef.current = resume.tail;
       }
@@ -138,24 +229,49 @@ export function useHistoryScroll(options: Options) {
     const tail = options.items.at(-1)!;
     const signature = `${tail.id}:${tail.text}:${tail.status ?? ""}`;
     const previousIds = idsRef.current;
-    const anchor = anchorRef.current;
-    const anchorIndex = options.items.findIndex((item) => item.id === anchor?.element.dataset.historyId);
     const previousIdSet = new Set(previousIds);
-    const insertedBeforeAnchor = !!anchor && anchorIndex >= 0 && options.items.slice(0, anchorIndex).some((item) => !previousIdSet.has(item.id));
     const insertedItems = options.items.some((item) => !previousIdSet.has(item.id));
     if (bottomRef.current && (reopened || signature !== tailRef.current || insertedItems)) {
       element.scrollTop = element.scrollHeight;
       anchorRef.current = null;
-    } else if (anchor && insertedBeforeAnchor) {
-      if (anchor.element.isConnected) element.scrollTop += anchor.element.getBoundingClientRect().top - element.getBoundingClientRect().top - anchor.offset;
-      anchorRef.current = null;
-    }
+    } else if (!bottomRef.current) restore(element);
+    measure(element);
+    anchorRef.current = bottomRef.current ? null : capture();
     if (!bottomRef.current && tailRef.current && signature !== tailRef.current) setNewContent(true);
-    if (anchor && !options.loadingOlder && !busyRef.current && !insertedBeforeAnchor) anchorRef.current = null;
     tailRef.current = signature;
     idsRef.current = options.items.map((item) => item.id);
+    optionsRef.current.onReadingLatestChange?.(bottomRef.current);
     remember(element);
   });
 
-  return { scrollRef, onScroll, loadOlder, jumpLatest, newContent, autoLoadBlocked };
+  // The observer stays attached across tail polls. Its callback checks the
+  // actual content size so its initial delivery does not repeat a layout scan.
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    const current = observerRef.current;
+    if (current && current.element === element && current.owner === options.owner && options.visible !== false) return;
+    current?.observer.disconnect();
+    observerRef.current = null;
+    if (!element || options.visible === false || typeof ResizeObserver === "undefined") return;
+    const content = element.querySelector(".history-content") ?? element;
+    const observer = new ResizeObserver(() => {
+      if (observerRef.current?.observer !== observer || scrollRef.current !== element || optionsRef.current.visible === false) return;
+      const size = content.getBoundingClientRect();
+      const previous = measuredContentSizeRef.current;
+      if (Math.abs(size.width - previous.width) < 0.5 && Math.abs(size.height - previous.height) < 0.5) return;
+      if (bottomRef.current) element.scrollTop = element.scrollHeight;
+      else restore(element);
+      measure(element);
+      anchorRef.current = bottomRef.current ? null : capture();
+      remember(element);
+    });
+    observerRef.current = { element, owner: options.owner, observer };
+    observer.observe(content);
+  });
+  useLayoutEffect(() => () => {
+    observerRef.current?.observer.disconnect();
+    observerRef.current = null;
+  }, []);
+
+  return { scrollRef, onScroll, onWheel, onTouchStart, onTouchMove, onKeyDown, onClickCapture, loadOlder, jumpLatest, newContent, autoLoadBlocked };
 }

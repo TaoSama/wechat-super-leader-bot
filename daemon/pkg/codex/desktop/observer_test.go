@@ -164,10 +164,17 @@ func TestDesktopLargeSnapshotDoesNotRetainHistory(t *testing.T) {
 		func(_ string, result protocol.DesktopObservation) { observation = result }); err != nil {
 		t.Fatal(err)
 	}
-	// The persistent projection has no reference-bearing history field.
+	// Only the explicitly bounded identity/status projection may retain bytes;
+	// malformed or opaque history never survives as metadata or a transcript.
 	typ := reflect.TypeOf(*projection)
 	for i := range typ.NumField() {
 		kind := typ.Field(i).Type.Kind()
+		if typ.Field(i).Name == "turnMetadata" {
+			if len(projection.turnMetadata) != 0 {
+				t.Fatal("opaque history was retained as turn metadata")
+			}
+			continue
+		}
 		if kind != reflect.String && kind != reflect.Uint64 && kind != reflect.Bool {
 			t.Fatalf("projection retains unexpected field %s", typ.Field(i).Name)
 		}

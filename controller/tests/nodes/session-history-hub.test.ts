@@ -52,6 +52,17 @@ afterEach(async () => {
 });
 
 describe("session history hub", () => {
+  it("retains exact native turn statuses while rejecting unbounded or unknown metadata", () => {
+    const parsed = SessionHistorySchema.parse({ ...history, items: [{ ...history.items[0], turnStatus: "inProgress" }],
+      turnStatuses: { turn: "inProgress", old: "completed" } });
+    expect(parsed.items[0].turnStatus).toBe("inProgress");
+    expect(parsed.turnStatuses).toEqual({ turn: "inProgress", old: "completed" });
+    for (const turnStatuses of [{ turn: "done" }, { "": "completed" }, { ["t".repeat(129)]: "completed" },
+      Object.fromEntries(Array.from({ length: 2049 }, (_, index) => [String(index), "completed"]))]) {
+      expect(SessionHistorySchema.safeParse({ ...history, turnStatuses }).success).toBe(false);
+    }
+    expect(SessionHistorySchema.safeParse({ ...history, items: [{ ...history.items[0], turnStatus: "done" }] }).success).toBe(false);
+  });
   it("forwards an explicit paginated source and refuses a daemon source mismatch", async () => {
     const { hub } = fixture();
     const ws = await connected(hub, "node");
