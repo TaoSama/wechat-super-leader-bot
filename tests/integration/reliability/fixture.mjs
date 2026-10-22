@@ -127,7 +127,7 @@ export async function withReliabilityFixture({ databaseUrl, evidence, name, sign
       for (const running of wechat.processes) evidence('gateway-process-output', {
         pid: running.child.pid, stdout: running.stdout, stderr: running.stderr,
         code: running.child.exitCode, signal: running.child.signalCode });
-      evidence('native-snapshot', { starts: native.starts, turns: native.turns });
+      evidence('native-snapshot', { starts: native.starts, resumes: native.resumes, turns: native.turns });
     }
   }, cleanup);
 }

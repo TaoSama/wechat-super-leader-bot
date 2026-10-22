@@ -39,7 +39,7 @@ export function createNativeFixture({ dir, env = verificationEnvironment(), cont
     } else errors.push(error);
   }
   const snapshot = includeTurns => ({ id: sessionId, title: 'Synthetic reliability session',
-    cwd: dir, status: { type: status }, model: 'synthetic-model', updatedAt: Date.now(),
+    cwd: dir, source: 'appServer', status: { type: status }, model: 'synthetic-model', updatedAt: Date.now(),
     ...(includeTurns ? { turns: structuredClone(turns) } : {}) });
   function reply(socket, id, result) {
     if (socket.readyState !== WebSocket.OPEN) return false;
@@ -126,6 +126,7 @@ export function createNativeFixture({ dir, env = verificationEnvironment(), cont
       '--token-file', tokenPath, '--sock', socketPath, '--state-dir', stateDir, '--heartbeat', '1'], {
       env: { ...verificationEnvironment(env), SKILL_ROOTS: '[]' }, stdio: ['ignore', 'pipe', 'pipe'],
     });
+    evidence('process-start', { component: 'daemon', pid: daemon.pid });
     const append = chunk => {
       const text = chunk.toString().replaceAll(nodeToken, '[redacted]');
       logs.push(text);
