@@ -49,10 +49,13 @@ func sessionFromThread(thread map[string]any, loaded bool, observedAt string) pr
 	status := threadstate.ExtractStatus(thread["status"])
 	loaded = loaded && status != "unknown" && status != "notLoaded"
 	caps := []protocol.ActionType{protocol.ActionRead}
-	if loaded && status == "idle" {
+	// Capabilities identify a route for queued next-turn work. Sending still
+	// requires a fresh idle preflight on that route.
+	queueable := status == "idle" || status == "active" || status == "waitingApproval" || status == "waitingUserInput"
+	if loaded && queueable {
 		caps = append(caps, protocol.ActionSend)
 	}
-	if status == "notLoaded" || status == "idle" {
+	if status == "notLoaded" || status == "idle" || loaded && queueable {
 		caps = append(caps, protocol.CapabilityResumeSend)
 	}
 	return protocol.Session{
