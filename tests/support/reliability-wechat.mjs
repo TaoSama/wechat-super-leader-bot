@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { PROJECT_ROOT, verificationEnvironment } from '../../scripts/verify.mjs';
 import { stopTestProcess, withTestCleanup } from './cleanup.mjs';
+import { writeInboxAuditPreload } from './reliability-inbox-audit.mjs';
 
 const REQUEST_LIMIT_BYTES = 64 * 1024;
 const PROCESS_TIMEOUT_MS = 30_000;
@@ -49,6 +50,7 @@ export async function createWechatFixture({ dir, env = verificationEnvironment()
   const accountPath = join(dir, 'wechat-account.json'), statePath = join(dir, 'wechat-state.json');
   const healthPath = join(dir, 'wechat-health.json');
   const sdkLogPath = join(dir, 'sdk-processes.jsonl'), sdkAuditPath = join(dir, 'sdk-spawn-audit.mjs');
+  const inboxAudit = await writeInboxAuditPreload({ dir, statePath });
   const incoming = [], sent = [], polls = [], errors = [], processes = [], faults = [], pollFaults = [], held = new Set();
   let active, lastOptions, offline = false;
   const record = value => {
@@ -88,9 +90,16 @@ function observeAppServer(child) {
         params: identity(value.params) });
     } else if (direction === 'response' && typeof value.method === 'string') {
       const params = value.params;
+      const mcpStartup = value.method === 'mcpServer/startupStatus/updated';
+      if (mcpStartup && (typeof params?.name !== 'string' || !params.name ||
+        !['starting', 'ready', 'failed', 'cancelled'].includes(params.status))) {
+        auditError('Invalid MCP startup identity or status');
+      }
       record({ event: 'rpc-notification', pid: child.pid, method: value.method,
-        threadId: params?.threadId ?? params?.thread?.id,
-        turnId: params?.turnId ?? params?.turn?.id, status: params?.turn?.status ?? params?.status });
+        threadId: mcpStartup ? params?.threadId : params?.threadId ?? params?.thread?.id,
+        turnId: params?.turnId ?? params?.turn?.id, status: params?.turn?.status ?? params?.status,
+        ...(mcpStartup ? { serverName: params?.name, error: params?.error,
+          failureReason: params?.failureReason } : {}) });
     } else if (direction === 'response' && value.id !== undefined) {
       const method = pending.get(value.id);
       pending.delete(value.id);
@@ -130,9 +139,9 @@ function observeAppServer(child) {
 childProcess.spawn = function(file, args, options) {
   const native = /(?:^|[/\\\\])codex(?:\\.exe)?$/.test(String(file));
   const [command, ...nativeArgs] = args;
-  const forwarded = native ? [command, '--config', 'mcp_servers.openaiDeveloperDocs.enabled=false',
+  const forwarded = native ? [command, ...nativeArgs, '--config', 'mcp_servers.openaiDeveloperDocs.enabled=false',
     '--config', 'analytics.enabled=false', '--config', 'feedback.enabled=false',
-    '--config', 'check_for_update_on_startup=false', ...nativeArgs] : args;
+    '--config', 'check_for_update_on_startup=false'] : args;
   const child = spawn.call(this, file, forwarded, options);
   if (native) {
     record({ event: 'spawn', pid: child.pid, executable: String(file), cwd: options?.cwd, transport: command });
@@ -221,8 +230,9 @@ syncBuiltinESMExports();
       mode = '--run', pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
       pollTimeoutMs = DEFAULT_POLL_TIMEOUT_MS, sendBudget, contextWindowMs, maxChars, extraArgs = [],
       leaderMode = 'controller', leaderRoot = join(dir, 'leader'), leaderModel,
-      sdkBaseUrl, sdkApiKey } = options;
-    const args = [...(leaderMode === 'codex' ? ['--import', sdkAuditPath] : []),
+      sdkBaseUrl, sdkApiKey, auditInbox = false } = options;
+    const args = [...(auditInbox ? ['--import', inboxAudit.preloadPath] : []),
+      ...(leaderMode === 'codex' ? ['--import', sdkAuditPath] : []),
       'gateway/dist/index.js', mode, '--leader-mode', leaderMode, '--controller-url', controllerUrl,
       '--credentials-path', accountPath, '--state-path', statePath, '--health-path', healthPath,
       '--wechat-base-url', url, '--poll-interval-ms', String(pollIntervalMs), '--poll-timeout-ms', String(pollTimeoutMs)];
@@ -360,6 +370,8 @@ syncBuiltinESMExports();
       catch (error) { if (error.code === 'ENOENT') return []; throw error; }
     },
     healthy, readState: async () => JSON.parse(await readFile(statePath, 'utf8')),
+    readInbox: async () => JSON.parse(await readFile(statePath + '.inbox.json', 'utf8')),
+    readInboxAudit: () => inboxAudit.readRecords({ stderr: processes.map(item => item.stderr).join('\n') }),
     setOffline(value) { offline = Boolean(value); record({ event: 'wechat.offline', value: offline }); },
     async restart(options = lastOptions) { await stop(); return start(options); },
     async waitFor(condition, label, timeoutMs = PROCESS_TIMEOUT_MS) {

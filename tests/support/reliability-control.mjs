@@ -72,7 +72,13 @@ export async function createControlFixture({ env, databaseUrl, token, nodeId, no
           const bytes = Buffer.concat(parts);
           if (entry.fault) {
             entry.fault.enter({ ...entry, response: bytes.toString() });
-            response.destroy();
+            if (entry.fault.mode === 'hold') {
+              void entry.fault.released.then(() => {
+                if (response.destroyed) return;
+                response.writeHead(incoming.statusCode, incoming.headers);
+                response.end(bytes);
+              }).catch(error => { errors.push(error); response.destroy(error); });
+            } else response.destroy();
             return;
           }
           response.writeHead(incoming.statusCode, incoming.headers);
@@ -172,6 +178,9 @@ export async function createControlFixture({ env, databaseUrl, token, nodeId, no
       evidence('result-replay', { frame });
     },
     holdFrame(predicate) { const hold = barrier(predicate); barriers.add(hold); return hold; },
+    holdHttp(predicate) {
+      const hold = barrier(predicate); hold.mode = 'hold'; barriers.add(hold); httpFault = hold; return hold;
+    },
     failHttp(predicate, mode = 'after-commit') { const fault = barrier(predicate); fault.mode = mode; httpFault = fault; return fault; },
     async stop() {
       stopping = true;
