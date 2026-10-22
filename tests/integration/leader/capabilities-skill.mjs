@@ -13,6 +13,7 @@ import { parseArgs } from 'node:util';
 
 const { values } = parseArgs({ strict: true, allowPositionals: false, options: {
   help: { type: 'boolean', short: 'h' }, run: { type: 'boolean' }, live: { type: 'boolean' },
+  'tls-key': { type: 'string' }, 'tls-cert': { type: 'string' },
   'system-skill': { type: 'boolean' }, 'gateway-cli': { type: 'string' }, evidence: { type: 'string' }, 'max-chars': { type: 'string' },
 } });
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
@@ -25,7 +26,7 @@ const children = new Set();
 const QUESTIONS = ['你能做什么？请给出全部功能，使用默认功能说明格式，每项举一个简短微信场景。',
   'Plan 和 Goal 有什么区别？请给出功能表和两个完整微信场景。'];
 
-if (values.help || !values.run) console.log(`Usage: node tests/integration/leader/capabilities-skill.mjs --run [--live] [--system-skill] [--gateway-cli PATH] [--evidence PATH] [--max-chars COUNT]
+if (values.help || !values.run) console.log(`Usage: node tests/integration/leader/capabilities-skill.mjs --run [--live] [--system-skill] [--gateway-cli PATH] [--evidence PATH] [--max-chars COUNT] [--tls-key PATH --tls-cert PATH]
 Runs real Gateway CLI and pinned Codex 0.163.0 with isolated chat, HOME and native thread.
 Synthetic loopback WeChat/Controller never contact real accounts. Default Responses is scripted.
 --live forwards model requests using LIVE_MODEL_BASE_URL and LIVE_MODEL_API_KEY from environment.
@@ -109,8 +110,10 @@ async function main() {
       assert(endpoint.protocol === 'https:' && !endpoint.username && !endpoint.password && !endpoint.search && !endpoint.hash);
       endpoint.pathname = endpoint.pathname.replace(/\/+$/, '') + '/responses';
     }
-    const key = join(directory, 'key.pem'), cert = join(directory, 'cert.pem');
-    await execute('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=127.0.0.1',
+    assert(Boolean(values['tls-key']) === Boolean(values['tls-cert']), 'Supply both TLS paths');
+    const key = values['tls-key'] ? resolve(values['tls-key']) : join(directory, 'key.pem');
+    const cert = values['tls-cert'] ? resolve(values['tls-cert']) : join(directory, 'cert.pem');
+    if (!values['tls-key']) await execute('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=127.0.0.1',
       '-addext', 'subjectAltName=IP:127.0.0.1', '-keyout', key, '-out', cert], { PATH: process.env.PATH }, 'tls');
     const handler = (req, res) => { void serve(req, res).catch(error => {
       errors.push({ path: req.url, error: error.message }); if (!res.headersSent) res.writeHead(500); res.end();
