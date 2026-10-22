@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 
 export async function verifyNotificationProgress({ stores, pool, reopenStore }) {
   const { createExecution, executionRequestId } = await import('../../../controller/dist/leader/plans/execution.js');
-  const { NOTIFICATION_PROGRESS_INITIAL_DELAY_MS, NOTIFICATION_PROGRESS_INTERVAL_MS } = await import('../../../controller/dist/notifications/progress.js');
+  const { NOTIFICATION_PROGRESS_INITIAL_DELAY_MS, NOTIFICATION_PROGRESS_INTERVAL_MS, progressNotificationContext } = await import('../../../controller/dist/notifications/progress.js');
   const now = Date.now(), chatId = 'progress-' + randomUUID();
   const initial = createExecution(chatId, { id: randomUUID(), expiresAt: now + 60_000,
     actions: Array.from({ length: 4 }, (_, index) => ({ nodeId: 'progress-node', sessionId: `progress-${index}`,
@@ -14,7 +14,7 @@ export async function verifyNotificationProgress({ stores, pool, reopenStore }) 
   assert(record);
   const source = { type: 'plan', id: record.id }, commandIds = [];
   const firstTime = now + NOTIFICATION_PROGRESS_INITIAL_DELAY_MS;
-  let reopened;
+  let reopened, latestDraft;
   try {
     for (let index = 0; index < 4; index++) {
       const action = record.plan.actions[index], commandId = randomUUID(), turnId = 'exact-' + commandId;
@@ -24,22 +24,33 @@ export async function verifyNotificationProgress({ stores, pool, reopenStore }) 
         createdAt: stamp, updatedAt: stamp, expiresAt: new Date(now + 60 * 60_000).toISOString() });
       await stores[0].updateCommandStatus(commandId, 'accepted', undefined, undefined, turnId);
       const time = firstTime + index * NOTIFICATION_PROGRESS_INTERVAL_MS;
-      assert.equal(await stores[0].enqueueProgressNotification(source, time - 1), null, 'Progress arrived before delay/interval gate');
-      const racers = await Promise.all(stores.map(store => store.enqueueProgressNotification(source, time)));
+      // Generate a draft from current persisted evidence even when the permanent budget is exhausted,
+      // so the fourth attempt and reopened attempt cannot pass merely because they reused an old event.
+      const commands = await Promise.all(record.plan.actions.map((_action, step) => stores[0].findCommandByRequestId(executionRequestId(record, step))));
+      const context = await stores[0].getProgressNotificationContext(source, time) ??
+        progressNotificationContext(record, commands.filter(Boolean), [], time);
+      assert(context, 'The current exact receipts did not establish model progress evidence');
+      const draft = { eventKey: context.eventKey, text: `模型已核对任务 ${index + 1} 的回执，继续等待其他任务结果。` };
+      latestDraft = draft;
+      assert.equal(await stores[0].enqueueProgressNotification(source, time - 1, draft), null, 'Progress arrived before delay/interval gate');
+      const racers = await Promise.all(stores.map(store => store.enqueueProgressNotification(source, time, draft)));
       const created = racers.filter(Boolean);
       assert.equal(created.length, index < 3 ? 1 : 0, 'Concurrent enqueues consumed more than one progress slot');
       if (index < 3) {
         const notification = created[0];
         assert.equal(notification.kind, 'progress'); assert.equal(notification.progress.sequence, index + 1);
         assert.notEqual(notification.id, record.id);
+        assert.equal(notification.text, draft.text, 'Stored progress did not preserve the model draft');
         const claims = await Promise.allSettled(stores.map(store => store.claimNotification(notification.id, randomUUID(), [chatId], time)));
         assert.equal(claims.filter(result => result.status === 'fulfilled').length, 1);
         const claimed = await stores[0].getNotification(notification.id, time);
         await stores[0].recordNotificationReceipt(notification.id, claimed.attemptId, index === 0 ? 'uncertain' : 'accepted', time);
+        assert.equal(await stores[1].enqueueProgressNotification(source, time + NOTIFICATION_PROGRESS_INTERVAL_MS, draft), null,
+          'An already consumed event was submitted again after its cooldown');
       }
     }
     reopened = reopenStore();
-    assert.equal(await reopened.enqueueProgressNotification(source, firstTime + 4 * NOTIFICATION_PROGRESS_INTERVAL_MS), null,
+    assert.equal(await reopened.enqueueProgressNotification(source, firstTime + 4 * NOTIFICATION_PROGRESS_INTERVAL_MS, latestDraft), null,
       'Reopening refilled an uncertain progress slot');
     const rows = (await pool.query("SELECT data FROM leader_notifications WHERE execution_id=$1 AND kind='progress' ORDER BY data->'progress'->>'sequence'", [record.id])).rows;
     assert.equal(rows.length, 3); assert.deepEqual(rows.map(r => r.data.progress.sequence), [1, 2, 3]);
@@ -70,14 +81,18 @@ export async function verifyNotificationProgress({ stores, pool, reopenStore }) 
       sessionId: 'progress-0', prompt: initial.plan.actions[0].prompt, sendRoute: 'desktop-owner', action: 'send', status: 'pending',
       createdAt: raceStamp, updatedAt: raceStamp, expiresAt: new Date(now + 60_000).toISOString() });
     await stores[0].updateCommandStatus(raceCommand, 'accepted', undefined, undefined, 'race-' + raceCommand);
-    const stale = await stores[0].enqueueProgressNotification({ type: 'plan', id: racing.id }, firstTime);
+    const racingSource = { type: 'plan', id: racing.id };
+    const racingContext = await stores[0].getProgressNotificationContext(racingSource, firstTime);
+    assert(racingContext);
+    const racingDraft = { eventKey: racingContext.eventKey, text: '模型已核对任务受理，继续等待结果。' };
+    const stale = await stores[0].enqueueProgressNotification(racingSource, firstTime, racingDraft);
     assert(stale); assert.equal((await stores[1].listPendingNotifications([racingChat], firstTime))[0].id, stale.id);
     assert(await stores[0].compareAndSetExecution({ ...claimedRace, revision: 3, status: 'failed' }, 2, firstTime + 1));
     await assert.rejects(stores[1].claimNotification(stale.id, randomUUID(), [racingChat], firstTime + 1));
     assert.deepEqual((await stores[1].listPendingNotifications([racingChat], firstTime + 1)).map(n => n.id), [racing.id]);
-    assert.equal(await reopened.enqueueProgressNotification({ type: 'plan', id: racing.id }, firstTime + 60_000), null);
+    assert.equal(await reopened.enqueueProgressNotification(racingSource, firstTime + 60_000, racingDraft), null);
     await verifyTerminalParts({ stores, pool });
-    console.log('PASS real PG progress: exact receipts, 30s/60s gates, concurrent permanent three-slot budget, uncertain+reopen dedup, terminal claim race, all Markdown beyond 128KiB');
+    console.log('PASS real PG progress: model drafts from exact receipts, 30s/60s gates, concurrent permanent three-slot budget, uncertain+reopen dedup, terminal claim race, all Markdown beyond 128KiB');
   } finally {
     await reopened?.close();
   }
