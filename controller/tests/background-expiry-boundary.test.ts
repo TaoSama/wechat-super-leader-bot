@@ -158,6 +158,170 @@ describe("absolute background execution boundaries", () => {
     expect((await s.repository.get(s.worker.id))!.initialOutcome).toMatchObject({ status: "completed" });
   });
 
+  it("preserves a queued extension committed while maintenance is deciding whether to cancel", async () => {
+    const executor = { execute: vi.fn(async (request: WorkerExecutionRequest) => { await request.onThread(randomUUID()); return completed(); }) };
+    const f = fixture(executor); const s = await queuedServiceFixture(f);
+    const original = JSON.parse(fs.readFileSync(f.receiptPath(s.value), "utf8")) as Receipt;
+    const inspect = f.runtime.inspect.bind(f.runtime);
+    let observed!: () => void;
+    let resume!: () => void;
+    const inspected = new Promise<void>(resolve => { observed = resolve; });
+    const resumed = new Promise<void>(resolve => { resume = resolve; });
+    vi.spyOn(f.runtime, "inspect").mockImplementationOnce(async (...args) => {
+      const receipt = await inspect(...args);
+      observed();
+      await resumed;
+      return receipt;
+    });
+    const cancel = vi.spyOn(f.runtime, "cancel");
+    f.setTime(BASE + 100);
+    const maintenance = s.service.maintenance();
+    await inspected;
+    try { await s.service.extend(s.worker.id, s.worker.chatId, BASE + 1_000); }
+    finally { resume(); }
+    await maintenance;
+    expect(cancel).not.toHaveBeenCalled();
+    expect((await s.repository.get(s.worker.id))!).toMatchObject({ phase: "executing", expiresAt: BASE + 1_000,
+      activeInvocationId: s.value.invocationId });
+    expect((await s.repository.get(s.worker.id))!.initialOutcome).toBeUndefined();
+    expect(JSON.parse(fs.readFileSync(f.receiptPath(s.value), "utf8"))).toMatchObject({ status: "queued",
+      inputHash: original.inputHash, pendingInput: original.pendingInput });
+    fs.unlinkSync(s.slot); f.setTime(BASE + 101);
+    await s.service.maintenance(); await flush(); await s.service.maintenance();
+    expect(executor.execute).toHaveBeenCalledTimes(1);
+    expect((await s.repository.get(s.worker.id))!.initialOutcome).toMatchObject({ status: "completed" });
+  });
+
+  it("rejects extension after expiry cancellation wins and its receipt is recorded", async () => {
+    const held = heldExecutor(); const f = fixture(held.executor); const s = await queuedServiceFixture(f);
+    const update = s.repository.update.bind(s.repository);
+    let observed!: () => void;
+    let resume!: () => void;
+    let paused = false;
+    const recorded = new Promise<void>(resolve => { observed = resolve; });
+    const resumed = new Promise<void>(resolve => { resume = resolve; });
+    vi.spyOn(s.repository, "update").mockImplementation(async (...args) => {
+      const result = await update(...args);
+      if (!paused && result?.initialOutcome?.result?.error === "worker_expired") {
+        paused = true; observed(); await resumed;
+      }
+      return result;
+    });
+    f.setTime(BASE + 100);
+    const maintenance = s.service.maintenance();
+    await recorded;
+    try { await expect(s.service.extend(s.worker.id, s.worker.chatId, BASE + 1_000)).rejects.toThrow("cannot be resumed"); }
+    finally { resume(); await maintenance; }
+    expect((await s.repository.get(s.worker.id))!).toMatchObject({ phase: "expired", expiresAt: BASE + 100 });
+    expect(await f.runtime.inspect(s.value.workerId, s.value.invocationId)).toMatchObject({ status: "failed", error: "worker_cancelled_before_launch" });
+    expect(held.executor.execute).not.toHaveBeenCalled();
+  });
+
+  it("continues a waiting followup when an extension commits before its receipt is recorded", async () => {
+    let round = 0;
+    const executor = { execute: vi.fn(async (request: WorkerExecutionRequest) => {
+      await request.onThread(request.threadId ?? randomUUID());
+      return ++round === 2 ? JSON.stringify({ status: "waiting", summary: "synthetic waiting", attachments: [],
+        nextCheckAt: new Date(BASE + 500).toISOString() }) : completed();
+    }) };
+    const f = fixture(executor); const s = serviceFixture(f.runtime, f.now);
+    const worker = await s.service.register(s.run, s.spec);
+    await s.repository.update(worker.id, current => { current.expiresAt = BASE + 100; });
+    await s.service.inspect(s.run); await flush(); await s.service.maintenance(); await s.service.acceptResult(s.run.id);
+    await s.service.enqueue(worker.id, worker.chatId, "synthetic followup", "waiting-extension");
+    await s.service.maintenance(); await flush();
+    const activeInvocationId = (await s.repository.get(worker.id))!.activeInvocationId!;
+    const inspect = f.runtime.inspect.bind(f.runtime);
+    let observed!: () => void;
+    let resume!: () => void;
+    const inspected = new Promise<void>(resolve => { observed = resolve; });
+    const resumed = new Promise<void>(resolve => { resume = resolve; });
+    vi.spyOn(f.runtime, "inspect").mockImplementationOnce(async (...args) => {
+      const receipt = await inspect(...args);
+      observed(); await resumed; return receipt;
+    });
+    const deliverSupplement = vi.fn(async () => undefined);
+    const service = new BackgroundService({ ...s.options, deliverSupplement });
+    f.setTime(BASE + 100);
+    const maintenance = service.maintenance();
+    await inspected;
+    try { await service.extend(worker.id, worker.chatId, BASE + 1_000); }
+    finally { resume(); }
+    await maintenance;
+    const extended = (await s.repository.get(worker.id))!;
+    expect(extended.prompts[0].invocationId).not.toBe(activeInvocationId);
+    expect(extended.prompts[0]).toMatchObject({ notBefore: BASE + 500 });
+    expect(extended.prompts[0].deliveredAt).toBeUndefined();
+    expect(deliverSupplement).not.toHaveBeenCalled();
+    f.setTime(BASE + 500);
+    await service.maintenance(); await flush(); await service.maintenance();
+    expect(executor.execute).toHaveBeenCalledTimes(3);
+    expect(deliverSupplement).toHaveBeenCalledTimes(1);
+    expect((await s.repository.get(worker.id))!.prompts[0].deliveredAt).toBe(BASE + 500);
+  });
+
+  it.each(["observing", "completed"] as const)("preserves a committed extension before expiring an idle %s worker", async phase => {
+    const executor = { execute: vi.fn(async (request: WorkerExecutionRequest) => { await request.onThread(request.threadId ?? randomUUID()); return completed(); }) };
+    const f = fixture(executor); const s = serviceFixture(f.runtime, f.now);
+    const worker = await s.service.register(s.run, s.spec);
+    await s.repository.update(worker.id, current => { current.expiresAt = BASE + 100; });
+    if (phase === "completed") {
+      await s.service.inspect(s.run); await flush(); await s.service.maintenance(); await s.service.acceptResult(s.run.id);
+      await s.service.enqueue(worker.id, worker.chatId, "synthetic followup", "idle-extension");
+    }
+    let observed!: () => void;
+    let resume!: () => void;
+    const inspected = new Promise<void>(resolve => { observed = resolve; });
+    const resumed = new Promise<void>(resolve => { resume = resolve; });
+    const deliverSupplement = vi.fn(async () => undefined);
+    const service = new BackgroundService({ ...s.options, deliverSupplement, getScheduleStatus: async () => {
+      observed(); await resumed; return "active";
+    } });
+    f.setTime(BASE + 100);
+    const maintenance = service.maintenance();
+    await inspected;
+    try { await service.extend(worker.id, worker.chatId, BASE + 1_000); }
+    finally { resume(); }
+    await maintenance;
+    const extended = (await s.repository.get(worker.id))!;
+    expect(extended).toMatchObject({ phase, expiresAt: BASE + 1_000 });
+    expect(extended.initialOutcome?.result?.error).toBeUndefined();
+    expect(extended.prompts.every(prompt => !prompt.deliveredAt && !prompt.cancelledAt)).toBe(true);
+    expect(deliverSupplement).not.toHaveBeenCalled();
+    await service.maintenance(); await flush(); await service.maintenance();
+    expect((await s.repository.get(worker.id))!.initialOutcome).toMatchObject({ status: "completed" });
+    expect(executor.execute).toHaveBeenCalledTimes(phase === "completed" ? 2 : 1);
+  });
+
+  it("preserves a restored chat's committed extension before revoked expiry cleanup", async () => {
+    const held = heldExecutor(); const f = fixture(held.executor); const s = serviceFixture(f.runtime, f.now);
+    const worker = await s.service.register(s.run, s.spec);
+    await s.repository.update(worker.id, current => { current.expiresAt = BASE + 100; });
+    let allowed = false;
+    const service = new BackgroundService({ ...s.options, isAllowed: () => allowed });
+    const update = s.repository.update.bind(s.repository);
+    let observed!: () => void;
+    let resume!: () => void;
+    let paused = false;
+    const inspected = new Promise<void>(resolve => { observed = resolve; });
+    const resumed = new Promise<void>(resolve => { resume = resolve; });
+    vi.spyOn(s.repository, "update").mockImplementation(async (...args) => {
+      const result = await update(...args);
+      if (!paused && result?.suspendedAt) { paused = true; observed(); await resumed; }
+      return result;
+    });
+    const cleanup = vi.spyOn(f.runtime, "cleanup");
+    f.setTime(BASE + 100);
+    const maintenance = service.maintenance();
+    await inspected;
+    try { allowed = true; await service.extend(worker.id, worker.chatId, BASE + 1_000); }
+    finally { resume(); }
+    await expect(maintenance).resolves.toBeUndefined();
+    expect((await s.repository.get(worker.id))!).toMatchObject({ phase: "observing", expiresAt: BASE + 1_000 });
+    expect((await s.repository.get(worker.id))!.initialDiscardedAt).toBeUndefined();
+    expect(cleanup).not.toHaveBeenCalled();
+  });
+
   it.each([BASE + 50, BASE + 100])("rejects a shorter or unchanged user lifetime without altering queued authorization (%i)", async expiresAt => {
     const held = heldExecutor(); const f = fixture(held.executor); const s = await queuedServiceFixture(f);
     const original = fs.readFileSync(f.receiptPath(s.value), "utf8");
