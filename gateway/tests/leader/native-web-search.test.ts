@@ -1,3 +1,4 @@
+import { directToolController } from "./direct-tool-fixture.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -33,7 +34,7 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
 `, { mode: 0o700 });
   const engine = new CodexReplyEngine({ root: path.join(root, "accounts"), model: "test-model",
     codexPath: cli, baseUrl: "https://provider.example.test/v1", apiKey: "synthetic-test-key" });
-  const controller = { forwardMessage: async () => { throw new Error("Search does not require Controller"); } };
+  const controller = directToolController();
   const request = { chatId: "chat", messageId: "first", text: "用原生网络搜索查一下最新资料" };
   assert.deepEqual(await engine.reply("account-one", request, controller), { text: "搜索已启用" });
   assert.deepEqual(await engine.reply("account-one", { ...request, messageId: "second" }, controller), { text: "搜索已启用" });

@@ -37,6 +37,7 @@ import { createMediaRouter } from "../sessions/media-routes.js";
 import { createMessageReplyRouter } from "../sessions/message-reply-routes.js";
 import { createReadResponseCompression } from "./response-compression.js";
 import { createMessageStream } from "./message-stream.js";
+import { createDirectToolsRouter } from "./direct-tools.js";
 
 import { TaskNotifications } from "../runtime/task-notifications.js";
 import { createAutomationRouter } from "../automations/routes.js";
@@ -59,6 +60,7 @@ export class ControllerServer {
   private wss: WebSocketServer;
   private commands: CommandService;
   private leader?: LeaderOrchestrator;
+  private directLeader: LeaderOrchestrator;
   private executions?: ExecutionScheduler;
   private goals?: GoalScheduler;
   private consoleAuth: ConsoleAuthService;
@@ -84,28 +86,35 @@ export class ControllerServer {
     if (leaderModel) {
       this.progress = new ModelProgressRunner(store, leaderModel, now, () => this.statusEvents?.changed(), undefined,
         chatId => this.config.allowedChatIds.has(chatId));
-      this.executions = new ExecutionScheduler(store, this.commands, { now,
-        isChatAllowed: chatId => this.config.allowedChatIds.has(chatId),
-        onProgress: (source, createdAt) => this.progress!.request(source, createdAt),
-        canDispatch: (execution, index) => {
-          const action = execution.plan.actions[index];
-          return !!action.sendRoute && this.commands.canDispatchSend(action, action.sendRoute);
-        },
-        onChanged: () => this.statusEvents?.changed(),
-      });
-      this.goals = new GoalScheduler(store, this.commands, createGoalDecider(leaderModel), { now,
-        isChatAllowed: chatId => this.config.allowedChatIds.has(chatId),
-        onProgress: (source, createdAt) => this.progress!.request(source, createdAt),
-        canDispatch: (goal, targetIndex) => {
-          const target = goal.proposal.targets[targetIndex];
-          return !!target && this.commands.canDispatchSend(target, target.sendRoute);
-        },
-        onChanged: () => this.statusEvents?.changed(),
-      });
-      this.leader = new LeaderOrchestrator(store, this.hub, this.commands, leaderModel, now,
-        requestId => this.consoleAuth.issueLink(requestId), this.executions, this.goals, this.taskNotifications.automations,
-        this.taskNotifications.background);
     }
+    // Direct tools retain deterministic business operations without a configured model.
+    const businessModel: LeaderModel = leaderModel ?? { complete: async () => {
+      throw new CommandError(503, "Leader model unavailable for background goal reasoning");
+    } };
+    const reportProgress = this.progress?.request.bind(this.progress);
+    this.executions = new ExecutionScheduler(store, this.commands, { now,
+      isChatAllowed: chatId => this.config.allowedChatIds.has(chatId),
+      ...(reportProgress ? { onProgress: reportProgress } : {}),
+      canDispatch: (execution, index) => {
+        const action = execution.plan.actions[index];
+        return !!action.sendRoute && this.commands.canDispatchSend(action, action.sendRoute);
+      },
+      onChanged: () => this.statusEvents?.changed(),
+    });
+    this.goals = new GoalScheduler(store, this.commands, createGoalDecider(businessModel), { now,
+      isChatAllowed: chatId => this.config.allowedChatIds.has(chatId),
+      ...(reportProgress ? { onProgress: reportProgress } : {}),
+      canDispatch: (goal, targetIndex) => {
+        const target = goal.proposal.targets[targetIndex];
+        return !!target && this.commands.canDispatchSend(target, target.sendRoute);
+      },
+      onChanged: () => this.statusEvents?.changed(),
+    });
+    this.directLeader = new LeaderOrchestrator(store, this.hub, this.commands, businessModel, now,
+      requestId => this.consoleAuth.issueLink(requestId), this.executions, this.goals, this.taskNotifications.automations,
+      this.taskNotifications.background, { isAllowed: chatId => this.config.allowedChatIds.has(chatId),
+        goalsAvailable: Boolean(leaderModel) });
+    if (leaderModel) this.leader = this.directLeader;
     this.resolver = new NaturalLanguageResolver();
     this.statusEvents = new StatusEvents(() => this.statusSnapshot());
 
@@ -213,6 +222,7 @@ export class ControllerServer {
     // Authenticated API router for /v1
     const apiRouter = express.Router();
     apiRouter.use(this.authMiddleware.bind(this));
+    apiRouter.use(createDirectToolsRouter(this.directLeader.direct, chatId => this.config.allowedChatIds.has(chatId)));
     apiRouter.use(createMediaRouter(this.store, () => this.config.allowedChatIds, this.now));
     apiRouter.use(createMessageReplyRouter(this.store, () => this.config.allowedChatIds));
     apiRouter.use("/notifications", createNotificationRouter(this.store, () => this.config.allowedChatIds, this.now));
@@ -497,7 +507,7 @@ export class ControllerServer {
       });
     });
     this.executions?.start();
-    this.goals?.start();
+    if (this.leader) this.goals?.start();
     this.progress?.start();
     this.commands.start();
     this.taskNotifications.start();

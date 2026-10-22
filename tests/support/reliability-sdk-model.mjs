@@ -1,11 +1,74 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
+import { NODE, SESSION, TASK, TASK_PROMPT } from './reliability-model.mjs';
 
 const BODY_LIMIT_BYTES = 4 * 1024 * 1024;
 export const SDK_MODEL = 'synthetic-native-sdk-model';
 export const SDK_API_KEY = 'synthetic-native-sdk-api-key';
 export const SDK_REPLY = '合成 SDK 原生进程回复：本轮处理完成。';
+const TOOL_OUTPUT_TYPES = new Set(['function_call_output', 'custom_tool_call_output']);
+const QUERY_AUTHORIZATION = { intent: 'query', automationOperations: [], backgroundOperations: [], memoryOperations: [], sendImages: false };
+
+function businessTool(tools, name) {
+  const matches = tools.filter(tool => tool.name === name || tool.name.endsWith(`__${name}`));
+  assert.equal(matches.length, 1, `Native SDK must expose exactly one bound ${name} MCP tool`);
+  return matches[0];
+}
+
+function toolPayload(value) {
+  if (typeof value === 'string') return toolPayload(JSON.parse(value));
+  if (Array.isArray(value)) {
+    const text = value.filter(part => ['text', 'input_text'].includes(part.type)).map(part => part.text).join('');
+    assert(text, 'Native SDK discovery output has no text content');
+    return toolPayload(text);
+  }
+  assert(value && typeof value === 'object', 'Native SDK tool output must contain an object');
+  if (value.isError) return value;
+  if (Array.isArray(value.content)) return toolPayload(value.content);
+  return value;
+}
+
+function toolResult(output) {
+  const value = toolPayload(output);
+  assert(!value.isError, 'Native SDK discovery tool failed');
+  assert(value.result && typeof value.result === 'object', 'Native SDK discovery output lacks a Controller result');
+  return value.result;
+}
+
+function messageOutput(text) {
+  return [{ type: 'message', id: `msg_${randomUUID()}`, role: 'assistant', status: 'completed',
+    content: [{ type: 'output_text', text, annotations: [] }] }];
+}
+
+function taskOutput(body, tools, outputs) {
+  assert.equal(currentSdkUserText(body), TASK, 'SDK control fixture only authorizes its explicit synthetic task');
+  assert(outputs.length <= 2, 'SDK task fixture received unexpected extra tool output');
+  for (const [index, result] of outputs.entries()) {
+    const expected = businessTool(tools, index === 0 ? 'list_sessions' : 'execute_plan');
+    const call = body.input.find(item => item.type === 'function_call' && item.call_id === result.call_id);
+    assert(call && call.name === expected.name, 'SDK task fixture received an out-of-order or unrelated tool result');
+  }
+  if (outputs.length === 2) {
+    const completed = toolPayload(outputs[1].output);
+    if (completed.isError) return messageOutput('Controller 调用未成功，执行结果待核实；请勿自行重试。');
+    assert.equal(typeof completed.reply?.text, 'string', 'SDK dispatch result must provide its authoritative receipt');
+    assert(completed.reply.text.trim(), 'SDK dispatch receipt must not be empty');
+    return messageOutput(completed.reply.text);
+  }
+  const name = outputs.length === 0 ? 'list_sessions' : 'execute_plan';
+  let args = {};
+  if (outputs.length === 1) {
+    const result = toolResult(outputs[0].output);
+    assert(Array.isArray(result.sessions), 'Native SDK discovery lacks sessions');
+    const targets = result.sessions.filter(session => session.nodeId === NODE && session.id === SESSION);
+    assert.equal(targets.length, 1, 'SDK task target must be uniquely discovered before dispatch');
+    args = { actions: [{ nodeId: targets[0].nodeId, sessionId: targets[0].id, prompt: TASK_PROMPT, dependsOn: [] }] };
+  }
+  return [{ type: 'function_call', id: `fc_${randomUUID()}`, call_id: `call_${randomUUID()}`,
+    ...businessTool(tools, name), status: 'completed', arguments: JSON.stringify({ arguments: args,
+      authorization: { ...QUERY_AUTHORIZATION, intent: name === 'execute_plan' ? 'task' : 'query' } }) }];
+}
 
 export function currentSdkUserText(body) {
   assert(Array.isArray(body.input), 'Native SDK Responses input must be an array');
@@ -87,7 +150,7 @@ export async function createSdkModelFixture({ evidence = () => {}, reply = SDK_R
         ? tool.tools.map(nested => ({ name: nested.name, namespace: tool.name })) : [{ name: tool.name }]).filter(tool => tool.name);
       const input = body.input ?? [];
       const currentUser = input.findLastIndex(item => item.type === 'message' && item.role === 'user');
-      const outputs = input.slice(currentUser + 1).filter(item => ['function_call_output', 'custom_tool_call_output'].includes(item.type));
+      const outputs = input.slice(currentUser + 1).filter(item => TOOL_OUTPUT_TYPES.has(item.type));
       evidence('sdk-model-request', { ordinal: calls.length, model: body.model, tools,
         text: currentSdkUserText(body), toolOutput: outputs.length > 0, toolOutputs: outputs.length });
       const hold = responseHolds.shift();
@@ -100,17 +163,12 @@ export async function createSdkModelFixture({ evidence = () => {}, reply = SDK_R
       if (response.destroyed || stopping) return;
       let output;
       if (respond) output = await respond(body, calls.length);
-      else if ((typeof control === 'function' ? control(body) : control) && !outputs.length) {
-        const tool = tools.find(item => item.name.includes('control_current_request'));
-        assert(tool, 'Native SDK did not expose bound control_current_request MCP tool');
-        output = [{ type: 'function_call', id: `fc_${randomUUID()}`, call_id: `call_${randomUUID()}`,
-          ...tool, arguments: '{}', status: 'completed' }];
-      } else {
+      else if (typeof control === 'function' ? control(body) : control) output = taskOutput(body, tools, outputs);
+      if (!output) {
         const text = typeof reply === 'function' ? await reply(body) : reply;
         assert.equal(typeof text, 'string', 'SDK fixture reply must be a string');
         assert(text.trim(), 'SDK fixture reply must not be empty');
-        output = [{ type: 'message', id: `msg_${randomUUID()}`, role: 'assistant', status: 'completed',
-          content: [{ type: 'output_text', text, annotations: [] }] }];
+        output = messageOutput(text);
       }
       if (!response.destroyed && !stopping) sendEvents(response, output);
     })().catch(error => {

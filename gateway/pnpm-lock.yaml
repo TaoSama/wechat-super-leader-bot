@@ -204,7 +204,7 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
-  '@openai/codex-sdk@0.163.0': 08bde329ccbf938e60829f951c2d90a0657fb408d84ef07d50eb1dbaf868321d
+  '@openai/codex-sdk@0.163.0': f662185dd4de892b8d4b2a38d8d2c4c93bd7bc08a12d3af5e32fc5617b1d983b
 
 importers:
 
@@ -215,7 +215,7 @@ importers:
         version: 1.32.1(zod@4.6.7)
       '@openai/codex-sdk':
         specifier: 0.163.0
-        version: 0.163.0(patch_hash=08bde329ccbf938e60829f951c2d90a0657fb408d84ef07d50eb1dbaf868321d)
+        version: 0.163.0(patch_hash=f662185dd4de892b8d4b2a38d8d2c4c93bd7bc08a12d3af5e32fc5617b1d983b)
       '@super-leader/wechat-text':
         specifier: file:../packages/wechat-text
         version: file:../packages/wechat-text
@@ -806,7 +806,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@openai/codex-sdk@0.163.0(patch_hash=08bde329ccbf938e60829f951c2d90a0657fb408d84ef07d50eb1dbaf868321d)':
+  '@openai/codex-sdk@0.163.0(patch_hash=f662185dd4de892b8d4b2a38d8d2c4c93bd7bc08a12d3af5e32fc5617b1d983b)':
     dependencies:
       '@openai/codex': 0.163.0
 
