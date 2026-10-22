@@ -75,9 +75,9 @@ test("unknown and expired windows defer both kinds of sends including the exact 
   }
 });
 
-test("progress sends stop after three while final sends can spend the remaining budget", () => {
+test("independent queries share the context budget while preserving final sends", () => {
   let state = budget();
-  for (let count = 1; count <= 3; count++) {
+  for (let count = 1; count <= 7; count++) {
     state = consumeSend(state, DEFAULT_CONTEXT_POLICY, "progress", NOW);
     assert.equal(state.progressSent, count);
     assert.equal(state.remaining, DEFAULT_CONTEXT_POLICY.sendBudget - count);
@@ -85,7 +85,7 @@ test("progress sends stop after three while final sends can spend the remaining 
   assertDeferred(state, "progress", "budget_exhausted");
   while (state.remaining > 0) {
     state = consumeSend(state, DEFAULT_CONTEXT_POLICY, "final", NOW);
-    assert.equal(state.progressSent, 3);
+    assert.equal(state.progressSent, 7);
   }
   assertDeferred(state, "final", "budget_exhausted");
 });

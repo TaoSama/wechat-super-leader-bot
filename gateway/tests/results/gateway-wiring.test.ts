@@ -10,7 +10,7 @@ test("a failed resume checkpoint retries the same admitted generation without re
   const outbox = new FileResultOutbox(`${f.statePath}.results.json`, () => f.state.getLoginFingerprint());
   const client = new ResultClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic" });
   const gateway = new WeChatGateway({ stateManager: f.state, ilink: f.ilink, controller: f.controller,
-    notifications: true, resultClient: client, resultOutbox: outbox });
+    resultClient: client, resultOutbox: outbox });
   const createdAtMs = Date.now(), deliveryKey = "admitted-generation";
   t.mock.method(f.ilink, "pollBatch", async () => ({ messages: [{ chatId: "chat", deliveryKey,
     messageId: "message", text: "hello", contextToken: "new-context", createdAtMs }],
@@ -33,7 +33,7 @@ for (const renewal of ["accepted", "failed"] as const) test(`result failure stil
   const outbox = new FileResultOutbox(`${f.statePath}.results.json`, () => f.state.getLoginFingerprint());
   const client = new ResultClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic" });
   const gateway = new WeChatGateway({ stateManager: f.state, ilink: f.ilink, controller: f.controller,
-    notifications: true, resultClient: client, resultOutbox: outbox });
+    resultClient: client, resultOutbox: outbox });
   const failure = new Error("result dispatch unavailable");
   if (renewal === "failed") f.hooks.send = () => { throw new Error("renewal transport response lost"); };
   t.mock.method(client, "notificationInterest", async () => ({ chatIds: ["broken"], interested: ["renewal"] }));

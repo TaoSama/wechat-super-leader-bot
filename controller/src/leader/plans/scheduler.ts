@@ -1,3 +1,4 @@
+import type { NotificationSource } from "../../notifications/contracts.js";
 import { randomUUID } from "node:crypto";
 import { CommandError, type CommandService } from "../../commands/service.js";
 import type { IStore } from "../../store/interface.js";
@@ -12,6 +13,7 @@ type SchedulerOptions = {
   isChatAllowed?: (chatId: string) => boolean;
   canDispatch?: (execution: ExecutionRecord, index: number) => Promise<boolean> | boolean;
   onChanged?: () => void;
+  onProgress?: (source: NotificationSource, createdAt: number) => void;
   onError?: (error: unknown) => void;
 };
 
@@ -116,7 +118,7 @@ export class ExecutionScheduler {
       await this.transition(execution, "completed");
       return null;
     }
-    await this.store.enqueueProgressNotification({type:"plan",id:execution.id},this.now());
+    this.options.onProgress?.({ type: "plan", id: execution.id }, execution.createdAt);
     return { execution, view };
   }
 

@@ -18,11 +18,15 @@ import { ResultDispatcher } from "./results/dispatcher.js";
 import { RenewalNotifier, renewalDeliveryKey } from "./results/renewal.js";
 import { RESULT_TEXT_CHARS } from "./results/contracts.js";
 import { getDeferReason, LocalSendDeferredError } from "./runtime/context-policy.js";
-import type { ControllerMessageResponse, DeliveryOutboxItem } from "./types.js";
+import type { ControllerMessageResponse, DeliveryOutboxItem, InboundWeChatMessage } from "./types.js";
 import { OutboxBackpressureError } from "./runtime/delivery-state.js";
 import { CONFLICT_REPLY, ReplyEngineBackpressureError, ReplyEngineConflictError, ReplyEngineUnavailableError, type GatewayReplyEngine } from "./leader/contracts.js";
 export type { GatewayReplyEngine } from "./leader/contracts.js";
 export { NotificationDiagnosticError } from "./runtime/notification-outbox.js";
+
+import { FileInboundInbox, InboxConflictError } from "./runtime/inbox.js";
+import { InboundRunner } from "./runtime/inbound-runner.js";
+import { QueryProgress, MAX_PROGRESS_CHARS, type ProgressSink } from "./leader/progress.js";
 
 const MIN_NOTIFICATION_INTERVAL_MS = 1;
 const NOTIFICATION_INTEREST_CACHE_MS = 30_000;
@@ -62,7 +66,6 @@ export class WeChatGateway {
   public readonly splitMaxChars: number;
   public readonly splitMultiPart: boolean;
   public readonly healthTracker?: HealthTracker;
-  public readonly notifications: boolean;
   private readonly replyEngine?: GatewayReplyEngine;
   private stopped: boolean = false;
   private readonly notificationOutbox?: NotificationOutbox;
@@ -70,6 +73,11 @@ export class WeChatGateway {
   private readonly renewalNotifier?: RenewalNotifier;
   private readonly resultClient?: ResultClient;
   private notificationInterest?: { fetchedAt: number; chatIds: string[]; interested: string[] };
+  private readonly inbox: FileInboundInbox;
+  private readonly inboundRunner: InboundRunner;
+  private inboundError?: Error;
+  private onInboundError?: (error: Error) => void;
+  private readonly queryStarts = new Map<string, Promise<void>>();
   private readonly activeInboundChats = new Set<string>();
   private flushingReplies = false;
   private readonly activeReplyDeliveries = new Set<string>();
@@ -83,7 +91,6 @@ export class WeChatGateway {
     splitMaxChars?: number;
     splitMultiPart?: boolean;
     healthTracker?: HealthTracker;
-    notifications?: boolean;
     replyEngine?: GatewayReplyEngine;
     resultClient?: ResultClient;
     resultOutbox?: FileResultOutbox;
@@ -95,7 +102,28 @@ export class WeChatGateway {
     this.splitMaxChars = options.splitMaxChars ?? DEFAULT_MESSAGE_MAX_CHARS;
     this.splitMultiPart = options.splitMultiPart ?? true;
     this.healthTracker = options.healthTracker;
-    this.notifications = options.notifications ?? false;
+    this.inbox = new FileInboundInbox(`${this.stateManager.statePath}.inbox.json`,
+      () => this.stateManager.getLoginFingerprint(), this.stateManager.policy.outboxLimit);
+    this.inboundRunner = new InboundRunner({ inbox: this.inbox,
+      process: msg => runWithTrace(createMessageTrace(msg.chatId, msg.messageId), async () => { await this.processMessage(msg); }),
+      steer: async msg => {
+        await this.queryStarts.get(msg.chatId);
+        return this.replyEngine?.steer?.(this.stateManager.account!.accountId,
+          { chatId: msg.chatId, messageId: msg.messageId, text: msg.text }, this.controller) ?? false;
+      },
+      covered: msg => this.stateManager.recordProcessedMessageKey(msg.deliveryKey, { preserveReplyEvidence: true }),
+      onError: error => {
+        const failure = error instanceof Error ? error : new Error("Inbound processing failed");
+        this.healthTracker?.recordPollError(failure);
+        try {
+          if (this.onInboundError) this.onInboundError(failure);
+          else { this.inboundError = failure; this.stop(); }
+        } catch (reportError) {
+          this.inboundError = reportError instanceof Error ? reportError : new Error("Inbound error reporting failed");
+          this.stop();
+        }
+      },
+    });
     if (options.resultClient && options.resultOutbox) {
       this.resultClient = options.resultClient;
       const active = () => !this.stopped && this.stateManager.isReadyForActivePolling();
@@ -118,7 +146,7 @@ export class WeChatGateway {
       this.renewalNotifier = new RenewalNotifier({ state: this.stateManager, active, signal: this.notificationAbort.signal,
         send: (chatId, text, sendOptions) => this.ilink.sendMarkdownReply(chatId, text, sendOptions) });
       this.ilink.setBeforeSendCheck((chatId, deliveryKey) => {
-        if (this.notifications && this.renewalInterestedChats().includes(chatId) && this.renewalNotifier!.shouldYield(chatId, deliveryKey)) {
+        if (this.renewalInterestedChats().includes(chatId) && this.renewalNotifier!.shouldYield(chatId, deliveryKey)) {
           throw new LocalSendDeferredError("budget_exhausted", "Local send deferred for a priority renewal reminder");
         }
       });
@@ -136,12 +164,13 @@ export class WeChatGateway {
 
   public stop(): void {
     this.stopped = true;
+    this.inboundRunner.halt();
     this.notificationAbort.abort(new Error("WeChat notification delivery stopped"));
   }
 
   /** One durable multipart delivery per claim; client IDs only correlate evidence. */
   public async deliverNotificationsOnce(): Promise<NotificationDeliverySummary> {
-    if (!this.notifications || this.stopped || !this.stateManager.isReadyForActivePolling()) return { accepted: 0, uncertain: 0, skipped: 0 };
+    if (this.stopped || !this.stateManager.isReadyForActivePolling()) return { accepted: 0, uncertain: 0, skipped: 0 };
     let firstError: unknown;
     let renewalError: unknown;
     let summary: NotificationDeliverySummary = { accepted: 0, uncertain: 0, skipped: 0 };
@@ -223,7 +252,7 @@ export class WeChatGateway {
    * Handles poison messages (CHAT_NOT_ALLOWED) by recording deliveryKey without replying,
    * allowing the cursor to safely advance past unallowed senders.
    */
-  public async pollOnce(): Promise<PollCycleSummary> {
+  public async pollOnce(waitForReplies = true): Promise<PollCycleSummary> {
     if (!this.stateManager.isReadyForActivePolling()) {
       throw new Error(
         "Gateway cannot poll for active messages: baseline is not established. Run with --establish-baseline first."
@@ -253,92 +282,11 @@ export class WeChatGateway {
 
       for (const [batchIndex, msg] of batch.messages.entries()) {
         if (this.stopped) { interrupted = true; break; }
-        this.healthTracker?.recordMessageStart(this.controller.authorizationBudgetMs +
+        if (waitForReplies) this.healthTracker?.recordMessageStart(this.controller.authorizationBudgetMs +
           (this.replyEngine?.requestBudgetMs ?? this.controller.requestBudgetMs) + REPLY_TIMEOUT_MS + CHECKPOINT_MARGIN_MS);
-        this.activeInboundChats.add(msg.chatId);
-        await runWithTrace(traces[batchIndex], async () => {
-          traceEvent("message.processing.start", { batchId, batchIndex, batchWaitMs: performance.now() - receivedClock });
-          let outcome = "error";
-          try {
-            if (this.hasQuarantinedInboundReply(msg.deliveryKey)) {
-              this.quarantineInboundReply(msg.deliveryKey);
-              skippedCount++;
-              outcome = "skipped";
-              return;
-            }
-            await traceSpan("message.authorization", () => this.controller.assertChatAllowed(msg.chatId));
-            const fresh = await traceSpan("message.context.persist", async () => this.stateManager.recordInboundContext(msg.deliveryKey, msg.chatId, msg.createdAtMs, Boolean(msg.contextToken?.trim()), msg.contextToken));
-            const retryingAdmission = this.stateManager.contextBudgets[msg.chatId]?.lastInboundKey === msg.deliveryKey &&
-              !this.stateManager.isMessageProcessed(msg.deliveryKey);
-            if ((fresh || retryingAdmission) && msg.contextToken?.trim()) this.resultDispatcher?.noteInbound(msg.chatId, msg.deliveryKey);
-            if (this.stateManager.outbox[msg.deliveryKey]) {
-              this.stateManager.recordProcessedMessageKey(msg.deliveryKey, { preserveReplyEvidence: true });
-              processedCount++;
-              outcome = "processed";
-              return;
-            }
-            try { this.stateManager.assertOutboxCapacity(msg.deliveryKey); }
-            catch (error) {
-              if (!(error instanceof OutboxBackpressureError)) throw error;
-              // The new inbound may have restored the budget needed to drain a full queue.
-              await this.flushRepliesOnce();
-              this.stateManager.assertOutboxCapacity(msg.deliveryKey);
-            }
-            this.ilink.sendTyping(msg.chatId);
-            const request = { chatId: msg.chatId, messageId: msg.messageId, text: msg.text };
-            let source: DeliveryOutboxItem["source"] = this.replyEngine ? "engine" : "controller";
-            let controllerReply: ControllerMessageResponse;
-            try {
-              controllerReply = this.replyEngine
-                ? await traceSpan("message.leader", () => this.replyEngine!.reply(this.stateManager.account!.accountId, request, this.controller))
-                : await traceSpan("message.controller", () => this.controller.forwardMessage(request));
-            } catch (error) {
-              if (error instanceof ReplyEngineBackpressureError && this.replyEngine) {
-                // This inbound may restore a window needed to release pinned replies.
-                await this.flushRepliesOnce();
-                controllerReply = await this.replyEngine.reply(this.stateManager.account!.accountId, request, this.controller);
-              } else {
-                if (!(error instanceof ReplyEngineConflictError)) throw error;
-                source = "codex-conflict";
-                controllerReply = error.reply;
-              }
-            }
-            await traceSpan("message.outbox.persist", async () => this.stateManager.putOutbox({ kind: "reply", source, chatId: msg.chatId, messageId: msg.messageId,
-              deliveryKey: msg.deliveryKey, splitMaxChars: this.splitMaxChars, splitMultiPart: this.splitMultiPart, status: "pending" }));
-            if (msg.deliveryKey) {
-              this.stateManager.recordProcessedMessageKey(msg.deliveryKey, { preserveReplyEvidence: true });
-            }
-            await this.deliverReply(this.stateManager.outbox[msg.deliveryKey], controllerReply);
-            processedCount++;
-            outcome = "processed";
-            this.healthTracker?.recordMessageProgress();
-          } catch (err) {
-            if (err instanceof PermanentImageDownloadError) {
-              this.stateManager.recordReplyFailure(`image-reply:${msg.deliveryKey}`, err.reason);
-            }
-            if (this.hasQuarantinedInboundReply(msg.deliveryKey)) {
-              this.quarantineInboundReply(msg.deliveryKey);
-              skippedCount++;
-              outcome = "skipped";
-              return;
-            }
-            if (err instanceof ChatNotAllowedError) {
-              // Poison batch protection: unauthorized chat is rejected by Controller allowlist.
-              // Mark message processed so the cursor advances and subsequent messages are not starved.
-              if (msg.deliveryKey) {
-                this.stateManager.recordProcessedMessageKey(msg.deliveryKey);
-              }
-              skippedCount++;
-              outcome = "skipped";
-              this.healthTracker?.recordMessageProgress();
-              return;
-            }
-            throw err;
-          } finally {
-            traceEvent("message.processing.end", { outcome });
-            this.activeInboundChats.delete(msg.chatId);
-          }
-        });
+        const outcome = await runWithTrace(traces[batchIndex], () => waitForReplies
+          ? this.processMessage(msg, { batchId, batchIndex, receivedClock }) : this.admitMessage(msg));
+        if (outcome === "processed") processedCount++; else skippedCount++;
       }
 
       if (interrupted) this.healthTracker?.recordProcessingEnd();
@@ -370,8 +318,142 @@ export class WeChatGateway {
       ...pendingReplies.map(item => item.chatId)])];
   }
 
+  private async processMessage(msg: InboundWeChatMessage, batch?: { batchId: string; batchIndex: number; receivedClock: number }): Promise<string> {
+    let ready!: () => void;
+    const starting = new Promise<void>(resolve => { ready = resolve; });
+    this.queryStarts.set(msg.chatId, starting);
+    this.activeInboundChats.add(msg.chatId);
+    traceEvent("message.processing.start", batch ? { batchId: batch.batchId, batchIndex: batch.batchIndex,
+      batchWaitMs: performance.now() - batch.receivedClock } : {});
+    let outcome = "error";
+    try {
+      if (this.hasQuarantinedInboundReply(msg.deliveryKey)) {
+        this.quarantineInboundReply(msg.deliveryKey);
+        outcome = "skipped";
+        return outcome;
+      }
+      await traceSpan("message.authorization", () => this.controller.assertChatAllowed(msg.chatId));
+      const fresh = await traceSpan("message.context.persist", async () => this.stateManager.recordInboundContext(msg.deliveryKey, msg.chatId, msg.createdAtMs, Boolean(msg.contextToken?.trim()), msg.contextToken));
+      const retryingAdmission = this.stateManager.contextBudgets[msg.chatId]?.lastInboundKey === msg.deliveryKey &&
+        !this.stateManager.isMessageProcessed(msg.deliveryKey);
+      if ((fresh || retryingAdmission) && msg.contextToken?.trim()) this.resultDispatcher?.noteInbound(msg.chatId, msg.deliveryKey);
+      if (this.stateManager.outbox[msg.deliveryKey]) {
+        this.stateManager.recordProcessedMessageKey(msg.deliveryKey, { preserveReplyEvidence: true });
+        outcome = "processed";
+        return outcome;
+      }
+      try { this.stateManager.assertOutboxCapacity(msg.deliveryKey); }
+      catch (error) {
+        if (!(error instanceof OutboxBackpressureError)) throw error;
+        // The new inbound may have restored the budget needed to drain a full queue.
+        await this.flushRepliesOnce();
+        this.stateManager.assertOutboxCapacity(msg.deliveryKey);
+      }
+      this.ilink.sendTyping(msg.chatId);
+      const request = { chatId: msg.chatId, messageId: msg.messageId, text: msg.text };
+      const progress = this.progressSink(msg.chatId);
+      const queryProgress = new QueryProgress(request, progress);
+      let source: DeliveryOutboxItem["source"] = this.replyEngine ? "engine" : "controller";
+      let controllerReply: ControllerMessageResponse;
+      ready();
+      try {
+        controllerReply = this.replyEngine
+          ? await traceSpan("message.leader", () => this.replyEngine!.reply(this.stateManager.account!.accountId, request, this.controller, { progress }))
+          : await traceSpan("message.controller", () => this.controller.forwardMessage(request, {
+            onProgress: text => queryProgress.report(text), progressRemaining: queryProgress.remaining }));
+      } catch (error) {
+        if (error instanceof ReplyEngineBackpressureError && this.replyEngine) {
+          // This inbound may restore a window needed to release pinned replies.
+          await this.flushRepliesOnce();
+          controllerReply = await this.replyEngine.reply(this.stateManager.account!.accountId, request, this.controller, { progress });
+        } else {
+          if (!(error instanceof ReplyEngineConflictError)) throw error;
+          source = "codex-conflict";
+          controllerReply = error.reply;
+        }
+      }
+      await traceSpan("message.outbox.persist", async () => this.stateManager.putOutbox({ kind: "reply", source, chatId: msg.chatId, messageId: msg.messageId,
+        deliveryKey: msg.deliveryKey, splitMaxChars: this.splitMaxChars, splitMultiPart: this.splitMultiPart, status: "pending" }));
+      if (msg.deliveryKey) {
+        this.stateManager.recordProcessedMessageKey(msg.deliveryKey, { preserveReplyEvidence: true });
+      }
+      await this.deliverReply(this.stateManager.outbox[msg.deliveryKey], controllerReply);
+      outcome = "processed";
+      this.healthTracker?.recordMessageProgress();
+      return outcome;
+    } catch (err) {
+      if (err instanceof PermanentImageDownloadError) {
+        this.stateManager.recordReplyFailure(`image-reply:${msg.deliveryKey}`, err.reason);
+      }
+      if (this.hasQuarantinedInboundReply(msg.deliveryKey)) {
+        this.quarantineInboundReply(msg.deliveryKey);
+        outcome = "skipped";
+        return outcome;
+      }
+      if (err instanceof ChatNotAllowedError) {
+        // Poison batch protection: unauthorized chat is rejected by Controller allowlist.
+        // Mark message processed so the cursor advances and subsequent messages are not starved.
+        if (msg.deliveryKey) {
+          this.stateManager.recordProcessedMessageKey(msg.deliveryKey);
+        }
+        outcome = "skipped";
+        this.healthTracker?.recordMessageProgress();
+        return outcome;
+      }
+      throw err;
+    } finally {
+      ready();
+      if (this.queryStarts.get(msg.chatId) === starting) this.queryStarts.delete(msg.chatId);
+      traceEvent("message.processing.end", { outcome });
+      this.activeInboundChats.delete(msg.chatId);
+    }
+  }
+
+  private progressSink(chatId: string): ProgressSink {
+    return async (text, id) => {
+      if (this.stopped || !this.stateManager.isReadyForActivePolling()) return { sent: false, reason: "unavailable" };
+      if (!text.trim() || text.length > MAX_PROGRESS_CHARS) return { sent: false, reason: "rejected" };
+      if (this.stateManager.hasUncertainReply(id)) return { sent: false, reason: "previous_send_unknown" };
+      try {
+        await this.ilink.sendMarkdownReply(chatId, text, { deliveryKey: id, kind: "progress",
+          maxCharsPerChunk: MAX_PROGRESS_CHARS, splitMultiPart: false, signal: this.notificationAbort.signal,
+          shouldContinue: () => !this.stopped });
+        return { sent: true };
+      } catch (error) {
+        if (error instanceof LocalSendDeferredError) return { sent: false, reason: error.reason };
+        traceEvent("query.progress.failed");
+        return { sent: false, reason: this.stateManager.hasUncertainReply(id) ? "send_unknown" : "delivery_failed" };
+      }
+    };
+  }
+
+  private async admitMessage(msg: InboundWeChatMessage): Promise<string> {
+    if (this.stateManager.isMessageProcessed(msg.deliveryKey)) return "skipped";
+    try { await this.controller.assertChatAllowed(msg.chatId); }
+    catch (error) {
+      if (!(error instanceof ChatNotAllowedError)) throw error;
+      this.stateManager.recordProcessedMessageKey(msg.deliveryKey);
+      return "skipped";
+    }
+    if (this.inbox.has(msg.deliveryKey)) {
+      try { this.inbox.put(msg); }
+      catch (error) {
+        if (!(error instanceof InboxConflictError)) throw error;
+        traceEvent("message.inbox.conflict");
+      }
+      return "skipped";
+    }
+    const fresh = this.stateManager.recordInboundContext(msg.deliveryKey, msg.chatId, msg.createdAtMs,
+      Boolean(msg.contextToken?.trim()), msg.contextToken);
+    if (fresh && msg.contextToken?.trim()) this.resultDispatcher?.noteInbound(msg.chatId, msg.deliveryKey);
+    const { createdAtMs, ...message } = msg;
+    this.inbox.put({ ...message, ...(Number.isSafeInteger(createdAtMs) && createdAtMs! >= 0 ? { createdAtMs } : {}) });
+    this.inboundRunner.schedule();
+    return "processed";
+  }
+
   private isReplyPending(chatId: string): boolean {
-    return this.activeInboundChats.has(chatId) || Object.values(this.stateManager.outbox).some(item =>
+    return this.activeInboundChats.has(chatId) || this.inboundRunner.hasPending(chatId) || Object.values(this.stateManager.outbox).some(item =>
       item.kind === "reply" && item.chatId === chatId && item.status === "pending");
   }
 
@@ -389,7 +471,7 @@ export class WeChatGateway {
         if (reply.images?.length) {
           await this.ilink.sendImageReply(item.chatId, reply.images, { deliveryKey: `image-reply:${item.deliveryKey}`,
             timeoutMs: REPLY_TIMEOUT_MS, shouldContinue: () => !this.stopped,
-            getImageBytes: (image, signal) => traceSpan("delivery.image.download", () => this.controller.downloadImage({ chatId: item.chatId, messageId: item.messageId, image }, signal)) });
+            getImageBytes: (image, signal) => traceSpan("delivery.image.download", () => this.controller.downloadImage({ chatId: item.chatId, messageId: reply.imageSourceMessageId ?? item.messageId, image }, signal)) });
         }
         if (reply.text.length) {
           const timeoutMs = deadline - Date.now();
@@ -538,6 +620,8 @@ export class WeChatGateway {
       );
     }
 
+    this.onInboundError = onError;
+    this.inboundRunner.schedule();
     let notificationFailure: Error | undefined;
     const deliver = async (): Promise<void> => {
       try { await this.deliverNotificationsOnce(); }
@@ -555,15 +639,15 @@ export class WeChatGateway {
         }
       }
     };
-    const notificationTask = this.notifications ? (async () => {
+    const notificationTask = (async () => {
       while (!this.stopped) {
         await deliver();
         if (!this.stopped) await waitForNotificationPoll(pollIntervalMs, this.notificationAbort.signal);
       }
-    })() : Promise.resolve();
+    })();
     try {
       while (!this.stopped) {
-        try { await this.pollOnce(); }
+        try { await this.pollOnce(false); this.inboundRunner.schedule(); }
         catch (err) {
           const error = err instanceof Error ? err : new Error("Gateway polling failed");
           if (onError) onError(error);
@@ -575,7 +659,9 @@ export class WeChatGateway {
     } finally {
       this.stop();
       await notificationTask;
+      await this.inboundRunner.stop();
     }
     if (notificationFailure) throw notificationFailure;
+    if (this.inboundError) throw this.inboundError;
   }
 }

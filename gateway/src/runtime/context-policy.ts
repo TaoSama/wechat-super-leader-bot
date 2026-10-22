@@ -16,7 +16,6 @@ export interface ContextPolicy {
 }
 
 const MILLISECONDS_PER_HOUR = 60 * 60 * 1000;
-const MAX_PROGRESS_SENDS = 3;
 const RESERVED_FINAL_SENDS = 3;
 
 export const MAX_CONTEXT_WINDOW_MS = 7 * 24 * MILLISECONDS_PER_HOUR;
@@ -73,7 +72,7 @@ export function getDeferReason(
         state.grantedBudget <= 0 || state.grantedBudget > MAX_SEND_BUDGET) ||
       !Number.isSafeInteger(state.progressSent) || state.progressSent < 0 ||
       kind === "progress" &&
-        (state.progressSent >= MAX_PROGRESS_SENDS || effectiveRemaining(state, policy) <= Math.min(RESERVED_FINAL_SENDS, policy.sendBudget))) {
+        effectiveRemaining(state, policy) <= Math.min(RESERVED_FINAL_SENDS, policy.sendBudget)) {
     return "budget_exhausted";
   }
   return undefined;

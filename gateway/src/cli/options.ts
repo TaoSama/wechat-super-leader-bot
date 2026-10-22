@@ -34,7 +34,6 @@ export interface ParsedCliOptions {
   contextWindowMs: number;
   sendBudget: number;
   outboxLimit: number;
-  notifications: boolean;
   leaderMode: "controller" | "codex";
   leaderRoot: string;
   leaderModel: string;
@@ -79,7 +78,6 @@ export function getHelpText(): string {
     `      --outbox-limit <count>     Local deferred reply capacity (env: GATEWAY_OUTBOX_LIMIT, default: ${DEFAULT_CONTEXT_POLICY.outboxLimit}; app resource maximum: ${MAX_OUTBOX_LIMIT})`,
     `      --result-file-max-bytes <n> Maximum result attachment bytes (env: RESULT_FILE_MAX_BYTES, default: ${RESULT_FILE_BYTES}; maximum: 536870912)`,
     "      --result-public-origin <url> Public result download origin (env: RESULT_PUBLIC_ORIGIN or CONSOLE_PUBLIC_URL)",
-    "      --notifications            Deliver plan and goal state notifications (env: GATEWAY_NOTIFICATIONS=true, default: false)",
   ].join("\n");
 }
 
@@ -109,7 +107,6 @@ export function parseGatewayCli(args: string[], env: NodeJS.ProcessEnv = process
       "context-window-ms": { type: "string" },
       "send-budget": { type: "string" },
       "outbox-limit": { type: "string" },
-      notifications: { type: "boolean" },
       "leader-mode": { type: "string" },
       "leader-root": { type: "string" },
       "leader-model": { type: "string" },
@@ -222,6 +219,5 @@ export function parseGatewayCli(args: string[], env: NodeJS.ProcessEnv = process
     pollTimeoutMs,
     maxChars,
     ...policy,
-    notifications: values.notifications ?? env.GATEWAY_NOTIFICATIONS === "true",
   };
 }

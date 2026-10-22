@@ -76,7 +76,7 @@ async function fixture(t: TestContext, status: number | "network") {
     splitMaxChars: 100, splitMultiPart: true, status: "pending" });
   const sends: Record<string, unknown>[] = [];
   let freshInbound = false;
-  const create = (current = state) => new WeChatGateway({ stateManager: current, controller: mock.controller, notifications: true,
+  const create = (current = state) => new WeChatGateway({ stateManager: current, controller: mock.controller,
     ilink: new ILinkClient({ stateManager: current, fetchImpl: async (url, init) => {
       if (String(url).endsWith("getupdates")) return Response.json({ ret: 0, get_updates_buf: "next-cursor", msgs: freshInbound ? [{
         message_type: 1, from_user_id: "chat", client_id: "fresh-message", context_token: "fresh-context",
