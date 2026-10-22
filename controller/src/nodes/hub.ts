@@ -362,7 +362,8 @@ export class NodeHub {
         return; // No acknowledgement or waiter notification before persistence.
       }
 
-      if (node.inspection?.commandId === msg.commandId && node.inspection.turnId === msg.turnId) {
+      if (node.inspection?.commandId === msg.commandId &&
+          (node.inspection.turnId === undefined || node.inspection.turnId === msg.turnId)) {
         node.inspection = undefined;
       }
       if (this.nodes.get(nodeId) !== node || node.ws.readyState !== WebSocket.OPEN) return;
