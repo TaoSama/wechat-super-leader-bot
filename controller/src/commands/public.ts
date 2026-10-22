@@ -14,7 +14,7 @@ export function publicCommand(command: CommandRecord): PublicCommand {
     commandId: command.commandId, requestId: command.requestId,
     nodeId: command.nodeId, sessionId: command.sessionId, action: command.action,
     prompt: command.prompt, skills: command.skills, sendRoute: command.sendRoute,
-    status: command.status, output: command.output, error: command.error,
+    status: command.status === "preparing" ? "pending" : command.status, output: command.output, error: command.error,
     turnId: command.turnId, inputReceipt: command.inputReceipt,
     deliveryMode: command.deliveryMode, expectedTurnId: command.expectedTurnId,
     expiresAt: command.expiresAt, createdAt: command.createdAt, updatedAt: command.updatedAt,

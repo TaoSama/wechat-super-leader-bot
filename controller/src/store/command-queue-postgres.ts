@@ -8,9 +8,15 @@ export async function pgListQueuedCommands(pool: pg.Pool, map: Mapper, limit = 6
   const result = await pool.query(`SELECT c.* FROM commands c WHERE c.status='queued' AND c.command_id>$1
     AND (c.delivery_mode='steer' OR NOT EXISTS (SELECT 1 FROM commands earlier WHERE earlier.node_id=c.node_id AND earlier.session_id=c.session_id
       AND earlier.action='send' AND (earlier.status IN ('pending','accepted','uncertain') OR
-        earlier.status='queued' AND earlier.queue_order<c.queue_order)))
+        earlier.status IN ('preparing','queued') AND earlier.queue_order<c.queue_order)))
     ORDER BY c.command_id LIMIT $2`, [after, inspectionLimit(limit)]);
   return result.rows.map(map);
+}
+
+export async function pgPublishPreparedCommand(pool: pg.Pool, map: Mapper, id: string): Promise<CommandRecord | null> {
+  const result = await pool.query(`UPDATE commands SET status='queued',updated_at=NOW()
+    WHERE command_id=$1 AND status='preparing' AND expires_at>NOW() RETURNING *`, [id]);
+  return result.rows[0] ? map(result.rows[0]) : null;
 }
 
 export async function pgClaimQueuedCommand(pool: pg.Pool, map: Mapper, id: string, route: SendRoute): Promise<CommandRecord | null> {
@@ -24,7 +30,7 @@ export async function pgClaimQueuedCommand(pool: pg.Pool, map: Mapper, id: strin
       WHERE command_id=$1 AND status='queued' AND expires_at>NOW()
       AND (c.delivery_mode='steer' OR NOT EXISTS (SELECT 1 FROM commands earlier WHERE earlier.node_id=c.node_id AND earlier.session_id=c.session_id
         AND earlier.action='send' AND (earlier.status IN ('pending','accepted','uncertain') OR
-          earlier.status='queued' AND earlier.queue_order<c.queue_order))) RETURNING c.*`, [id, route]);
+          earlier.status IN ('preparing','queued') AND earlier.queue_order<c.queue_order))) RETURNING c.*`, [id, route]);
     await client.query("COMMIT");
     return result.rows[0] ? map(result.rows[0]) : null;
   } catch (error) { await client.query("ROLLBACK"); throw error; }
@@ -34,7 +40,7 @@ export async function pgClaimQueuedCommand(pool: pg.Pool, map: Mapper, id: strin
 /** Atomic row update retains FIFO order and cannot revive expired, accepted, or uncertain work. */
 export async function pgRequeueClaimedCommand(pool: pg.Pool, map: Mapper, id: string): Promise<CommandRecord | null> {
   const result = await pool.query(`UPDATE commands SET status='queued',updated_at=NOW()
-    WHERE command_id=$1 AND status='pending' AND action='send' AND authority->>'type'='automation'
+    WHERE command_id=$1 AND status='pending' AND action='send' AND authority->>'type' IN ('automation','plan')
       AND turn_id IS NULL AND input_receipt IS NULL AND expires_at>NOW() RETURNING *`, [id]);
   return result.rows[0] ? map(result.rows[0]) : null;
 }

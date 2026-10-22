@@ -1,11 +1,11 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useSyncExternalStore } from "react";
 import { Ellipsis, LockKeyhole, LogOut, RefreshCw, Layers, LayoutDashboard, MessagesSquare, Moon, Sun, X } from "lucide-react";
 import { LeaderOverview } from "./features/leader/components/LeaderOverview";
 import { SessionWorkspace } from "./features/sessions/components/SessionWorkspace";
 import { useStatusPolling } from "./features/status/useStatusPolling";
-import { getOrInitAuthSession, setUnauthenticatedSession, subscribeAuthState } from "./auth/bootstrap";
+import { getAuthSessionSnapshot, getOrInitAuthSession, isCurrentAuthGeneration, setUnauthenticatedSession, subscribeAuthSession } from "./auth/bootstrap";
 import { logoutAuthSession } from "./api/auth";
-import { POLL_INTERVAL_MS, AuthState, ScopedSession } from "./types";
+import { POLL_INTERVAL_MS, ScopedSession } from "./types";
 import { sessionKey } from "./features/sessions/useSessionHistory";
 import { formatTimeShort } from "./format";
 import { useViewportHeight } from "./useViewportHeight";
@@ -14,7 +14,7 @@ import { SessionDialog } from "./features/sessions/components/SessionDialog";
 export interface AppProps { pollIntervalMs?: number }
 
 export function App({ pollIntervalMs = POLL_INTERVAL_MS }: AppProps) {
-  const [authState, setAuthState] = useState<AuthState>({ status: "checking" });
+  const { state: authState, generation: authGeneration } = useSyncExternalStore(subscribeAuthSession, getAuthSessionSnapshot, getAuthSessionSnapshot);
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const [view, setView] = useState<"sessions" | "leader">("sessions");
@@ -27,21 +27,17 @@ export function App({ pollIntervalMs = POLL_INTERVAL_MS }: AppProps) {
   const utilityRef = useRef<HTMLDivElement>(null);
   const viewportHeight = useViewportHeight();
   const handleAuthFailure = useCallback(() => {
-    setUnauthenticatedSession("expired");
-    setAuthState({ status: "unauthenticated", reason: "expired" });
+    if (!setUnauthenticatedSession("expired", authGeneration)) return;
     setSelectedNodeId(null);
     setView("sessions");
     setRequestedSessionKey(null);
     setDetailVisible(false);
-  }, []);
+  }, [authGeneration]);
   const authenticated = authState.status === "authenticated";
-  const telemetry = useStatusPolling(authenticated, pollIntervalMs, handleAuthFailure);
+  const telemetry = useStatusPolling(authenticated, pollIntervalMs, handleAuthFailure, authGeneration);
 
   useEffect(() => {
-    let cancelled = false;
-    const unsubscribe = subscribeAuthState((state) => { if (!cancelled) setAuthState(state); });
-    void getOrInitAuthSession().then((state) => { if (!cancelled) setAuthState(state); });
-    return () => { cancelled = true; unsubscribe(); };
+    void getOrInitAuthSession();
   }, []);
 
   useEffect(() => {
@@ -67,14 +63,13 @@ export function App({ pollIntervalMs = POLL_INTERVAL_MS }: AppProps) {
     setLogoutError(null);
     try {
       await logoutAuthSession();
-      setUnauthenticatedSession("none");
-      setAuthState({ status: "unauthenticated", reason: "none" });
+      if (!setUnauthenticatedSession("none", authGeneration)) return;
       setSelectedNodeId(null);
       setView("sessions");
       setRequestedSessionKey(null);
       setDetailVisible(false);
     } catch (error) {
-      setLogoutError(error instanceof Error ? error.message : "退出登录失败");
+      if (isCurrentAuthGeneration(authGeneration)) setLogoutError(error instanceof Error ? error.message : "退出登录失败");
     } finally { setLoggingOut(false); }
   }
 

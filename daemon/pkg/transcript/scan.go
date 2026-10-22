@@ -184,7 +184,7 @@ func (r *Reader) readFile(ctx context.Context, ref Ref, state *generationState, 
 	if verified != digest {
 		return Page{}, failure(protocol.HistoryContextExpired)
 	}
-	if err := verifyLocation(anchor, r.roots[ref.Agent], rel, info); err != nil {
+	if err := verifyLocation(ctx, anchor, r.roots[ref.Agent], ref, rel, info); err != nil {
 		return Page{}, err
 	}
 	// Select newest items within both count and encoded-size budgets. Keeping
@@ -217,7 +217,7 @@ func (r *Reader) readFile(ctx context.Context, ref Ref, state *generationState, 
 	return page, nil
 }
 
-func verifyLocation(anchor *os.File, path, rel string, expected os.FileInfo) (err error) {
+func verifyLocation(ctx context.Context, anchor *os.File, path string, ref Ref, rel string, expected os.FileInfo) (err error) {
 	freshRoot, err := openAnchor(path)
 	if err != nil {
 		return failure(protocol.HistoryContextExpired)
@@ -229,6 +229,16 @@ func verifyLocation(anchor *os.File, path, rel string, expected os.FileInfo) (er
 	}
 	newInfo, err := freshRoot.Stat()
 	if err != nil || !os.SameFile(oldInfo, newInfo) {
+		return failure(protocol.HistoryContextExpired)
+	}
+	currentPath, err := resolve(ctx, freshRoot, ref)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || err.Error() == protocol.HistoryTooLarge {
+			return err
+		}
+		return failure(protocol.HistoryContextExpired)
+	}
+	if currentPath != rel {
 		return failure(protocol.HistoryContextExpired)
 	}
 	freshFile, err := openRelative(freshRoot, rel)

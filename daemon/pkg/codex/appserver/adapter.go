@@ -61,10 +61,6 @@ type rpcResponse struct {
 	err    error
 }
 
-type rpcRejectedError struct{ message string }
-
-func (e *rpcRejectedError) Error() string { return e.message }
-
 var errInvalidRPCResponse = errors.New("codex websocket response has invalid UTF-8")
 
 func (a *AppServerAdapter) connect(ctx context.Context) (*rpcConn, error) {
@@ -199,12 +195,8 @@ func (rc *rpcConn) readLoop() {
 		}
 
 		if errObj, hasErr := raw["error"]; hasErr && errObj != nil {
-			errBytes, marshalErr := json.Marshal(errObj)
-			if marshalErr != nil {
-				ch <- rpcResponse{err: &rpcRejectedError{message: fmt.Sprintf("codex rpc error: %v", errObj)}}
-			} else {
-				ch <- rpcResponse{err: &rpcRejectedError{message: fmt.Sprintf("codex rpc error: %s", string(errBytes))}}
-			}
+			_, hasResult := raw["result"]
+			ch <- rpcResponse{err: newRPCRejectedError(errObj, hasResult)}
 			continue
 		}
 

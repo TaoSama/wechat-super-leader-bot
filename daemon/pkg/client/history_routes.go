@@ -30,6 +30,7 @@ type historyBinding struct {
 	gate                                         chan struct{}
 	cursors                                      map[string]string
 	cursorTokens                                 map[string]string
+	cursorOrder                                  []string
 }
 
 // Tokens never contain a backend cursor, socket, owner or session identity.
@@ -120,6 +121,7 @@ func (h *historyContexts) acquire(ctx context.Context, msg protocol.ReadHistoryM
 			<-binding.gate
 			return nil, "", errors.New(protocol.HistoryContextExpired)
 		}
+		binding.touchCursor(msg.Cursor)
 		return binding, cursor, nil
 	}
 	return binding, "", nil
@@ -133,17 +135,37 @@ func (b *historyBinding) wrapCursor(cursor *string) (*string, error) {
 		return nil, errors.New(protocol.HistoryFailed)
 	}
 	if token, exists := b.cursorTokens[*cursor]; exists {
+		b.touchCursor(token)
 		return &token, nil
-	}
-	if len(b.cursors) >= maxHistoryContextCursors {
-		return nil, errors.New(protocol.HistoryBusy)
 	}
 	token, err := protocol.NewDispatchID()
 	if err != nil {
 		return nil, errors.New(protocol.HistoryFailed)
 	}
+	// Tail refreshes can keep producing new boundaries indefinitely. Retain a
+	// bounded working set; an evicted token expires explicitly on its next use.
+	if len(b.cursors) >= maxHistoryContextCursors {
+		oldest := b.cursorOrder[0]
+		delete(b.cursorTokens, b.cursors[oldest])
+		delete(b.cursors, oldest)
+		copy(b.cursorOrder, b.cursorOrder[1:])
+		b.cursorOrder = b.cursorOrder[:len(b.cursorOrder)-1]
+	}
 	b.cursors[token], b.cursorTokens[*cursor] = *cursor, token
+	b.cursorOrder = append(b.cursorOrder, token)
 	return &token, nil
+}
+
+// The binding gate serializes cursor access. The scan is bounded by the cursor
+// limit and keeps recently used pagination boundaries available during polling.
+func (b *historyBinding) touchCursor(token string) {
+	for i, candidate := range b.cursorOrder {
+		if candidate == token {
+			copy(b.cursorOrder[i:], b.cursorOrder[i+1:])
+			b.cursorOrder[len(b.cursorOrder)-1] = token
+			return
+		}
+	}
 }
 
 func (d *Daemon) preferredHistorySource(sessionID string) string {

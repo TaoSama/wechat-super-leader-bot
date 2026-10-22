@@ -58,6 +58,8 @@ export interface IStore extends IConsoleAuthStore, MessageImageStore {
   listRecentCommandSummaries(limit?: number): Promise<CommandSummary[]>;
   listInspectableCommands(nodeId: string, limit?: number, afterCommandId?: string): Promise<CommandRecord[]>;
   listQueuedCommands(limit?: number, afterCommandId?: string): Promise<CommandRecord[]>;
+  /** Publish only after the submitting caller's dispatch guard succeeds. */
+  publishPreparedCommand(commandId: string): Promise<CommandRecord | null>;
   claimQueuedCommand(commandId: string, route: SendRoute): Promise<CommandRecord | null>;
   /** Release this worker's claim only before calling the transport. Never recover an ambiguous send this way. */
   requeueClaimedCommand(commandId: string): Promise<CommandRecord | null>;

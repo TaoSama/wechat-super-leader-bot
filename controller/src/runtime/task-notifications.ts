@@ -5,6 +5,7 @@ import type { IStore } from "../store/interface.js";
 import type { CommandService } from "../commands/service.js";
 import type { NodeHub } from "../nodes/hub.js";
 import type { LeaderModel } from "../leader/model/contracts.js";
+import { HttpLeaderModel } from "../leader/model/client.js";
 import { AutomationService, MemoryAutomationRepository, PostgresAutomationRepository, initAutomationTables, discoverAutomationTarget } from "../automations/index.js";
 import { MemoryDeliveryRepository } from "../deliveries/memory.js";
 import { PostgresDeliveryRepository, initDeliveryTables } from "../deliveries/postgres.js";
@@ -46,8 +47,15 @@ export class TaskNotifications {
     const schedules = this.pool ? new PostgresAutomationRepository(this.pool) : new MemoryAutomationRepository();
     const deliveries = this.pool ? new PostgresDeliveryRepository(this.pool) : new MemoryDeliveryRepository();
     this.fallbackRepository = this.pool ? new PostgresFallbackRepository(this.pool) : new MemoryFallbackRepository();
+    const backgroundProvider = config.background;
     this.results = new ResultDeliveryService(deliveries, {
-      model, now, publicUrl: config.consolePublicUrl ?? `http://localhost:${config.port}`,
+      // Short results need no model. Initialize the independent provider only when a summary is requested.
+      model: model ?? (backgroundProvider ? {
+        complete: (...args: Parameters<LeaderModel["complete"]>) => new HttpLeaderModel({
+          baseUrl: backgroundProvider.baseUrl, apiKey: backgroundProvider.apiKey, model: backgroundProvider.model,
+        }).complete(...args),
+      } : undefined),
+      now, publicUrl: config.consolePublicUrl ?? `http://localhost:${config.port}`,
       signingSecret: createHash("sha256").update(`task-results:${config.controllerToken}`).digest("hex"),
       fileMaxBytes: config.taskNotifications?.fileMaxBytes, retentionMs: config.taskNotifications?.retentionMs,
     });
