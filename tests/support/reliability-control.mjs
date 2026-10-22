@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { createServer, request as httpRequest } from 'node:http';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { stopTestProcess } from './cleanup.mjs';
+import { stopTestProcess, withTestCleanup } from './cleanup.mjs';
 import { waitFor } from './control-plane-fixture.mjs';
 
 const require = createRequire(new URL('../../controller/package.json', import.meta.url));
@@ -167,9 +167,12 @@ export async function createControlFixture({ env, databaseUrl, token, nodeId, no
       stopping = true;
       for (const hold of barriers) hold.release();
       for (const pair of peers) { pair.upstream.terminate(); pair.downstream.terminate(); }
-      await stopTestProcess(child); child = undefined;
-      await new Promise((resolve, reject) => wss.close(error => error ? reject(error) : resolve()));
-      await closeLocal(proxy);
+      await withTestCleanup(async () => {
+        await stopTestProcess(child); child = undefined;
+      }, [
+        { label: 'Controller proxy WebSockets', cleanup: () => new Promise((resolve, reject) => wss.close(error => error ? reject(error) : resolve())) },
+        { label: 'Controller HTTP proxy', cleanup: () => closeLocal(proxy) },
+      ]);
     },
   };
   return fixture;
