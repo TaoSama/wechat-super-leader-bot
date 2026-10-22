@@ -93,6 +93,9 @@ func (a *AppServerAdapter) ReadHistory(ctx context.Context, sessionID, cursor st
 		history.Truncated = history.Truncated || item.Truncated
 		history.Items = append(history.Items, item)
 	}
+	// Turn metadata is optional enrichment. Older servers or a slow metadata
+	// scan must never hide a successfully read page of recorded messages.
+	a.enrichHistoryTurns(ctx, rc, sessionID, &history)
 	if err := threadstate.BoundHistoryResponse(&history); err != nil {
 		return empty, err
 	}

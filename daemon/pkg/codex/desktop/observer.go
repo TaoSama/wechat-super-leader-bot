@@ -43,6 +43,7 @@ type desktopRuntimeState struct {
 	LatestReasoningEffort   json.RawMessage `json:"-"`
 	ModelProvider           json.RawMessage `json:"-"`
 	LatestCollaborationMode json.RawMessage `json:"-"`
+	TurnMetadata            json.RawMessage `json:"-"`
 }
 
 type desktopPatch struct {
@@ -73,6 +74,8 @@ type desktopProjection struct {
 	collaborationNullish bool
 	modelProvider        string
 	reasoningEffort      string
+	turnMetadata         json.RawMessage
+	activeTurnID         string
 }
 
 func desktopStatus(raw json.RawMessage) string {
@@ -97,6 +100,8 @@ func (p *desktopProjection) snapshot(sessionID string, state *desktopRuntimeStat
 	p.modelProvider = desktopModelString(state.ModelProvider)
 	p.reasoningEffort = desktopModelString(state.LatestReasoningEffort)
 	p.collaborationModel, p.collaborationNullish = desktopCollaborationModel(state.LatestCollaborationMode)
+	p.turnMetadata = state.TurnMetadata
+	p.activeTurnID = desktopObservedActiveTurn(p.turnMetadata)
 	return nil
 }
 
@@ -135,6 +140,7 @@ func (p *desktopProjection) patch(sessionID string, patch desktopPatch) error {
 	if p.patchModel(patch, key) {
 		return nil
 	}
+	p.patchTurnMetadata(patch)
 	if key != "threadRuntimeStatus" {
 		return nil
 	}
@@ -211,7 +217,7 @@ func applyDesktopChange(message desktopEnvelope, clientID string, projections ma
 	projection.revision, projection.initialized = *change.Revision, true
 	model, provider, effort := projection.modelMetadata()
 	publish(params.ConversationID, protocol.DesktopObservation{Status: projection.status, Availability: "available", Source: "codex-desktop", ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), OwnerID: projection.owner, Revision: projection.revision,
-		Model: model, ModelProvider: provider, ReasoningEffort: effort})
+		Model: model, ModelProvider: provider, ReasoningEffort: effort, ActiveTurnID: projection.activeTurnID})
 	return nil
 }
 

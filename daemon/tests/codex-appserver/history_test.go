@@ -34,6 +34,11 @@ func historyServer(t *testing.T, handler func(string, map[string]any) map[string
 					t.Error("experimentalApi must be enabled")
 				}
 				result = map[string]any{}
+			case "thread/turns/list":
+				if params["itemsView"] != "notLoaded" || params["sortDirection"] != "desc" || params["limit"] != float64(50) {
+					t.Error("turn status must use bounded metadata without loading items")
+				}
+				result = map[string]any{"data": []any{map[string]any{"id": "turn", "status": "completed", "items": []any{}}}}
 			default:
 				result = handler(method, params)
 			}

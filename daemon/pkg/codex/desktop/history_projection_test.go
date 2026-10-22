@@ -23,6 +23,24 @@ func historyTestTurn(id string, items ...any) map[string]any {
 	return map[string]any{"turnId": id, "status": "completed", "items": append([]any{}, items...), "itemsPagination": map[string]any{"hasLoadedOldest": true}}
 }
 
+func TestDesktopHistoryProjectsNativeTurnStatusWithoutInferringCompletion(t *testing.T) {
+	for _, status := range []string{"completed", "inProgress", "failed", "interrupted", "future", ""} {
+		turn := historyTestTurn("turn", historyTestItem("item", "agentMessage", "answer"))
+		turn["status"] = status
+		view, err := projectDesktopHistory(historyTestState(true, turn), "session")
+		if err != nil || len(view.items) != 1 {
+			t.Fatalf("turn status prevented readable history: %v", err)
+		}
+		want := status
+		if status == "future" {
+			want = ""
+		}
+		if view.items[0].TurnStatus != want {
+			t.Fatalf("turnStatus=%q want=%q", view.items[0].TurnStatus, want)
+		}
+	}
+}
+
 func historyTestState(canonical bool, turns ...any) map[string]any {
 	state := controlState()
 	state["title"] = "fixture history"

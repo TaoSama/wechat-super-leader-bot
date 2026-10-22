@@ -25,12 +25,14 @@ export function canQueueSession(session: ScopedSession, connected: boolean, now 
   }
   const availability = normalizeSendAvailability(session.sendAvailability);
   if (availability) {
-    // Busy invalidation preserves the last preflight's timestamps. Queueing is
-    // backed by the current owner observation; dispatch still needs a new check.
+    // Busy or checking invalidation preserves the last preflight's timestamps.
+    // The current owner permits durable queueing; dispatch needs a new check.
     const observedAt = Date.parse(availability.observedAt), validUntil = Date.parse(availability.validUntil);
     const desktop = normalizeDesktopObservation(session.desktopObservation);
-    if (connected && desktop && isDesktopObservationFresh(desktop, now) && desktop.status === "active" &&
-        availability.route === "desktop-owner" && availability.state === "blocked" && availability.reason === "busy" &&
+    const pendingOwner = desktop?.status === "active" && availability.reason === "busy" ||
+      desktop?.status === "idle" && availability.reason === "checking";
+    if (connected && desktop && isDesktopObservationFresh(desktop, now) && pendingOwner &&
+        availability.route === "desktop-owner" && availability.state === "blocked" &&
         isIsoTimestamp(availability.observedAt) && isIsoTimestamp(availability.validUntil) &&
         observedAt <= now && validUntil >= observedAt && validUntil - observedAt <= MAX_SEND_AVAILABILITY_AGE_MS) return true;
     if (!KNOWN_SESSION_STATES.has(session.status)) return false;

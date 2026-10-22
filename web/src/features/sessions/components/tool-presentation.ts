@@ -15,10 +15,16 @@ const TOOL_TYPES = {
   thinking: { label: "思考", icon: Brain },
 } as const;
 
-const TOOL_STATES: Record<string, { label: string; tone: "running" | "failed" | "neutral" }> = {
+const TOOL_STATES: Record<string, { label: string; tone: "running" | "failed" | "neutral"; unfinished?: boolean; approval?: boolean }> = {
   inProgress: { label: "运行中", tone: "running" },
+  in_progress: { label: "运行中", tone: "running" },
   running: { label: "运行中", tone: "running" },
   executing: { label: "运行中", tone: "running" },
+  pending: { label: "等待中", tone: "neutral", unfinished: true },
+  waiting: { label: "等待中", tone: "neutral", unfinished: true },
+  waitingForApproval: { label: "等待审批", tone: "neutral", unfinished: true, approval: true },
+  requiresApproval: { label: "等待审批", tone: "neutral", unfinished: true, approval: true },
+  error: { label: "失败", tone: "failed" },
   completed: { label: "已完成", tone: "neutral" },
   failed: { label: "失败", tone: "failed" },
   canceled: { label: "已取消", tone: "neutral" },
@@ -26,16 +32,22 @@ const TOOL_STATES: Record<string, { label: string; tone: "running" | "failed" | 
   declined: { label: "已拒绝", tone: "neutral" },
 };
 
-export function presentTool(item: HistoryItem) {
-  const type = Object.hasOwn(TOOL_TYPES, item.type) ? TOOL_TYPES[item.type as keyof typeof TOOL_TYPES] : { label: "工具", icon: Wrench };
-  const state = item.status && Object.hasOwn(TOOL_STATES, item.status) ? TOOL_STATES[item.status] : undefined;
+export function presentToolState(status?: string) {
+  const state = status && Object.hasOwn(TOOL_STATES, status) ? TOOL_STATES[status] : undefined;
   return {
-    ...type,
-    summary: item.title || item.type,
     stateLabel: state?.label ?? "状态未知",
     tone: state?.tone ?? "neutral",
-    nativeStatus: item.status || "未记录",
+    nativeStatus: status || "未记录",
     isRunning: state?.tone === "running",
     isFailed: state?.tone === "failed",
+    isUnfinished: state?.tone === "running" || state?.unfinished === true,
+    isAwaitingApproval: state?.approval === true,
+    isDeclined: status === "declined",
+    isUnknown: !state,
   };
+}
+
+export function presentTool(item: HistoryItem) {
+  const type = Object.hasOwn(TOOL_TYPES, item.type) ? TOOL_TYPES[item.type as keyof typeof TOOL_TYPES] : { label: "工具", icon: Wrench };
+  return { ...type, ...presentToolState(item.status), summary: item.title || item.type };
 }
