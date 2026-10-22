@@ -58,8 +58,7 @@ export function groupSessionProjects<T extends DirectorySession>(sessions: T[]) 
     }
     group.sessions.sort((a, b) => updatedAt(b) - updatedAt(a) || 0);
   }
-  return result.sort((a, b) => updatedAt(b.sessions[0]) - updatedAt(a.sessions[0]) ||
-    a.project.groupLabel.localeCompare(b.project.groupLabel));
+  return result.sort((a, b) => updatedAt(b.sessions[0]) - updatedAt(a.sessions[0]) || 0);
 }
 
 export function renderSessionDirectory(sessions: DirectorySession[]): string {
