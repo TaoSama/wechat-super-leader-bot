@@ -4,10 +4,12 @@ import { expect, it, vi } from "vitest";
 import { PostgresStore } from "../../src/store/postgres.js";
 import { MemoryStore } from "../../src/store/memory.js";
 import { createExecution, executionRequestId } from "../../src/leader/plans/execution.js";
+import { createGoal, goalRequestId } from "../../src/leader/goals/goal.js";
+import { proposal, lease, commit, nextDecision } from "../fixtures/goals.js";
 import { ModelProgressRunner } from "../../src/notifications/model-progress.js";
 import { PROGRESS_OUTPUT_LIMIT } from "../../src/notifications/progress.js";
 import { claimNotificationRecord, receiptNotificationRecord, normalizeNotification, LEGACY_NOTIFICATION_ATTEMPT_MS,
-  type StoredNotification } from "../../src/notifications/contracts.js";
+  type NotificationSource, type StoredNotification } from "../../src/notifications/contracts.js";
 import type { LeaderModel } from "../../src/leader/model/contracts.js";
 import type { CommandRecord } from "../../src/types.js";
 
@@ -44,6 +46,73 @@ function initial() {
     { nodeId: "synthetic-node", sessionId: "synthetic-thread", prompt: "核查实际进展", sendRoute: "control-socket", dependsOn: [] },
   ] }, NOW);
 }
+
+it.skipIf(!databaseUrl).each(["plan", "goal"] as const)("preserves real PostgreSQL %s admission evidence through model generation and atomic enqueue", async kind => {
+  await inSchema(async (store, pool) => {
+    const memory = new MemoryStore(), stamp = new Date(NOW).toISOString();
+    const attempt = { token: randomUUID(), startedAt: NOW, expiresAt: NOW + 15_000 };
+    const base = { commandId: randomUUID(), action: "send" as const, status: "admitting" as const,
+      authority: { type: "admin" as const }, createdAt: stamp, updatedAt: stamp,
+      output: "unsent text is not a completed result", expiresAt: new Date(NOW + 600_000).toISOString() };
+    let source: NotificationSource, receipt: CommandRecord;
+    if (kind === "plan") {
+      const record = initial();
+      source = { type: kind, id: record.id };
+      for (const backend of [store, memory]) {
+        await backend.createExecutionIfAbsent(record);
+        expect(await backend.compareAndSetExecution({ ...record, revision: 2, attempts: [attempt] }, 1, NOW)).not.toBeNull();
+      }
+      receipt = { ...base, requestId: executionRequestId(record, 0), ...record.plan.actions[0] };
+    } else {
+      const record = createGoal("synthetic-chat", proposal(NOW), NOW), leased = lease(record), decided = commit(leased, nextDecision());
+      const claimed = structuredClone(decided); claimed.revision++; claimed.actions[0].attempt = attempt;
+      source = { type: kind, id: record.id };
+      for (const backend of [store, memory]) {
+        const confirmation = await backend.compareAndSetLeaderState(record.chatId, 0, {
+          inflight: { messageId: "confirm", inputHash: "hash", expiresAt: record.proposal.expiresAt, goal: record.proposal } });
+        await backend.confirmGoal(record, { revision: confirmation!.revision, messageId: "confirm", inputHash: "hash" }, () => NOW);
+        expect(await backend.compareAndSetGoal(leased, 1, () => NOW)).not.toBeNull();
+        expect(await backend.compareAndSetGoal(decided, 2, () => NOW)).not.toBeNull();
+        expect(await backend.compareAndSetGoal(claimed, 3, () => NOW)).not.toBeNull();
+      }
+      receipt = { ...base, requestId: goalRequestId(claimed, 0), ...record.proposal.targets[0], prompt: claimed.actions[0].input.prompt };
+    }
+    for (const backend of [store, memory]) await backend.createCommandIfAbsent(receipt);
+    const context = (await store.getProgressNotificationContext(source, FIRST))!;
+    expect(context).not.toBeNull();
+    expect(context).toEqual(await memory.getProgressNotificationContext(source, FIRST));
+    expect(context.evidence).toMatchObject([{ status: "claimed", commandId: receipt.commandId }]);
+    expect(context.evidence[0]).not.toHaveProperty("output");
+    expect((await store.getProgressNotificationContext(source, FIRST + 1))?.eventKey).toBe(context.eventKey);
+    const reportText = "请求已经保存，尚未发送。";
+    const complete = vi.fn<LeaderModel["complete"]>().mockImplementation(async messages => {
+      if (messages.some(message => message.role === "tool")) return { content: "", toolCalls: [] };
+      expect(JSON.parse(messages[1].content!).evidence).toMatchObject([{ status: "claimed", commandId: receipt.commandId }]);
+      return { content: null, toolCalls: [{ id: randomUUID(), type: "function", function: {
+        name: "report_progress", arguments: JSON.stringify({ text: reportText }),
+      } }] };
+    });
+    const runner = new ModelProgressRunner(store, { complete }, () => FIRST);
+    try { await runner.request(source); }
+    finally { await runner.stop(); }
+    expect(complete).toHaveBeenCalledTimes(2);
+    const column = kind === "plan" ? "execution_id" : "goal_id";
+    const rows = await pool.query(`SELECT data FROM leader_notifications WHERE ${column}=$1`, [source.id]);
+    expect(rows.rows).toHaveLength(1);
+    expect(normalizeNotification(rows.rows[0].data)).toMatchObject({ kind: "progress", text: reportText,
+      progress: { sequence: 1, eventKey: context.eventKey } });
+    expect((await store.getCommand(receipt.commandId))?.status).toBe("admitting");
+    const nextTime = FIRST + 60_000;
+    expect(await store.getProgressNotificationContext(source, nextTime)).toBeNull();
+    expect(await store.admitCommand(receipt.commandId)).not.toBeNull();
+    const next = (await store.getProgressNotificationContext(source, nextTime))!;
+    expect(next.evidence[0].status).toBe("queued");
+    expect(next.eventKey).not.toBe(context.eventKey);
+    expect(await store.enqueueProgressNotification(source, nextTime, { eventKey: context.eventKey, text: "stale draft" })).toBeNull();
+    expect(await store.enqueueProgressNotification(source, nextTime, { eventKey: next.eventKey, text: "current queued draft" }))
+      .toMatchObject({ kind: "progress", progress: { sequence: 2, eventKey: next.eventKey } });
+  });
+}, TIMEOUT_MS);
 
 it.skipIf(!databaseUrl)("uses real PostgreSQL bounded Unicode completion evidence, model tools, atomic claims and terminal rejection", async () => {
   await inSchema(async (store, pool, reopen) => {

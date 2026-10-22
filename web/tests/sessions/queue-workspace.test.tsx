@@ -13,6 +13,31 @@ const queued: CommandRecord = { commandId: "queued-command", requestId: "origina
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
+it("准备发送保留独立回执并锁住重复提交，转为排队后才提供取消", async () => {
+  let status: CommandRecord["status"] = "admitting";
+  const fetchMock = vi.fn(async (url: string) => new Response(JSON.stringify(url.endsWith("/messages") || url.includes("/commands/")
+    ? { ...queued, status } : { session, historyContext: "cf7e282f-d6d2-4a98-a517-9fb753f2549b", source: "control-socket",
+      fetchedAt: iso, items: [], nextCursor: null, truncated: false }), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+  render(<SessionWorkspace data={{ nodes, sessions: [session], commands: [], goals: emptyGoals(), executions: emptyExecutions() }} nodes={nodes} stale={false} onAuthFailure={vi.fn()} />);
+  fireEvent.click(screen.getByTestId("session-row-air-original"));
+  await act(async () => {});
+  fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "继续" } });
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "发送消息" })));
+  expect(screen.getByText("准备发送", { selector: ".receipt-heading" })).toBeVisible();
+  expect(screen.getByText("请求已保存，准备发送", { selector: ".send-receipt > p" })).toBeVisible();
+  expect(screen.queryByText("正在确认发送结果…")).toBeNull();
+  expect(screen.queryByRole("button", { name: "取消排队" })).toBeNull();
+  fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "下一条草稿" } });
+  expect(screen.getByRole("button", { name: "发送消息" })).toBeDisabled();
+  fireEvent.keyDown(screen.getByLabelText("发送给当前会话"), { key: "Enter" });
+  expect(fetchMock.mock.calls.filter(([url]) => url.endsWith("/messages"))).toHaveLength(1);
+  status = "queued";
+  await act(async () => vi.advanceTimersByTimeAsync(5000));
+  expect(screen.getByRole("button", { name: "取消排队" })).toBeVisible();
+  expect(screen.getByLabelText("发送给当前会话")).toHaveValue("下一条草稿");
+});
+
 it("忙碌会话明确提示排队，取消仅针对原消息，取消后可编辑下一条", async () => {
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;

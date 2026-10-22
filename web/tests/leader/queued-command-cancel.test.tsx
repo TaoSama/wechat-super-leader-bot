@@ -70,6 +70,7 @@ describe("persisted web queue cancellation", () => {
       { ...queued, commandId: "malformed", requestId: "web_short" },
       { ...queued, commandId: "unknown", status: "uncertain" },
       { ...queued, commandId: "accepted", status: "accepted" },
+      { ...queued, commandId: "admitting", status: "admitting" },
       { ...queued, commandId: "read", action: "read", sendRoute: undefined },
     ])));
     expect(screen.queryByRole("button", { name: "取消排队" })).toBeNull();

@@ -58,7 +58,7 @@
 .command-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--text-muted); }
 .status-badge { display: inline-flex; gap: 5px; align-items: center; color: var(--text-secondary); font-size: 12px; }
 .status-badge.status-completed, .status-badge.status-accepted { color: var(--accent-teal); }
-.status-badge.status-pending, .status-badge.status-uncertain { color: var(--warning); }
+.status-badge.status-admitting, .status-badge.status-pending, .status-badge.status-uncertain { color: var(--warning); }
 .status-badge.status-queued, .status-badge.status-expired { color: var(--warning); }
 .status-badge.status-cancelled { color: var(--text-muted); }
 .status-badge.status-failed { color: var(--danger); }

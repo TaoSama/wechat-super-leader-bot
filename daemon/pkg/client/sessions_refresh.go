@@ -60,7 +60,7 @@ func (d *Daemon) cachedSessions() []protocol.Session {
 	defer d.snapshotMu.RUnlock()
 	sessions := mergeSessionSources(d.managedSessionsLocked(), d.catalogSnapshot)
 	for i := range sessions {
-		if !d.canResumeSendLocked(sessions[i].ID, time.Now()) {
+		if !d.canQueueResumeSendLocked(sessions[i].ID, time.Now()) {
 			sessions[i].Capabilities = slices.DeleteFunc(sessions[i].Capabilities, func(capability protocol.ActionType) bool {
 				return capability == protocol.CapabilityResumeSend
 			})

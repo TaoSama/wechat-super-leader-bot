@@ -36,6 +36,7 @@ export const MetricsRibbon: React.FC<MetricsRibbonProps> = ({
   ).length;
 
   const counts = {
+    admitting: 0,
     queued: 0,
     cancelled: 0,
     expired: 0,
@@ -113,8 +114,9 @@ export const MetricsRibbon: React.FC<MetricsRibbonProps> = ({
             </div>
             <div className="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-1 tabular-nums">
               <span className="text-xl sm:text-2xl font-mono font-semibold text-[#E6EDF3]">
-                {counts.queued + counts.pending + counts.accepted}
+                {counts.admitting + counts.queued + counts.pending + counts.accepted}
               </span>
+              <span className="text-xs font-mono text-amber-300">准备发送:{counts.admitting}</span>
               <span className="text-xs font-mono text-amber-300">排队:{counts.queued}</span>
               <span
                 className="text-xs font-mono text-amber-300"

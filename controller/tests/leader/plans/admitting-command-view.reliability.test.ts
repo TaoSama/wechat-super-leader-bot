@@ -12,20 +12,20 @@ function fixture() {
       sendRoute: "control-socket", dependsOn: [] }] }, now);
   execution.attempts[0] = { token: randomUUID(), startedAt: now, expiresAt: now + EXECUTION_CLAIM_MS };
   const action = execution.plan.actions[0];
-  const command: CommandRecord = { ...action, action: "send", commandId: "synthetic-command", status: "preparing",
+  const command: CommandRecord = { ...action, action: "send", commandId: "synthetic-command", status: "admitting",
     requestId: executionRequestId(execution, 0), createdAt: new Date(now).toISOString(),
     updatedAt: new Date(now).toISOString(), expiresAt: new Date(now + 60_000).toISOString() };
   const store = { findCommandByRequestId: async () => command, getExecution: async () => execution };
   return { now, execution, command, store };
 }
 
-describe("plan preparing command views", () => {
+describe("plan admitting command views", () => {
   it.each([false, true])("exposes claimed without leaking preparation for metadataOnly=%s", async metadataOnly => {
     const f = fixture();
     const view = await readExecutionView(f.store, f.execution, f.now, metadataOnly);
     expect(view.steps[0]).toMatchObject({ status: "claimed", commandId: f.command.commandId });
-    expect(JSON.stringify(view)).not.toContain("preparing");
-    expect(f.command.status).toBe("preparing");
+    expect(JSON.stringify(view)).not.toContain("admitting");
+    expect(f.command.status).toBe("admitting");
   });
 
   it("keeps the preparation's valid plan authorization available to the dispatch guard", async () => {

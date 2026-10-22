@@ -97,9 +97,9 @@ it("keeps a real scheduler guard's command unclaimable until that guard rejects 
   try {
     await entered.promise;
     const saved = (await f.store.findCommandByRequestId(executionRequestId(execution, 0)))!;
-    expect(saved.status).toBe("preparing");
-    expect(publicCommand(saved).status).toBe("pending");
-    expect(commandSummary(saved).status).toBe("pending");
+    expect(saved.status).toBe("admitting");
+    expect(publicCommand(saved).status).toBe("admitting");
+    expect(commandSummary(saved).status).toBe("admitting");
     expect(await f.store.claimQueuedCommand(saved.commandId, "control-socket")).toBeNull();
     now += EXECUTION_CLAIM_MS + 1;
     await f.createCommands().dispatchQueued();
@@ -121,7 +121,7 @@ it("does not let concurrent retries or another service publish an in-flight guar
     const retryGuard = vi.fn();
     const repeated = await f.createCommands().submit(input, 0, retryGuard);
     originalId = repeated.commandId;
-    expect(repeated.status).toBe("preparing");
+    expect(repeated.status).toBe("admitting");
     expect(retryGuard).not.toHaveBeenCalled();
     await f.createCommands().dispatchQueued();
     expect(f.hub.sendCommand).not.toHaveBeenCalled();
@@ -131,22 +131,37 @@ it("does not let concurrent retries or another service publish an in-flight guar
   expect(f.hub.sendCommand).toHaveBeenCalledTimes(1);
 });
 
-it.each(["restart", "expiry"] as const)("cannot publish or resend a preparation interrupted by %s", async interruption => {
+it("does not let a restarted service publish an abandoned admission, and expires it without resend", async () => {
+  const f = await fixture();
+  const stamp = new Date().toISOString();
+  const saved = (await f.store.createCommandIfAbsent({ ...input, commandId: randomUUID(), status: "admitting",
+    sendRoute: "control-socket", authority: { type: "admin" }, createdAt: stamp, updatedAt: stamp,
+    expiresAt: new Date(START_TIME + TTL_SECONDS * 1_000).toISOString() })).command;
+  await f.store.init();
+  expect(await f.createCommands().submit(input, 0)).toMatchObject({ commandId: saved.commandId, status: "admitting" });
+  await f.createCommands().dispatchQueued();
+  expect(f.hub.sendCommand).not.toHaveBeenCalled();
+  vi.setSystemTime(START_TIME + TTL_SECONDS * 1_000);
+  await f.createCommands().dispatchQueued();
+  expect(await f.createCommands().submit(input, 0)).toMatchObject({ commandId: saved.commandId, status: "expired" });
+  expect(f.hub.sendCommand).not.toHaveBeenCalled();
+});
+
+it("cannot publish or resend an admission whose guard finishes after the deadline", async () => {
   const f = await fixture(1);
   const entered = deferred(), release = deferred();
   const submitting = f.commands.submit(input, 0, async () => { entered.resolve(); await release.promise; });
   try {
     await entered.promise;
-    if (interruption === "restart") await f.store.init();
-    else vi.setSystemTime(START_TIME + 1_000);
+    vi.setSystemTime(START_TIME + 1_000);
   } finally { release.resolve(); await submitting; }
   const result = await f.createCommands().submit(input, 0);
-  expect(result.status).toBe(interruption === "restart" ? "failed" : "expired");
+  expect(result.status).toBe("expired");
   await f.createCommands().dispatchQueued();
   expect(f.hub.sendCommand).not.toHaveBeenCalled();
 });
 
-it("retains session FIFO while an earlier guard is still preparing", async () => {
+it("retains session FIFO while an earlier guard is still admitting", async () => {
   const f = await fixture();
   const entered = deferred(), release = deferred();
   const submitting = f.commands.submit(input, 0, async () => { entered.resolve(); await release.promise; });

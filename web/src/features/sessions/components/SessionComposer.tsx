@@ -33,17 +33,17 @@ export function SessionComposer({ session, model, messages, terminal, mobile, co
     textarea.style.height = `${Math.min(160, Math.max(46, textarea.scrollHeight))}px`;
   }, [messages.draft]);
   const ReceiptIcon = submission?.uncertain || submission?.command?.status === "failed" ? TriangleAlert : submission?.command?.status === "queued" ? Clock : submission?.command?.status === "completed" ? Check : LoaderCircle;
-  const guidance = blockReason || (pending ? submission?.command?.status === "queued" ? "已排队，等待会话继续" : "正在确认发送结果…" : !connected ? "设备离线，发送后等待连接" : busy ? "会话忙碌，发送后排队" : mobile ? "" : "Enter 发送 · Shift + Enter 换行");
+  const guidance = blockReason || (pending ? submission?.command?.status === "admitting" ? "请求已保存，准备发送" : submission?.command?.status === "queued" ? "已排队，等待会话继续" : "正在确认发送结果…" : !connected ? "设备离线，发送后等待连接" : busy ? "会话忙碌，发送后排队" : mobile ? "" : "Enter 发送 · Shift + Enter 换行");
   return <form className="composer" onSubmit={event => { event.preventDefault(); onSend(); }}>
     {submission && <div className={`send-receipt ${submission.uncertain ? "receipt-uncertain" : submission.command?.status === "failed" ? "receipt-failed" : ""}`} role={submission.uncertain || submission.command?.status === "failed" ? "alert" : "status"}>
       <span className="receipt-heading"><ReceiptIcon size={15} aria-hidden="true" />{submission.command ? COMMAND_STATUS_SEMANTICS[submission.command.status].label : "提交结果待核查"}</span>
-      {(submission.uncertain || submission.command && ["failed", "accepted", "input-written"].includes(submission.command.status)) && <p>{submission.uncertain ? "结果不确定，请手动核查；恢复将沿用同一个请求。" : COMMAND_STATUS_SEMANTICS[submission.command!.status].description}</p>}
+      {(submission.uncertain || submission.command && ["admitting", "failed", "accepted", "input-written"].includes(submission.command.status)) && <p>{submission.uncertain ? "结果不确定，请手动核查；恢复将沿用同一个请求。" : COMMAND_STATUS_SEMANTICS[submission.command!.status].description}</p>}
       {submission.command?.status === "queued" && <><p>消息已排队，会在会话可以继续时发送。</p><button type="button" className="ui-button ghost" disabled={messages.sending || messages.cancelling} onClick={() => setCancelConfirm(true)}>{messages.cancelling ? "正在取消…" : "取消排队"}</button></>}
       {(submission.uncertain || messages.pollingStopped) && <button type="button" disabled={messages.sending || messages.cancelling} onClick={onRecover}>核查发送状态</button>}
       <details className="receipt-details"><summary>{submission.command?.status === "completed" ? "查看最终回执" : "查看发送详情"}</summary>
         <p className="receipt-prompt">{submission.prompt}</p>
         {submission.command?.sendRoute && <p>发送通道：{sendRouteLabel(submission.command.sendRoute)}</p>}
-        {!submission.uncertain && submission.command && !["failed", "accepted", "input-written"].includes(submission.command.status) && <p>{COMMAND_STATUS_SEMANTICS[submission.command.status].description}</p>}
+        {!submission.uncertain && submission.command && !["admitting", "failed", "accepted", "input-written"].includes(submission.command.status) && <p>{COMMAND_STATUS_SEMANTICS[submission.command.status].description}</p>}
         {submission.command?.status === "completed" && submission.command.output && <pre>{submission.command.output}</pre>}
       </details>
     </div>}

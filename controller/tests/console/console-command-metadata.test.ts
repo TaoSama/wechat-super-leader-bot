@@ -146,7 +146,8 @@ it.each(["valid", "commandId", "turnId", "hasOutput"] as const)("preserves compl
   for (const secret of [CHAT, output, "private constraints", '"input"', '"authority"']) expect(JSON.stringify(result)).not.toContain(secret);
 });
 
-it.each([false, true])("preserves a claimed plan's queued command with metadataOnly=%s", async metadataOnly => {
+it.each([["queued", false], ["queued", true], ["admitting", false], ["admitting", true]] as const)(
+  "projects a claimed plan's %s command with metadataOnly=%s", async (status, metadataOnly) => {
   const store = new MemoryStore();
   const execution = createExecution(CHAT, { id: uuid(20), expiresAt: NOW + 60_000, actions: [
     { nodeId: "node", sessionId: "queued-plan", prompt: "queued task", dependsOn: [], sendRoute: "control-socket" },
@@ -156,16 +157,17 @@ it.each([false, true])("preserves a claimed plan's queued command with metadataO
   execution.revision++;
   expect(await store.compareAndSetExecution(execution, 1, NOW)).not.toBeNull();
   await store.createCommandIfAbsent({ commandId: "queued-plan-command", requestId: executionRequestId(execution, 0),
-    nodeId: "node", sessionId: "queued-plan", action: "send", prompt: "queued task", sendRoute: "control-socket", status: "queued",
+    nodeId: "node", sessionId: "queued-plan", action: "send", prompt: "queued task", sendRoute: "control-socket", status,
     authority: { type: "plan", id: execution.id, chatId: CHAT }, createdAt: stamp, updatedAt: stamp, expiresAt: stamp });
   const fullReads = metadataOnly ? blockFullReads(store) : [];
   const result = await readConsoleExecutions(store, [CHAT], NOW, metadataOnly);
-  expect(result.items[0]).toMatchObject({ status: "active", steps: [{ status: "queued", commandId: "queued-plan-command" }] });
+  expect(result.items[0]).toMatchObject({ status: "active", steps: [{ status: status === "admitting" ? "claimed" : status, commandId: "queued-plan-command" }] });
   expect(result.items[0].steps[0]).not.toHaveProperty("turnId");
   fullReads.forEach(read => expect(read).not.toHaveBeenCalled());
 });
 
-it.each([false, true])("preserves a goal's queued command with metadataOnly=%s without claiming criterion completion", async metadataOnly => {
+it.each([["queued", false], ["queued", true], ["admitting", false], ["admitting", true]] as const)(
+  "projects a goal's %s command with metadataOnly=%s without claiming criterion completion", async (status, metadataOnly) => {
   const store = new MemoryStore();
   const goal = createGoal(CHAT, { id: uuid(30), expiresAt: NOW + 60_000, objective: "queued goal",
     criteria: ["test passes"], targets: [{ nodeId: "node", sessionId: "queued-goal", sendRoute: "control-socket" }],
@@ -176,11 +178,11 @@ it.each([false, true])("preserves a goal's queued command with metadataOnly=%s w
   const records = (store as unknown as { goals: Map<string, GoalRecord> }).goals;
   records.set(goal.id, normalizeGoal(goal));
   await store.createCommandIfAbsent({ commandId: "queued-goal-command", requestId: goalRequestId(goal, 0),
-    nodeId: "node", sessionId: "queued-goal", action: "send", prompt: goal.actions[0].input.prompt, sendRoute: "control-socket", status: "queued",
+    nodeId: "node", sessionId: "queued-goal", action: "send", prompt: goal.actions[0].input.prompt, sendRoute: "control-socket", status,
     authority: { type: "goal", id: goal.id, chatId: CHAT }, createdAt: stamp, updatedAt: stamp, expiresAt: stamp });
   const fullReads = metadataOnly ? blockFullReads(store) : [];
   const result = await readConsoleGoals(store, [CHAT], NOW, metadataOnly);
-  expect(result.items[0]).toMatchObject({ status: "active", actions: [{ status: "queued", commandId: "queued-goal-command" }],
+  expect(result.items[0]).toMatchObject({ status: "active", actions: [{ status: status === "admitting" ? "claimed" : status, commandId: "queued-goal-command" }],
     criteria: [{ supported: false, actions: [] }] });
   expect(result.items[0].actions[0]).not.toHaveProperty("turnId");
   fullReads.forEach(read => expect(read).not.toHaveBeenCalled());

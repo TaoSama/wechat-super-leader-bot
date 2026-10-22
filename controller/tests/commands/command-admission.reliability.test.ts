@@ -10,15 +10,15 @@ const databaseUrl = process.env.COMMAND_TEST_DATABASE_URL;
 const TTL_MS = 300_000;
 if (databaseUrl) {
   const url = new URL(databaseUrl);
-  if (url.hostname !== "127.0.0.1" || !url.pathname.startsWith("/command_authorization_test")) {
-    throw new Error("COMMAND_TEST_DATABASE_URL requires a disposable loopback command_authorization_test database");
+  if (url.hostname !== "127.0.0.1" || url.pathname !== "/command_admission_test") {
+    throw new Error("COMMAND_TEST_DATABASE_URL requires a disposable loopback command_admission_test database");
   }
 }
 
 function command(overrides: Partial<CommandRecord> = {}): CommandRecord {
   const now = Date.now();
   return { commandId: randomUUID(), requestId: randomUUID(), nodeId: "synthetic-node", sessionId: "synthetic-session",
-    action: "send", prompt: "Synthetic durable admission", sendRoute: "control-socket", status: "preparing",
+    action: "send", prompt: "Synthetic durable admission", sendRoute: "control-socket", status: "admitting",
     authority: { type: "chat", chatId: "synthetic-chat" }, createdAt: new Date(now).toISOString(),
     updatedAt: new Date(now).toISOString(), expiresAt: new Date(now + TTL_MS).toISOString(), ...overrides };
 }
@@ -50,13 +50,13 @@ for (const kind of ["memory", "postgres"] as const) {
       schema = undefined;
     });
 
-    it("excludes preparing work from queue and receipt admission, then atomically publishes and claims once", async () => {
+    it("excludes admitting work from queue and receipt admission, then atomically publishes and claims once", async () => {
       const prepared = (await store.createCommandIfAbsent(command())).command;
       expect(await store.listQueuedCommands()).toEqual([]);
       expect(await store.claimQueuedCommand(prepared.commandId, "control-socket")).toBeNull();
       await expect(store.updateCommandStatus(prepared.commandId, "accepted", undefined, undefined, "synthetic-turn"))
-        .rejects.toThrow("has not been dispatched");
-      const published = await Promise.all([store.publishPreparedCommand(prepared.commandId), store.publishPreparedCommand(prepared.commandId)]);
+        .rejects.toThrow("admission has not completed");
+      const published = await Promise.all([store.admitCommand(prepared.commandId), store.admitCommand(prepared.commandId)]);
       expect(published.filter(Boolean)).toHaveLength(1);
       expect(published.find(Boolean)).toMatchObject({ status: "queued", queueOrder: prepared.queueOrder });
       const claimed = await Promise.all([store.claimQueuedCommand(prepared.commandId, "control-socket"),
@@ -68,7 +68,7 @@ for (const kind of ["memory", "postgres"] as const) {
     it("retains a failed guard's request identity and never publishes it", async () => {
       const prepared = (await store.createCommandIfAbsent(command())).command;
       await store.updateCommandStatus(prepared.commandId, "failed", undefined, "Synthetic rejected guard");
-      expect(await store.publishPreparedCommand(prepared.commandId)).toBeNull();
+      expect(await store.admitCommand(prepared.commandId)).toBeNull();
       const duplicate = await store.createCommandIfAbsent({ ...prepared, commandId: randomUUID() });
       expect(duplicate).toMatchObject({ created: false, command: { commandId: prepared.commandId, status: "failed" } });
       expect(await store.listQueuedCommands()).toEqual([]);
@@ -76,20 +76,19 @@ for (const kind of ["memory", "postgres"] as const) {
 
     it("expires unsent preparation and cannot publish it after the deadline", async () => {
       const prepared = (await store.createCommandIfAbsent(command({ expiresAt: new Date(Date.now() - 1).toISOString() }))).command;
-      expect(await store.publishPreparedCommand(prepared.commandId)).toBeNull();
+      expect(await store.admitCommand(prepared.commandId)).toBeNull();
       await store.markExpiredActiveCommandsUncertain();
       expect((await store.getCommand(prepared.commandId))?.status).toBe("expired");
-      expect(await store.publishPreparedCommand(prepared.commandId)).toBeNull();
+      expect(await store.admitCommand(prepared.commandId)).toBeNull();
     });
 
-    it("fails interrupted preparation at startup but retains already approved queue work", async () => {
+    it("retains abandoned admission and approved queue work distinctly after startup", async () => {
       const prepared = (await store.createCommandIfAbsent(command())).command;
       const approved = (await store.createCommandIfAbsent(command({ sessionId: "another-session", status: "queued" }))).command;
       await store.init();
-      expect(await store.getCommand(prepared.commandId)).toMatchObject({ status: "failed",
-        error: "Controller restarted before dispatch authorization completed" });
+      expect(await store.getCommand(prepared.commandId)).toEqual(prepared);
       expect((await store.getCommand(approved.commandId))?.status).toBe("queued");
-      expect(await store.publishPreparedCommand(prepared.commandId)).toBeNull();
+      expect((await store.listQueuedCommands()).map(item => item.commandId)).toEqual([approved.commandId]);
       expect((await store.findCommandByRequestId(prepared.requestId))?.commandId).toBe(prepared.commandId);
     });
 
@@ -105,7 +104,7 @@ for (const kind of ["memory", "postgres"] as const) {
 
     it("releases only an untransmitted plan claim and preserves FIFO for resumed authorization", async () => {
       const prepared = (await store.createCommandIfAbsent(command({ authority: { type: "plan", id: randomUUID(), chatId: "synthetic-chat" } }))).command;
-      await store.publishPreparedCommand(prepared.commandId);
+      await store.admitCommand(prepared.commandId);
       await store.claimQueuedCommand(prepared.commandId, "control-socket");
       expect(await store.requeueClaimedCommand(prepared.commandId)).toMatchObject({ status: "queued", queueOrder: prepared.queueOrder });
       await store.claimQueuedCommand(prepared.commandId, "control-socket");

@@ -42,24 +42,24 @@ describe("durable queue web admission", () => {
     expect(sendBlockReason({ ...session, nodeId: "wrong/target", status: "idle" }, true, false)).not.toBeNull();
   });
 
-  it.each(["queued", "cancelled", "expired"] as const)("preserves %s as its own status", status => {
+  it.each(["admitting", "queued", "cancelled", "expired"] as const)("preserves %s as its own status", status => {
     expect(normalizeCommand({ ...queued, status })?.status).toBe(status);
     expect(matchesCommandFilter(status, status)).toBe(true);
-    expect(matchesCommandFilter(status, "running")).toBe(status === "queued");
+    expect(matchesCommandFilter(status, "running")).toBe(status === "admitting" || status === "queued");
     expect(matchesCommandFilter(status, "attention")).toBe(status === "expired");
   });
 });
 
 describe("queue receipt lifecycle", () => {
-  it("polls queued → pending → accepted → completed and suppresses duplicate submissions", async () => {
-    const statuses = ["pending", "accepted", "completed"] as const;
+  it.each(["admitting", "queued"] as const)("polls %s through completion and suppresses duplicate submissions", async initialStatus => {
+    const statuses: CommandRecord["status"][] = [...(initialStatus === "admitting" ? ["queued" as const] : []), "pending", "accepted", "completed"];
     let polls = 0;
-    const fetchMock = vi.fn(async (url: string) => response(url.includes("/commands/") ? { ...queued, status: statuses[polls++] } : queued));
+    const fetchMock = vi.fn(async (url: string) => response(url.includes("/commands/") ? { ...queued, status: statuses[polls++] } : { ...queued, status: initialStatus }));
     vi.stubGlobal("fetch", fetchMock);
     const { result, unmount } = renderHook(() => useSessionMessages(session, vi.fn()));
     act(() => result.current.setDraft("稍后执行"));
     await act(async () => { const first = result.current.submit(); await result.current.submit(); await first; });
-    expect(result.current.submission?.command?.status).toBe("queued");
+    expect(result.current.submission?.command?.status).toBe(initialStatus);
     await act(async () => result.current.submit());
     expect(fetchMock).toHaveBeenCalledTimes(1);
     for (const status of statuses) {
@@ -67,9 +67,24 @@ describe("queue receipt lifecycle", () => {
       expect(result.current.submission?.command?.status).toBe(status);
     }
     await act(async () => vi.advanceTimersByTimeAsync(10_000));
-    expect(polls).toBe(3);
+    expect(polls).toBe(statuses.length);
     unmount();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["failed", "expired"] as const)("restores the draft after admitting becomes %s without replaying the saved request", async status => {
+    const fetchMock = vi.fn(async (url: string) => response({ ...queued, status: url.includes("/commands/") ? status : "admitting" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(() => useSessionMessages(session, vi.fn()));
+    act(() => result.current.setDraft("稍后执行"));
+    await act(async () => result.current.submit());
+    await act(async () => { await result.current.submit(); await result.current.cancel(); });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(result.current.submission?.command?.status).toBe(status);
+    expect(result.current.draft).toBe("稍后执行");
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it.each(["cancelled", "expired"] as const)("treats %s as terminal and permits a subsequent explicit request", async status => {

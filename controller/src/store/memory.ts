@@ -65,14 +65,7 @@ export class MemoryStore implements IStore {
   private consoleLinks = new Map<string, ConsoleLinkRecord>(); // tokenHash -> ConsoleLinkRecord
   private consoleSessions = new Map<string, ConsoleSessionRecord>(); // tokenHash -> ConsoleSessionRecord
 
-  async init(): Promise<void> {
-    for (const command of this.commands.values()) {
-      if (command.status !== "preparing") continue;
-      command.status = "failed";
-      command.error = "Controller restarted before dispatch authorization completed";
-      command.updatedAt = new Date().toISOString();
-    }
-  }
+  async init(): Promise<void> {}
   async close(): Promise<void> {}
 
   async createCommandIfAbsent(cmd: CommandRecord): Promise<CreateCommandResult> {
@@ -155,7 +148,7 @@ export class MemoryStore implements IStore {
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
     for (const cmd of this.commands.values()) {
-      if (["preparing", "queued"].includes(cmd.status) && Date.parse(cmd.expiresAt) <= nowMs) {
+      if (["admitting", "queued"].includes(cmd.status) && Date.parse(cmd.expiresAt) <= nowMs) {
         cmd.status = "expired"; cmd.updatedAt = nowIso;
       }
       if (cmd.status === "pending" || (cmd.status === "accepted" && !cmd.turnId)) {
@@ -174,29 +167,26 @@ export class MemoryStore implements IStore {
     const all = [...this.commands.values()];
     return structuredClone(all.filter(cmd => cmd.status === "queued" && cmd.commandId > afterCommandId &&
       (cmd.deliveryMode === "steer" || !all.some(other => other.commandId !== cmd.commandId && other.action === "send" && other.nodeId === cmd.nodeId && other.sessionId === cmd.sessionId &&
-        (ACTIVE_COMMAND_STATUSES.includes(other.status) || ["preparing", "queued"].includes(other.status) && beforeInQueue(other, cmd))))
+        (ACTIVE_COMMAND_STATUSES.includes(other.status) || ["admitting", "queued"].includes(other.status) && beforeInQueue(other, cmd))))
       )
       .sort((a,b) => a.commandId.localeCompare(b.commandId)).slice(0,limit));
-  }
-  async publishPreparedCommand(commandId: string): Promise<CommandRecord | null> {
-    const cmd = this.commands.get(commandId);
-    if (!cmd || cmd.status !== "preparing" || Date.parse(cmd.expiresAt) <= Date.now()) return null;
-    const next = { ...cmd, status: "queued" as const, updatedAt: new Date().toISOString() };
-    this.commands.set(commandId, next);
-    return structuredClone(next);
   }
   async claimQueuedCommand(commandId: string, route: SendRoute): Promise<CommandRecord | null> {
     const cmd = this.commands.get(commandId);
     if (!cmd || cmd.status !== "queued" || Date.parse(cmd.expiresAt) <= Date.now()) return null;
     if (cmd.deliveryMode !== "steer" && [...this.commands.values()].some(other => other.commandId !== cmd.commandId && other.action === "send" &&
       other.nodeId === cmd.nodeId && other.sessionId === cmd.sessionId &&
-      (ACTIVE_COMMAND_STATUSES.includes(other.status) || ["preparing", "queued"].includes(other.status) && beforeInQueue(other,cmd)))) return null;
+      (ACTIVE_COMMAND_STATUSES.includes(other.status) || ["admitting", "queued"].includes(other.status) && beforeInQueue(other,cmd)))) return null;
     const next = { ...cmd, status: "pending" as const, sendRoute: route, updatedAt: new Date().toISOString() };
     this.commands.set(commandId,next); return structuredClone(next);
   }
-  async requeueClaimedCommand(commandId: string): Promise<CommandRecord | null> {
+  async admitCommand(commandId: string): Promise<CommandRecord | null> { return this.queueUnsentCommand(commandId,"admitting"); }
+  async requeueClaimedCommand(commandId: string): Promise<CommandRecord | null> { return this.queueUnsentCommand(commandId,"pending"); }
+  private queueUnsentCommand(commandId: string, status: "admitting" | "pending"): CommandRecord | null {
     const cmd = this.commands.get(commandId);
-    if (!cmd || cmd.status !== "pending" || cmd.action !== "send" || !["automation", "plan"].includes(cmd.authority?.type ?? "") ||
+    if (!cmd || cmd.status !== status || cmd.action !== "send" || !cmd.authority ||
+        status === "pending" && !["automation", "plan"].includes(cmd.authority.type) ||
+        !cmd.sendRoute || cmd.sendRoute === "terminal-pane" ||
         cmd.turnId !== undefined || cmd.inputReceipt !== undefined || Date.parse(cmd.expiresAt) <= Date.now()) return null;
     const next = { ...cmd, status: "queued" as const, updatedAt: new Date().toISOString() };
     this.commands.set(commandId, next);
@@ -263,7 +253,7 @@ export class MemoryStore implements IStore {
   private pruneKnownSessions(): void {
     const pinned = new Set<string>();
     const pin = (nodeId:string,sessionId:string) => pinned.add(JSON.stringify([nodeId,sessionId]));
-    for (const command of this.commands.values()) if (["preparing","queued",...ACTIVE_COMMAND_STATUSES].includes(command.status)) pin(command.nodeId,command.sessionId);
+    for (const command of this.commands.values()) if (["admitting","queued",...ACTIVE_COMMAND_STATUSES].includes(command.status)) pin(command.nodeId,command.sessionId);
     for (const execution of this.executions.values()) if (execution.status === "active") for (const action of execution.plan.actions) pin(action.nodeId,action.sessionId);
     for (const goal of this.goals.values()) if (goalIsOpen(goal)) for (const target of goal.proposal.targets) pin(target.nodeId,target.sessionId);
     const threshold = Date.now()-KNOWN_SESSION_TTL_MS;

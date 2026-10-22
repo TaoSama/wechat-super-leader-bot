@@ -338,9 +338,9 @@ func (rc *rpcConn) getLoadedSet(ctx context.Context, timeout time.Duration) (map
 }
 
 // DiscoverSessions queries both thread/loaded/list and thread/list (useStateDbOnly: true).
-// Only loaded idle threads receive "send". Idle and known unloaded targets
-// advertise "resume-send" for explicit sends and frozen-route continuations;
-// discovery never restores a thread.
+// Known loaded threads advertise routes for queued next-turn work, while known
+// unloaded targets advertise only "resume-send". Every send still requires a
+// fresh idle preflight; discovery never restores a thread.
 func (a *AppServerAdapter) DiscoverSessions(ctx context.Context) ([]protocol.Session, error) {
 	rc, err := a.connect(ctx)
 	if err != nil {

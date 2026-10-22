@@ -10,6 +10,7 @@ export type ActionType = "read" | "send";
 export type SessionCapability = ActionType | "resume-send";
 
 export type CommandStatus =
+  | "admitting"
   | "queued"
   | "cancelled"
   | "expired"
@@ -135,7 +136,7 @@ export interface ControlPlaneStatusResponse {
 }
 
 export type ExecutionStatus = "active" | "completed" | "failed" | "cancelled" | "expired";
-export type ExecutionStepStatus = Exclude<CommandStatus, "input-written"> | "waiting" | "claimed";
+export type ExecutionStepStatus = Exclude<CommandStatus, "input-written" | "admitting"> | "waiting" | "claimed";
 export interface ExecutionResultSource {
   step: number;
   commandId: string;
@@ -198,6 +199,10 @@ export const COMMAND_STATUS_SEMANTICS: Record<
   CommandStatus,
   CommandStatusSemantics
 > = {
+  admitting: {
+    status: "admitting", label: "准备发送", shortTag: "ADMITTING",
+    description: "请求已保存，准备发送", tone: "amber",
+  },
   queued: {
     status: "queued", label: "等待发送", shortTag: "QUEUED",
     description: "请求已保存，等待会话空闲及机器上线；本页同时保留一条在途请求，可取消排队", tone: "amber",
@@ -207,7 +212,7 @@ export const COMMAND_STATUS_SEMANTICS: Record<
     description: "排队请求已取消，未发送至会话", tone: "cyan",
   },
   expired: {
-    status: "expired", label: "排队已过期", shortTag: "EXPIRED",
+    status: "expired", label: "请求已过期", shortTag: "EXPIRED",
     description: "请求等待超时，未发送至会话；可重新编辑后提交", tone: "orange",
   },
   pending: {
