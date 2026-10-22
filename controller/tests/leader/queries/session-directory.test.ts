@@ -31,6 +31,19 @@ describe("WeChat project directory", () => {
     expect(body).not.toContain("改写的标题");
   });
 
+  it("keeps source order for equal or missing update times instead of sorting project names", () => {
+    const groups = groupSessionProjects([
+      session("unknown-z", { cwd: "/work/z-unknown", updatedAt: undefined }),
+      session("known-z", { cwd: "/work/z-known" }),
+      session("unknown-a", { cwd: "/work/a-unknown", updatedAt: "invalid" }),
+      session("known-a", { cwd: "/work/a-known" }),
+      session("newest", { cwd: "/work/newest", updatedAt: "2026-10-22T01:00:00Z" }),
+    ]);
+    expect(groups.map(group => group.sessions[0].id)).toEqual([
+      "newest", "known-z", "known-a", "unknown-z", "unknown-a",
+    ]);
+  });
+
   it("keeps same-named projects on different machines and different paths separate", () => {
     const groups = groupSessionProjects([
       session("air"), session("mini", { nodeId: "mini", nodeName: "Mac Mini" }),
