@@ -35,7 +35,6 @@ export function barrier(predicate) {
 export async function createControlFixture({ env, databaseUrl, token, nodeId, nodeToken, chatIds, modelUrl, evidence, commandTtlSeconds = 60 }) {
   const reservation = createServer();
   const port = await listenLocal(reservation);
-  await closeLocal(reservation);
   const base = `http://127.0.0.1:${port}`;
   const logs = [], frames = [], requests = [], errors = [], peers = new Set(), barriers = new Set();
   let child, spawnError, offline = false, stopping = false, httpFault;
@@ -117,7 +116,18 @@ export async function createControlFixture({ env, databaseUrl, token, nodeId, no
       }
     });
   });
-  const proxyUrl = `http://127.0.0.1:${await listenLocal(proxy)}`;
+  let proxyPort;
+  try {
+    proxyPort = await withTestCleanup(() => listenLocal(proxy), [
+      { label: 'Controller port reservation', cleanup: () => closeLocal(reservation) },
+    ]);
+  } catch (error) {
+    await withTestCleanup(async () => { throw error; }, [
+      { label: 'Controller proxy WebSockets', cleanup: () => new Promise((resolve, reject) => wss.close(error => error ? reject(error) : resolve())) },
+      { label: 'Controller HTTP proxy', cleanup: () => closeLocal(proxy) },
+    ]);
+  }
+  const proxyUrl = `http://127.0.0.1:${proxyPort}`;
   controllerEnv.CONSOLE_PUBLIC_URL = proxyUrl;
   const fixture = {
     base, proxyUrl, logs, frames, requests, errors, env: controllerEnv,

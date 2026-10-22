@@ -94,7 +94,9 @@ export const queueScenarios = [
       assert.equal(h.native.starts.length, index + 1, 'Queue bypassed accepted active task');
       await h.complete(expected.commandId, TASK_RESULT + `FIFO-${index + 1}`);
     }
+    await delay(OBSERVE_MS);
     assert.equal(h.native.starts.length, 3);
+    assert(!h.native.starts.some(start => start.prompt === responses[2].prompt), 'Cancelled command reached native dispatch');
     assert.equal((await h.command(responses[2].commandId)).status, 'cancelled');
     h.evidence('assertions', { queued: 4, deliveredInOrder: 3, cancelledDeliveries: 0, controllerCrash: true });
   }],
