@@ -53,15 +53,16 @@ it("聊天输入区收起发送通道说明，详情仍可查看模型设置和�
   expect(within(details).getByText(/关闭页面后不会保存/)).toBeVisible();
 });
 
-it("会话列表突出标题、项目和模型，不展示消息预览和时间，技术字段在详情中", async () => {
+it("会话列表按项目归组并突出标题，模型、目录和时间在详情中", async () => {
   render(<App />);
   const row = await screen.findByTestId("session-row-local-session-one");
   expect(row).toHaveTextContent(session.title);
   expect(row).not.toHaveTextContent(session.preview!);
   expect(row.querySelector("time")).toBeNull();
-  expect(within(row).getByRole("img", { name: "空闲" })).toBeInTheDocument();
-  expect(row).toHaveTextContent("gpt-6.1-sol");
-  expect(row).toHaveTextContent("editorial-project");
+  expect(within(row).getByText("闲")).toBeInTheDocument();
+  expect(row).not.toHaveTextContent("gpt-6.1-sol");
+  expect(row).not.toHaveTextContent("editorial-project");
+  expect(row.closest("section")).toHaveTextContent("editorial-project");
   expect(row).not.toHaveTextContent("/workspace/");
   expect(row).not.toHaveTextContent("openai");
   fireEvent.click(row);
@@ -71,6 +72,7 @@ it("会话列表突出标题、项目和模型，不展示消息预览和时间�
   fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
   const metadata = screen.getByRole("dialog", { name: "会话详情" });
   expect(metadata).toHaveAttribute("open");
+  expect(within(metadata).getByText("模型").nextElementSibling).toHaveTextContent("gpt-6.1-sol");
   expect(within(metadata).getByText(session.cwd)).toBeVisible();
   expect(within(metadata).getByText("最近更新").parentElement).toHaveTextContent("2026-10-11 18:00:00");
 });
