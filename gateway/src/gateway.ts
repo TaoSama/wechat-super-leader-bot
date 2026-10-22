@@ -7,7 +7,7 @@ import { ControllerClient, ChatNotAllowedError } from "./controller/client.js";
 import { PermanentImageDownloadError } from "./controller/image-client.js";
 import { PermanentReplyUnavailableError } from "./controller/reply-client.js";
 import { DEFAULT_MESSAGE_MAX_CHARS } from "./wechat/markdown.js";
-import { HealthTracker } from "./runtime/health.js";
+import { HealthTracker, sanitizeErrorType } from "./runtime/health.js";
 import { CHECKPOINT_MARGIN_MS, REPLY_TIMEOUT_MS } from "./runtime/budgets.js";
 import { type NotificationDeliverySummary } from "./controller/notification-contract.js";
 import { NotificationOutbox, NotificationDiagnosticError } from "./runtime/notification-outbox.js";
@@ -339,7 +339,8 @@ export class WeChatGateway {
       if ((fresh || retryingAdmission) && msg.contextToken?.trim()) this.resultDispatcher?.noteInbound(msg.chatId, msg.deliveryKey);
       if ((fresh || retryingAdmission) && msg.contextToken?.trim()) {
         // Give deferred replies this chat's refreshed budget before new progress or results.
-        await this.flushRepliesOnce(msg.chatId);
+        try { await this.flushRepliesOnce(msg.chatId); }
+        catch (error) { traceEvent("message.admission.flush.failed", { reason: sanitizeErrorType(error) }); }
       }
       if (this.stateManager.outbox[msg.deliveryKey]) {
         this.stateManager.recordProcessedMessageKey(msg.deliveryKey, { preserveReplyEvidence: true });
@@ -350,7 +351,7 @@ export class WeChatGateway {
       catch (error) {
         if (!(error instanceof OutboxBackpressureError)) throw error;
         // The new inbound may have restored the budget needed to drain a full queue.
-        await this.flushRepliesOnce();
+        await this.flushRepliesOnce(undefined, msg.chatId);
         this.stateManager.assertOutboxCapacity(msg.deliveryKey);
       }
       this.ilink.sendTyping(msg.chatId);
@@ -368,7 +369,7 @@ export class WeChatGateway {
       } catch (error) {
         if (error instanceof ReplyEngineBackpressureError && this.replyEngine) {
           // This inbound may restore a window needed to release pinned replies.
-          await this.flushRepliesOnce();
+          await this.flushRepliesOnce(undefined, msg.chatId);
           controllerReply = await this.replyEngine.reply(this.stateManager.account!.accountId, request, this.controller, { progress });
         } else {
           if (!(error instanceof ReplyEngineConflictError)) throw error;
@@ -512,17 +513,19 @@ export class WeChatGateway {
   }
 
   /** Recovery reads immutable responses only; an old command is never POSTed again. */
-  public async flushRepliesOnce(chatId?: string): Promise<void> {
+  public async flushRepliesOnce(chatId?: string, callerChatId = chatId): Promise<void> {
     // A concurrent recovery pass must not bypass a newly refreshed chat's turn.
     while (this.replyFlushCompletion) await this.replyFlushCompletion;
     if (this.stopped) return;
     let complete!: () => void;
     this.replyFlushCompletion = new Promise<void>(resolve => { complete = resolve; });
     let firstError: unknown;
+    const canRecover = (item: DeliveryOutboxItem) => (chatId === undefined || item.chatId === chatId) &&
+      (item.chatId === callerChatId || !this.activeInboundChats.has(item.chatId));
     try {
       // Retry terminal journal acknowledgements after a prior journal save failure.
       for (const item of Object.values(this.stateManager.outbox)) {
-        if (chatId !== undefined && item.chatId !== chatId) continue;
+        if (!canRecover(item)) continue;
         if (this.activeReplyDeliveries.has(item.deliveryKey)) continue;
         if (item.kind === "reply" && item.source === "engine" && item.status === "receipt" && item.receiptStatus === "accepted") {
           try {
@@ -540,10 +543,11 @@ export class WeChatGateway {
         }
       }
       const items = Object.values(this.stateManager.outbox).filter(item => item.kind === "reply" && item.status === "pending" &&
-        (chatId === undefined || item.chatId === chatId) &&
+        canRecover(item) &&
         !this.activeReplyDeliveries.has(item.deliveryKey));
       const offset = this.replyOutboxCursor % Math.max(1, items.length);
       for (const item of [...items.slice(offset), ...items.slice(0, offset)]) {
+        if (!canRecover(item) || this.activeReplyDeliveries.has(item.deliveryKey)) continue;
         if (this.hasQuarantinedInboundReply(item.deliveryKey)) {
           await this.withRecoveryTrace(item, async () => {
             this.stateManager.updateOutbox(item.deliveryKey, { status: "uncertain" });
