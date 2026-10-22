@@ -85,9 +85,10 @@ export class CommandService {
       if (request.skills?.length && this.hub.isNodeConnected(request.nodeId) && !hasSkillRefs(this.hub.getNodeSkills(request.nodeId),request.skills)) throw new CommandError(409,"Selected skill unavailable or changed");
     } else this.targetRoute(request);
     const now = new Date();
-    const record: CommandRecord = { ...request, commandId:`cmd_${randomUUID()}`,status:request.action === "send" && sendRoute !== "terminal-pane" ? "queued" : "pending",
+    const record: CommandRecord = { ...request, commandId:`cmd_${randomUUID()}`,status:request.action === "send" && sendRoute !== "terminal-pane" ? "admitting" : "pending",
       ...(sendRoute ? {sendRoute,deliveryMode:request.deliveryMode ?? "next-turn",authority } : {}),
       createdAt:now.toISOString(),updatedAt:now.toISOString(),expiresAt:new Date(now.getTime()+this.ttlSeconds*1000).toISOString() };
+    // Keep the request reserved but undispatchable until its full admission checks finish.
     const created = await this.store.createCommandIfAbsent(record);
     if (!created.created) return created.command;
     this.onStatusChanged?.();
@@ -97,8 +98,10 @@ export class CommandService {
       await this.store.updateCommandStatus(record.commandId,"failed",undefined,"Target send route or authority changed before transmission");
       throw new CommandError(409,"Target send route or authority changed before transmission");
     }
-    if (request.action === "send" && sendRoute !== "terminal-pane") await this.dispatchOne(created.command,waitMs);
-    else await this.transmit(record,waitMs);
+    if (request.action === "send" && sendRoute !== "terminal-pane") {
+      const queued = await this.store.admitCommand(record.commandId);
+      if (queued) { this.onStatusChanged?.(); await this.dispatchOne(queued,waitMs); }
+    } else await this.transmit(record,waitMs);
     return (await this.store.getCommand(record.commandId))!;
   }
 

@@ -9,6 +9,7 @@ import { parseAutomations } from "../features/notifications/automation-contract"
 import { parseDeliveries } from "../features/notifications/delivery-contract";
 
 const VALID_COMMAND_STATUSES: ReadonlySet<CommandStatus> = new Set([
+  "admitting",
   "queued",
   "cancelled",
   "expired",
