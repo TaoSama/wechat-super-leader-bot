@@ -18,6 +18,8 @@ const OTHER_REPLY = 'SDK_OTHER_CHAT_RESULT';
 const FIRST_TEXT = '合成SDK原聊天唯一成果';
 const FIRST_REPLY = 'SDK_FIRST_CHAT_RESULT';
 const STARTED_TEXT = '合成SDK执行中崩溃';
+const INBOX_CONTEXT = 'synthetic-inbox-context:原始消息';
+const ACK_REPLY = '[reliability-node] Synthetic reliability session\n\n合成任务已保存；请以本轮持久回执核对进度。';
 const CHUNK_CHARS = 64;
 const runtimeProvenanceCache = new Map();
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -45,7 +47,7 @@ async function runtimeProvenance(executable) {
   assert.equal(identity(await stat(executable)), before, 'Native executable changed while recording provenance');
   const provenance = { executable, sha256: digest.digest('hex'), bytes,
     platform: process.platform, arch: process.arch, transport: 'app-server',
-    auxiliaryExternalMcpAndTelemetryDisabled: true, nativeExecutableReplaced: false };
+    nativeExecutableReplaced: false };
   runtimeProvenanceCache.set(executable, { identity: before, provenance });
   return provenance;
 }
@@ -59,15 +61,152 @@ async function nativeExecutions(h) {
   assert.equal(starts.length, executions.length, 'Each native app-server query must start exactly one turn');
   assert(executions.every(item => starts.filter(start => start.pid === item.pid).length === 1),
     'Native app-server turn/start ownership did not match its recorded process');
+  const mcp = records.filter(item => item.event === 'rpc-notification' && item.method === 'mcpServer/startupStatus/updated');
+  for (const execution of executions) {
+    const startup = mcp.filter(item => item.pid === execution.pid);
+    assert(startup.length > 0, 'Native MCP startup evidence is missing');
+    assert(startup.every(item => item.serverName === 'wechat_control'), 'Unexpected external MCP server started');
+    const threadId = starts.find(item => item.pid === execution.pid).params.threadId;
+    assert.equal(typeof threadId, 'string');
+    assert(startup.every(item => item.threadId === threadId), 'MCP startup belongs to another native thread');
+    assert(startup.every(item => item.error === null && item.failureReason === null), 'MCP startup reported an error');
+    assert.equal(startup.at(-1).status, 'ready', 'Local control MCP never became ready');
+    assert(!startup.some(item => ['failed', 'cancelled'].includes(item.status)), 'Local control MCP startup failed');
+  }
   if (executions.length && !h.sdkRuntimeRecorded) {
     h.evidence('sdk-runtime-provenance', await runtimeProvenance(executions[0].executable));
     h.sdkRuntimeRecorded = true;
   }
   h.evidence('sdk-native-processes', { records });
+  h.evidence('sdk-mcp-startup-observed', { startup: mcp });
   return executions;
 }
 
 export const sdkScenarios = [
+  ['sdk-durable-inbox-cursor-crash-recovery', async h => {
+    const initialCursor = (await h.wechat.readState()).sync_buf;
+    const createdAtMs = Date.now() - 1_000;
+    const message = h.wechat.enqueue(TASK, { chatId: CHAT, contextToken: INBOX_CONTEXT, createdAtMs });
+    const originalKey = key(CHAT, message.client_id);
+    const expected = { chatId: CHAT, text: TASK, messageId: message.client_id, deliveryKey: originalKey,
+      contextToken: INBOX_CONTEXT, createdAtMs };
+    const committedCursor = `synthetic-cursor-${h.wechat.incoming.length}`;
+    let authorizations = 0;
+    const hold = h.control.holdHttp(entry => entry.method === 'POST' && entry.path === '/v1/chats/authorize' &&
+      entry.body?.chatId === CHAT && ++authorizations === 2);
+    const options = { ...h.gatewayOptions, mode: '--run', auditInbox: true };
+    const first = h.wechat.start(options);
+    const authorization = await h.entered(hold.entered, 'inbox admitted; native execution authorization held');
+    assert.equal(authorization.status, 200);
+    assert.equal(JSON.parse(authorization.response).allowed, true);
+    await waitFor(async () => {
+      h.healthy(); return (await h.wechat.readState()).sync_buf === committedCursor;
+    }, 'poll cursor committed while execution remains blocked');
+    assert.equal(first.child.exitCode, null); assert.equal(first.child.signalCode, null);
+    assert.equal(authorizations, 2);
+    assert.deepEqual((await h.wechat.readInbox()).items, [expected]);
+    const audit = await h.wechat.readInboxAudit();
+    const admission = audit.find(item => item.pid === first.child.pid && item.target === 'inbox' &&
+      item.inbox.value?.items.some(value => value.deliveryKey === originalKey));
+    const commit = audit.find(item => item.pid === first.child.pid && item.cursorChanged && item.cursor === committedCursor);
+    assert(admission && commit, 'Missing actual inbox/cursor rename checkpoints');
+    assert(admission.sequence < commit.sequence, 'Cursor committed before durable inbox');
+    assert.equal(admission.state.value.sync_buf, initialCursor);
+    assert.deepEqual(admission.inbox.value.items, [expected]);
+    assert.deepEqual(commit.inbox.value.items, [expected]);
+    assert.equal((await nativeExecutions(h)).length, 0);
+    assert.equal(h.sdkModel.calls.length, 0); assert.equal(h.model.calls.length, 0);
+    assert.equal(h.native.starts.length, 0); assert.equal(h.wechat.sent.length, 0);
+    await assert.rejects(readFile(join(workspace(h, CHAT), '.replies.json')), error => error.code === 'ENOENT');
+    const beforeCrash = await h.wechat.readState();
+    assert.equal(beforeCrash.delivery_outbox[originalKey], undefined);
+    assert.equal(beforeCrash.reply_deliveries[originalKey], undefined);
+    h.evidence('sdk-inbox-pre-crash-checkpoint', { expected, initialCursor, committedCursor,
+      pid: first.child.pid, admission, commit, audit, authorizations,
+      nativeExecutions: 0, sdkModelCalls: 0, controllerModelCalls: 0, targetStarts: 0, sends: 0 });
+    const crash = await h.wechat.kill(first);
+    assert.equal(crash.signal, 'SIGKILL');
+    assert.equal((await nativeExecutions(h)).length, 0);
+    assert.equal(h.sdkModel.calls.length, 0); assert.equal(h.model.calls.length, 0);
+    assert.equal(h.control.requests.filter(item => item.method === 'POST' && item.path === '/v1/chats/authorize' &&
+      item.body?.chatId === CHAT).length, 2, 'Execution authorization barrier expired before the crash');
+    await assert.rejects(readFile(join(workspace(h, CHAT), '.replies.json')), error => error.code === 'ENOENT');
+    hold.release();
+    assert.deepEqual((await h.wechat.readInbox()).items, [expected]);
+
+    const recoveryPollStart = h.wechat.polls.length;
+    const source = h.wechat.holdPoll();
+    const recovered = h.wechat.start(options);
+    const emptyPoll = await h.entered(source.entered, 'restarted run reads the committed source cursor');
+    assert.deepEqual(emptyPoll, { cursor: committedCursor, count: 0 }); source.release();
+    await waitFor(async () => {
+      h.healthy();
+      const state = await h.wechat.readState();
+      return (await h.wechat.readInbox()).items.length === 0 &&
+        state.delivery_outbox[originalKey] === undefined && h.wechat.sent.some(item => text(item) === ACK_REPLY);
+    }, 'disk inbox recovered and native reply acknowledged');
+    assert.equal((await journal(h, CHAT, message.client_id)).stage, 'completed');
+    assert.equal((await journal(h, CHAT, message.client_id)).delivery, 'accepted');
+    assert.equal((await nativeExecutions(h)).length, 1);
+    const submissions = h.control.requests.filter(item => item.method === 'POST' && item.path === '/v1/messages');
+    assert.equal(submissions.length, 1);
+    assert.deepEqual(submissions[0].body, { chatId: CHAT, messageId: message.client_id, text: TASK });
+    const stored = await h.pool.query('SELECT chat_id, message_id, text FROM messages');
+    assert.equal(stored.rowCount, 1);
+    assert.deepEqual(stored.rows[0], { chat_id: CHAT, message_id: message.client_id, text: TASK });
+    const commands = await h.pool.query('SELECT command_id FROM commands');
+    assert.equal(commands.rowCount, 1); await h.native.waitForStarts(1);
+    assert.equal(h.wechat.sent.length, 1); assert.equal(text(h.wechat.sent[0]), ACK_REPLY);
+    assert.equal(h.wechat.sent[0].to_user_id, CHAT); assert.equal(h.wechat.sent[0].context_token, INBOX_CONTEXT);
+    await h.wechat.stop(recovered);
+    const restartAudit = await h.wechat.readInboxAudit();
+    const startup = restartAudit.find(item => item.pid === recovered.child.pid && item.operation === 'startup');
+    assert(startup, 'Missing restart disk snapshot');
+    assert.deepEqual(startup.inbox.value.items, [expected]); assert.equal(startup.cursor, committedCursor);
+    const sourcePolls = h.wechat.polls.slice(recoveryPollStart);
+    assert(sourcePolls.length > 0);
+    assert(sourcePolls.every(item => item.cursor === committedCursor && item.count === 0), 'Recovery used source replay');
+    assert.equal(h.wechat.incoming.length, 1);
+    h.evidence('sdk-inbox-recovered', { expected, startup, sourcePolls, restartAudit, submissions: submissions.map(item => item.body) });
+
+    await h.complete(commands.rows[0].command_id);
+    const delivery = await h.waitResult();
+    assert.equal(delivery.chatId, CHAT);
+    const modelCalls = h.sdkModel.calls.length, controllerCalls = h.model.calls.length;
+    const finalPollStart = h.wechat.polls.length;
+    const final = h.wechat.start(options);
+    await waitFor(async () => {
+      h.healthy(); return (await h.delivery(delivery.id)).status === 'accepted' && h.wechat.polls.length > finalPollStart;
+    }, 'final result delivered after another real run restart');
+    const finals = h.wechat.sent.filter(item => text(item).includes(TASK_RESULT));
+    assert.equal(finals.length, 1); assert.equal(finals[0].to_user_id, CHAT);
+    assert.equal(finals[0].context_token, INBOX_CONTEXT); assert.equal(h.wechat.sent.length, 2);
+    assert.equal((await nativeExecutions(h)).length, 1);
+    assert.equal(h.sdkModel.calls.length, modelCalls); assert.equal(h.model.calls.length, controllerCalls);
+    assert.equal(h.native.starts.length, 1); assert.equal(h.wechat.incoming.length, 1);
+    assert(h.wechat.polls.slice(finalPollStart).every(item => item.cursor === committedCursor && item.count === 0));
+    const replayPollStart = h.wechat.polls.length;
+    h.wechat.enqueue(TASK, { id: message.client_id, chatId: CHAT, contextToken: INBOX_CONTEXT, createdAtMs });
+    const replayCursor = `synthetic-cursor-${h.wechat.incoming.length}`;
+    await waitFor(async () => {
+      h.healthy(); return (await h.wechat.readState()).sync_buf === replayCursor && (await h.wechat.readInbox()).items.length === 0;
+    }, 'real run discards stable message replay after completed recovery');
+    await h.wechat.stop(final);
+    assert.equal((await nativeExecutions(h)).length, 1);
+    assert.equal(h.sdkModel.calls.length, modelCalls); assert.equal(h.model.calls.length, controllerCalls);
+    assert.equal(h.native.starts.length, 1); assert.equal(h.wechat.sent.length, 2);
+    assert.equal(h.control.requests.filter(item => item.method === 'POST' && item.path === '/v1/messages').length, 1);
+    assert.equal((await h.pool.query('SELECT command_id FROM commands')).rowCount, 1);
+    const replayPolls = h.wechat.polls.slice(replayPollStart);
+    assert.equal(replayPolls.filter(item => item.count === 1 && item.cursor === committedCursor).length, 1);
+    assert.deepEqual((await h.wechat.readInbox()).items, []);
+    h.evidence('sdk-inbox-final-audit', { records: await h.wechat.readInboxAudit(), replayPolls });
+    h.evidence('assertions', { leaderMode: 'codex', realRunLoop: true, inboxBeforeCursor: true,
+      crashBoundary: 'cursor committed; native and model not started', originalInboxTupleRestored: true,
+      recoverySourceReplays: 0, completedSourceReplays: 1, nativeExecutions: 1, controllerSubmissions: 1, messages: 1, commands: 1,
+      targetStarts: 1, acknowledgedReplies: 1, finalMessages: 1, correctChatAndContext: true,
+      receipt: 'accepted', duplicateExecutions: 0 });
+  }, sdk({ control: true, reply: ACK_REPLY })],
   ['sdk-started-turn-crash-no-blind-retry', async h => {
     const hold = h.sdkModel.holdNextResponse();
     const message = h.wechat.enqueue(STARTED_TEXT, { chatId: CHAT });
