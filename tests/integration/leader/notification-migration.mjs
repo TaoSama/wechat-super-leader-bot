@@ -20,6 +20,9 @@ export async function verifyNotificationMigration({ databaseUrl, Pool, PostgresS
     await store.init();
     assert.equal((await fixture.query('SELECT current_schema() AS name')).rows[0].name, schema);
     await fixture.query('DROP TABLE leader_notifications');
+    // Re-run the baseline migration against the legacy table. The version ledger
+    // is created by the initial setup above and would otherwise skip migration 1.
+    await fixture.query('DROP TABLE controller_schema_migrations');
     await fixture.query(`CREATE TABLE leader_notifications (
       id VARCHAR(36) COLLATE "C" PRIMARY KEY,
       execution_id VARCHAR(36) COLLATE "C" NOT NULL UNIQUE REFERENCES leader_executions(id),
