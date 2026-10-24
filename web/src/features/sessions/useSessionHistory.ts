@@ -33,7 +33,7 @@ interface HistoryState {
   sizeBlocked?: boolean;
 }
 interface Gap { beforeId: string; cursor: string | null; previousIds: Set<string>; seen: Set<string> }
-interface Job { older: boolean; reset: boolean; resolve: (loaded: boolean) => void; promise: Promise<boolean> }
+interface Job { older: boolean; reset: boolean; beforeId?: string; resolve: (loaded: boolean) => void; promise: Promise<boolean> }
 interface CachedHistory {
   state: HistoryState;
   oldestCursor: string | null;
@@ -50,7 +50,7 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
   const terminalObservedAt = session && isTerminalSession(session) ? session.observedAt : undefined;
   const [state, setState] = useState<HistoryState>(EMPTY);
   const cacheRef = useRef(new HistoryCache<CachedHistory>());
-  const requestRef = useRef<(older?: boolean, reset?: boolean) => Promise<boolean>>(async () => false);
+  const requestRef = useRef<(older?: boolean, reset?: boolean, beforeId?: string) => Promise<boolean>>(async () => false);
   const lifecycleRef = useRef<() => void>(() => undefined);
   const sourceRef = useRef<(source?: "control-socket") => Promise<boolean>>(async () => false);
   const authRef = useRef(onAuthFailure);
@@ -119,9 +119,9 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
       if (disposed || active || contextExpired || !available()) return;
       const job = queue.shift();
       if (!job) { schedule(); return; }
-      const bridge = job.older && !memoryGap ? gaps[gaps.length - 1] : undefined;
+      const bridge = job.older && !memoryGap ? job.beforeId === undefined ? gaps[gaps.length - 1] : gaps.find(gap => gap.beforeId === job.beforeId) : undefined;
       const cursor = job.older ? bridge ? bridge.cursor : oldestCursor : undefined;
-      if (job.older && !cursor) { job.resolve(false); void pump(); return; }
+      if (job.older && (!cursor || job.beforeId !== undefined && !bridge)) { job.resolve(false); void pump(); return; }
       const controller = new AbortController();
       const flight = { controller, job };
       active = flight;
@@ -242,7 +242,7 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
       }
     }
 
-    function request(older = false, reset = false): Promise<boolean> {
+    function request(older = false, reset = false, beforeId?: string): Promise<boolean> {
       if (disposed || !available()) return Promise.resolve(false);
       if (reset) {
         cacheRef.current.delete(owner);
@@ -254,11 +254,11 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
         failures = 0;
         sizeBlocked = false;
       } else if (contextExpired || needsReset && older) return Promise.resolve(false);
-      const duplicate = [active?.job, ...queue].find((job) => job && job.older === older && (!reset || job.reset));
+      const duplicate = [active?.job, ...queue].find((job) => job && job.older === older && job.beforeId === beforeId && (!reset || job.reset));
       if (duplicate) return duplicate.promise;
       let resolve!: (loaded: boolean) => void;
       const promise = new Promise<boolean>((done) => { resolve = done; });
-      queue.push({ older, reset, resolve, promise });
+      queue.push({ older, reset, beforeId, resolve, promise });
       void pump();
       return promise;
     }
@@ -322,7 +322,7 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
     readingLatestRef.current = { owner: current ? sessionKey(current) : "", latest };
   }, []);
   const refresh = useCallback(() => requestRef.current(), []);
-  const loadOlder = useCallback(() => requestRef.current(true), []);
+  const loadOlder = useCallback((beforeId?: string) => requestRef.current(true, false, beforeId), []);
   const resetLatest = useCallback(() => requestRef.current(false, true), []);
   const usePagedHistory = useCallback(() => sourceRef.current("control-socket"), []);
   const useAutomaticHistory = useCallback(() => sourceRef.current(), []);

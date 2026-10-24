@@ -21,7 +21,7 @@ describe("durable queue web admission", () => {
   });
 
   it.each([
-    { capabilities: ["read"] }, { status: "unknown" }, { id: "wrong/target" }, { nodeId: "wrong/target" },
+    { capabilities: ["read"] }, { status: "unknown" }, { id: "wrong/target" }, { nodeId: "" },
     { observedAt: "invalid" }, { sendAvailability: {} },
     { desktopObservation: { source: "codex-desktop", status: "unknown", availability: "available", observedAt: iso() } },
     { provider: "terminal/codex", id: "terminal:fixture" },
@@ -39,7 +39,7 @@ describe("durable queue web admission", () => {
 
   it("rejects invalid idle targets before the direct send route", () => {
     expect(sendBlockReason({ ...session, id: "wrong/target", status: "idle" }, true, false)).not.toBeNull();
-    expect(sendBlockReason({ ...session, nodeId: "wrong/target", status: "idle" }, true, false)).not.toBeNull();
+    expect(sendBlockReason({ ...session, nodeId: "", status: "idle" }, true, false)).not.toBeNull();
   });
 
   it.each(["admitting", "queued", "cancelled", "expired"] as const)("preserves %s as its own status", status => {

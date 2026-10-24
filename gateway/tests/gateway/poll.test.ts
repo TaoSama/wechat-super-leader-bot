@@ -9,7 +9,7 @@ import { ControllerClient } from "../../src/controller/client.js";
 import { WeChatGateway } from "../../src/gateway.js";
 
 for (const blockedEndpoint of [undefined, "getconfig", "sendtyping"])
-test(`WeChatGateway end-to-end pollOnce, deduplication and cursor checkpointing${blockedEndpoint ? ` with background ${blockedEndpoint}` : ""}`, async t => {
+test(`pollOnce deduplicates within and across pages while isolating chats${blockedEndpoint ? ` with background ${blockedEndpoint}` : ""}`, async t => {
   if (blockedEndpoint) t.mock.timers.enable({ apis: ["setTimeout"] });
   let releaseTyping!: () => void, typingStarted!: () => void;
   const typingGate = new Promise<void>(resolve => { releaseTyping = resolve; });
@@ -51,7 +51,7 @@ test(`WeChatGateway end-to-end pollOnce, deduplication and cursor checkpointing$
             from_user_id: "chat-a",
             client_id: "same-client-id",
             context_token: "ctx-a",
-            item_list: [{ type: 1, text_item: { text: "status on demoair" } }],
+            item_list: [{ type: 1, text_item: { text: "status on macair" } }],
           },
           {
             message_type: 1,
@@ -61,7 +61,7 @@ test(`WeChatGateway end-to-end pollOnce, deduplication and cursor checkpointing$
             context_token: "ctx-b",
             item_list: [{ type: 1, text_item: { text: "hello from b" } }],
           },
-        ],
+        ].flatMap(message => [message, message]),
       }), { status: 200 });
     }
     if (url.endsWith("/ilink/bot/sendmessage")) {
@@ -110,8 +110,9 @@ test(`WeChatGateway end-to-end pollOnce, deduplication and cursor checkpointing$
     } finally { releaseTyping(); await poll; }
   }
   const summary1 = await poll;
-  assert.equal(summary1.polledCount, 2);
+  assert.equal(summary1.polledCount, 4);
   assert.equal(summary1.processedCount, 2);
+  assert.equal(summary1.skippedCount, 2);
   assert.equal(summary1.nextSyncBuf, "cursor-after-batch-1");
   assert.equal(sm.syncBuf, "cursor-after-batch-1");
   assert.equal(forwardedToController.length, 2);

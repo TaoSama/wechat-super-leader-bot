@@ -233,6 +233,18 @@ describe("Leader recorded-history qualification and projection", () => {
 });
 
 describe("Leader history over the real NodeHub channel", () => {
+  it.each([{ capabilities: [] }, { capabilities: ["send"] }])(
+    "returns missing read capability to the model without dispatch: $capabilities", async ({ capabilities }) => {
+      const f = await fixture(SessionSchema.parse({ ...session, capabilities }));
+      const model = new ScriptedModel([readTool(), final()]);
+      await new LeaderOrchestrator(f.store, f.hub, f.commands, model).handle("chat", "no-read", "看看会话输出");
+      const output = JSON.parse(model.calls[1].find(message => message.role === "tool")!.content!);
+      expect(output).toMatchObject({ code: "history_forbidden" });
+      expect(output).not.toHaveProperty("items");
+      expect(f.ws.requests()).toEqual([]);
+      await noCommands(f, "chat");
+    });
+
   it("refuses an unmarked terminal session without sending any read or fallback command", async () => {
     const current = SessionSchema.parse({ ...session, id: `terminal:${"A".repeat(43)}`, provider: "terminal/codex" });
     const f = await fixture(current);

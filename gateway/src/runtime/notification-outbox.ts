@@ -49,7 +49,6 @@ export class NotificationOutbox {
     ilink: Pick<ILinkClient, "sendMarkdownReply">;
     controller: NotificationController;
     splitMaxChars: number;
-    splitMultiPart?: boolean;
     signal: AbortSignal;
     shouldContinue: () => boolean;
   }) {}
@@ -146,7 +145,7 @@ export class NotificationOutbox {
               const deliveryKey = `notification:${item.id}`;
               if (this.state.outbox[deliveryKey]) continue;
               this.state.putOutbox({ kind: "notification", deliveryKey, chatId, messageId: item.id,
-                splitMaxChars: this.options.splitMaxChars, splitMultiPart: this.options.splitMultiPart ?? true,
+                splitMaxChars: this.options.splitMaxChars,
                 expiresAt: item.expiresAt, notificationKind: item.kind, notificationIdentity: notificationIdentity(item), status: "pending" });
               if (await this.deliver(this.state.outbox[deliveryKey], item, summary, fingerprint)) {
                 if (firstError !== undefined) throw firstError;
@@ -282,7 +281,7 @@ export class NotificationOutbox {
     try {
       this.sentThisCycle = true;
       await this.options.ilink.sendMarkdownReply(item.chatId, item.text, {
-        deliveryKey: ref.deliveryKey, maxCharsPerChunk: ref.splitMaxChars, splitMultiPart: ref.splitMultiPart, kind,
+        deliveryKey: ref.deliveryKey, maxCharsPerChunk: ref.splitMaxChars, kind,
         verbatim: true,
         timeoutMs, signal: this.options.signal,
         shouldContinue: () => {

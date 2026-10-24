@@ -15,15 +15,16 @@ export const SendRouteSchema = z.enum(["desktop-owner", "control-socket", "app-s
 export type SendRoute = z.infer<typeof SendRouteSchema>;
 export const DeliveryModeSchema = z.enum(["next-turn", "steer"]);
 export type DeliveryMode = z.infer<typeof DeliveryModeSchema>;
+export const SteerGenerationSchema = z.number().int().nonnegative();
 export type CommandAuthority =
   | { type: "admin" }
-  | { type: "chat"; chatId: string }
+  | { type: "chat"; chatId: string; steerGeneration?: number }
   | { type: "automation"; chatId: string; scheduleId: string; runId: string }
   | { type: "console"; tokenHash: string; expiresAt: string }
   | { type: "plan" | "goal"; id: string; chatId: string };
 export const CommandAuthoritySchema = z.union([
   z.object({type:z.literal("admin")}).strict(),
-  z.object({type:z.literal("chat"),chatId:z.string().min(1).max(64)}).strict(),
+  z.object({type:z.literal("chat"),chatId:z.string().min(1).max(64),steerGeneration:SteerGenerationSchema.optional()}).strict(),
   z.object({type:z.literal("automation"),chatId:z.string().min(1).max(64),scheduleId:z.string().uuid(),runId:z.string().uuid()}).strict(),
   z.object({type:z.literal("console"),tokenHash:z.string().regex(/^[a-f0-9]{64}$/),expiresAt:z.string().datetime({offset:true})}).strict(),
   z.object({type:z.enum(["plan","goal"]),id:z.string().uuid(),chatId:z.string().min(1).max(64)}).strict(),
@@ -161,6 +162,8 @@ export const DaemonHelloMessageSchema = z.object({
   nodeId: z.string().min(1),
   sessions: z.array(SessionSchema),
   skills: SkillCatalogSchema,
+  // Missing on legacy v1 nodes; only an explicit steer advertisement grants support.
+  deliveryModes: z.array(DeliveryModeSchema).max(DeliveryModeSchema.options.length).optional(),
 });
 export type DaemonHelloMessage = z.infer<typeof DaemonHelloMessageSchema>;
 

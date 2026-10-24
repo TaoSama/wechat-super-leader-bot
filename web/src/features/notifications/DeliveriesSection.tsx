@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { FileCheck2 } from "lucide-react";
 import { fetchFullDelivery } from "../../api/deliveries";
 import { ApiAuthError, ApiHttpError } from "../../api/errors";
-import { setUnauthenticatedSession } from "../../auth/bootstrap";
+import { getAuthSessionSnapshot, setUnauthenticatedSession } from "../../auth/bootstrap";
 import { formatTimestamp } from "../../format";
 import type { ConsoleDelivery, DeliveryStatus } from "./delivery-contract";
 
@@ -25,11 +25,12 @@ function DeliveryCard({ item }: { item: ConsoleDelivery }) {
     if (loading) return;
     if (content !== undefined) { setExpanded(value => !value); return; }
     const controller = new AbortController();
+    const requestGeneration = getAuthSessionSnapshot().generation;
     request.current = controller; setLoading(true); setError(undefined);
     try { const text = await fetchFullDelivery(item.id, controller.signal); if (!controller.signal.aborted) { setContent(text); setExpanded(true); } }
     catch (cause) {
       if (controller.signal.aborted) return;
-      if (cause instanceof ApiAuthError) setUnauthenticatedSession("expired");
+      if (cause instanceof ApiAuthError) setUnauthenticatedSession("expired", requestGeneration);
       else setError(cause instanceof ApiHttpError && cause.statusCode === 410 ? "成果保存期已结束。" : "完整成果加载失败，可重试。");
     } finally { if (request.current === controller) { request.current = null; setLoading(false); } }
   }

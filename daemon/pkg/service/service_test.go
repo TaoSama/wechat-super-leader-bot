@@ -36,7 +36,7 @@ func sampleConfig(t *testing.T, stateDir string) *config.Config {
 	t.Helper()
 	return &config.Config{
 		NodeID:            "node-alpha",
-		ControllerURL:     "wss://leader.example.com/v1/daemon",
+		ControllerURL:     "wss://leader.taoai.site/v1/daemon",
 		NodeToken:         "super-secret-node-token-do-not-leak",
 		SocketPath:        filepath.Join(stateDir, "codex.sock"),
 		DesktopSocketPath: filepath.Join(stateDir, "desktop.sock"),

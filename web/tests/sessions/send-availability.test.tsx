@@ -4,10 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeControlPlaneStatus } from "../../src/api/normalizers";
 import { SessionWorkspace } from "../../src/features/sessions/components/SessionWorkspace";
 import { sendBlockReason } from "../../src/features/sessions/useSessionMessages";
-import { normalizeSendAvailability, sessionSendBlockReason } from "../../src/features/sessions/send-availability";
+import { isSessionMessageTarget, normalizeSendAvailability, sessionSendBlockReason } from "../../src/features/sessions/send-availability";
 import type { DesktopObservation, ScopedSession, SendAvailability } from "../../src/types";
 
 const NOW = Date.parse("2026-10-11T12:00:00Z");
+const NODE_IDS = ["mac.mini", "mac-mini_1", "mac mini~主机", "mac/mini", "mac\\mini", "mac%2Fmini", "mac?mini#leaf", "m".repeat(64)];
 const iso = (offset = 0) => new Date(NOW + offset).toISOString();
 const ready = (overrides: Partial<Extract<SendAvailability, { route: "desktop-owner" }>> = {}): SendAvailability => ({
   route: "desktop-owner", state: "ready", observedAt: iso(), validUntil: iso(45_000), ...overrides,
@@ -31,6 +32,28 @@ const response = (body: unknown) => new Response(JSON.stringify(body), { status:
 const normalize = (raw: unknown) => normalizeControlPlaneStatus({ nodes, sessions: [raw], commands: [], goals: emptyGoals(), executions: emptyExecutions() }).sessions[0];
 
 describe("send qualification contract", () => {
+  it.each([...NODE_IDS, " ", "🖥".repeat(32)])("accepts opaque command node ID %s without rewriting it", nodeId => {
+    const session = desktop({ nodeId });
+    expect(isSessionMessageTarget(session)).toBe(true);
+    expect(sendBlockReason(session, true, false, NOW)).toBeNull();
+    expect(sendBlockReason(session, false, false, NOW)).toBeNull();
+    expect(session.nodeId).toBe(nodeId);
+  });
+
+  it.each([
+    { nodeId: "" }, { nodeId: "m".repeat(65) }, { nodeId: "🖥".repeat(33) },
+    { id: "fixture.with-dot" }, { id: "fixture/other" }, { id: "fixture other" }, { id: "s".repeat(65) },
+    { id: `terminal:${"a".repeat(42)}` }, { id: `terminal:${"a".repeat(42)}.` },
+  ])("keeps command length and session ID boundaries %#", changes => {
+    const session = desktop({ nodeId: "mac.mini", ...changes });
+    expect(isSessionMessageTarget(session)).toBe(false);
+    expect(sendBlockReason(session, true, false, NOW)).toContain("会话目标无效");
+  });
+
+  it("preserves the terminal input target format on opaque nodes", () => {
+    expect(isSessionMessageTarget(desktop({ nodeId: "mac.mini", id: `terminal:${"a".repeat(43)}` }))).toBe(true);
+  });
+
   it("permits a qualified desktop without rewriting native loaded/status/capabilities or time", () => {
     const raw = desktop();
     const before = structuredClone(raw);
@@ -96,19 +119,51 @@ describe("workspace send route feedback", () => {
   afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
   function setup(session = desktop(), onSend?: () => Promise<Response>) {
-    const fetchMock = vi.fn(async (url: string) => {
-      if (url.endsWith("/messages")) return onSend ? onSend() : response(command);
-      if (url.includes("/commands/")) return response(command);
+    const targetNodes = [{ ...nodes[0], nodeId: session.nodeId }];
+    const targetCommand = { ...command, nodeId: session.nodeId, sessionId: session.id };
+    const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
+      if (url.endsWith("/messages")) return onSend ? onSend() : response(targetCommand);
+      if (url.includes("/commands/")) return response(targetCommand);
       return response({ session, historyContext: "cf7e282f-d6d2-4a98-a517-9fb753f2549b", source: "control-socket", fetchedAt: iso(), items: [], nextCursor: null, truncated: false });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const result = render(<SessionWorkspace data={{ nodes, sessions: [session], commands: [], goals: emptyGoals(), executions: emptyExecutions() }}
-      nodes={nodes} stale={false} onAuthFailure={vi.fn()} />);
-    fireEvent.click(screen.getByTestId("session-row-air-fixture"));
+    const result = render(<SessionWorkspace data={{ nodes: targetNodes, sessions: [session], commands: [], goals: emptyGoals(), executions: emptyExecutions() }}
+      nodes={targetNodes} stale={false} onAuthFailure={vi.fn()} />);
+    fireEvent.click(screen.getByTestId(`session-row-${session.nodeId}-${session.id}`));
     fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "继续原会话" } });
     return { ...result, fetchMock };
   }
   const sendCalls = (mock: ReturnType<typeof setup>["fetchMock"]) => mock.mock.calls.filter(([url]) => url.endsWith("/messages"));
+
+  it.each(NODE_IDS)("sends once to encoded opaque node %s and accepts its unchanged receipt", async nodeId => {
+    const { fetchMock } = setup(desktop({ nodeId }));
+    const send = screen.getByRole("button", { name: "发送消息" });
+    expect(send).toBeEnabled();
+    await act(async () => fireEvent.click(send));
+    const calls = sendCalls(fetchMock);
+    expect(calls).toHaveLength(1);
+    const [url, init] = calls[0];
+    expect(url).toBe(`/v1/sessions/${encodeURIComponent(nodeId)}/fixture/messages`);
+    expect(init).toMatchObject({ method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-Super-Leader-Intent": "session-message" } });
+    expect(JSON.parse(String(init?.body))).toEqual({ prompt: "继续原会话", requestId: expect.any(String) });
+    expect(screen.getByText("执行完成 (Completed)")).toBeInTheDocument();
+    expect(screen.getByLabelText("发送给当前会话")).toHaveValue("");
+  });
+
+  it.each([
+    { nodeId: "m".repeat(65) }, { id: "fixture.with-dot" }, { id: "fixture/other" }, { id: "fixture other" },
+  ])("blocks invalid targets at both button and Enter without posting %#", async changes => {
+    const { fetchMock } = setup(desktop({ nodeId: "mac.mini", ...changes }));
+    const send = screen.getByRole("button", { name: "发送消息" });
+    expect(send).toBeDisabled();
+    await act(async () => {
+      fireEvent.click(send);
+      fireEvent.keyDown(screen.getByLabelText("发送给当前会话"), { key: "Enter" });
+    });
+    expect(sendCalls(fetchMock)).toHaveLength(0);
+    expect(screen.getByLabelText("发送给当前会话")).toHaveValue("继续原会话");
+  });
 
   it("enables ready desktop and displays the persisted route in its receipt", async () => {
     const { fetchMock } = setup();

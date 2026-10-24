@@ -31,6 +31,18 @@ export function writePrivateJsonSync(targetPath: string, data: unknown): void {
     fs.closeSync(fd);
     fd = null;
     fs.renameSync(tempPath, resolved);
+    // A prior failed checkpoint may have created ancestors, even in another process.
+    // Synchronize their real paths through the root on every write before success.
+    for (let directoryToSync = fs.realpathSync(dir); ; directoryToSync = path.dirname(directoryToSync)) {
+      // Unsupported directory synchronization must fail the checkpoint, without a fallback.
+      const directoryFd = fs.openSync(directoryToSync, "r");
+      try {
+        fs.fsyncSync(directoryFd);
+      } finally {
+        fs.closeSync(directoryFd);
+      }
+      if (path.dirname(directoryToSync) === directoryToSync) break;
+    }
   } finally {
     if (fd !== null) {
       try { fs.closeSync(fd); } catch (err: unknown) {

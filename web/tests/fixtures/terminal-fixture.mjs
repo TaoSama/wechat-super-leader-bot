@@ -7,7 +7,7 @@ const READY_DURATION_MS = 45_000;
 // Browser-only synthetic API state, with no network/terminal implementation.
 export function createTerminalFixture(sessions, commands) {
   let mode = 'disabled', writes = 0;
-  const session = { id: SESSION_ID, nodeId: 'demoair', provider: 'terminal/codex',
+  const session = { id: SESSION_ID, nodeId: 'macair', provider: 'terminal/codex',
     title: '终端投递验收 · 仅合成输入', cwd: '/synthetic/terminal', status: 'idle',
     loaded: false, capabilities: ['read'], observedAt: new Date().toISOString() };
   function setMode(next) {

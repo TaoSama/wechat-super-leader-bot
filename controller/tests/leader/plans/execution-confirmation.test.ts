@@ -34,6 +34,7 @@ interface ExecutionRow {
 // SQL mock: stage INSERT until COMMIT, serialize row locks and model I/O barriers.
 // This is not evidence that PostgreSQL itself enforces these semantics.
 class ConfirmationPool {
+  on = vi.fn();
   states = new Map<string, LeaderState>();
   rows = new Map<string, ExecutionRow>();
   queries: string[] = [];

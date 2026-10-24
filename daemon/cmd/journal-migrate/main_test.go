@@ -20,7 +20,7 @@ func testCLIJournal(t *testing.T, dir, scope string) {
 	cmd := protocol.ControllerCommandMessage{
 		Type:      "command",
 		CommandID: "cmd-cli-1",
-		NodeID:    "demoair",
+		NodeID:    "macair",
 		SessionID: "sess-1",
 		Action:    protocol.ActionSend,
 		Prompt:    "test",
@@ -60,9 +60,9 @@ func TestCLI_DryRunAndApply(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	nodeID := "demoair"
+	nodeID := "macair"
 	fromURL := "ws://127.0.0.1:8790/v1/daemon"
-	toURL := "wss://leader.example.com/v1/daemon"
+	toURL := "wss://leader.taoai.site/v1/daemon"
 	sockPath := "/tmp/test.sock"
 
 	fromScope, err := journal.ScopeDigest(nodeID, fromURL, sockPath)

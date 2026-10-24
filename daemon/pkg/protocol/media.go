@@ -8,6 +8,7 @@ const (
 	MaxMediaBytes       = 8 * 1024 * 1024
 	MaxMediaChunkBytes  = 192 * 1024
 	MaxSessionMedia     = 3
+	MaxMediaOrdinal     = 1<<53 - 1 // Original image positions must remain exact in JSON number consumers.
 	MediaInvalidRequest = "Invalid media request"
 	MediaUnavailable    = "Media unavailable"
 	MediaContextExpired = "Media context expired"
@@ -65,7 +66,7 @@ type MediaDescriptor struct {
 	MediaID   string `json:"mediaId"`
 	ItemID    string `json:"itemId"`
 	TurnID    string `json:"turnId"`
-	Ordinal   int    `json:"ordinal"`
+	Ordinal   int    `json:"ordinal"` // Original image position before unsupported paths are filtered.
 	MIME      string `json:"mime"`
 	TotalSize int64  `json:"totalSize"`
 	SHA256    string `json:"sha256"`

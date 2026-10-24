@@ -22,15 +22,15 @@ async function createServerFixture(options: {
   clock?: () => number;
 }): Promise<TestContext> {
   const controllerToken = "ctrl-token-sec-9999";
-  const nodeToken = "node-token-demoair-8888";
+  const nodeToken = "node-token-macair-8888";
   const consoleOrigin = options.consolePublicUrl ?? "http://127.0.0.1:8790";
 
   const config: Config = {
     port: 0,
     host: "127.0.0.1",
     controllerToken,
-    nodeTokens: Object.assign(Object.create(null), { demoair: nodeToken }),
-    tokenToNode: new Map([[nodeToken, "demoair"]]),
+    nodeTokens: Object.assign(Object.create(null), { macair: nodeToken }),
+    tokenToNode: new Map([[nodeToken, "macair"]]),
     allowedChatIds: new Set(["chat-1"]),
     persistenceMode: "memory",
     commandTtlSeconds: 60,
@@ -84,7 +84,7 @@ describe("Console Auth HTTP API & Security", () => {
   it("POST /v1/console-links issues 1h link with 43-char token, same requestId is idempotent without extending expiry, used gives 409, expired gives 410", async () => {
     let now = 1700000000000;
     const ctx = await createServerFixture({
-      consolePublicUrl: "https://leader.example.com",
+      consolePublicUrl: "https://leader.taoai.site",
       clock: () => now,
     });
 
@@ -100,7 +100,7 @@ describe("Console Auth HTTP API & Security", () => {
       });
       expect(res1.status).toBe(200);
       const data1 = await res1.json();
-      expect(new URL(data1.url).origin).toBe("https://leader.example.com");
+      expect(new URL(data1.url).origin).toBe("https://leader.taoai.site");
       expect(new URL(data1.url).hash).toMatch(/^#login=[A-Za-z0-9_-]{43}$/);
       const rawToken1 = data1.url.slice(data1.url.indexOf("=") + 1);
       expect(rawToken1).toHaveLength(43);
@@ -126,7 +126,7 @@ describe("Console Auth HTTP API & Security", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Origin: "https://leader.example.com",
+          Origin: "https://leader.taoai.site",
         },
         body: JSON.stringify({ token: rawToken1 }),
       });
@@ -175,7 +175,7 @@ describe("Console Auth HTTP API & Security", () => {
   it("POST /auth/exchange enforces strict JSON with token only, rejecting invalid/replay/expired with 401", async () => {
     let now = 1700000000000;
     const ctx = await createServerFixture({
-      consolePublicUrl: "https://leader.example.com",
+      consolePublicUrl: "https://leader.taoai.site",
       clock: () => now,
     });
 
@@ -197,7 +197,7 @@ describe("Console Auth HTTP API & Security", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Origin: "https://leader.example.com",
+          Origin: "https://leader.taoai.site",
         },
         body: JSON.stringify({ token: validToken, extra: "malicious" }),
       });
@@ -208,7 +208,7 @@ describe("Console Auth HTTP API & Security", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Origin: "https://leader.example.com",
+          Origin: "https://leader.taoai.site",
         },
         body: JSON.stringify({}),
       });
@@ -219,7 +219,7 @@ describe("Console Auth HTTP API & Security", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Origin: "https://leader.example.com",
+          Origin: "https://leader.taoai.site",
         },
         body: JSON.stringify({ token: "invalid-token-short" }),
       });
@@ -230,7 +230,7 @@ describe("Console Auth HTTP API & Security", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Origin: "https://leader.example.com",
+          Origin: "https://leader.taoai.site",
         },
         body: JSON.stringify({ token: validToken }),
       });
@@ -243,7 +243,7 @@ describe("Console Auth HTTP API & Security", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Origin: "https://leader.example.com",
+          Origin: "https://leader.taoai.site",
         },
         body: JSON.stringify({ token: validToken }),
       });
@@ -255,7 +255,7 @@ describe("Console Auth HTTP API & Security", () => {
 
   it("sets __Host-super_leader_session cookie on HTTPS origin with Secure, HttpOnly, SameSite=Strict, Path=/, Max-Age=3600", async () => {
     const ctx = await createServerFixture({
-      consolePublicUrl: "https://leader.example.com",
+      consolePublicUrl: "https://leader.taoai.site",
     });
 
     try {
@@ -274,7 +274,7 @@ describe("Console Auth HTTP API & Security", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Origin: "https://leader.example.com",
+          Origin: "https://leader.taoai.site",
         },
         body: JSON.stringify({ token }),
       });
@@ -351,7 +351,7 @@ describe("Console Auth HTTP API & Security", () => {
 
     // 2. HTTPS environment: ignores super_leader_session
     const httpsCtx = await createServerFixture({
-      consolePublicUrl: "https://leader.example.com",
+      consolePublicUrl: "https://leader.taoai.site",
     });
 
     try {
@@ -370,7 +370,7 @@ describe("Console Auth HTTP API & Security", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Origin: "https://leader.example.com",
+          Origin: "https://leader.taoai.site",
         },
         body: JSON.stringify({ token }),
       });
@@ -399,7 +399,7 @@ describe("Console Auth HTTP API & Security", () => {
 
   it("Cookie allows GET /v1/status, /v1/skills, /v1/commands/:id; rejects POST commands/messages/console-links and Daemon WS", async () => {
     const ctx = await createServerFixture({
-      consolePublicUrl: "https://leader.example.com",
+      consolePublicUrl: "https://leader.taoai.site",
     });
 
     try {
@@ -419,7 +419,7 @@ describe("Console Auth HTTP API & Security", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Origin: "https://leader.example.com",
+          Origin: "https://leader.taoai.site",
         },
         body: JSON.stringify({ token }),
       });
@@ -449,7 +449,7 @@ describe("Console Auth HTTP API & Security", () => {
           Cookie: cookieHeader,
         },
         body: JSON.stringify({
-          nodeId: "demoair",
+          nodeId: "macair",
           sessionId: "s1",
           action: "read",
         }),
@@ -495,7 +495,7 @@ describe("Console Auth HTTP API & Security", () => {
 
   it("preserves machine Bearer token functionality across all endpoints", async () => {
     const ctx = await createServerFixture({
-      consolePublicUrl: "https://leader.example.com",
+      consolePublicUrl: "https://leader.taoai.site",
     });
 
     try {
@@ -520,7 +520,7 @@ describe("Console Auth HTTP API & Security", () => {
 
   it("enforces Origin verification: rejects mismatch, null, and cross-site Sec-Fetch-Site; Host spoofing cannot bypass", async () => {
     const ctx = await createServerFixture({
-      consolePublicUrl: "https://leader.example.com",
+      consolePublicUrl: "https://leader.taoai.site",
     });
 
     try {
@@ -575,7 +575,7 @@ describe("Console Auth HTTP API & Security", () => {
 
   it("handles session restoration and logout revocation with clearCookie", async () => {
     const ctx = await createServerFixture({
-      consolePublicUrl: "https://leader.example.com",
+      consolePublicUrl: "https://leader.taoai.site",
     });
 
     try {
@@ -594,7 +594,7 @@ describe("Console Auth HTTP API & Security", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Origin: "https://leader.example.com",
+          Origin: "https://leader.taoai.site",
         },
         body: JSON.stringify({ token }),
       });
@@ -612,7 +612,7 @@ describe("Console Auth HTTP API & Security", () => {
       const resLogout = await fetch(`${ctx.baseUrl}/auth/logout`, {
         method: "POST",
         headers: {
-          Origin: "https://leader.example.com",
+          Origin: "https://leader.taoai.site",
           Cookie: cookieHeader,
         },
       });
@@ -635,7 +635,7 @@ describe("Console Auth HTTP API & Security", () => {
 
   it("applies no-store and no-referrer headers across all responses and masks internal errors without leaking secrets", async () => {
     const ctx = await createServerFixture({
-      consolePublicUrl: "https://leader.example.com",
+      consolePublicUrl: "https://leader.taoai.site",
     });
 
     try {

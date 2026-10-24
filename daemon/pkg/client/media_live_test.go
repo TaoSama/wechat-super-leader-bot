@@ -55,6 +55,8 @@ func TestLiveDesktopSessionMediaReadonly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	if controlPath == "" {
+		// The explicit target scopes this observer without native discovery.
+		d.sessionSnapshot = []protocol.Session{{ID: sessionID}}
 		ownerCtx, ownerCancel := context.WithTimeout(ctx, 8*time.Second)
 		updates := make(chan struct{}, 1)
 		err := codexdesktop.NewDesktopObserver(socketPath).Watch(ownerCtx, []string{sessionID}, func(id string, observation protocol.DesktopObservation) {

@@ -60,6 +60,33 @@ test('production tmpfs options form exactly one mount', () => {
   assert.deepEqual(production.services.controller.tmpfs, ['/tmp:size=64m,mode=1777']);
 });
 
+test('database passwords with URI delimiters reach PostgreSQL and the controller unchanged', () => {
+  for (const password of ['synthetic#password', 'synthetic/password', ' synthetic#/%:@? password ']) {
+    const configured = JSON.parse(execCompose([
+      '--env-file', '/dev/null',
+      '-f', fileURLToPath(new URL('../../../compose.yaml', import.meta.url)),
+      'config', '--format', 'json',
+    ], { encoding: 'utf8', timeout: 10000, env: { ...fakeEnv, POSTGRES_PASSWORD: password } }));
+    assert.equal(configured.services.postgres.environment.POSTGRES_PASSWORD, password);
+    assert.equal(configured.services.controller.environment.PGPASSWORD, password);
+    assert.equal(configured.services.controller.environment.DATABASE_URL, '');
+    assert.equal(configured.services.controller.environment.PGHOST, 'postgres');
+    assert.equal(configured.services.controller.environment.PGPORT, '5432');
+    assert.equal(configured.services.controller.environment.PGUSER, 'leader');
+    assert.equal(configured.services.controller.environment.PGDATABASE, 'leader');
+  }
+});
+
+test('an explicit DATABASE_URL remains available as a controller override', () => {
+  const databaseUrl = 'postgresql://synthetic:synthetic%23%2Fpassword@external-db.invalid:5544/external';
+  const configured = JSON.parse(execCompose([
+    '--env-file', '/dev/null',
+    '-f', fileURLToPath(new URL('../../../compose.yaml', import.meta.url)),
+    'config', '--format', 'json',
+  ], { encoding: 'utf8', timeout: 10000, env: { ...fakeEnv, DATABASE_URL: databaseUrl } }));
+  assert.equal(configured.services.controller.environment.DATABASE_URL, databaseUrl);
+});
+
 test('small-host memory and worker concurrency overrides preserve the sandbox', () => {
   const configured = JSON.parse(execCompose([
     '--env-file', '/dev/null',
@@ -76,7 +103,7 @@ test('small-host memory and worker concurrency overrides preserve the sandbox', 
 });
 
 test('production uses the explicitly configured console origin', () => {
-  assert.equal(production.services.controller.environment.CONSOLE_PUBLIC_URL, 'https://leader.example.com');
+  assert.equal(production.services.controller.environment.CONSOLE_PUBLIC_URL, 'https://leader.taoai.site');
 });
 
 test('only loopback controller is published; PostgreSQL remains private', () => {
@@ -93,7 +120,7 @@ test('Nginx keeps WSS upgrades and HTTP requests on the same protected endpoint'
   assert.match(nginx, /proxy_set_header Upgrade \$http_upgrade;/);
   assert.match(nginx, /proxy_set_header Connection \$super_leader_connection_upgrade;/);
   assert.match(nginx, /proxy_pass http:\/\/127\.0\.0\.1:8790;/);
-  assert.match(nginx, /return 308 https:\/\/leader\.example\.com\$request_uri;/);
+  assert.match(nginx, /return 308 https:\/\/leader\.taoai\.site\$request_uri;/);
   assert.match(nginx, /access_log off;/);
   assert.doesNotMatch(nginx, /proxy_set_header Authorization/);
 });

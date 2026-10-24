@@ -85,23 +85,38 @@ func historyControlUUID(id string) bool {
 	return true
 }
 
+func desktopRouterControlEnvelope(message desktopEnvelope) bool {
+	return !message.historyControlMalformed && message.Version == 0 && message.TargetClientID == "" && len(message.TargetClientIDs) == 0 &&
+		message.ResultType == "" && message.HandledByClientID == "" && len(message.Result) == 0 && len(message.Response) == 0 && message.TimeoutMS == 0
+}
+
+func desktopClientStatus(message desktopEnvelope) (clientID, status string, valid bool) {
+	if !desktopRouterControlEnvelope(message) || message.Type != "broadcast" || message.Method != desktopClientStatusChanged {
+		return "", "", false
+	}
+	var params struct {
+		ClientID   string `json:"clientId"`
+		ClientType string `json:"clientType"`
+		Status     string `json:"status"`
+	}
+	if message.RequestID != "" || len(message.Request) != 0 || !historyControlUUID(message.SourceClientID) ||
+		!historyControlObject(message.Params, []string{"clientId", "clientType", "status"}, nil) || json.Unmarshal(message.Params, &params) != nil ||
+		params.ClientID != message.SourceClientID || !protocol.ValidTurnID(params.ClientType) || (params.Status != "connected" && params.Status != "disconnected") {
+		return "", "", false
+	}
+	return params.ClientID, params.Status, true
+}
+
 func (stream *desktopHistoryStream) routerControl(message desktopEnvelope) (bool, error) {
-	if message.historyControlMalformed || message.Version != 0 || message.TargetClientID != "" || len(message.TargetClientIDs) != 0 ||
-		message.ResultType != "" || message.HandledByClientID != "" || len(message.Result) != 0 || len(message.Response) != 0 || message.TimeoutMS != 0 {
+	if !desktopRouterControlEnvelope(message) {
 		return false, nil
 	}
 	if message.Type == "broadcast" && message.Method == desktopClientStatusChanged {
-		var params struct {
-			ClientID   string `json:"clientId"`
-			ClientType string `json:"clientType"`
-			Status     string `json:"status"`
-		}
-		if message.RequestID != "" || len(message.Request) != 0 || !historyControlUUID(message.SourceClientID) ||
-			!historyControlObject(message.Params, []string{"clientId", "clientType", "status"}, nil) || json.Unmarshal(message.Params, &params) != nil ||
-			params.ClientID != message.SourceClientID || !protocol.ValidTurnID(params.ClientType) || (params.Status != "connected" && params.Status != "disconnected") {
+		clientID, status, valid := desktopClientStatus(message)
+		if !valid {
 			return false, nil
 		}
-		if params.Status == "disconnected" && params.ClientID == stream.owner && stream.owner != "" {
+		if status == "disconnected" && clientID == stream.owner && stream.owner != "" {
 			return true, historyFailure(protocol.HistoryContextExpired, historyFailureOwner)
 		}
 		return true, nil

@@ -12,13 +12,15 @@ import { hasSkillRefs } from "../skills/catalog.js";
 import { selectExecutionObservation, selectModelObservation } from "../sessions/observation.js";
 import { selectSendRoute } from "../sessions/send-eligibility.js";
 import { queueSendRoute } from "../commands/queue.js";
+import { routeSupportsDeliveryMode } from "../commands/delivery.js";
 import { readinessFailure, waitForSendReadiness, type ReadinessHub } from "../sessions/send-readiness.js";
 import { failureReply, modelDiagnostic } from "./model/errors.js";
-import { MAX_LEADER_DATA_BYTES } from "./state.js";
-import { authorizationConversation, invalidateConversationPreview, retainConversation } from "./conversation-history.js";
+import { retainLeaderData } from "./persistence.js";
+import { authorizationConversation, invalidateConversationPreview } from "./conversation-history.js";
 import { classifyUserAuthorization } from "./model/user-authorization.js";
 import { createExecution, hasTerminalTarget, matchesExecutionCommand, validatePlanDependencies } from "./plans/execution.js";
 import { assertTerminalSingleStep, submitTerminalPlan, TERMINAL_INPUT_WARNING } from "./plans/terminal.js";
+import { recoverSteerPlanCommand, steerPlanRequestId } from "./plans/steer.js";
 import { ExecutionScheduler } from "./plans/scheduler.js";
 import { executionSummary, sessionLabels } from "./plans/presentation.js";
 import { readSessionHistory } from "./queries/session-history.js";
@@ -41,7 +43,7 @@ import { assertBackgroundSourcesDiscovered, BACKGROUND_INSTRUCTIONS, BACKGROUND_
   confirmBackgroundMutations, executeBackgroundTool, recoverBackgroundFollowups, type BackgroundToolAuthority, type BackgroundToolService, type BackgroundTurn } from "./background-tools.js";
 import {
   CLAIM_TTL_MS, ConsoleLinkIssued, ConsoleLinkIssuer, LEADER_TOOLS, LeaderData, LeaderDataSchema, LeaderReply,
-  MAX_MODEL_STEPS, MAX_RECEIPTS, MAX_REPLY_CHARS, MAX_RESULT_CODE_POINTS, MAX_RESULT_JSON_CHARS, MAX_TOOL_CALLS, PLAN_TTL_MS, Plan,
+  MAX_MODEL_STEPS, MAX_REPLY_CHARS, MAX_RESULT_CODE_POINTS, MAX_RESULT_JSON_CHARS, MAX_TOOL_CALLS, PLAN_TTL_MS, Plan,
   SYSTEM_PROMPT, TURN_TIMEOUT_MS, ToolArguments,
 } from "./contracts.js";
 
@@ -128,6 +130,8 @@ export class LeaderOrchestrator {
       const prior = data.inflight;
       const recovered = prior.plan ? await this.executions.view(prior.plan.id, chatId) : null;
       for (const step of recovered?.steps ?? []) if (step.commandId) data.commandIds.push(step.commandId);
+      const recoveredCommand = !recovered && prior.plan ? await recoverSteerPlanCommand(this.store, chatId, prior.plan) : null;
+      if (recoveredCommand) data.commandIds.push(recoveredCommand.commandId);
       let automationRecovery: string | undefined;
       if (this.automations && !prior.plan && !prior.goal) {
         try {
@@ -145,15 +149,17 @@ export class LeaderOrchestrator {
       const mutationRecovery = [automationRecovery, backgroundRecovery].filter(Boolean).join("\n");
       const recoveryText = `上次对话处理被中断，未自动重试原指令。${mutationRecovery || (prior.goal ? await this.goals.recovery(chatId, prior.goal.id) : recovered
         ? `已确认计划仍按持久记录核查与推进：\n${executionSummary(recovered)}`
-        : this.background ? "尚未核对到本轮追问回执；后台任务及延期情况请查询任务记录，不自动重试。"
+        : recoveredCommand ? `已找回本次当前轮补充的持久指令：${recoveredCommand.commandId}（状态：${recoveredCommand.status}）。补充执行情况仍需核查，不会重复发送。`
+          : this.background ? "尚未核对到本轮追问回执；后台任务及延期情况请查询任务记录，不自动重试。"
           : "尚无可确认的持久执行记录，不自动创建或派发。请先核查会话状态。")}`;
-      data.receipts.push({ messageId: prior.messageId, inputHash: prior.inputHash, text: recoveryText });
+      const recoveryReply: LeaderReply = { text: recoveryText, ...(recoveredCommand ? { commandId: recoveredCommand.commandId } : {}) };
+      data.receipts.push({ messageId: prior.messageId, inputHash: prior.inputHash, ...recoveryReply });
       data.inflight = undefined;
-      data.pending = undefined;
+      if (prior.plan && data.pending?.id === prior.plan.id) data.pending = undefined;
       if (prior.messageId === messageId) {
         if (prior.inputHash !== inputHash) throw new ConflictError("Message ID already used with different text");
         await this.save(chatId, saved!.revision, data);
-        return { text: recoveryText };
+        return recoveryReply;
       }
     }
     const previousPlan = data.pending;
@@ -173,6 +179,8 @@ export class LeaderOrchestrator {
       : confirms && !ambiguous && !plan ? data.pendingGoal : undefined;
     if (plan || data.pending && data.pending.expiresAt <= confirmationTime) data.pending = undefined;
     if (goal || data.pendingGoal && data.pendingGoal.expiresAt <= confirmationTime) data.pendingGoal = undefined;
+    // Persist revocation with the cancellation claim, before any asynchronous cleanup.
+    if (goalCancellation(text.trim()) || cancellation.test(text.trim())) data.steerGeneration++;
     data.inflight = { messageId, inputHash, expiresAt: this.now() + CLAIM_TTL_MS, plan, goal };
     let claimed = await this.save(chatId, saved?.revision ?? 0, data);
     let reply: LeaderReply;
@@ -273,12 +281,7 @@ export class LeaderOrchestrator {
   }
 
   private async save(chatId: string, revision: number, data: LeaderData) {
-    data.history = retainConversation(data.history);
-    data.receipts = data.receipts.slice(-MAX_RECEIPTS);
-    data.commandIds = [...new Set(data.commandIds)].slice(-64);
-    while (data.history.length && Buffer.byteLength(JSON.stringify(data), "utf8") > MAX_LEADER_DATA_BYTES) {
-      data.history = data.history.slice(2);
-    }
+    retainLeaderData(data);
     const saved = await this.store.compareAndSetLeaderState(chatId, revision, data);
     if (!saved) throw new CommandError(409, "聊天状态发生变化，本次操作已停止，请重新查询");
     return saved;
@@ -306,6 +309,9 @@ export class LeaderOrchestrator {
       if (!action.sendRoute || !route || route !== action.sendRoute) {
         return { text: "计划中的节点或会话状态已变化，没有派发。请重新查询并生成计划。" };
       }
+      if (!routeSupportsDeliveryMode(route, action.deliveryMode)) {
+        return { text: "目标原路线不支持补充当前轮，没有派发。请重新核对会话和轮次。" };
+      }
     }
     const current = await this.store.getLeaderState(chatId);
     if (current?.revision !== revision || data.inflight!.expiresAt <= this.now()) {
@@ -314,13 +320,13 @@ export class LeaderOrchestrator {
     if (plan.actions.length === 1 && plan.actions[0].deliveryMode === "steer") {
       const action = plan.actions[0];
       const command = await this.commands.submit({nodeId:action.nodeId,sessionId:action.sessionId,action:"send",prompt:action.prompt,
-        skills:action.skills,deliveryMode:"steer",expectedTurnId:action.expectedTurnId,requestId:`leader_steer_${hash([chatId,plan.id])}`},0,async()=>{
+        skills:action.skills,deliveryMode:"steer",expectedTurnId:action.expectedTurnId,requestId:steerPlanRequestId(chatId,plan.id)},0,async()=>{
         const latest = await this.store.getLeaderState(chatId);
         const inflight = latest && LeaderDataSchema.parse(latest.data).inflight;
         if (latest?.revision !== revision || !inflight || inflight.expiresAt<=this.now() || JSON.stringify(inflight.plan)!==JSON.stringify(plan)) {
           throw new CommandError(409,"Current-turn supplement authority changed");
         }
-      },action.sendRoute,{type:"chat",chatId});
+      },action.sendRoute,{type:"chat",chatId,steerGeneration:data.steerGeneration});
       data.commandIds.push(command.commandId);
       const fallbackText = command.status === "accepted" ? "补充已由原会话当前轮受理，执行情况尚待核查。" : `当前轮补充${command.status === "queued" ? "已保存，等待核对原轮次" : "结果待核查"}；不会改成新任务或重复发送。`;
       return { text: modelFree ? fallbackText : await generateAcknowledgement(this.model, this.store, this.hub, {
@@ -851,6 +857,9 @@ export class LeaderOrchestrator {
           }
           if (readiness.routes[index] && route !== readiness.routes[index]) {
             return { error: `[${action.nodeId}] ${action.sessionId}：发送路线已变化，请重新生成计划` };
+          }
+          if (!routeSupportsDeliveryMode(route, action.deliveryMode)) {
+            return { error: "目标原路线不支持补充当前轮，未生成计划或派发；请重新核对会话和轮次" };
           }
           if (action.deliveryMode === "steer" ? !action.expectedTurnId : action.expectedTurnId !== undefined) return {error:"补充当前轮需要准确expectedTurnId，普通任务不能绑定其他轮次"};
           boundActions.push({ ...action, sendRoute: route });

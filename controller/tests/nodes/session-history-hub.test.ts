@@ -22,6 +22,7 @@ class Socket extends EventEmitter {
   request() { return this.sent.filter(value => value.type === "read_history").at(-1)!; }
 }
 const session = SessionSchema.parse({ id: "session", observedAt: "2026-10-11T01:00:00Z",
+  capabilities: ["read"],
   model: "actual-model", modelProvider: "actual-provider", reasoningEffort: "high",
   updatedAt: "2026-10-11T01:00:00Z", preview: "preview", loaded: false });
 const history = { session, items: [{ id: "item", turnId: "turn", kind: "assistant", type: "agentMessage", text: "answer" }],
@@ -31,10 +32,10 @@ const response = (request: Record<string, unknown>, extra = {}) => ({
   type: "history", requestId: request.requestId, sessionId: request.sessionId, history, ...extra,
 });
 const hubs: NodeHub[] = [];
-async function connected(hub: NodeHub, nodeId: string): Promise<Socket> {
+async function connected(hub: NodeHub, nodeId: string, current = session): Promise<Socket> {
   const ws = new Socket();
   hub.handleConnection(ws as unknown as WebSocket, nodeId);
-  ws.receive({ type: "hello", version: 1, nodeId, sessions: [session], skills: [] });
+  ws.receive({ type: "hello", version: 1, nodeId, sessions: [current], skills: [] });
   await Promise.resolve();
   await Promise.resolve();
   return ws;
@@ -52,6 +53,17 @@ afterEach(async () => {
 });
 
 describe("session history hub", () => {
+  it.each([{ capabilities: undefined }, { capabilities: [] }, { capabilities: ["send"] }])(
+    "requires an advertised read capability before dispatch: $capabilities", async ({ capabilities }) => {
+      const { hub } = fixture();
+      const ws = await connected(hub, "node", SessionSchema.parse({ ...session, capabilities }));
+      ws.onSend = frame => { if (frame.type === "read_history") ws.receive(response(frame)); };
+      await expect(hub.readHistory("node", "session")).rejects.toMatchObject({
+        httpStatus: 403, code: "history_forbidden", message: "Session does not provide history reading capability",
+      });
+      expect(ws.sent).toEqual([]);
+    });
+
   it("retains exact native turn statuses while rejecting unbounded or unknown metadata", () => {
     const parsed = SessionHistorySchema.parse({ ...history, items: [{ ...history.items[0], turnStatus: "inProgress" }],
       turnStatuses: { turn: "inProgress", old: "completed" } });
@@ -182,12 +194,12 @@ describe("session history hub", () => {
 
   it("reads an unloaded original session with scoped UUID request and never creates or reads commands", async () => {
     const { hub, store } = fixture();
-    const ws = await connected(hub, "demoair");
+    const ws = await connected(hub, "macair");
     const get = vi.spyOn(store, "getCommand");
     const create = vi.spyOn(store, "createCommandIfAbsent");
     const update = vi.spyOn(store, "updateCommandStatus");
-    const pending = hub.readHistory("demoair", "session", { cursor: "opaque", historyContext: history.historyContext, limit: 2 });
-    expect(ws.request()).toMatchObject({ type: "read_history", nodeId: "demoair", sessionId: "session", cursor: "opaque", historyContext: history.historyContext, limit: 2 });
+    const pending = hub.readHistory("macair", "session", { cursor: "opaque", historyContext: history.historyContext, limit: 2 });
+    expect(ws.request()).toMatchObject({ type: "read_history", nodeId: "macair", sessionId: "session", cursor: "opaque", historyContext: history.historyContext, limit: 2 });
     expect(ws.request().requestId).toMatch(/^[0-9a-f-]{36}$/);
     ws.receive(response(ws.request(), { history: { ...history, internalSecret: "not projected",
       items: [{ ...history.items[0], rawPayload: "not projected" }] } }));

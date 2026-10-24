@@ -6,6 +6,7 @@ import {
   DaemonMessage,
   DaemonMessageSchema,
   DaemonResultMessage,
+  DeliveryMode,
   HistoryReadOptions,
   NodeStatus,
   ScopedSession,
@@ -22,6 +23,8 @@ import { isTerminalSession } from "../sessions/terminal.js";
 import { validateCommandTurnBinding } from "../store/command-state.js";
 import { sameInputReceipt } from "../sessions/input-receipt.js";
 import { InvalidSessionInventoryError, validateNodeSessionInventory } from "../store/node-sessions.js";
+import { duplicateNodeCloseReason } from "./close-reason.js";
+import { CommandTransport, type CommandDelivery } from "./command-transport.js";
 
 export interface ConnectedNode {
   nodeId: string;
@@ -30,6 +33,7 @@ export interface ConnectedNode {
   lastHeartbeat: Date;
   sessions: Session[];
   skills: Skill[];
+  deliveryModes: DeliveryMode[];
   isHelloCompleted: boolean;
   heartbeatTimer?: NodeJS.Timeout;
   inspection?: { commandId: string; turnId?: string; deadline: number };
@@ -44,6 +48,8 @@ export class NodeHub {
   private historyRequests = new SessionHistoryRequests();
   private mediaRequests = new SessionMediaRequests();
   private automationRequests = new AutomationRequests();
+  private stopping = false;
+  private commandTransport = new CommandTransport();
 
   async listAutomations(nodeId: string, signal?: AbortSignal): Promise<SourceAutomation[]> {
     const node = this.nodes.get(nodeId);
@@ -92,6 +98,8 @@ export class NodeHub {
   // Bound idle connections, including while a fragmented result is arriving.
   private static readonly HEARTBEAT_TIMEOUT_MS = 45000;
   private static readonly INSPECTION_TIMEOUT_MS = 20000;
+  private static readonly SHUTDOWN_CLOSE_CODE = 1001;
+  private static readonly SHUTDOWN_CLOSE_REASON = "Server shutting down";
 
   constructor(store: IStore, tokenToNode: Map<string, string>, private readonly onStatusChanged?: () => void) {
     this.store = store;
@@ -105,6 +113,13 @@ export class NodeHub {
   isNodeConnected(nodeId: string): boolean {
     const node = this.nodes.get(nodeId);
     return !!node && node.isHelloCompleted && node.ws.readyState === WebSocket.OPEN;
+  }
+
+  supportsDeliveryMode(nodeId: string, mode: DeliveryMode): boolean {
+    const node = this.nodes.get(nodeId);
+    if (!node || !this.isNodeConnected(nodeId)) return false;
+    // Legacy v1 nodes only guarantee ordinary next-turn delivery.
+    return mode === "next-turn" || node.deliveryModes.includes(mode);
   }
 
   getNodeSession(nodeId: string, sessionId: string): Session | null {
@@ -137,14 +152,31 @@ export class NodeHub {
     if (!session) {
       throw new HistoryError(404, "history_session_not_found", "Session not found");
     }
+    if (!session.capabilities.includes("read")) {
+      throw new HistoryError(403, "history_forbidden", "Session does not provide history reading capability");
+    }
     return this.historyRequests.read(nodeId, sessionId, node.ws, options, signal, session);
   }
 
   handleConnection(ws: WebSocket, nodeId: string): void {
+    // Rejected sockets can still emit parser errors during the closing handshake.
+    ws.on("error", (err) => {
+      this.commandTransport.disconnect(ws);
+      this.historyRequests.disconnect(ws);
+      this.mediaRequests.disconnect(ws);
+      this.automationRequests.disconnect(ws);
+      console.error(`[${nodeId}] ws error:`, err);
+    });
+
+    if (this.stopping) {
+      ws.close(NodeHub.SHUTDOWN_CLOSE_CODE, NodeHub.SHUTDOWN_CLOSE_REASON);
+      return;
+    }
+
     // Contract: Reject duplicate live node identities
     const existing = this.nodes.get(nodeId);
     if (existing && existing.ws.readyState === WebSocket.OPEN) {
-      ws.close(4009, `Node identity '${nodeId}' is already actively connected`);
+      ws.close(4009, duplicateNodeCloseReason(nodeId));
       return;
     }
 
@@ -158,6 +190,7 @@ export class NodeHub {
       lastHeartbeat: new Date(),
       sessions: [],
       skills: [],
+      deliveryModes: [],
       isHelloCompleted: false,
     };
     this.nodes.set(nodeId, nodeRecord);
@@ -237,6 +270,7 @@ export class NodeHub {
 
     ws.on("close", async () => {
       if (nodeRecord.heartbeatTimer) clearTimeout(nodeRecord.heartbeatTimer);
+      this.commandTransport.disconnect(ws);
       this.historyRequests.disconnect(ws);
       this.mediaRequests.disconnect(ws);
       this.automationRequests.disconnect(ws);
@@ -262,13 +296,6 @@ export class NodeHub {
         this.onStatusChanged?.();
       }
     });
-
-    ws.on("error", (err) => {
-      this.historyRequests.disconnect(ws);
-      this.mediaRequests.disconnect(ws);
-      this.automationRequests.disconnect(ws);
-      console.error(`[${nodeId}] ws error:`, err);
-    });
   }
 
   private async handleDaemonMessage(node: ConnectedNode, msg: DaemonMessage): Promise<void> {
@@ -290,6 +317,7 @@ export class NodeHub {
 
       node.sessions = msg.sessions;
       node.skills = msg.skills;
+      node.deliveryModes = msg.deliveryModes ?? [];
       node.lastHeartbeat = new Date();
       node.isHelloCompleted = true;
       this.sessionsChanged(nodeId);
@@ -477,26 +505,18 @@ export class NodeHub {
   }
 
   async sendCommand(
-    cmd: ControllerCommandMessage
-  ): Promise<{ delivered: boolean; error?: string }> {
+    cmd: ControllerCommandMessage, signal?: AbortSignal
+  ): Promise<CommandDelivery> {
     const node = this.nodes.get(cmd.nodeId);
     if (!node || !node.isHelloCompleted || node.ws.readyState !== WebSocket.OPEN) {
       return { delivered: false, error: `Node '${cmd.nodeId}' is not connected` };
     }
+    // Recheck the current connection after any asynchronous admission or queue claim.
+    if (cmd.deliveryMode === "steer" && !this.supportsDeliveryMode(cmd.nodeId, "steer")) {
+      return { delivered: false, rejected: true, error: "Target node does not support steer delivery" };
+    }
 
-    return new Promise<{ delivered: boolean; error?: string }>((resolve) => {
-      try {
-        node.ws.send(JSON.stringify(cmd), (err) => {
-          if (err) {
-            resolve({ delivered: false, error: err.message });
-          } else {
-            resolve({ delivered: true });
-          }
-        });
-      } catch (err: any) {
-        resolve({ delivered: false, error: err.message });
-      }
-    });
+    return this.commandTransport.send(node.ws, cmd, signal);
   }
 
   getNodeStatusList(): NodeStatus[] {
@@ -534,6 +554,8 @@ export class NodeHub {
   }
 
   async closeAll(): Promise<void> {
+    this.stopping = true;
+    this.commandTransport.closeAll();
     this.historyRequests.closeAll();
     this.mediaRequests.closeAll();
     this.automationRequests.closeAll();
@@ -543,7 +565,7 @@ export class NodeHub {
     for (const [nodeId, node] of closingNodes) {
       if (node.heartbeatTimer) clearTimeout(node.heartbeatTimer);
       try {
-        node.ws.close(1001, "Server shutting down");
+        node.ws.close(NodeHub.SHUTDOWN_CLOSE_CODE, NodeHub.SHUTDOWN_CLOSE_REASON);
       } catch (err) {
         console.error(`[${nodeId}] Error closing websocket during closeAll:`, err);
       }

@@ -23,6 +23,11 @@ func TestItemMediaRequiresExplicitLocalImageAttachments(t *testing.T) {
 		{"inline-html-comment", map[string]any{"type": "agentMessage", "text": "example <!-- ![secret](/private/secret.png) --> ![real](/tmp/real.png)"}, []string{"/tmp/real.png"}},
 		{"percent-escaped-path", map[string]any{"type": "agentMessage", "text": "![real](/tmp/my%20image.png) ![remote](https%3A%2F%2Fexample.com%2Fsecret.png)"}, []string{"/tmp/my image.png"}},
 		{"noncanonical-path", map[string]any{"type": "agentMessage", "text": "![secret](/tmp/link/../private.png)"}, nil},
+		{"entity-noncanonical-path", map[string]any{"type": "agentMessage", "text": "![secret](/tmp/&#46;&#46;/private.png)"}, nil},
+		{"entity-network-path", map[string]any{"type": "agentMessage", "text": "![secret](&#47;&#47;server/share.png)"}, nil},
+		{"entity-line-ending", map[string]any{"type": "agentMessage", "text": "![secret](/tmp/a&NewLine;b.png)"}, nil},
+		{"entity-url", map[string]any{"type": "agentMessage", "text": "![secret](https&colon;//example.com/secret.png)"}, nil},
+		{"entity-percent-nul", map[string]any{"type": "agentMessage", "text": "![secret](/tmp/a&#37;00.png)"}, nil},
 		{"native-path-is-not-trimmed", map[string]any{"type": "userMessage", "content": []any{map[string]any{"type": "localImage", "path": " /private/secret.png"}}}, nil},
 	}
 	for _, tc := range tests {

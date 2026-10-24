@@ -34,7 +34,6 @@ export interface DeliveryOutboxItem {
   chatId: string;
   messageId: string;
   splitMaxChars: number;
-  splitMultiPart: boolean;
   status: "pending" | "claiming" | "claimed" | "defer" | "receipt" | "uncertain" | "expired";
   attemptId?: string;
   deferReason?: import("./runtime/context-policy.js").DeferReason;

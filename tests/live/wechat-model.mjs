@@ -25,7 +25,7 @@ async function runCli() {
       help: { type: "boolean", short: "h" },
       session: { type: "string" },
       chat: { type: "string", default: "synthetic-live-test" },
-      node: { type: "string", default: "demoair" },
+      node: { type: "string", default: "macair" },
       url: { type: "string", default: "http://127.0.0.1:8790" },
       marker: { type: "string" },
       timeout: { type: "string", default: "90000" },
@@ -33,7 +33,7 @@ async function runCli() {
   });
 
   if (values.help) {
-    console.log(`Usage: node tests/live/wechat-model.mjs --session ID [--chat CHAT_ID] [--node demoair] [--url URL] [--marker MARKER] [--timeout MS]
+    console.log(`Usage: node tests/live/wechat-model.mjs --session ID [--chat CHAT_ID] [--node macair] [--url URL] [--marker MARKER] [--timeout MS]
 
 Synthetic WeChat acceptance simulator for Control Plane.
 Validates:

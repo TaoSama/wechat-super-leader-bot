@@ -38,7 +38,7 @@ test("shared parser accepts only standalone directories and preserves requested 
     assert.deepEqual(parseSessionDirectoryQuery(text), { status: "idle" }, text);
   }
   for (const text of ["", "会话", "列出会话并发送", "列出会话，然后给第三个发消息", "查看所有会话\n继续第三个",
-    "会话列表\n", "会话列表\u2028", "查看会话。继续第三个", "查看所有会话的进度", "查看会话模型", "列出demoair会话",
+    "会话列表\n", "会话列表\u2028", "查看会话。继续第三个", "查看所有会话的进度", "查看会话模型", "列出macair会话",
     "查看项目A的任务", "记住以后查看所有会话", "‘查看所有会话’", "查看所有会话的标题", "取消任务列表",
     "把标题改成会话列表", "看看第三个任务", "运行会话", "列出会话；发消息", "列出会话并记住偏好"]) {
     assert.equal(parseSessionDirectoryQuery(text), undefined, text);

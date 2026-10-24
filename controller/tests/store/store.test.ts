@@ -11,7 +11,7 @@ describe("MemoryStore", () => {
     const cmd1: CommandRecord = {
       commandId: "cmd_1",
       requestId: "req_1",
-      nodeId: "demoair",
+      nodeId: "macair",
       sessionId: "s_1",
       action: "read",
       status: "pending",
@@ -50,7 +50,7 @@ describe("MemoryStore", () => {
     const cmdPending: CommandRecord = {
       commandId: "cmd_p",
       requestId: "req_p",
-      nodeId: "demoair",
+      nodeId: "macair",
       sessionId: "s_1",
       action: "send",
       prompt: "hi",
@@ -63,7 +63,7 @@ describe("MemoryStore", () => {
     const cmdAccepted: CommandRecord = {
       commandId: "cmd_a",
       requestId: "req_a",
-      nodeId: "demoair",
+      nodeId: "macair",
       sessionId: "s_1",
       action: "send",
       prompt: "hi2",
@@ -77,7 +77,7 @@ describe("MemoryStore", () => {
     const cmdCompleted: CommandRecord = {
       commandId: "cmd_c",
       requestId: "req_c",
-      nodeId: "demoair",
+      nodeId: "macair",
       sessionId: "s_1",
       action: "read",
       status: "completed",
@@ -90,7 +90,7 @@ describe("MemoryStore", () => {
     await store.createCommandIfAbsent(cmdAccepted);
     await store.createCommandIfAbsent(cmdCompleted);
 
-    await store.markNodeActiveCommandsUncertain("demoair", "Node disconnected");
+    await store.markNodeActiveCommandsUncertain("macair", "Node disconnected");
 
     const p = await store.getCommand("cmd_p");
     const a = await store.getCommand("cmd_a");

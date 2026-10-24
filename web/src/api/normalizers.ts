@@ -37,10 +37,10 @@ function normalizeActionCapabilities(raw: unknown): SessionCapability[] {
 function normalizeNode(raw: unknown): NodeStatus | null {
   if (typeof raw !== "object" || raw === null) return null;
   const obj = raw as Record<string, unknown>;
-  if (typeof obj.nodeId !== "string" || obj.nodeId.trim() === "") return null;
+  if (typeof obj.nodeId !== "string" || obj.nodeId.trim() === "" || typeof obj.connected !== "boolean") return null;
   return {
     nodeId: obj.nodeId,
-    connected: Boolean(obj.connected),
+    connected: obj.connected,
     lastHeartbeat:
       typeof obj.lastHeartbeat === "string" ? obj.lastHeartbeat : "",
     sessionCount:

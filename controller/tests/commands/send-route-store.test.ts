@@ -7,6 +7,7 @@ import type { CommandRecord } from "../../src/types.js";
 vi.mock("pg", () => ({ default: { Pool: vi.fn() } }));
 type Row = Record<string, unknown>;
 class FakeCommandPool {
+  on = vi.fn();
   rows = new Map<string, Row>();
   statements: string[] = [];
   async query(raw: string, params: unknown[] = []) {
@@ -26,8 +27,10 @@ class FakeCommandPool {
       return { rows: row ? [structuredClone(row)] : [] };
     }
     if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql) || sql.startsWith("CREATE TABLE") || sql.startsWith("ALTER TABLE") ||
-        sql.startsWith("CREATE INDEX") || sql.startsWith("CREATE UNIQUE INDEX") || sql.startsWith("DROP INDEX") || sql.startsWith("INSERT INTO known_sessions") || sql.startsWith("DELETE FROM node_sessions") || sql.startsWith("UPDATE commands")) return { rows: [] };
-    if (sql === "SELECT * FROM leader_notifications ORDER BY id FOR UPDATE") return { rows: [] };
+        sql.startsWith("CREATE INDEX") || sql.startsWith("CREATE UNIQUE INDEX") || sql.startsWith("DROP INDEX") || sql.startsWith("INSERT INTO known_sessions") || sql.startsWith("DELETE FROM node_sessions") || sql.startsWith("UPDATE commands") ||
+        sql.startsWith("SELECT pg_advisory_xact_lock(") || sql.startsWith("INSERT INTO controller_schema_migrations")) return { rows: [] };
+    if (sql === "SELECT version FROM controller_schema_migrations" ||
+        sql === "SELECT * FROM leader_notifications WHERE ($1::text IS NULL OR id>$1) ORDER BY id LIMIT $2 FOR UPDATE") return { rows: [] };
     throw new Error(`Unexpected fixture SQL: ${sql}`);
   }
   async connect() { return { query: this.query.bind(this), release: () => {} }; }

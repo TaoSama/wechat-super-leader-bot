@@ -5,6 +5,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
+import { verificationEnvironment } from '../../scripts/verify.mjs';
 import { verifyNodeIsolation } from './sessions/node-isolation.mjs';
 import { verifyNodeSessionStore } from './sessions/node-session-store.mjs';
 import { createDesktopModelFixture, verifyDesktopRoute } from './sessions/desktop-route.mjs';
@@ -119,6 +120,7 @@ async function main() {
       [TERMINAL_NODE]: terminalToken, [TERMINAL_INPUT_NODE]: terminalInputToken, [TERMINAL_HISTORY_NODE]: terminalHistoryToken,
       [PLAN_NODE]: planToken, [GOAL_NODE]: goalToken };
     controller = await createControllerFixture({ logs, secrets: [postgres.password, token, ...Object.values(nodeTokens)], env: {
+      ...verificationEnvironment(),
       PERSISTENCE_MODE: 'postgres', DATABASE_URL: databaseUrl,
       CONTROLLER_TOKEN: token, NODE_TOKENS: JSON.stringify(nodeTokens),
       ALLOWED_CHAT_IDS: ['test-chat', PLAN_CHAT, GOAL_CHAT].join(','),

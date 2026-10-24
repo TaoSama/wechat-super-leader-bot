@@ -63,7 +63,7 @@ func TestCodexHomeIsExplicitAndDoesNotCreateFiles(t *testing.T) {
 
 func TestParseFlags_Validations(t *testing.T) {
 	// 1. Missing token
-	_, err := config.ParseFlags([]string{"-node-id", "demoair", "-controller-url", "ws://127.0.0.1:8790/v1/daemon", "-token-env", "NON_EXISTENT_ENV_TOKEN_XYZ"})
+	_, err := config.ParseFlags([]string{"-node-id", "macair", "-controller-url", "ws://127.0.0.1:8790/v1/daemon", "-token-env", "NON_EXISTENT_ENV_TOKEN_XYZ"})
 	if err == nil {
 		t.Fatalf("expected error for missing token")
 	}
@@ -76,7 +76,7 @@ func TestParseFlags_Validations(t *testing.T) {
 	}
 
 	cfg, err := config.ParseFlags([]string{
-		"-node-id", "demoair",
+		"-node-id", "macair",
 		"-controller-url", "ws://127.0.0.1:8790/v1/daemon",
 		"-token-file", tokenPath,
 		"-heartbeat", "10",
@@ -93,7 +93,7 @@ func TestParseFlags_Validations(t *testing.T) {
 
 	// 3. Invalid heartbeat (<= 0)
 	_, err = config.ParseFlags([]string{
-		"-node-id", "demoair",
+		"-node-id", "macair",
 		"-token-file", tokenPath,
 		"-heartbeat", "0",
 	})
@@ -103,7 +103,7 @@ func TestParseFlags_Validations(t *testing.T) {
 
 	// 4. Positional arguments forbidden (security against leaking tokens on CLI)
 	_, err = config.ParseFlags([]string{
-		"-node-id", "demoair",
+		"-node-id", "macair",
 		"-token-file", tokenPath,
 		"extra-argument",
 	})
@@ -113,7 +113,7 @@ func TestParseFlags_Validations(t *testing.T) {
 
 	// 5. Remote controller requires wss://
 	_, err = config.ParseFlags([]string{
-		"-node-id", "demoair",
+		"-node-id", "macair",
 		"-controller-url", "ws://remote.example.com/v1/daemon",
 		"-token-file", tokenPath,
 	})
@@ -123,7 +123,7 @@ func TestParseFlags_Validations(t *testing.T) {
 
 	// Remote with wss:// is valid
 	cfgRemote, err := config.ParseFlags([]string{
-		"-node-id", "demoair",
+		"-node-id", "macair",
 		"-controller-url", "wss://remote.example.com/v1/daemon",
 		"-token-file", tokenPath,
 	})
@@ -150,7 +150,7 @@ func TestParseFlags_Validations(t *testing.T) {
 func TestServiceActionFlags(t *testing.T) {
 	// 1. Valid non-install action does not require token
 	for _, action := range []string{"start", "stop", "restart", "status", "uninstall"} {
-		cfg, err := config.ParseFlags([]string{"--node-id", "demoair", "--service", action})
+		cfg, err := config.ParseFlags([]string{"--node-id", "macair", "--service", action})
 		if err != nil {
 			t.Fatalf("expected success for service action %q without token: %v", action, err)
 		}
@@ -160,7 +160,7 @@ func TestServiceActionFlags(t *testing.T) {
 	}
 
 	// 2. Install requires token
-	if _, err := config.ParseFlags([]string{"--node-id", "demoair", "--service", "install"}); err == nil {
+	if _, err := config.ParseFlags([]string{"--node-id", "macair", "--service", "install"}); err == nil {
 		t.Fatal("expected error for service install without token")
 	}
 
@@ -171,7 +171,7 @@ func TestServiceActionFlags(t *testing.T) {
 		t.Fatalf("write token file: %v", err)
 	}
 	cfg, err := config.ParseFlags([]string{
-		"--node-id", "demoair",
+		"--node-id", "macair",
 		"--service", "install",
 		"--token-file", tokenPath,
 		"--controller-url", "ws://127.0.0.1:8790/v1/daemon",
@@ -184,15 +184,15 @@ func TestServiceActionFlags(t *testing.T) {
 	}
 
 	// 4. Invalid service action
-	if _, err := config.ParseFlags([]string{"--node-id", "demoair", "--service", "invalid"}); err == nil {
+	if _, err := config.ParseFlags([]string{"--node-id", "macair", "--service", "invalid"}); err == nil {
 		t.Fatal("expected error for invalid service action")
 	}
 
 	// 5. Exclusive modes
-	if _, err := config.ParseFlags([]string{"--node-id", "demoair", "--probe", "--service", "status"}); err == nil {
+	if _, err := config.ParseFlags([]string{"--node-id", "macair", "--probe", "--service", "status"}); err == nil {
 		t.Fatal("expected error combining probe and service")
 	}
-	if _, err := config.ParseFlags([]string{"--node-id", "demoair", "--probe-skills", "--service", "status"}); err == nil {
+	if _, err := config.ParseFlags([]string{"--node-id", "macair", "--probe-skills", "--service", "status"}); err == nil {
 		t.Fatal("expected error combining probe-skills and service")
 	}
 }

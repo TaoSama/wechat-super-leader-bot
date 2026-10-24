@@ -71,10 +71,7 @@ collect:
 			if !ok {
 				continue
 			}
-			for _, ref := range threadstate.ItemMedia(map[string]any{"item": item, "turnId": turn["turnId"]}) {
-				if itemID != "" && ref.ItemID != itemID || turnID != "" && ref.TurnID != turnID {
-					continue
-				}
+			for _, ref := range threadstate.SelectItemMedia(map[string]any{"item": item, "turnId": turn["turnId"]}, itemID, turnID) {
 				refs = append(refs, ref)
 				if len(refs) >= limit {
 					break collect

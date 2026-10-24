@@ -145,7 +145,7 @@ for (const status of ["pending", "receipt"] as const) {
     const f = fixture(t);
     const oldKey = f.state.computeDeliveryKey("chat", "old");
     f.state.putOutbox({ kind: "reply", source: "engine", chatId: "chat", messageId: "old", deliveryKey: oldKey,
-      splitMaxChars: 1, splitMultiPart: true, status, ...(status === "receipt" ? { receiptStatus: "accepted" as const } : {}) });
+      splitMaxChars: 1, status, ...(status === "receipt" ? { receiptStatus: "accepted" as const } : {}) });
     let started!: () => void, release!: () => void;
     const startedPromise = new Promise<void>(resolve => { started = resolve; });
     const releasePromise = new Promise<void>(resolve => { release = resolve; });
@@ -198,7 +198,7 @@ for (const pressure of ["outbox", "engine"] as const) {
     const f = fixture(t, pressure === "outbox" ? 1 : undefined);
     const oldKey = f.state.computeDeliveryKey("chat", "old");
     f.state.putOutbox({ kind: "reply", source: "engine", chatId: "chat", messageId: "old", deliveryKey: oldKey,
-      splitMaxChars: 1, splitMultiPart: true, status: "pending" });
+      splitMaxChars: 1, status: "pending" });
     let reads = 0, requests = 0, released = false;
     const engine: GatewayReplyEngine = { requestBudgetMs: 1000,
       reply: async () => {
@@ -248,7 +248,7 @@ test("a concurrent unrelated recovery cannot bypass refreshed chat's deferred re
   const otherKey = f.state.computeDeliveryKey("other-chat", "other");
   f.state.recordInboundContext(otherKey, "other-chat", f.timestamp, true, "other-context");
   f.state.putOutbox({ kind: "reply", source: "controller", chatId: "other-chat", messageId: "other",
-    deliveryKey: otherKey, splitMaxChars: 1, splitMultiPart: true, status: "pending" });
+    deliveryKey: otherKey, splitMaxChars: 1, status: "pending" });
   let entered!: () => void, release!: () => void;
   const enteredPromise = new Promise<void>(resolve => { entered = resolve; });
   const releasePromise = new Promise<void>(resolve => { release = resolve; });

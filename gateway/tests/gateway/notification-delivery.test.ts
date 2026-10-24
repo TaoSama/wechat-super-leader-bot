@@ -55,7 +55,7 @@ test("long notification preserves all Markdown and Unicode across bounded chunks
   item.text = "# 执行结果\n\n- **完成**：" + "验证通过🚀".repeat(200);
   const f = harness(t, { items: [item], policy: { sendBudget: 100 } }), maxChars = 96;
   const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink,
-    splitMaxChars: maxChars, splitMultiPart: true });
+    splitMaxChars: maxChars });
   assert.equal((await gateway.deliverNotificationsOnce()).accepted, 1);
   assert.ok(f.sends.length > 1);
   const texts = f.sends.map((send, index) => {
@@ -76,7 +76,7 @@ test("failed Markdown notification is permanently uncertain without another send
   const f = harness(t, { items: [item] });
   f.hooks.send = () => { throw new TypeError("response lost"); };
   const gateway = new WeChatGateway({ stateManager: f.state, controller: f.controller, ilink: f.ilink,
-    splitMaxChars: 96, splitMultiPart: true });
+    splitMaxChars: 96 });
   assert.deepEqual(await gateway.deliverNotificationsOnce(), { accepted: 0, uncertain: 1, skipped: 0 });
   const state = new StateManager(f.accountPath, f.statePath);
   const restarted = new WeChatGateway({ stateManager: state, controller: f.controller, ilink: f.createILink(state) });

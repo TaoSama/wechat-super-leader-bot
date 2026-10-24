@@ -1,6 +1,6 @@
 import type { IStore } from "../../store/interface.js";
 import { TurnIdSchema } from "../../types.js";
-import { matchesGoalCommand, goalRequestId, type GoalRecord, type GoalDecisionInput } from "./goal.js";
+import { matchesGoalCommand, matchesGoalActionInput, goalRequestId, type GoalRecord, type GoalDecisionInput } from "./goal.js";
 
 export type GoalView = Pick<GoalRecord, "id" | "status" | "proposal" | "createdAt" | "expiresAt" | "decisions" | "decisionAttempts" | "blockedReason"> & {
   actions: GoalDecisionInput["actions"];
@@ -49,7 +49,7 @@ export async function validateGoalProofs(store: GoalCommandReader, current: Goal
   if (input && JSON.stringify(input.actions) !== JSON.stringify(view.actions)) throw new Error("Goal decision input differs from recorded commands");
   if (claimed) {
     const action = next.actions.at(-1)!;
-    if (view.actions.at(-1)?.status !== "waiting" || view.actions.slice(0, -1).some(a => a.status !== "completed") || action.input.sources.some(s =>
-      JSON.stringify(view.actions[s.action - 1]?.result) !== JSON.stringify(s))) throw new Error("Goal send predecessors are not completed");
+    if (view.actions.at(-1)?.status !== "waiting" || view.actions.slice(0, -1).some(a => a.status !== "completed") ||
+      !matchesGoalActionInput(current.proposal, action, view.actions)) throw new Error("Goal send predecessors are not completed");
   }
 }

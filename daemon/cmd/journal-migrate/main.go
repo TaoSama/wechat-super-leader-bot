@@ -58,7 +58,7 @@ func parseFlags(args []string) (*journal.MigrationOptions, error) {
 	defaultStateDir := strings.TrimSpace(os.Getenv("DAEMON_STATE_DIR"))
 
 	stateDir := fs.String("state-dir", defaultStateDir, "Private durable command journal directory; defaults to ~/.super-leader/daemon/<node hash>")
-	nodeID := fs.String("node-id", defaultNodeID, "Node identifier (e.g. demoair)")
+	nodeID := fs.String("node-id", defaultNodeID, "Node identifier (e.g. macair)")
 	socketPath := fs.String("sock", defaultSock, "Path to Codex app-server Unix domain socket")
 	fromURL := fs.String("from", config.DefaultControllerURL, "Previous Controller WebSocket URL")
 	toURL := fs.String("to", "", "Target Controller WebSocket URL")

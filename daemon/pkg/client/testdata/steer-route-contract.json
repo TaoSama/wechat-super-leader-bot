@@ -1,0 +1,66 @@
+[
+  {
+    "name": "control",
+    "supported": true,
+    "command": {
+      "type": "command",
+      "commandId": "route-control",
+      "nodeId": "macair",
+      "sessionId": "fixture-session",
+      "action": "send",
+      "prompt": "fixture only",
+      "expiresAt": "2099-01-01T00:00:00Z",
+      "sendRoute": "control-socket",
+      "deliveryMode": "steer",
+      "expectedTurnId": "active-turn"
+    }
+  },
+  {
+    "name": "managed",
+    "supported": true,
+    "command": {
+      "type": "command",
+      "commandId": "route-managed",
+      "nodeId": "macair",
+      "sessionId": "fixture-session",
+      "action": "send",
+      "prompt": "fixture only",
+      "expiresAt": "2099-01-01T00:00:00Z",
+      "sendRoute": "app-server-resume",
+      "deliveryMode": "steer",
+      "expectedTurnId": "active-turn"
+    }
+  },
+  {
+    "name": "desktop",
+    "supported": false,
+    "command": {
+      "type": "command",
+      "commandId": "route-desktop",
+      "nodeId": "macair",
+      "sessionId": "fixture-session",
+      "action": "send",
+      "prompt": "fixture only",
+      "expiresAt": "2099-01-01T00:00:00Z",
+      "sendRoute": "desktop-owner",
+      "deliveryMode": "steer",
+      "expectedTurnId": "active-turn"
+    }
+  },
+  {
+    "name": "terminal",
+    "supported": false,
+    "command": {
+      "type": "command",
+      "commandId": "route-terminal",
+      "nodeId": "macair",
+      "sessionId": "terminal:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "action": "send",
+      "prompt": "fixture only",
+      "expiresAt": "2099-01-01T00:00:00Z",
+      "sendRoute": "terminal-pane",
+      "deliveryMode": "steer",
+      "expectedTurnId": "active-turn"
+    }
+  }
+]

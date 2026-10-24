@@ -11,7 +11,7 @@ import { HistoryError } from "../../src/sessions/history.js";
 import type { Config } from "../../src/runtime/config.js";
 import type { SessionHistory } from "../../src/types.js";
 
-const HISTORY_PATH = "/v1/sessions/demoair/thread/history";
+const HISTORY_PATH = "/v1/sessions/macair/thread/history";
 const ADMIN_TOKEN = "compression-admin-token";
 const CONSOLE_ORIGIN = "http://127.0.0.1:8790";
 const BEARER = { Authorization: `Bearer ${ADMIN_TOKEN}` };
@@ -112,7 +112,7 @@ describe("scoped response compression over real HTTP", () => {
     expect(gunzipSync(compressed.body)).toEqual(plain.body);
     expect(JSON.parse(plain.body.toString())).toEqual(history());
     expect(compressed.body.length).toBeLessThan(plain.body.length);
-    expect(readHistory).toHaveBeenLastCalledWith("demoair", "thread", {
+    expect(readHistory).toHaveBeenLastCalledWith("macair", "thread", {
       limit: 20, cursor: "opaque+older=", historyContext: HISTORY_CONTEXT,
     }, expect.any(AbortSignal));
     console.info(`history ${auth}: identity=${plain.body.length}B gzip=${compressed.body.length}B ` +
@@ -177,7 +177,7 @@ describe("scoped response compression over real HTTP", () => {
     expect(message.body.length).toBeGreaterThan(1024);
     expect(message.headers["content-encoding"]).toBeUndefined();
     vi.spyOn(server.getNodeHub(), "getAllSessions").mockResolvedValue([
-      { ...history().session, nodeId: "demoair", title: LARGE_TEXT },
+      { ...history().session, nodeId: "macair", title: LARGE_TEXT },
     ]);
     const status = await request("/v1/status", { ...BEARER, "Accept-Encoding": "gzip" });
     expect(status.status).toBe(200);

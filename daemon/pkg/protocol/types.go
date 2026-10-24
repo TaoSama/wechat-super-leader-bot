@@ -81,13 +81,14 @@ type DesktopObservation struct {
 	ActiveTurnID string `json:"-"`
 }
 
-// DaemonHelloMessage: {type:"hello",version:1,nodeId:"demoair",sessions:[Session]}
+// DaemonHelloMessage: {type:"hello",version:1,nodeId:"macair",sessions:[Session]}
 type DaemonHelloMessage struct {
-	Type     string         `json:"type"`
-	Version  int            `json:"version"`
-	NodeID   string         `json:"nodeId"`
-	Sessions []Session      `json:"sessions"`
-	Skills   []skills.Skill `json:"skills"`
+	Type          string         `json:"type"`
+	Version       int            `json:"version"`
+	NodeID        string         `json:"nodeId"`
+	Sessions      []Session      `json:"sessions"`
+	Skills        []skills.Skill `json:"skills"`
+	DeliveryModes []DeliveryMode `json:"deliveryModes,omitempty"`
 }
 
 // DaemonHeartbeatMessage: {type:"heartbeat",sessions:[Session]}

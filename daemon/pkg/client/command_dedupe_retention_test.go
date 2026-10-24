@@ -10,6 +10,11 @@ import (
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 )
 
+const (
+	retentionReadCount   = 16
+	retentionOutputBytes = 1024 * 1024
+)
+
 type cacheRetentionAdapter struct {
 	receiptAdapter
 	reads int
@@ -17,7 +22,7 @@ type cacheRetentionAdapter struct {
 
 func (a *cacheRetentionAdapter) ReadSession(context.Context, string) (string, error) {
 	a.reads++
-	return fmt.Sprintf("read %d\n", a.reads) + strings.Repeat("x", 1024*1024), nil
+	return fmt.Sprintf("read %d\n", a.reads) + strings.Repeat("x", retentionOutputBytes), nil
 }
 
 func TestDurableReadAcknowledgementDoesNotRetainVolatileBodies(t *testing.T) {
@@ -33,23 +38,21 @@ func TestDurableReadAcknowledgementDoesNotRetainVolatileBodies(t *testing.T) {
 		}
 	})
 	var lastCommand protocol.ControllerCommandMessage
-	for i := 0; i < 16; i++ {
+	for i := range retentionReadCount {
 		cmd := persistenceCommand(time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano))
 		cmd.CommandID = fmt.Sprintf("large-read-%d", i)
 		cmd.Action, cmd.Prompt = protocol.ActionRead, ""
 		result := d.ExecuteCommand(context.Background(), cmd)
-		if result.Status != protocol.StatusCompleted || len(result.Output) < 1024*1024 {
+		if result.Status != protocol.StatusCompleted || len(result.Output) < retentionOutputBytes {
 			t.Fatalf("read did not preserve original output: status=%s bytes=%d", result.Status, len(result.Output))
 		}
-		duplicate := d.ExecuteCommand(context.Background(), cmd)
-		if !protocol.SameResult(result, duplicate) || adapter.reads != i+1 {
+		if duplicate := d.ExecuteCommand(context.Background(), cmd); !protocol.SameResult(result, duplicate) || adapter.reads != i+1 {
 			t.Fatal("unacknowledged duplicate did not replay exact journal receipt")
 		}
 		if len(d.dedupeCache) != 0 || len(d.dedupeOrder) != 0 || len(d.pendingPersistence) != 0 {
 			t.Fatal("durable execution retained a redundant in-memory receipt")
 		}
-		wrong := protocol.ResultAckMessage{CommandID: cmd.CommandID, Status: protocol.StatusFailed}
-		if err := d.ackResult(wrong); err != nil {
+		if err := d.ackResult(protocol.ResultAckMessage{CommandID: cmd.CommandID, Status: protocol.StatusFailed}); err != nil {
 			t.Fatal(err)
 		}
 		entry, found, err := d.journal.Lookup(cmd)
@@ -59,8 +62,7 @@ func TestDurableReadAcknowledgementDoesNotRetainVolatileBodies(t *testing.T) {
 		if err := d.ackResult(protocol.ResultAckMessage{CommandID: cmd.CommandID, Status: result.Status}); err != nil {
 			t.Fatal(err)
 		}
-		duplicate = d.ExecuteCommand(context.Background(), cmd)
-		if duplicate.Status != result.Status || duplicate.HasOutput() || adapter.reads != i+1 {
+		if duplicate := d.ExecuteCommand(context.Background(), cmd); duplicate.Status != result.Status || duplicate.HasOutput() || adapter.reads != i+1 {
 			t.Fatal("ACK erased dedupe protection or revived acknowledged output")
 		}
 		conflict := cmd
@@ -73,15 +75,22 @@ func TestDurableReadAcknowledgementDoesNotRetainVolatileBodies(t *testing.T) {
 	if pending, err := d.journal.Unacked(); err != nil || len(pending) != 0 {
 		t.Fatalf("acknowledged backlog remains: count=%d err=%v", len(pending), err)
 	}
-	if len(d.dedupeCache) != 0 || len(d.pendingPersistence) != 0 {
-		t.Fatal("ACKed output remains in daemon result caches")
+	retainedOutputBytes := 0
+	for _, cached := range d.dedupeCache {
+		retainedOutputBytes += len(cached.result.Output)
 	}
+	if len(d.dedupeCache) != 0 || len(d.dedupeOrder) != 0 || len(d.pendingPersistence) != 0 {
+		t.Fatalf("durable results remain in volatile caches: entries=%d order=%d pending=%d retainedOutputBytes=%d",
+			len(d.dedupeCache), len(d.dedupeOrder), len(d.pendingPersistence), retainedOutputBytes)
+	}
+	t.Logf("ACKed reads=%d retainedOutputBytes=%d volatileEntries=%d pendingPersistence=%d",
+		retentionReadCount, retainedOutputBytes, len(d.dedupeCache), len(d.pendingPersistence))
 	closeDaemon(t, d)
 	d, err = OpenDaemon(cfg, adapter)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := d.ExecuteCommand(context.Background(), lastCommand); got.Status != protocol.StatusCompleted || got.HasOutput() || adapter.reads != 16 {
+	if got := d.ExecuteCommand(context.Background(), lastCommand); got.Status != protocol.StatusCompleted || got.HasOutput() || adapter.reads != retentionReadCount {
 		t.Fatal("restart lost acknowledged replay protection")
 	}
 }
@@ -96,7 +105,7 @@ func TestVolatileAcknowledgementPrunesBodyAndPreservesReplayGuard(t *testing.T) 
 	}
 	result := d.ExecuteCommand(context.Background(), cmd)
 	d.queueResult(result)
-	if result.Status != protocol.StatusCompleted || len(result.Output) < 1024*1024 {
+	if result.Status != protocol.StatusCompleted || len(result.Output) < retentionOutputBytes {
 		t.Fatal("missing full read result")
 	}
 	if err := d.ackResult(protocol.ResultAckMessage{CommandID: cmd.CommandID, Status: protocol.StatusFailed}); err != nil {

@@ -10,7 +10,7 @@ services:
         max-file: "3"
   controller:
     environment:
-      CONSOLE_PUBLIC_URL: ${CONSOLE_PUBLIC_URL:-https://leader.example.com}
+      CONSOLE_PUBLIC_URL: ${CONSOLE_PUBLIC_URL:-https://leader.taoai.site}
       BACKGROUND_WORKER_ROOT: ${BACKGROUND_WORKER_ROOT:-}
       BACKGROUND_ARTIFACT_ROOT: /var/lib/super-leader-artifacts
       BACKGROUND_MODEL_NAME: ${BACKGROUND_MODEL_NAME:-}

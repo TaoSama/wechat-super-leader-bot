@@ -49,7 +49,7 @@ func (entry *desktopHistoryEntry) change(raw json.RawMessage) error {
 		if err != nil {
 			return err
 		}
-		encoded, state, err = applyDesktopHistoryPatches(entry.raw, patches)
+		_, state, err = applyDesktopHistoryPatches(entry.raw, patches)
 		if err != nil {
 			return err
 		}

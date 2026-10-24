@@ -56,7 +56,8 @@ describe("node inventory persistence ordering", () => {
       expect(f.hub.getNodeSession("node", "initial")).toBeNull();
       expect(f.hub.getNodeSession("node", "latest")).toBeDefined();
       gate.release();
-      await vi.waitFor(async () => expect((await f.store.getNodeSessions("node")).map(item => item.id)).toEqual(["latest"]));
+      await vi.waitFor(async () => expect((await f.store.getKnownSession("node", "latest"))?.id).toBe("latest"));
+      expect((await f.hub.getAllSessions()).filter(item => item.nodeId === "node").map(item => item.id)).toEqual(["latest"]);
       expect(entered.filter(item => item.startsWith("node:"))).toEqual(["node:initial", "node:middle", "node:latest"]);
     } finally { gate.release(); }
   });
@@ -81,13 +82,13 @@ describe("node inventory persistence ordering", () => {
       f.hub.handleConnection(replacement as unknown as WebSocket, "node");
       replacement.receive(hello("node", [session("replacement")]));
       gate.release();
-      await vi.waitFor(async () => expect((await f.store.getNodeSessions("node")).map(item => item.id)).toEqual(["replacement"]));
+      await vi.waitFor(async () => expect((await f.store.getKnownSession("node", "replacement"))?.id).toBe("replacement"));
       expect(operations).toEqual(["old", "remove", "replacement"]);
       expect(f.hub.isNodeConnected("node")).toBe(true);
     } finally { gate.release(); }
   });
 
-  it("shutdown waits for pending inventory before removing it", async () => {
+  it("shutdown waits for pending observations and preserves their offline identity", async () => {
     const f = fixture(), gate = barrier();
     const original = f.store.upsertNodeSessions.bind(f.store);
     const write = vi.spyOn(f.store, "upsertNodeSessions").mockImplementation(async (nodeId, sessions) => {
@@ -99,7 +100,8 @@ describe("node inventory persistence ordering", () => {
       const closing = f.hub.closeAll();
       gate.release();
       await closing;
-      expect(await f.store.getAllSessions()).toEqual([]);
+      expect(await f.hub.getAllSessions()).toEqual([]);
+      expect((await f.store.getKnownSession("node", "pending"))?.id).toBe("pending");
     } finally { gate.release(); }
   });
 
@@ -109,7 +111,7 @@ describe("node inventory persistence ordering", () => {
     vi.spyOn(f.store, "upsertNodeSessions").mockRejectedValueOnce(new Error("synthetic database failure"));
     f.socket.receive(hello("node", [session("failed")]));
     f.socket.receive(heartbeat([session("recovered")]));
-    await vi.waitFor(async () => expect((await f.store.getNodeSessions("node")).map(item => item.id)).toEqual(["recovered"]));
+    await vi.waitFor(async () => expect((await f.store.getKnownSession("node", "recovered"))?.id).toBe("recovered"));
     expect(error).toHaveBeenCalledWith("[node] Error upserting node sessions on hello:", expect.any(Error));
   });
 
@@ -133,7 +135,7 @@ describe("node inventory persistence ordering", () => {
       expect(returned).toBe(false);
       writeGate.release();
       await vi.waitFor(() => expect(marking).toHaveBeenCalledTimes(1));
-      expect(await f.store.getAllSessions()).toEqual([]);
+      expect(await f.hub.getAllSessions()).toEqual([]);
       expect(returned).toBe(false);
       uncertainGate.release();
       await closing;
@@ -146,20 +148,22 @@ describe("node inventory persistence ordering", () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     if (type === "heartbeat") {
       f.socket.receive(hello("node", [session("prior")]));
-      await vi.waitFor(async () => expect(await f.store.getNodeSessions("node")).toHaveLength(1));
+      await vi.waitFor(async () => expect((await f.store.getKnownSession("node", "prior"))?.id).toBe("prior"));
     }
     const duplicate = [session("same"), { ...session("same"), capabilities: [] }];
     f.socket.receive(type === "hello" ? hello("node", duplicate) : heartbeat(duplicate));
     expect(f.socket.closeCode).toBe(4000);
     expect(f.hub.isNodeConnected("node")).toBe(false);
     expect(f.hub.getNodeSession("node", "same")).toBeNull();
-    await vi.waitFor(async () => expect(await f.store.getNodeSessions("node")).toEqual([]));
+    expect(await f.hub.getAllSessions()).toEqual([]);
+    expect(await f.store.getKnownSession("node", "same")).toBeNull();
   });
 
-  it("rejects duplicate IDs in MemoryStore before replacing the previous complete snapshot", async () => {
+  it("rejects duplicate IDs in MemoryStore before recording conflicting identities", async () => {
     const store = new MemoryStore();
     await store.upsertNodeSessions("node", [session("prior")]);
     await expect(store.upsertNodeSessions("node", [session("same"), session("same")])).rejects.toBeInstanceOf(InvalidSessionInventoryError);
-    expect((await store.getNodeSessions("node")).map(item => item.id)).toEqual(["prior"]);
+    expect((await store.getKnownSession("node", "prior"))?.id).toBe("prior");
+    expect(await store.getKnownSession("node", "same")).toBeNull();
   });
 });

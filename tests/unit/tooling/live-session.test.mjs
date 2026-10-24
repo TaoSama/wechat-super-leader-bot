@@ -63,7 +63,7 @@ test('test-live-session fails safely when targeting nonexistent session', async 
   const server = createServer((request, response) => {
     if (request.method !== 'GET') writes++;
     response.setHeader('Content-Type', 'application/json');
-    response.end(JSON.stringify({ nodes: [{ nodeId: 'demoair', connected: true }], sessions: [] }));
+    response.end(JSON.stringify({ nodes: [{ nodeId: 'macair', connected: true }], sessions: [] }));
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');

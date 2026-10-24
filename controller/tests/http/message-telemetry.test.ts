@@ -121,7 +121,7 @@ describe("message HTTP latency trace", () => {
     const post = await start();
     const now = Date.now();
     const sessions: ScopedSession[] = [
-      { id: "old", nodeId: "demoair", provider: "codex-app", title: "旧会话原标题", cwd: "/work/app",
+      { id: "old", nodeId: "macair", provider: "codex-app", title: "旧会话原标题", cwd: "/work/app",
         status: "notLoaded", observedAt: new Date(now).toISOString(), capabilities: [],
         updatedAt: "2026-10-20T01:00:00Z", model: "control-model",
         desktopObservation: { source: "codex-desktop", availability: "available", status: "idle",
@@ -131,7 +131,7 @@ describe("message HTTP latency trace", () => {
         updatedAt: "2026-10-21T02:00:00Z",
         desktopObservation: { source: "codex-desktop", availability: "available", status: "idle",
           observedAt: new Date(now - 120_000).toISOString(), model: "stale-model" } },
-      { id: "new", nodeId: "demoair", provider: "codex-app", title: "最新会话原标题", cwd: "/work/app",
+      { id: "new", nodeId: "macair", provider: "codex-app", title: "最新会话原标题", cwd: "/work/app",
         status: "active", observedAt: new Date(now).toISOString(), capabilities: [],
         updatedAt: "2026-10-21T03:00:00Z", model: "native-model",
         desktopObservation: { source: "codex-desktop", availability: "available", status: "idle",
@@ -141,14 +141,14 @@ describe("message HTTP latency trace", () => {
     const response = await post({}, "会话列表");
     expect(response.status).toBe(200);
     const body = markdownToWeChat((await response.json()).text, Number.MAX_SAFE_INTEGER);
-    expect(body).toContain("app（demoair）");
+    expect(body).toContain("app（macair）");
     expect(body).toContain("other（mini）");
-    expect(body.indexOf("app（demoair）")).toBeLessThan(body.indexOf("other（mini）"));
+    expect(body.indexOf("app（macair）")).toBeLessThan(body.indexOf("other（mini）"));
     expect(body.indexOf("最新会话原标题")).toBeLessThan(body.indexOf("旧会话原标题"));
     expect(body).toContain("1. [忙] 最新会话原标题");
     expect(body).toContain("2. [闲] 旧会话原标题");
     expect(body).toContain("3. [未知] 其他项目原标题");
-    expect(body).not.toContain("[demoair]");
+    expect(body).not.toContain("[macair]");
     expect(body).not.toContain("stale-model");
     expect(body).not.toContain("模型：");
     expect(body).not.toContain("desktop-model");

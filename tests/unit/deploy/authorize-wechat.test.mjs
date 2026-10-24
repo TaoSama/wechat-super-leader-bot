@@ -108,7 +108,7 @@ test('--apply updates only ALLOWED_CHAT_IDS=, preserves other bytes and 0600 mod
     'POSTGRES_PASSWORD=super_secret_pg_pass\r\n' +
     'CONTROLLER_TOKEN="tok=123$abc"\n' +
     'ALLOWED_CHAT_IDS=\n' +
-    'NODE_TOKENS={"demoair":"node_sec_999"}\n' +
+    'NODE_TOKENS={"macair":"node_sec_999"}\n' +
     'TRAILING_NO_NEWLINE=1';
   const fix = createFixture({ envContent: envWithSpecialBytes });
   try {
@@ -129,7 +129,7 @@ test('--apply updates only ALLOWED_CHAT_IDS=, preserves other bytes and 0600 mod
       'POSTGRES_PASSWORD=super_secret_pg_pass\r\n' +
       'CONTROLLER_TOKEN="tok=123$abc"\n' +
       'ALLOWED_CHAT_IDS=wxid_owner_123\n' +
-      'NODE_TOKENS={"demoair":"node_sec_999"}\n' +
+      'NODE_TOKENS={"macair":"node_sec_999"}\n' +
       'TRAILING_NO_NEWLINE=1';
     assert.equal(updatedContent, expectedContent);
     assert.equal(lstatSync(fix.envPath).mode & 0o777, 0o600);

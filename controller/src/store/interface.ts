@@ -1,5 +1,5 @@
 import type { ProgressContext, ProgressDraft } from "../notifications/progress.js";
-import { CommandRecord, CommandAuthority, MessageRecord, ScopedSession, Session, SendRoute } from "../types.js";
+import { CommandRecord, CommandAuthority, MessageRecord, Session, SendRoute } from "../types.js";
 import { InputReceipt } from "../sessions/input-receipt.js";
 import { LeaderState } from "../leader/state.js";
 import type { CreateExecutionResult, ExecutionRecord } from "../leader/plans/execution.js";
@@ -71,11 +71,11 @@ export interface IStore extends IConsoleAuthStore, MessageImageStore {
   recordMessage(msg: MessageRecord): Promise<void>;
   getMessage(chatId: string, messageId: string): Promise<MessageRecord | null>;
 
-  // Session Cache
+  // Durable session observations; online inventories are owned by NodeHub.
   upsertNodeSessions(nodeId: string, sessions: Session[]): Promise<void>;
-  getNodeSessions(nodeId: string): Promise<ScopedSession[]>;
-  getAllSessions(): Promise<ScopedSession[]>;
   removeNodeSessions(nodeId: string): Promise<void>;
+  /** Recent identities: 24h from observation, soft 4096 total; live inventories, active commands/plans and open goals stay pinned.
+   * Cache reads do not extend retention. This is not a history archive or current send authority. */
   getKnownSession(nodeId: string, sessionId: string): Promise<Session | null>;
 
   // Leader State

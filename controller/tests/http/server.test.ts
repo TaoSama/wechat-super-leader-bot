@@ -9,14 +9,14 @@ describe("ControllerServer & Hub Integration", () => {
   let store: MemoryStore;
   const port = 9988;
   const controllerToken = "ctrl-token-123";
-  const nodeToken = "node-token-demoair";
+  const nodeToken = "node-token-macair";
 
   const config: Config = {
     port,
     host: "127.0.0.1",
     controllerToken,
-    nodeTokens: Object.assign(Object.create(null), { demoair: nodeToken }),
-    tokenToNode: new Map([[nodeToken, "demoair"]]),
+    nodeTokens: Object.assign(Object.create(null), { macair: nodeToken }),
+    tokenToNode: new Map([[nodeToken, "macair"]]),
     allowedChatIds: new Set(["chat-1"]),
     persistenceMode: "memory",
     commandTtlSeconds: 60,
@@ -104,7 +104,7 @@ describe("ControllerServer & Hub Integration", () => {
       JSON.stringify({
         type: "hello",
         version: 1,
-        nodeId: "demoair",
+        nodeId: "macair",
         sessions: [
           {
             id: "s-app",
@@ -128,7 +128,7 @@ describe("ControllerServer & Hub Integration", () => {
     expect(res.status).toBe(200);
     const statusData = await res.json();
     expect(statusData.nodes.length).toBe(1);
-    expect(statusData.nodes[0].nodeId).toBe("demoair");
+    expect(statusData.nodes[0].nodeId).toBe("macair");
     expect(statusData.sessions.length).toBe(1);
     expect(statusData.sessions[0].id).toBe("s-app");
 

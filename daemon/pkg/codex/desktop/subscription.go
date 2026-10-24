@@ -277,6 +277,9 @@ func (o *DesktopObserver) subscribeDesktopTarget(ctx context.Context, id, owner 
 		var observation protocol.DesktopObservation
 		observed := false
 		err := c.readBudgeted(ctx, o.frameBudget, func(message desktopEnvelope) error {
+			if desktopSubscriptionRevoked(message, c.clientID, id, owner) {
+				return errDesktopUnavailable
+			}
 			return applyDesktopChange(message, c.clientID, projections, func(_ string, scalar protocol.DesktopObservation) {
 				observation, observed = scalar, true
 			})

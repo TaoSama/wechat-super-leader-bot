@@ -6,11 +6,13 @@ import { TERMINAL_SESSION_ID } from "./input-receipt";
 export const MAX_SEND_AVAILABILITY_AGE_MS = 45_000;
 const AVAILABILITY_KEYS = new Set(["route", "state", "observedAt", "validUntil", "reason"]);
 const REASONS = new Set(["busy", "preflight-rejected", "unavailable", "checking"]);
-const TARGET_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const MAX_NODE_ID_LENGTH = 64;
+const SESSION_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const KNOWN_SESSION_STATES = new Set(["idle", "active", "busy", "running", "notLoaded"]);
 
 export function isSessionMessageTarget(session: ScopedSession): boolean {
-  return TARGET_ID.test(session.nodeId) && (isTerminalSession(session) ? TERMINAL_SESSION_ID.test(session.id) : TARGET_ID.test(session.id));
+  return typeof session.nodeId === "string" && session.nodeId.length > 0 && session.nodeId.length <= MAX_NODE_ID_LENGTH &&
+    (isTerminalSession(session) ? TERMINAL_SESSION_ID.test(session.id) : SESSION_ID.test(session.id));
 }
 
 // Queue admission proves target identity and capability, never current dispatch authority.

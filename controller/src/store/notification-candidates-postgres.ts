@@ -7,7 +7,7 @@ import { notificationFromRow, type NotificationRow } from "./notification-postgr
 import { ConflictError } from "./interface.js";
 
 /** Conversion markers belong to the original outbox and need no delivery tables. */
-export async function initNotificationCandidateState(pool: pg.Pool): Promise<void> {
+export async function initNotificationCandidateState(pool: Pick<pg.PoolClient, "query">): Promise<void> {
   await pool.query("ALTER TABLE leader_notifications ADD COLUMN IF NOT EXISTS result_delivery_id UUID");
   await pool.query(`CREATE INDEX IF NOT EXISTS leader_notifications_unprepared_idx ON leader_notifications (chat_id,id)
     WHERE status='pending' AND result_delivery_id IS NULL`);

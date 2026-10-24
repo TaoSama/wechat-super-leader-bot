@@ -7,6 +7,9 @@ import { once } from 'node:events';
 import { parseArgs } from 'node:util';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { localDockerEnvironment } from './verify.mjs';
+import { loadSendEligibility } from './lib/send-eligibility.mjs';
+import { selectComposeCommand } from './lib/compose-command.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const runtime = fileURLToPath(new URL('../.runtime/', import.meta.url));
@@ -15,7 +18,7 @@ const modes = ['init', 'up', 'down', 'daemon', 'gateway', 'check', 'sessions'];
 const parseCli = () => parseArgs({ options: {
   help: { type: 'boolean', short: 'h' },
   ...Object.fromEntries(modes.map(mode => [mode, { type: 'boolean' }])),
-  compose: { type: 'string', default: 'docker-compose' },
+  compose: { type: 'string' },
   'simulation-chat': { type: 'string' },
   controller: { type: 'string' },
 } });
@@ -75,7 +78,7 @@ const isDirectRun = (() => {
 if (isDirectRun) {
   const { values } = parseCli();
   if (values.help) {
-    console.log(`Usage: node scripts/local.mjs --init|--up|--down|--daemon|--gateway|--check|--sessions [--controller URL] [--compose docker-compose]\nPrivate config: ${configPath}\n--init generates private credentials once; existing config is never overwritten.\n--up starts Docker Controller/Web/PostgreSQL locally. --down stops local Docker containers.\n--controller URL overrides Controller target (env CONTROLLER_URL; remote requires HTTPS).\n--daemon runs native daemon in foreground.\n--gateway explicitly starts real WeChat polling; allowedChatIds must first be configured.\n--check checks Controller health/auth without printing credentials or conversation content.\n--sessions lists session titles, IDs and capabilities only; never sends a task.`);
+    console.log(`Usage: node scripts/local.mjs --init|--up|--down|--daemon|--gateway|--check|--sessions [--controller URL] [--compose PATH]\nPrivate config: ${configPath}\n--init generates private credentials once; existing config is never overwritten.\n--up starts Docker Controller/Web/PostgreSQL locally. --down stops local Docker containers.\n--compose PATH overrides Compose executable; otherwise the Docker Compose plugin or standalone executable is detected.\n--controller URL overrides Controller target (env CONTROLLER_URL; remote requires HTTPS).\n--daemon runs native daemon in foreground.\n--gateway explicitly starts real WeChat polling; allowedChatIds must first be configured.\n--check checks Controller health/auth without printing credentials or conversation content.\n--sessions lists session titles, IDs and capabilities only; never sends a task.`);
     console.log('--simulation-chat synthetic-ID: temporarily allow a synthetic chat for --up only; does not change private config or start WeChat.');
   } else {
     await main(values).catch(error => { console.error(error.message); process.exitCode = 1; });
@@ -101,7 +104,7 @@ async function main(values) {
   if (mode === 'init') {
     await mkdir(runtime, { recursive: true, mode: 0o700 });
     const secret = () => randomBytes(32).toString('hex');
-    const config = { nodeId: 'demoair', postgresPassword: secret(), controllerToken: secret(), nodeToken: secret(), allowedChatIds: [] };
+    const config = { nodeId: 'macair', postgresPassword: secret(), controllerToken: secret(), nodeToken: secret(), allowedChatIds: [] };
     try { await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, { flag: 'wx', mode: 0o600 }); }
     catch (error) {
       if (error.code !== 'EEXIST') throw error;
@@ -133,23 +136,31 @@ async function main(values) {
     });
     if (!response.ok) throw new Error(`Controller check failed: HTTP ${response.status}`);
     const data = await response.json();
+    const { selectSendRoute } = await loadSendEligibility();
+    const now = Date.now();
+    const canSendNow = session => data.nodes.some(node => node.nodeId === session.nodeId && node.connected)
+      && selectSendRoute(session, now).ready;
     if (mode === 'sessions') {
       console.log(JSON.stringify({ sessions: data.sessions.map(session => ({
         nodeId: session.nodeId, sessionId: session.id, title: session.title,
         provider: session.provider, status: session.status, capabilities: session.capabilities,
         observedAt: session.observedAt,
-        canSendNow: data.nodes.some(node => node.nodeId === session.nodeId && node.connected)
-          && session.status === 'idle' && session.capabilities.includes('send'),
+        canSendNow: canSendNow(session),
       })) }, null, 2));
       return;
     }
     console.log(JSON.stringify({ leaderMode: data.leaderMode ?? 'unknown', nodes: data.nodes,
-      sessionCount: data.sessions.length, sendCapableSessionCount: data.sessions.filter(session => session.capabilities.includes('send')).length,
+      sessionCount: data.sessions.length, sendCapableSessionCount: data.sessions.filter(canSendNow).length,
       skillCount: data.skills?.length ?? 0, commandCount: data.commands.length }, null, 2));
     return;
   }
   if (mode === 'up' || mode === 'down') {
-    await run(values.compose, ['-f', `${root}compose.yaml`, ...(mode === 'up' ? ['up', '-d', '--build'] : ['down'])], env);
+    const localEnv = localDockerEnvironment(env);
+    const selected = values.compose === undefined
+      ? selectComposeCommand({ env: localEnv })
+      : { command: values.compose, args: [] };
+    if (!selected.command.trim()) throw new Error('--compose must be a non-empty executable path');
+    await run(selected.command, [...selected.args, '-f', `${root}compose.yaml`, ...(mode === 'up' ? ['up', '-d', '--build'] : ['down'])], localEnv);
   } else if (mode === 'daemon') {
     await run(`${root}daemon/bin/super-leader-daemon`, [], {
       ...env, NODE_ID: config.nodeId, NODE_TOKEN: config.nodeToken, CONTROLLER_WS_URL: targetUrls.wsUrl,

@@ -62,7 +62,7 @@ export abstract class DeliveryState {
     for (const [key, item] of Object.entries(outbox)) {
       if (!item || item.deliveryKey !== key || !["reply", "notification"].includes(item.kind) ||
           typeof item.chatId !== "string" || !item.chatId || typeof item.messageId !== "string" || !item.messageId ||
-          !Number.isSafeInteger(item.splitMaxChars) || item.splitMaxChars <= 0 || typeof item.splitMultiPart !== "boolean" ||
+          !Number.isSafeInteger(item.splitMaxChars) || item.splitMaxChars <= 0 ||
           !OUTBOX_STATUSES.has(item.status) || item.notificationIdentity !== undefined &&
           (item.kind !== "notification" || typeof item.notificationIdentity !== "string" || !NOTIFICATION_IDENTITY.test(item.notificationIdentity))) {
         throw new Error("Invalid delivery outbox reference");

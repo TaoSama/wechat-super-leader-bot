@@ -30,8 +30,19 @@ func (j *Journal) RecordTurnResult(sessionID string, result protocol.DaemonResul
 			return ErrTurnResultIdentity
 		}
 		if entry.Result.Status != protocol.StatusAccepted {
-			if protocol.SameResult(entry.Result, result) {
+			if !entry.Acknowledged && protocol.SameResult(entry.Result, result) {
 				return nil
+			}
+			// ACK removes the body; legacy pruned entries without a digest cannot
+			// establish equality with a later observation.
+			if entry.Acknowledged && entry.ResultSHA256 != "" {
+				digest, err := resultFingerprint(result)
+				if err != nil {
+					return err
+				}
+				if entry.ResultSHA256 == digest {
+					return nil
+				}
 			}
 			return ErrTurnResultIdentity
 		}
@@ -39,6 +50,7 @@ func (j *Journal) RecordTurnResult(sessionID string, result protocol.DaemonResul
 			return ErrCapacity
 		}
 		entry.Result = result
+		entry.ResultSHA256 = ""
 		entry.Acknowledged = false
 		if err := put(records, entry); err != nil {
 			return err

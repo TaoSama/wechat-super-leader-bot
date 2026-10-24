@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GOAL_LEASE_MS, GOAL_SEND_CLAIM_MS, type GoalDecision } from "../../../src/leader/goals/goal.js";
+import { goalSummary } from "../../../src/leader/goals/presentation.js";
+import type { GoalDecider } from "../../../src/leader/goals/scheduler.js";
 import { schedulers, fixture, deferred, lease, nextDecision } from "../../fixtures/goals.js";
 
 afterEach(async () => {
@@ -112,14 +114,20 @@ describe("durable continuous goal scheduler", () => {
   });
 
   it("cancellation aborts an uncooperative model and rejects its late result", async () => {
+    vi.useFakeTimers();
     const response = deferred<GoalDecision>(), entered = deferred<void>();
     const f = await fixture(async () => { entered.resolve(); return response.promise; });
     const pending = f.scheduler.advance(f.goal.id); await entered.promise;
     expect((await f.scheduler.cancel(f.goal.id, "other"))).toBeNull();
     await f.scheduler.cancel(f.goal.id, "chat"); await pending;
     response.resolve(nextDecision());
+    expect(await f.current()).toMatchObject({ status: "cancelled", actions: [] });
+    expect((await f.current()).blockedReason).toBeUndefined();
+    expect((await f.current()).lease).toBeUndefined();
+    expect(goalSummary((await f.create().view(f.goal.id, "chat"))!)).toContain("持续目标：已取消");
+    await vi.advanceTimersByTimeAsync(90_000);
     expect((await f.current()).status).toBe("cancelled");
-    expect((await f.current()).actions).toEqual([]); expect(f.sendCommand).not.toHaveBeenCalled();
+    expect(f.sendCommand).not.toHaveBeenCalled();
     expect(await f.store.getNotification(f.goal.id, f.now())).toBeNull();
   });
 
@@ -168,9 +176,11 @@ describe("durable continuous goal scheduler", () => {
     expect((await f.current()).status).toBe("blocked"); expect(f.sendCommand).toHaveBeenCalledTimes(1);
   });
 
-  it("invalid scope is blocked and cannot send a command", async () => {
-    const f = await fixture(async () => nextDecision(4)); await f.scheduler.advance(f.goal.id);
-    expect((await f.current()).status).toBe("blocked"); expect(f.sendCommand).not.toHaveBeenCalled();
+  it.each([0, 4])("invalid decision target %i keeps its processing diagnostic and cannot send a command", async target => {
+    const f = await fixture(async () => nextDecision(target)); await f.scheduler.advance(f.goal.id);
+    expect(await f.current()).toMatchObject({ status: "blocked", blockedReason: "model_decision_processing" });
+    expect(goalSummary((await f.create().view(f.goal.id, "chat"))!)).toContain("决策未通过处理或授权校验");
+    expect(f.sendCommand).not.toHaveBeenCalled();
   });
 
   it("expiry and revoked allowlist fence future decisions and sends", async () => {
@@ -202,19 +212,41 @@ describe("durable continuous goal scheduler", () => {
     const stopping = f.scheduler.stop(); f.scheduler.start();
     expect(f.scheduler.stop()).toBe(stopping); await stopping; await pending;
     expect(vi.getTimerCount()).toBe(0); expect((await f.current()).status).toBe("active");
+    expect((await f.current()).blockedReason).toBeUndefined();
+    expect(await f.store.getNotification(f.goal.id, f.now())).toBeNull();
     response.resolve(nextDecision()); f.tick(GOAL_LEASE_MS);
     const restored = f.create(); await restored.advance(f.goal.id);
     expect((await f.current()).actions).toHaveLength(1);
   });
 
-  it("model failure and timeout store only a static diagnostic and block", async () => {
-    vi.useFakeTimers(); const entered = deferred<void>();
-    const f = await fixture(async () => { entered.resolve(); return new Promise<GoalDecision>(() => {}); });
+  it("the scheduler deadline persists a timeout diagnostic and user text for an uncooperative model", async () => {
+    vi.useFakeTimers(); const entered = deferred<void>(), response = deferred<GoalDecision>();
+    let signal!: AbortSignal;
+    const decide = vi.fn<GoalDecider>((_input, modelSignal) => {
+      signal = modelSignal; entered.resolve(); return response.promise;
+    });
+    const f = await fixture(decide);
     const pending = f.scheduler.advance(f.goal.id); await entered.promise;
-    await vi.advanceTimersByTimeAsync(90_000); await pending;
-    expect((await f.current()).status).toBe("blocked");
-    expect((await f.current()).blockedReason).toMatch(/^model_decision_/);
+    f.tick(89_999); await vi.advanceTimersByTimeAsync(89_999);
+    expect(signal.aborted).toBe(false);
+    expect((await f.current()).status).toBe("active");
+    expect(await f.store.getNotification(f.goal.id, f.now())).toBeNull();
+    f.tick(1); await vi.advanceTimersByTimeAsync(1); await pending;
+    expect(signal.aborted).toBe(true);
+    expect(signal.reason).toMatchObject({ name: "ModelFailure", diagnostic: { category: "timeout" } });
+    expect(f.errors).toHaveBeenCalledExactlyOnceWith(signal.reason);
+    expect(await f.current()).toMatchObject({ status: "blocked", blockedReason: "model_decision_timeout", decisionAttempts: 1,
+      actions: [], decisions: [] });
     expect((await f.current()).lease).toBeUndefined();
+    const restored = f.create();
+    expect(goalSummary((await restored.view(f.goal.id, "chat"))!)).toContain("模型决策超时，已暂停；未据此派发新任务。");
+    const notification = await f.store.getNotification(f.goal.id, f.now());
+    expect(notification).toMatchObject({ source: { type: "goal", id: f.goal.id }, kind: "blocked", status: "pending" });
+    response.resolve(nextDecision()); await restored.advance(f.goal.id);
+    expect(decide).toHaveBeenCalledTimes(1); expect(f.sendCommand).not.toHaveBeenCalled();
+    expect((await f.current()).actions).toEqual([]);
+    expect(await f.store.getNotification(f.goal.id, f.now())).toEqual(notification);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("query is read-only, hides all leases/claim tokens and is chat-scoped", async () => {

@@ -9,6 +9,7 @@ import (
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	goldmarktext "github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 )
 
 func markdownImagePaths(source string) []string {
@@ -19,7 +20,8 @@ func markdownImagePaths(source string) []string {
 		if !entering || !ok {
 			return ast.WalkContinue, nil
 		}
-		path := string(image.Destination)
+		// Resolve Markdown escapes before decoding URL escapes exactly once.
+		path := string(util.URLEscape(image.Destination, true))
 		if decoded, err := url.PathUnescape(path); err == nil {
 			path = decoded
 		}
@@ -40,6 +42,21 @@ func mediaString(raw map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// SelectItemMedia defaults to assistant replies while preserving explicit item/turn selection.
+func SelectItemMedia(wrapper map[string]any, itemID, turnID string) []protocol.NativeMediaReference {
+	item, ok := wrapper["item"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	if itemID == "" && turnID == "" && item["type"] != "agentMessage" {
+		return nil
+	}
+	if itemID != "" && mediaString(item, "id") != itemID || turnID != "" && mediaString(wrapper, "turnId") != turnID {
+		return nil
+	}
+	return ItemMedia(wrapper)
 }
 
 // ItemMedia only accepts native image inputs or explicit assistant Markdown images.

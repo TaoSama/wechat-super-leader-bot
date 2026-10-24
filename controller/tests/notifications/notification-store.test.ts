@@ -27,6 +27,7 @@ type NotificationRow = ReturnType<typeof notificationRow>;
 
 // SQL mock verifies production queries and transactional visibility, not real PG locks.
 class NotificationPool {
+  on = vi.fn();
   executions = new Map<string, ExecutionRow>();
   notifications = new Map<string, NotificationRow>();
   commandRows = new Map<string, Record<string, unknown>>();
@@ -53,8 +54,12 @@ class NotificationPool {
         : [column, structuredClone(row[column])]))] : [] };
     }
     if (query.startsWith("SELECT pg_advisory_xact_lock(") || query.startsWith("SELECT id FROM leader_goals WHERE chat_id=$1")) return this.result();
-    if (/^(CREATE |ALTER |DROP INDEX |INSERT INTO known_sessions |DELETE FROM node_sessions|UPDATE commands)/.test(query)) return this.result();
-    if (query === "SELECT * FROM leader_notifications ORDER BY id FOR UPDATE") return this.result([...this.notifications.values()]);
+    if (query === "SELECT version FROM controller_schema_migrations") return this.result();
+    if (/^(CREATE |ALTER |DROP INDEX |INSERT INTO controller_schema_migrations|INSERT INTO known_sessions |DELETE FROM node_sessions|UPDATE commands)/.test(query)) return this.result();
+    if (query === "SELECT * FROM leader_notifications WHERE ($1::text IS NULL OR id>$1) ORDER BY id LIMIT $2 FOR UPDATE") {
+      return this.result([...this.notifications.values()].filter(row => params[0] === null || row.id > String(params[0]))
+        .sort((a, b) => a.id.localeCompare(b.id)).slice(0, Number(params[1])));
+    }
     if (query.startsWith("INSERT INTO leader_executions")) {
       const record = JSON.parse(params[4] as string) as ExecutionRecord;
       const row = executionRow(record);

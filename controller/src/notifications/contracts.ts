@@ -89,12 +89,6 @@ export function createTerminalNotifications(execution: ExecutionRecord, now: num
   return terminalParts({ type: "plan", id: execution.id }, execution.chatId, kind, planNotificationChunks(execution, commands), now);
 }
 
-export function createGoalNotification(current: GoalRecord, next: GoalRecord, now: number, commands: readonly CommandRecord[] = []): StoredNotification | null {
-  const notifications = createGoalNotifications(current, next, now, commands);
-  if (notifications.length > 1) throw new Error("Multipart terminal notifications require atomic array publication");
-  return notifications[0] ?? null;
-}
-
 export function createGoalNotifications(current: GoalRecord, next: GoalRecord, now: number, commands: readonly CommandRecord[] = []): StoredNotification[] {
   validateNotificationTime(now);
   if (current.status !== "active" || !["completed", "blocked", "expired"].includes(next.status)) return [];

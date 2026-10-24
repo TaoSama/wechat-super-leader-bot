@@ -19,12 +19,12 @@ func TestControllerCommandMessage_ValidationAndExpiry(t *testing.T) {
 	validRead := protocol.ControllerCommandMessage{
 		Type:      "command",
 		CommandID: "cmd-1",
-		NodeID:    "demoair",
+		NodeID:    "macair",
 		SessionID: "sess-1",
 		Action:    protocol.ActionRead,
 		ExpiresAt: future,
 	}
-	if err := validRead.Validate("demoair", now); err != nil {
+	if err := validRead.Validate("macair", now); err != nil {
 		t.Fatalf("expected valid read, got error: %v", err)
 	}
 	if validRead.IsExpiredAt(now) {
@@ -35,27 +35,27 @@ func TestControllerCommandMessage_ValidationAndExpiry(t *testing.T) {
 	validSend := protocol.ControllerCommandMessage{
 		Type:      "command",
 		CommandID: "cmd-2",
-		NodeID:    "demoair",
+		NodeID:    "macair",
 		SessionID: "sess-1",
 		Action:    protocol.ActionSend,
 		Prompt:    "hello world",
 		ExpiresAt: future,
 	}
-	if err := validSend.Validate("demoair", now); err != nil {
+	if err := validSend.Validate("macair", now); err != nil {
 		t.Fatalf("expected valid send, got error: %v", err)
 	}
 
 	// Send without prompt must fail
 	invalidSend := validSend
 	invalidSend.Prompt = "   "
-	if err := invalidSend.Validate("demoair", now); err == nil {
+	if err := invalidSend.Validate("macair", now); err == nil {
 		t.Fatalf("expected error for empty prompt in send action")
 	}
 
 	// Expired command must fail
 	expiredCmd := validRead
 	expiredCmd.ExpiresAt = past
-	if err := expiredCmd.Validate("demoair", now); err == nil {
+	if err := expiredCmd.Validate("macair", now); err == nil {
 		t.Fatalf("expected validation error for expired command")
 	}
 	if !expiredCmd.IsExpiredAt(now) {
@@ -65,7 +65,7 @@ func TestControllerCommandMessage_ValidationAndExpiry(t *testing.T) {
 	// Empty expiresAt must fail closed
 	emptyExpCmd := validRead
 	emptyExpCmd.ExpiresAt = ""
-	if err := emptyExpCmd.Validate("demoair", now); err == nil {
+	if err := emptyExpCmd.Validate("macair", now); err == nil {
 		t.Fatalf("expected validation error for empty expiresAt")
 	}
 	if !emptyExpCmd.IsExpiredAt(now) {
@@ -75,7 +75,7 @@ func TestControllerCommandMessage_ValidationAndExpiry(t *testing.T) {
 	// Malformed expiresAt must fail closed
 	badExpCmd := validRead
 	badExpCmd.ExpiresAt = "not-a-timestamp"
-	if err := badExpCmd.Validate("demoair", now); err == nil {
+	if err := badExpCmd.Validate("macair", now); err == nil {
 		t.Fatalf("expected validation error for bad expiresAt")
 	}
 	if !badExpCmd.IsExpiredAt(now) {
@@ -85,7 +85,7 @@ func TestControllerCommandMessage_ValidationAndExpiry(t *testing.T) {
 	// NodeID mismatch must fail
 	mismatchNode := validRead
 	mismatchNode.NodeID = "other-node"
-	if err := mismatchNode.Validate("demoair", now); err == nil {
+	if err := mismatchNode.Validate("macair", now); err == nil {
 		t.Fatalf("expected error for node mismatch")
 	}
 }

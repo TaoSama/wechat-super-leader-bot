@@ -7,10 +7,11 @@ import { isAbsolute, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { verificationEnvironment } from '../../scripts/verify.mjs';
 import { stopTestProcess, withTestCleanup } from '../support/cleanup.mjs';
 import { createControllerFixture, createPostgresFixture, waitFor } from '../support/control-plane-fixture.mjs';
 
-const NODE_ID = 'demoair';
+const NODE_ID = 'macair';
 const READ_TIMEOUT_MS = 45_000;
 const READ_POLL_INTERVAL_MS = 250;
 const LOG_LIMIT = 50;
@@ -43,6 +44,7 @@ async function main() {
   await withTestCleanup(async () => {
     const databaseUrl = await postgres.start();
     controller = await createControllerFixture({ logs, secrets: [postgres.password, token, nodeToken], env: {
+      ...verificationEnvironment(),
       PERSISTENCE_MODE: 'postgres', DATABASE_URL: databaseUrl, CONTROLLER_TOKEN: token,
       NODE_TOKENS: JSON.stringify({ [NODE_ID]: nodeToken }), ALLOWED_CHAT_IDS: 'test-chat',
       LEADER_MODE: 'rules', LEADER_MODEL_BASE_URL: '', LEADER_MODEL_NAME: '', LEADER_MODEL_API_KEY: '',

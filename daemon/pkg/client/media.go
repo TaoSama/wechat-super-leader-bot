@@ -151,7 +151,8 @@ func (d *Daemon) ListMedia(ctx context.Context, msg protocol.ListMediaMessage) p
 	binding := &mediaBinding{nodeID: msg.NodeID, sessionID: msg.SessionID, source: source, generation: generation, token: token,
 		itemID: msg.ItemID, turnID: msg.TurnID, reader: reader, files: map[string]boundMediaFile{}, order: []protocol.MediaDescriptor{}, expiresAt: time.Now().Add(mediaContextTTL)}
 	for _, ref := range refs {
-		if !protocol.ValidHistoryIdentity(ref.ItemID) || !protocol.ValidTurnID(ref.TurnID) || ref.Ordinal < 0 || msg.ItemID != "" && ref.ItemID != msg.ItemID || msg.TurnID != "" && ref.TurnID != msg.TurnID {
+		if !protocol.ValidHistoryIdentity(ref.ItemID) || !protocol.ValidTurnID(ref.TurnID) || ref.Ordinal < 0 || uint64(ref.Ordinal) > protocol.MaxMediaOrdinal ||
+			msg.ItemID != "" && ref.ItemID != msg.ItemID || msg.TurnID != "" && ref.TurnID != msg.TurnID {
 			response.Error = protocol.MediaFailed
 			return response
 		}
@@ -181,6 +182,11 @@ func (d *Daemon) ListMedia(ctx context.Context, msg protocol.ListMediaMessage) p
 	}
 	if err := reader.ValidateMediaGeneration(readCtx, msg.SessionID, generation); err != nil {
 		response.Error = mediaError(err)
+		return response
+	}
+	// Empty listings still carry a wire context, but have no readable files to retain.
+	if len(binding.files) == 0 {
+		response.MediaContext, response.Source, response.Media = token, source, binding.order
 		return response
 	}
 	d.mediaState.mu.Lock()

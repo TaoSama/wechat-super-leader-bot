@@ -13,6 +13,8 @@ import (
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 )
 
+const maxMediaPages = 20
+
 func (a *AppServerAdapter) mediaGeneration() (string, error) {
 	info, err := os.Stat(a.socketPath)
 	if err != nil || info.Mode()&os.ModeSocket == 0 {
@@ -70,32 +72,52 @@ func (a *AppServerAdapter) ListSessionMedia(ctx context.Context, sessionID, gene
 	if !ok || threadstate.ExtractString(thread, "id") != sessionID {
 		return nil, "", errors.New(protocol.MediaFailed)
 	}
-	page, err := rc.call(ctx, "thread/items/list", map[string]any{"threadId": sessionID, "sortDirection": "desc", "limit": protocol.MaxHistoryLimit}, a.rpcTimeout)
-	if err != nil {
-		return nil, "", errors.New(protocol.MediaUnavailable)
-	}
-	items, ok := page["data"].([]any)
-	if !ok || len(items) > protocol.MaxHistoryLimit {
-		return nil, "", errors.New(protocol.MediaFailed)
+	params := map[string]any{"threadId": sessionID, "sortDirection": "desc", "limit": protocol.MaxHistoryLimit}
+	if turnID != "" {
+		params["turnId"] = turnID
 	}
 	refs := []protocol.NativeMediaReference{}
-	for _, value := range items {
-		wrapper, ok := value.(map[string]any)
-		if !ok {
-			continue
+	seenCursors := map[string]bool{}
+	for pageIndex := 0; ; pageIndex++ {
+		if pageIndex >= maxMediaPages {
+			// A continuation remains unread. Allow another available history
+			// source to finish rather than reporting a definitive empty result.
+			return nil, "", errors.New(protocol.MediaUnavailable)
 		}
-		for _, ref := range threadstate.ItemMedia(wrapper) {
-			if itemID != "" && ref.ItemID != itemID || turnID != "" && ref.TurnID != turnID {
+		page, err := rc.call(ctx, "thread/items/list", params, a.rpcTimeout)
+		if err != nil {
+			return nil, "", errors.New(protocol.MediaUnavailable)
+		}
+		items, ok := page["data"].([]any)
+		if !ok || len(items) > protocol.MaxHistoryLimit {
+			return nil, "", errors.New(protocol.MediaFailed)
+		}
+		for _, value := range items {
+			wrapper, ok := value.(map[string]any)
+			if !ok {
 				continue
 			}
-			refs = append(refs, ref)
-			if len(refs) >= limit {
+			for _, ref := range threadstate.SelectItemMedia(wrapper, itemID, turnID) {
+				refs = append(refs, ref)
+				if len(refs) >= limit {
+					break
+				}
+			}
+			if len(refs) > 0 {
 				break
 			}
 		}
 		if len(refs) > 0 {
 			break
 		}
+		next, err := pageCursor(page["nextCursor"], seenCursors)
+		if err != nil {
+			return nil, "", errors.New(protocol.MediaFailed)
+		}
+		if next == "" {
+			break
+		}
+		params["cursor"] = next
 	}
 	if err := a.ValidateMediaGeneration(ctx, sessionID, current); err != nil {
 		return nil, "", err

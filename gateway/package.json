@@ -10,7 +10,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "PolyForm-Noncommercial-1.0.0",
+  "license": "ISC",
   "devEngines": {
     "packageManager": {
       "name": "pnpm",

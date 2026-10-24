@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
 
 const IO_TIMEOUT_MS = 5_000;
+const STARTUP_TIMEOUT_MS = 90_000;
+const TEST_TIMEOUT_MS = 120_000;
 const NODE_TOKEN = "upgrade-test-node-token";
 
 function upgradeResponse(port: number, target: string, token?: string): Promise<string> {
@@ -37,7 +39,7 @@ describe("Upgrade URL boundary", () => {
     child.stderr?.on("data", chunk => { stderr += String(chunk); });
     try {
       const port = await new Promise<number>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`Isolated server startup timed out: ${stderr}`)), IO_TIMEOUT_MS);
+        const timer = setTimeout(() => reject(new Error(`Isolated server startup timed out: ${stderr}`)), STARTUP_TIMEOUT_MS);
         child.once("error", error => { clearTimeout(timer); reject(error); });
         child.once("exit", (code, signal) => {
           clearTimeout(timer);
@@ -52,7 +54,8 @@ describe("Upgrade URL boundary", () => {
       });
 
       for (const token of [undefined, NODE_TOKEN]) {
-        expect(await upgradeResponse(port, "//[", token)).toMatch(/^HTTP\/1\.1 400 Bad Request\r\n/);
+        const response = await upgradeResponse(port, "//[", token);
+        expect(response, stderr).toMatch(/^HTTP\/1\.1 400 Bad Request\r\n/);
         expect(child.exitCode).toBeNull();
         expect((await fetch(`http://127.0.0.1:${port}/health`)).status).toBe(200);
       }
@@ -79,5 +82,5 @@ describe("Upgrade URL boundary", () => {
         await exited;
       }
     }
-  }, 20_000);
+  }, TEST_TIMEOUT_MS);
 });

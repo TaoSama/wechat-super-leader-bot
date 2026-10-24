@@ -25,7 +25,7 @@ services:
         max-size: 10m
         max-file: "3"
     environment:
-      CONTROLLER_URL: ${CONTROLLER_URL:-https://leader.example.com}
+      CONTROLLER_URL: ${CONTROLLER_URL:-https://leader.taoai.site}
       CONTROLLER_TOKEN: ${CONTROLLER_TOKEN:?set CONTROLLER_TOKEN}
       WECHAT_CREDENTIALS_PATH: /etc/super-leader/wechat-account.json
       WECHAT_STATE_PATH: /var/lib/super-leader-gateway/state.json
@@ -41,7 +41,7 @@ services:
       GATEWAY_LEADER_BASE_URL: ${GATEWAY_LEADER_BASE_URL:-${LEADER_MODEL_BASE_URL:-}}
       GATEWAY_LEADER_API_KEY: ${GATEWAY_LEADER_API_KEY:-${LEADER_MODEL_API_KEY:-}}
       RESULT_FILE_MAX_BYTES: ${RESULT_FILE_MAX_BYTES:-52428800}
-      RESULT_PUBLIC_ORIGIN: ${RESULT_PUBLIC_ORIGIN:-${CONSOLE_PUBLIC_URL:-https://leader.example.com}}
+      RESULT_PUBLIC_ORIGIN: ${RESULT_PUBLIC_ORIGIN:-${CONSOLE_PUBLIC_URL:-https://leader.taoai.site}}
     volumes:
       - type: bind
         source: ${WECHAT_ACCOUNT_FILE:-.runtime/wechat/account.json}

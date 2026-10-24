@@ -1,18 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { NodeHub } from "../nodes/hub.js";
 import { ConflictError, IStore } from "../store/interface.js";
-import { CommandRecord, CommandAuthority, PostCommandRequest, PostCommandRequestSchema, SendRoute } from "../types.js";
+import { CommandRecord, CommandAuthority, PostCommandRequest, PostCommandRequestSchema, SendRoute, SteerGenerationSchema } from "../types.js";
 import { hasSkillRefs } from "../skills/catalog.js";
 import { selectSendRoute } from "../sessions/send-eligibility.js";
 import { isTerminalSession } from "../sessions/terminal.js";
 import { QUEUE_BATCH_SIZE, QUEUE_TICK_MS, queueSendRoute, sameAuthority, sameCommandPayload } from "./queue.js";
 import { matchesGoalCommand } from "../leader/goals/goal.js";
+import { routeSupportsDeliveryMode } from "./delivery.js";
 import { isPlanCommandAuthorized } from "./plan-authorization.js";
 
 export class CommandError extends Error {
   constructor(public readonly httpStatus: number, message: string) { super(message); }
 }
-type Hub = Pick<NodeHub, "isNodeConnected" | "getNodeSession" | "getNodeSkills" | "registerCommandResultWaiter" | "sendCommand">;
+type Hub = Pick<NodeHub, "isNodeConnected" | "supportsDeliveryMode" | "getNodeSession" | "getNodeSkills" | "registerCommandResultWaiter" | "sendCommand">;
 export type AutomationCommandAuthorizer = (authority: Extract<CommandAuthority, { type: "automation" }>,
   command: CommandRecord) => Promise<boolean | "paused">;
 
@@ -20,16 +21,25 @@ export type AutomationCommandAuthorizer = (authority: Extract<CommandAuthority, 
 export class CommandService {
   private timer?: ReturnType<typeof setInterval>;
   private tick?: Promise<void>;
+  private stopping = false;
+  private transmissions = new Set<AbortController>();
   constructor(private store: IStore, private hub: Hub, private ttlSeconds: number,
     private readonly onStatusChanged?: () => void, private readonly isChatAllowed: (chatId: string) => boolean = () => true,
     private readonly isAutomationAuthorized?: AutomationCommandAuthorizer) {}
 
   start(): void {
     if (this.timer) return;
+    this.stopping = false;
     this.timer = setInterval(() => { void this.dispatchQueued().catch(error => console.error("Command queue dispatch failed", error)); }, QUEUE_TICK_MS);
     this.timer.unref?.();
   }
-  async stop(): Promise<void> { if (this.timer) clearInterval(this.timer); this.timer = undefined; await this.tick; }
+  async stop(): Promise<void> {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+    this.stopping = true;
+    for (const transmission of this.transmissions) transmission.abort();
+    await this.tick;
+  }
 
   canDispatchSend(target: Pick<PostCommandRequest, "nodeId" | "sessionId" | "skills" | "deliveryMode" | "expectedTurnId">, expectedRoute: SendRoute): boolean {
     try { this.targetRoute({ ...target, action: "send" }, expectedRoute); return true; }
@@ -46,9 +56,10 @@ export class CommandService {
       return undefined;
     }
     if (request.deliveryMode === "steer") {
+      if (!this.hub.supportsDeliveryMode(request.nodeId, "steer")) throw new CommandError(409,"Target node does not support steer delivery");
       const route = queueSendRoute(session, expectedRoute);
       const observed = Date.parse(session.observedAt ?? "");
-      if (!request.expectedTurnId || !route || route === "terminal-pane" || route === "app-server-resume" ||
+      if (!request.expectedTurnId || !route || !routeSupportsDeliveryMode(route, request.deliveryMode) ||
           !Number.isFinite(observed) || observed > Date.now() || Date.now()-observed > 45000) throw new CommandError(409,"Exact active turn route is unavailable");
       return route;
     }
@@ -79,13 +90,15 @@ export class CommandService {
       if (isTerminalSession(session)) this.targetRoute(request,expectedRoute);
       sendRoute = queueSendRoute(session,expectedRoute);
       if (!sendRoute) throw new CommandError(expectedRoute ? 409 : 400,expectedRoute ? "Target send route changed; regenerate the plan" : "Target does not support this action");
+      if (!routeSupportsDeliveryMode(sendRoute, request.deliveryMode)) throw new CommandError(409,"Selected route does not support exact active-turn steering");
+      if (request.deliveryMode === "steer" && this.hub.isNodeConnected(request.nodeId)) this.targetRoute(request,sendRoute);
       readyAtSubmission = this.canDispatchSend(request,sendRoute);
       if (sendRoute === "terminal-pane") this.targetRoute(request,sendRoute);
       if (request.skills?.length && this.hub.isNodeConnected(request.nodeId) && !hasSkillRefs(this.hub.getNodeSkills(request.nodeId),request.skills)) throw new CommandError(409,"Selected skill unavailable or changed");
     } else this.targetRoute(request);
     const now = new Date();
-    const record: CommandRecord = { ...request, commandId:`cmd_${randomUUID()}`,status:request.action === "send" && sendRoute !== "terminal-pane" ? "admitting" : "pending",
-      ...(sendRoute ? {sendRoute,deliveryMode:request.deliveryMode ?? "next-turn",authority } : {}),
+    const record: CommandRecord = { ...request, authority, commandId:`cmd_${randomUUID()}`,status:request.action === "send" && sendRoute !== "terminal-pane" ? "admitting" : "pending",
+      ...(sendRoute ? {sendRoute,deliveryMode:request.deliveryMode ?? "next-turn" } : {}),
       createdAt:now.toISOString(),updatedAt:now.toISOString(),expiresAt:new Date(now.getTime()+this.ttlSeconds*1000).toISOString() };
     // Keep the request reserved but undispatchable until its full admission checks finish.
     const created = await this.store.createCommandIfAbsent(record);
@@ -128,7 +141,17 @@ export class CommandService {
     // cursor past the returned rows could permanently skip those commands after
     // their blocker completes.
     const records = await this.store.listQueuedCommands(QUEUE_BATCH_SIZE,0);
-    for (const record of records) await this.dispatchOne(record,0);
+    const byNode = new Map<string, CommandRecord[]>();
+    for (const record of records) {
+      const group = byNode.get(record.nodeId) ?? [];
+      group.push(record);
+      byNode.set(record.nodeId, group);
+    }
+    const dispatched = await Promise.allSettled([...byNode.values()].map(async group => {
+      for (const record of group) await this.dispatchOne(record,0);
+    }));
+    const failures = dispatched.filter(result => result.status === "rejected").map(result => result.reason);
+    if (failures.length) throw new AggregateError(failures, "Command queue dispatch failed");
   }
   private async authorized(record: CommandRecord): Promise<boolean | "paused"> {
     const authority = record.authority;
@@ -136,7 +159,13 @@ export class CommandService {
     if (authority.type === "console") return Date.parse(authority.expiresAt)>Date.now() &&
       !!await this.store.getConsoleSession(authority.tokenHash,new Date().toISOString());
     if (!this.isChatAllowed(authority.chatId)) return false;
-    if (authority.type === "chat") return true;
+    if (authority.type === "chat") {
+      if (record.deliveryMode !== "steer") return true;
+      const state = await this.store.getLeaderState(authority.chatId);
+      // Unscoped supplements cannot prove that their authorization survived cancellation.
+      const generation = SteerGenerationSchema.safeParse(state?.data.steerGeneration);
+      return !!state && generation.success && generation.data === authority.steerGeneration;
+    }
     if (authority.type === "automation") return this.isAutomationAuthorized ? this.isAutomationAuthorized(authority, record) : false;
     if (authority.type === "plan") {
       return isPlanCommandAuthorized(this.store, record, authority);
@@ -146,7 +175,7 @@ export class CommandService {
       goal.actions.some((_,index)=>!!goal.actions[index].attempt && matchesGoalCommand(goal,index,record));
   }
   private async dispatchOne(record: CommandRecord, waitMs: number): Promise<void> {
-    if (record.status !== "queued") return;
+    if (this.stopping || record.status !== "queued") return;
     if (Date.parse(record.expiresAt)<=Date.now()) { await this.store.markExpiredActiveCommandsUncertain(); return; }
     const authorization = await this.authorized(record);
     if (authorization === "paused") return;
@@ -170,12 +199,16 @@ export class CommandService {
   }
   private async transmit(record: CommandRecord, waitMs: number): Promise<void> {
     const waiter = this.hub.registerCommandResultWaiter(record.commandId,waitMs);
+    const transmission = new AbortController();
+    this.transmissions.add(transmission);
+    if (this.stopping) transmission.abort();
     try {
       const delivery = await this.hub.sendCommand({type:"command",commandId:record.commandId,nodeId:record.nodeId,sessionId:record.sessionId,
         action:record.action,prompt:record.prompt,expiresAt:record.expiresAt,skills:record.skills,...(record.sendRoute ? {sendRoute:record.sendRoute}:{}),
-        ...(record.deliveryMode ? {deliveryMode:record.deliveryMode}:{}),...(record.expectedTurnId ? {expectedTurnId:record.expectedTurnId}: {})});
-      if (!delivery.delivered) await this.store.updateCommandStatus(record.commandId,"uncertain",undefined,"Transport did not confirm command delivery");
+        ...(record.deliveryMode ? {deliveryMode:record.deliveryMode}:{}),...(record.expectedTurnId ? {expectedTurnId:record.expectedTurnId}: {})}, transmission.signal);
+      if (!delivery.delivered) await this.store.updateCommandStatus(record.commandId,delivery.rejected ? "failed" : "uncertain",undefined,
+        delivery.rejected ? delivery.error : "Transport did not confirm command delivery");
       else if (waitMs>0) await waiter.wait();
-    } finally { waiter.cancel(); this.onStatusChanged?.(); }
+    } finally { this.transmissions.delete(transmission); waiter.cancel(); this.onStatusChanged?.(); }
   }
 }

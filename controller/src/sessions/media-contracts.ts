@@ -8,7 +8,9 @@ export const MediaMimeSchema = z.enum(["image/png", "image/jpeg", "image/gif", "
 export const MediaHashSchema = z.string().regex(/^[a-f0-9]{64}$/);
 export const MediaDescriptorSchema = z.object({
   mediaId: z.string().uuid(), itemId: z.string().min(1).max(128),
-  turnId: z.string().min(1).max(128), ordinal: z.number().int().min(0).max(255),
+  turnId: z.string().min(1).max(128),
+  // Original image position before unsupported paths are filtered.
+  ordinal: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
   mime: MediaMimeSchema, totalSize: z.number().int().positive().max(MAX_MEDIA_BYTES), sha256: MediaHashSchema,
 }).strict();
 export type MediaDescriptor = z.infer<typeof MediaDescriptorSchema>;

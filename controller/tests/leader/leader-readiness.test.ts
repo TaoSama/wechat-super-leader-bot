@@ -40,7 +40,7 @@ function nativeSession(id: string): Session {
   return { id, provider: "codex-app", title: id, cwd: "/fixture", loaded: true, status: "idle",
     capabilities: ["read", "send"], observedAt: new Date().toISOString() };
 }
-const actions = ["invest", "research"].map(sessionId => ({ nodeId: "demoair", sessionId, prompt: "研究任务" }));
+const actions = ["invest", "research"].map(sessionId => ({ nodeId: "macair", sessionId, prompt: "研究任务" }));
 const hubs: NodeHub[] = [];
 const schedulers: ExecutionScheduler[] = [];
 const schedulerErrors: unknown[] = [];
@@ -48,8 +48,8 @@ function fixture(sessions = [session("invest"), session("research")]) {
   const store = new MemoryStore(), hub = new NodeHub(store, new Map()), socket = new Socket();
   vi.spyOn(hub, "readHistory").mockRejectedValue(new Error("Synthetic history unavailable"));
   hubs.push(hub);
-  hub.handleConnection(socket as unknown as WebSocket, "demoair");
-  socket.receive({ type: "hello", version: 1, nodeId: "demoair", sessions, skills: [] });
+  hub.handleConnection(socket as unknown as WebSocket, "macair");
+  socket.receive({ type: "hello", version: 1, nodeId: "macair", sessions, skills: [] });
   const tools: string[] = [];
   let calls = 0;
   const model: LeaderModel = { complete: async (messages: ModelMessage[]) => {
@@ -168,7 +168,7 @@ describe("Leader durable readiness waits", () => {
     await recovered.advance(execution.id);
     await recovered.advance(execution.id);
     expect(f.socket.commands.map(command => [command.nodeId, command.sessionId, command.sendRoute])).toEqual([
-      ["demoair", "invest", "desktop-owner"],
+      ["macair", "invest", "desktop-owner"],
     ]);
     f.changed([session("invest", "ready"), session("research", "ready")]);
     await recovered.advance(execution.id);

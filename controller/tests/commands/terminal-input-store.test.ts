@@ -15,6 +15,7 @@ const command = (overrides: Partial<CommandRecord> = {}): CommandRecord => ({ co
   createdAt: "2026-10-12T00:00:00Z", updatedAt: "2026-10-12T00:00:00Z", expiresAt: "2026-10-12T00:01:00Z", ...overrides });
 
 class CommandPool {
+  on = vi.fn();
   rows = new Map<string, Record<string, unknown>>();
   statements: string[] = [];
   async query(raw: string, params: unknown[] = []) {
@@ -47,8 +48,9 @@ class CommandPool {
       return { rows: [] };
     }
     if (sql.startsWith("SELECT * FROM commands ORDER BY")) return { rows: [...this.rows.values()].map(row => structuredClone(row)) };
-    if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql) || /^(CREATE|ALTER|DROP INDEX|INSERT INTO known_sessions|DELETE FROM node_sessions|UPDATE commands)/.test(sql)) return { rows: [] };
-    if (sql === "SELECT * FROM leader_notifications ORDER BY id FOR UPDATE") return { rows: [] };
+    if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql) || /^(CREATE|ALTER|DROP INDEX|INSERT INTO known_sessions|INSERT INTO controller_schema_migrations|DELETE FROM node_sessions|UPDATE commands|SELECT pg_advisory_xact_lock\()/.test(sql)) return { rows: [] };
+    if (sql === "SELECT version FROM controller_schema_migrations" ||
+        sql === "SELECT * FROM leader_notifications WHERE ($1::text IS NULL OR id>$1) ORDER BY id LIMIT $2 FOR UPDATE") return { rows: [] };
     throw new Error(`Unexpected fixture SQL: ${sql}`);
   }
   async connect() { return { query: this.query.bind(this), release: () => {} }; }

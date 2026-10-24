@@ -12,9 +12,11 @@ import { createExecution, executionRequestId, EXECUTION_CLAIM_MS } from "../../s
 const CONTROLLER_TOKEN = "workspace-admin-token";
 const CONSOLE_ORIGIN = "http://127.0.0.1:8790";
 const SESSION_ID = "shared-thread";
-const NODE_TOKENS = new Map([["demoair", "workspace-air-token"], ["demomini", "workspace-mini-token"]]);
-const MESSAGE_PATH = `/v1/sessions/demoair/${SESSION_ID}/messages`;
-const HISTORY_PATH = `/v1/sessions/demoair/${SESSION_ID}/history`;
+const OPAQUE_NODE_IDS = ["mac.mini", "mac-mini_1", "mac mini~主机", "mac/mini", "mac\\mini", "mac%2Fmini", "mac?mini#leaf", "m".repeat(64)];
+const NODE_TOKENS = new Map([["macair", "workspace-air-token"], ["macmini", "workspace-mini-token"],
+  ...OPAQUE_NODE_IDS.map((nodeId, index): [string, string] => [nodeId, `workspace-target-${index}-token`])]);
+const MESSAGE_PATH = `/v1/sessions/macair/${SESSION_ID}/messages`;
+const HISTORY_PATH = `/v1/sessions/macair/${SESSION_ID}/history`;
 
 type Frame = Record<string, unknown>;
 interface FakeDaemon {
@@ -84,7 +86,7 @@ describe("Session workspace HTTP boundary", () => {
     return setCookie!.split(";")[0];
   }
 
-  async function connect(nodeId = "demoair", target = session(), replyHistory = true): Promise<FakeDaemon> {
+  async function connect(nodeId = "macair", target = session(), replyHistory = true): Promise<FakeDaemon> {
     const ws = new WebSocket(baseUrl.replace("http:", "ws:") + "/v1/daemon", {
       headers: { Authorization: `Bearer ${NODE_TOKENS.get(nodeId)}` },
     });
@@ -144,12 +146,12 @@ describe("Session workspace HTTP boundary", () => {
 
   it("reads Cookie and Bearer history through a real daemon roundtrip without creating commands", async () => {
     const air = await connect();
-    const mini = await connect("demomini");
+    const mini = await connect("macmini");
     const first = await fetch(baseUrl + HISTORY_PATH, { headers: { Cookie: cookie } });
     expect(first.status).toBe(200);
     expect(first.headers.get("cache-control")).toBe("no-store");
     expect(await first.json()).toEqual(air.history);
-    expect(air.frames[0]).toMatchObject({ type: "read_history", nodeId: "demoair", sessionId: SESSION_ID, limit: 30 });
+    expect(air.frames[0]).toMatchObject({ type: "read_history", nodeId: "macair", sessionId: SESSION_ID, limit: 30 });
     expect(air.frames[0].requestId).toEqual(expect.any(String));
     expect(mini.frames).toHaveLength(0);
 
@@ -163,12 +165,41 @@ describe("Session workspace HTTP boundary", () => {
     expect(await store.listRecentCommands()).toEqual([]);
   });
 
+  it.each<{ capabilities: Session["capabilities"] }>([{ capabilities: [] }, { capabilities: ["send"] }])(
+    "requires read capability for authenticated history requests: $capabilities", async ({ capabilities }) => {
+      const air = await connect("macair", session({ capabilities }));
+      for (const headers of [{ Cookie: cookie }, { Authorization: `Bearer ${CONTROLLER_TOKEN}` }]) {
+        const response = await fetch(baseUrl + HISTORY_PATH, { headers });
+        expect(response.status).toBe(403);
+        expect(await response.json()).toEqual({
+          code: "history_forbidden", error: "Session does not provide history reading capability",
+        });
+      }
+      expect(air.frames).toEqual([]);
+      expect(await store.listRecentCommands()).toEqual([]);
+    });
+
+  it.each(["control-socket", "codex-desktop", "terminal-transcript"] as const)(
+    "reads advertised %s history without requiring send capability or native loaded state", async source => {
+      const target = session({ capabilities: ["read"], loaded: false, status: "unknown",
+        ...(source === "terminal-transcript" ? { id: `terminal:${"A".repeat(43)}`,
+          provider: "terminal/claude", historySource: source } : {}) });
+      const air = await connect("macair", target);
+      air.history.source = source;
+      if (source === "terminal-transcript") air.history.items[0].type = "transcript_message";
+      const response = await fetch(baseUrl + `/v1/sessions/macair/${target.id}/history`, { headers: { Cookie: cookie } });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(air.history);
+      expect(air.frames).toEqual([expect.objectContaining({ type: "read_history", sessionId: target.id })]);
+      expect(await store.listRecentCommands()).toEqual([]);
+    });
+
   it.each([
     ["History context expired", 409, "history_context_expired"],
     ["History incomplete", 502, "history_incomplete"],
     ["History response too large", 413, "history_too_large"],
   ])("returns static %s HTTP errors from the exact daemon", async (error, status, code) => {
-    const air = await connect("demoair", session(), false);
+    const air = await connect("macair", session(), false);
     air.ws.on("message", raw => {
       const frame = JSON.parse(raw.toString());
       if (frame.type === "read_history") air.ws.send(JSON.stringify({ type: "history", requestId: frame.requestId, sessionId: frame.sessionId, error }));
@@ -179,7 +210,7 @@ describe("Session workspace HTTP boundary", () => {
   });
 
   it("HTTP cancellation sends the exact request tuple and ignores its late reply", async () => {
-    const air = await connect("demoair", session(), false);
+    const air = await connect("macair", session(), false);
     const abort = new AbortController();
     const read = fetch(baseUrl + HISTORY_PATH, { headers: { Cookie: cookie }, signal: abort.signal });
     const cancelled = expect(read).rejects.toMatchObject({ name: "AbortError" });
@@ -188,7 +219,7 @@ describe("Session workspace HTTP boundary", () => {
     abort.abort();
     await cancelled;
     await vi.waitFor(() => expect(air.frames.filter(frame => frame.type === "cancel_history")).toHaveLength(1));
-    expect(air.frames.at(-1)).toEqual({ type: "cancel_history", requestId: original.requestId, nodeId: "demoair", sessionId: SESSION_ID });
+    expect(air.frames.at(-1)).toEqual({ type: "cancel_history", requestId: original.requestId, nodeId: "macair", sessionId: SESSION_ID });
     air.ws.send(JSON.stringify({ type: "history", requestId: original.requestId, sessionId: SESSION_ID, history: air.history }));
     const next = fetch(baseUrl + HISTORY_PATH, { headers: { Cookie: cookie } });
     await vi.waitFor(() => expect(air.frames.filter(frame => frame.type === "read_history")).toHaveLength(2));
@@ -199,17 +230,17 @@ describe("Session workspace HTTP boundary", () => {
 
   it("dispatches the fixed send action to the exact node/session and permits Cookie receipt reads", async () => {
     const air = await connect();
-    const mini = await connect("demomini");
+    const mini = await connect("macmini");
     const response = await post({ prompt: "exact target", requestId: "browser-request" });
     expect(response.status).toBe(202);
     const command = await response.json();
     const expectedRequestId = "web_" + createHash("sha256")
       .update(JSON.stringify(["session-message", "browser-request"])).digest("hex");
-    expect(command).toMatchObject({ nodeId: "demoair", sessionId: SESSION_ID,
+    expect(command).toMatchObject({ nodeId: "macair", sessionId: SESSION_ID,
       action: "send", sendRoute: "control-socket", prompt: "exact target", requestId: expectedRequestId, status: "pending" });
     await vi.waitFor(() => expect(air.frames).toHaveLength(1));
     expect(air.frames[0]).toMatchObject({ type: "command", commandId: command.commandId,
-      nodeId: "demoair", sessionId: SESSION_ID, action: "send", sendRoute: "control-socket", prompt: "exact target" });
+      nodeId: "macair", sessionId: SESSION_ID, action: "send", sendRoute: "control-socket", prompt: "exact target" });
     expect(air.frames[0]).not.toHaveProperty("skills");
     expect(mini.frames).toHaveLength(0);
     const receipt = await fetch(baseUrl + `/v1/commands/${command.commandId}`, { headers: { Cookie: cookie } });
@@ -217,9 +248,54 @@ describe("Session workspace HTTP boundary", () => {
     expect((await receipt.json()).commandId).toBe(command.commandId);
   });
 
+  it.each(OPAQUE_NODE_IDS)("preserves opaque node ID %s across history, sending, recovery and cancellation", async nodeId => {
+    const target = await connect(nodeId);
+    const other = await connect("macmini");
+    const path = `/v1/sessions/${encodeURIComponent(nodeId)}/${SESSION_ID}`;
+    const history = await fetch(baseUrl + path + "/history", { headers: { Cookie: cookie } });
+    expect(history.status).toBe(200);
+    expect(await history.json()).toEqual(target.history);
+
+    const sent = await post({ prompt: "exact opaque target", requestId: "opaque-send" }, browserHeaders(), path + "/messages");
+    expect(sent.status).toBe(202);
+    const running = await sent.json();
+    expect(running).toMatchObject({ nodeId, sessionId: SESSION_ID, status: "pending" });
+    await vi.waitFor(() => expect(target.frames).toHaveLength(2));
+    expect(target.frames).toEqual([
+      expect.objectContaining({ type: "read_history", nodeId, sessionId: SESSION_ID }),
+      expect.objectContaining({ type: "command", nodeId, sessionId: SESSION_ID, commandId: running.commandId }),
+    ]);
+
+    const queued = await post({ prompt: "queued opaque target", requestId: "opaque-queued" }, browserHeaders(), path + "/messages");
+    expect(queued.status).toBe(202);
+    const command = await queued.json();
+    expect(command).toMatchObject({ nodeId, sessionId: SESSION_ID, status: "queued" });
+    const recovered = await fetch(baseUrl + path + "/messages/opaque-queued", { headers: { Cookie: cookie } });
+    expect(recovered.status).toBe(200);
+    expect(await recovered.json()).toEqual(command);
+    const cancelled = await post({ cancelCommandId: command.commandId }, browserHeaders(), path + "/messages");
+    expect(cancelled.status).toBe(200);
+    expect(await cancelled.json()).toMatchObject({ commandId: command.commandId, nodeId, sessionId: SESSION_ID, status: "cancelled" });
+    expect(await store.getCommand(command.commandId)).toMatchObject({ nodeId, sessionId: SESSION_ID, status: "cancelled" });
+    expect(target.frames).toHaveLength(2);
+    expect(other.frames).toHaveLength(0);
+  });
+
+  it("keeps session and request path boundaries for dotted nodes", async () => {
+    const target = await connect("mac.mini");
+    const path = "/v1/sessions/mac.mini/";
+    const headers = { Cookie: cookie };
+    expect((await fetch(baseUrl + path + "%2E%2E%2Fshared-thread/history", { headers })).status).toBe(400);
+    expect((await post(undefined, browserHeaders(), path + "%2E%2E%2Fshared-thread/messages")).status).toBe(400);
+    expect((await fetch(baseUrl + path + SESSION_ID + "/messages/request%2Fother", { headers })).status).toBe(400);
+    expect((await fetch(baseUrl + `/v1/sessions/${"m".repeat(65)}/${SESSION_ID}/history`, { headers })).status).toBe(400);
+    expect(target.frames).toHaveLength(0);
+    expect(await store.listRecentCommands()).toEqual([]);
+  });
+
   it("dispatches concurrent retries once and rejects changed prompt or target with 409", async () => {
     const air = await connect();
-    const mini = await connect("demomini");
+    const mini = await connect("macmini");
     const send = vi.spyOn(server.getNodeHub(), "sendCommand");
     const responses = await Promise.all(Array.from({ length: 12 }, () => post()));
     expect(responses.every(response => response.status === 202)).toBe(true);
@@ -229,13 +305,13 @@ describe("Session workspace HTTP boundary", () => {
     await vi.waitFor(() => expect(air.frames.filter(frame => frame.type === "command")).toHaveLength(1));
     expect((await store.listRecentCommands()).length).toBe(1);
     expect((await post({ prompt: "different", requestId: "request-1" })).status).toBe(409);
-    expect((await post(undefined, browserHeaders(), `/v1/sessions/demomini/${SESSION_ID}/messages`)).status).toBe(409);
+    expect((await post(undefined, browserHeaders(), `/v1/sessions/macmini/${SESSION_ID}/messages`)).status).toBe(409);
     expect(send).toHaveBeenCalledTimes(1);
     expect(mini.frames).toHaveLength(0);
   });
 
   it.each(["idle", "busy"])("recovers the existing %s target command by its original browser request ID without writes", async status => {
-    const air = await connect("demoair", session({ status }));
+    const air = await connect("macair", session({ status }));
     const requestId = "recover-browser-request";
     const submitted = await post({ prompt: "recover this exact command", requestId });
     expect(submitted.status).toBe(202);
@@ -260,7 +336,7 @@ describe("Session workspace HTTP boundary", () => {
   });
 
   it("hides recovery from another Cookie, another target and an unknown request without writes", async () => {
-    const air = await connect("demoair", session({ status: "busy" }));
+    const air = await connect("macair", session({ status: "busy" }));
     const submitted = await post({ prompt: "private queued command", requestId: "private-request" });
     expect(submitted.status).toBe(202);
     const command = await submitted.json();
@@ -270,8 +346,8 @@ describe("Session workspace HTTP boundary", () => {
     const create = vi.spyOn(store, "createCommandIfAbsent");
     const cases = [
       { path: MESSAGE_PATH + "/private-request", credential: otherCookie },
-      { path: `/v1/sessions/demomini/${SESSION_ID}/messages/private-request`, credential: cookie },
-      { path: "/v1/sessions/demoair/another-thread/messages/private-request", credential: cookie },
+      { path: `/v1/sessions/macmini/${SESSION_ID}/messages/private-request`, credential: cookie },
+      { path: "/v1/sessions/macair/another-thread/messages/private-request", credential: cookie },
       { path: MESSAGE_PATH + "/missing-request", credential: cookie },
     ];
     for (const { path, credential } of cases) {
@@ -286,7 +362,7 @@ describe("Session workspace HTTP boundary", () => {
   });
 
   it("requires a live console Cookie for recovery and refuses Bearer authority", async () => {
-    const air = await connect("demoair", session({ status: "busy" }));
+    const air = await connect("macair", session({ status: "busy" }));
     const submitted = await post({ prompt: "protected command", requestId: "protected-request" });
     const command = await submitted.json();
     const original = await store.getCommand(command.commandId);
@@ -305,7 +381,7 @@ describe("Session workspace HTTP boundary", () => {
   });
 
   it("keeps queued work visible after refresh and permits only its original Cookie to cancel it", async () => {
-    const air = await connect("demoair", session({ status: "busy" }));
+    const air = await connect("macair", session({ status: "busy" }));
     const requestId = "refresh-and-cancel";
     const submitted = await post({ prompt: "wait until this session is ready", requestId });
     expect(submitted.status).toBe(202);
@@ -346,8 +422,8 @@ describe("Session workspace HTTP boundary", () => {
   });
 
   it.each(["chat", "plan"] as const)("prevents a console Cookie from cancelling %s-authorized queued work", async source => {
-    const air = await connect("demoair", session({ status: "busy" }));
-    const action = { nodeId: "demoair", sessionId: SESSION_ID, prompt: "chat-authorized task", sendRoute: "control-socket" as const, dependsOn: [] };
+    const air = await connect("macair", session({ status: "busy" }));
+    const action = { nodeId: "macair", sessionId: SESSION_ID, prompt: "chat-authorized task", sendRoute: "control-socket" as const, dependsOn: [] };
     let authority: CommandAuthority = { type: "chat", chatId: "allowed-chat" };
     let requestId = "chat-authorized-request";
     if (source === "plan") {
@@ -427,7 +503,7 @@ describe("Session workspace HTTP boundary", () => {
   });
 
   it.each<[string, Record<string, unknown>]>([
-    ["extra action", { action: "read" }], ["extra node", { nodeId: "demomini" }],
+    ["extra action", { action: "read" }], ["extra node", { nodeId: "macmini" }],
     ["extra session", { sessionId: "other" }], ["extra skills", { skills: [] }], ["extra route", { sendRoute: "desktop-owner" }],
     ["blank prompt", { prompt: "   " }], ["empty requestId", { requestId: "" }],
     ["unsafe requestId", { requestId: "unsafe/request" }],
@@ -443,7 +519,7 @@ describe("Session workspace HTTP boundary", () => {
     "/v1/commands", "/v1/messages", "/v1/console-links",
   ])("keeps Cookie authority out of admin write route %s", async path => {
     expect((await post({ requestId: "admin-write", prompt: "hello", action: "send",
-      nodeId: "demoair", sessionId: SESSION_ID, chatId: "allowed-chat", messageId: "m", text: "list" },
+      nodeId: "macair", sessionId: SESSION_ID, chatId: "allowed-chat", messageId: "m", text: "list" },
     browserHeaders(), path)).status).toBe(401);
     expect(await store.listRecentCommands()).toEqual([]);
   });
@@ -470,7 +546,7 @@ describe("Session workspace HTTP boundary", () => {
     ["unknown status", { status: "unknown" }],
     ["not loaded", { loaded: false }],
   ])("persists %s targets in the queue without dispatch", async (_label, overrides) => {
-    const air = await connect("demoair", session(overrides));
+    const air = await connect("macair", session(overrides));
     const response = await post();
     expect(response.status).toBe(202);
     const command = await response.json();
@@ -485,7 +561,7 @@ describe("Session workspace HTTP boundary", () => {
     ["read-only", { capabilities: ["read"] }, 400],
     ["unknown capabilities", { capabilities: [] }, 400],
   ])("rejects %s targets without dispatch", async (_label, overrides, expectedStatus) => {
-    const air = await connect("demoair", session(overrides));
+    const air = await connect("macair", session(overrides));
     expect((await post()).status).toBe(expectedStatus);
     expect(air.frames).toHaveLength(0);
     expect(await store.listRecentCommands()).toEqual([]);
@@ -493,7 +569,7 @@ describe("Session workspace HTTP boundary", () => {
 
   it("dispatches independent desktop authority and preserves it on retry after authority revocation", async () => {
     const observed = Date.now();
-    const air = await connect("demoair", session({ loaded: false, status: "notLoaded", capabilities: ["read"],
+    const air = await connect("macair", session({ loaded: false, status: "notLoaded", capabilities: ["read"],
       sendAvailability: { route: "desktop-owner", state: "ready", observedAt: new Date(observed).toISOString(), validUntil: new Date(observed + 45000).toISOString() } }));
     const response = await post();
     expect(response.status).toBe(202);
@@ -501,20 +577,20 @@ describe("Session workspace HTTP boundary", () => {
     expect(command.sendRoute).toBe("desktop-owner");
     await vi.waitFor(() => expect(air.frames).toHaveLength(1));
     expect(air.frames[0].sendRoute).toBe("desktop-owner");
-    server.getNodeHub().getNodeSession("demoair", SESSION_ID)!.sendAvailability!.state = "blocked";
+    server.getNodeHub().getNodeSession("macair", SESSION_ID)!.sendAvailability!.state = "blocked";
     expect((await (await post()).json()).commandId).toBe(command.commandId);
     expect(air.frames).toHaveLength(1);
   });
 
   it("fails a persisted command with zero wire frames when ready expires before final dispatch", async () => {
     const observed = Date.now();
-    const air = await connect("demoair", session({ sendAvailability: {
+    const air = await connect("macair", session({ sendAvailability: {
       route: "desktop-owner", state: "ready", observedAt: new Date(observed).toISOString(), validUntil: new Date(observed + 45000).toISOString(),
     } }));
     const create = store.createCommandIfAbsent.bind(store);
     vi.spyOn(store, "createCommandIfAbsent").mockImplementationOnce(async record => {
       const result = await create(record);
-      server.getNodeHub().getNodeSession("demoair", SESSION_ID)!.sendAvailability!.validUntil = new Date().toISOString();
+      server.getNodeHub().getNodeSession("macair", SESSION_ID)!.sendAvailability!.validUntil = new Date().toISOString();
       return result;
     });
     expect((await post()).status).toBe(409);
@@ -524,7 +600,7 @@ describe("Session workspace HTTP boundary", () => {
 
   it("rejects a route injected into the admin command body", async () => {
     const air = await connect();
-    const response = await post({ nodeId: "demoair", sessionId: SESSION_ID, action: "send", prompt: "fixture", requestId: "injected", sendRoute: "desktop-owner" },
+    const response = await post({ nodeId: "macair", sessionId: SESSION_ID, action: "send", prompt: "fixture", requestId: "injected", sendRoute: "desktop-owner" },
       { Authorization: `Bearer ${CONTROLLER_TOKEN}`, "Content-Type": "application/json" }, "/v1/commands");
     expect(response.status).toBe(400);
     expect(air.frames).toHaveLength(0);
@@ -537,8 +613,8 @@ describe("Session workspace HTTP boundary", () => {
     expect(offlineHistory.status).toBe(503);
     expect((await offlineHistory.json()).code).toBe("history_offline");
     const air = await connect();
-    expect((await post(undefined, browserHeaders(), "/v1/sessions/demoair/missing/messages")).status).toBe(404);
-    const missingHistory = await fetch(baseUrl + "/v1/sessions/demoair/missing/history", { headers: { Cookie: cookie } });
+    expect((await post(undefined, browserHeaders(), "/v1/sessions/macair/missing/messages")).status).toBe(404);
+    const missingHistory = await fetch(baseUrl + "/v1/sessions/macair/missing/history", { headers: { Cookie: cookie } });
     expect(missingHistory.status).toBe(404);
     expect((await missingHistory.json()).code).toBe("history_session_not_found");
     expect(air.frames).toHaveLength(0);
@@ -547,18 +623,18 @@ describe("Session workspace HTTP boundary", () => {
 
   it("queues a known disconnected target and dispatches only after its original node returns", async () => {
     const air = await connect();
-    await vi.waitFor(async () => expect(await store.getKnownSession("demoair", SESSION_ID)).not.toBeNull());
+    await vi.waitFor(async () => expect(await store.getKnownSession("macair", SESSION_ID)).not.toBeNull());
     air.ws.close();
-    await vi.waitFor(() => expect(server.getNodeHub().isNodeConnected("demoair")).toBe(false));
+    await vi.waitFor(() => expect(server.getNodeHub().isNodeConnected("macair")).toBe(false));
     const response = await post();
     expect(response.status).toBe(202);
     const command = await response.json();
-    expect(command).toMatchObject({ nodeId: "demoair", sessionId: SESSION_ID, status: "queued", sendRoute: "control-socket" });
+    expect(command).toMatchObject({ nodeId: "macair", sessionId: SESSION_ID, status: "queued", sendRoute: "control-socket" });
     expect((await store.getCommand(command.commandId))?.status).toBe("queued");
     expect(air.frames).toHaveLength(0);
     const restored = await connect();
     await vi.waitFor(() => expect(restored.frames.filter(frame => frame.type === "command")).toHaveLength(1), { timeout: 3000 });
-    expect(restored.frames[0]).toMatchObject({ commandId: command.commandId, nodeId: "demoair", sessionId: SESSION_ID });
+    expect(restored.frames[0]).toMatchObject({ commandId: command.commandId, nodeId: "macair", sessionId: SESSION_ID });
     expect((await store.getCommand(command.commandId))?.status).toBe("pending");
   });
 
@@ -575,14 +651,25 @@ describe("Session workspace HTTP boundary", () => {
     expect(air.frames).toHaveLength(0);
   });
 
-  it.each(["bad.node", "bad%2Fnode", "n".repeat(65)])("rejects invalid node target %s", async target => {
+  it.each(["bad.node", "bad%2Fnode"])("rejects unknown opaque node target %s without dispatch", async target => {
+    const air = await connect();
+    expect((await post(undefined, browserHeaders(), `/v1/sessions/${target}/${SESSION_ID}/messages`)).status).toBe(404);
+    const history = await fetch(baseUrl + `/v1/sessions/${target}/${SESSION_ID}/history`, { headers: { Cookie: cookie } });
+    expect(history.status).toBe(503);
+    expect((await history.json()).code).toBe("history_offline");
+    expect(air.frames).toHaveLength(0);
+    expect(await store.listRecentCommands()).toEqual([]);
+  });
+
+  it("rejects overlong node targets", async () => {
+    const target = "n".repeat(65);
     expect((await post(undefined, browserHeaders(), `/v1/sessions/${target}/${SESSION_ID}/messages`)).status).toBe(400);
     expect((await fetch(baseUrl + `/v1/sessions/${target}/${SESSION_ID}/history`, { headers: { Cookie: cookie } })).status).toBe(400);
   });
 
   it.each(["bad.thread", "bad%2Fthread", "s".repeat(65)])("rejects invalid session target %s", async target => {
-    expect((await post(undefined, browserHeaders(), `/v1/sessions/demoair/${target}/messages`)).status).toBe(400);
-    expect((await fetch(baseUrl + `/v1/sessions/demoair/${target}/history`, { headers: { Cookie: cookie } })).status).toBe(400);
+    expect((await post(undefined, browserHeaders(), `/v1/sessions/macair/${target}/messages`)).status).toBe(400);
+    expect((await fetch(baseUrl + `/v1/sessions/macair/${target}/history`, { headers: { Cookie: cookie } })).status).toBe(400);
   });
 
   it("rechecks Cookie authorization after durable creation and before dispatch", async () => {

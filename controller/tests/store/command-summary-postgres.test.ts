@@ -18,7 +18,7 @@ function row(overrides: Row = {}): Row {
 
 function fixture(rows = [row()]) {
   const query = vi.fn(async (_sql: string, _params: unknown[]) => ({ rows }));
-  vi.mocked(pg.Pool).mockImplementation(function () { return { query } as unknown as pg.Pool; });
+  vi.mocked(pg.Pool).mockImplementation(function () { return { query, on: vi.fn() } as unknown as pg.Pool; });
   return { store: new PostgresStore("postgresql://unused/command-summary"), query };
 }
 

@@ -13,8 +13,10 @@ function createPostgresStoreWithFakePool() {
 }
 
 class FakePgPool {
+  on = vi.fn();
   public rows = new Map<string, { chat_id: string; revision: number; data: Record<string, unknown>; updated_at: string }>();
   public nodeSessionsClearedCount = 0;
+  public versions = new Set<number>();
   public leaderStatesCreated = false;
   public queries: { sql: string; params?: unknown[] }[] = [];
 
@@ -30,6 +32,13 @@ class FakePgPool {
   async query(sql: string, params?: unknown[]): Promise<{ rows: any[] }> {
     this.queries.push({ sql, params });
     const normalized = sql.replace(/\s+/g, " ").trim();
+
+    if (normalized === "SELECT version FROM controller_schema_migrations") {
+      return { rows: [...this.versions].map(version => ({ version })) };
+    }
+    if (normalized === "INSERT INTO controller_schema_migrations(version) VALUES($1)") {
+      this.versions.add(Number(params?.[0])); return { rows: [] };
+    }
 
     if (normalized.includes("CREATE TABLE IF NOT EXISTS leader_states")) {
       this.leaderStatesCreated = true;
@@ -361,24 +370,24 @@ describe("LeaderState Persistence & CAS Contract", () => {
     expect(m2?.replyText).toBe("reply-second");
   });
 
-  it("preserves leader_states across PostgresStore.init() while clearing stale node_sessions", async () => {
+  it("preserves leader_states across PostgresStore.init() and migrates stale node_sessions once", async () => {
     const { store, fakePool } = createPostgresStoreWithFakePool();
     await store.init();
     expect(fakePool.leaderStatesCreated).toBe(true);
     expect(fakePool.nodeSessionsClearedCount).toBe(1);
 
     const saved = await store.compareAndSetLeaderState("chat-persist", 0, {
-      memories: { host: "demomini" },
+      memories: { host: "macmini" },
     });
     expect(saved?.revision).toBe(1);
 
     // Re-running init() on controller restart must NOT delete leader_states
     await store.init();
-    expect(fakePool.nodeSessionsClearedCount).toBe(2);
+    expect(fakePool.nodeSessionsClearedCount).toBe(1);
 
     const afterRestart = await store.getLeaderState("chat-persist");
     expect(afterRestart).not.toBeNull();
     expect(afterRestart?.revision).toBe(1);
-    expect(afterRestart?.data).toEqual({ memories: { host: "demomini" } });
+    expect(afterRestart?.data).toEqual({ memories: { host: "macmini" } });
   });
 });

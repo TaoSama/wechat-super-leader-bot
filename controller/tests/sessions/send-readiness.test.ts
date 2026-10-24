@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { waitForSendReadiness, SEND_READINESS_WAIT_MS } from "../../src/sessions/send-readiness.js";
 import type { Session } from "../../src/types.js";
 
-const target = { nodeId: "demoair", sessionId: "invest" };
+const target = { nodeId: "macair", sessionId: "invest" };
 function fixture() {
   const now = Date.now(), observedAt = new Date(now).toISOString();
   const session: Session = { id: target.sessionId, provider: "codex-app", title: "投资", cwd: "/fixture",
@@ -112,7 +112,7 @@ describe("bounded send readiness observation", () => {
   });
 
   it("checks every target before waiting and rejects an unavailable peer", async () => {
-    const f = fixture(), other = { nodeId: "demomini", sessionId: "research" };
+    const f = fixture(), other = { nodeId: "macmini", sessionId: "research" };
     const hub = { ...f.hub, isNodeConnected: (nodeId: string) => nodeId !== other.nodeId };
     expect(await waitForSendReadiness(hub, [target, other])).toMatchObject({ ready: false, target: other });
     expect(f.hub.subscribeSessionChanges).not.toHaveBeenCalled();

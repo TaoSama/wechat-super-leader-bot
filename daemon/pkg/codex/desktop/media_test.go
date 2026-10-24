@@ -3,6 +3,7 @@ package desktop
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,9 +11,10 @@ import (
 )
 
 func TestDesktopMediaUsesLatestRecordedAssistantAndPinsGeneration(t *testing.T) {
+	const skippedImages = 256
 	state := historyTestState(true,
 		historyTestTurn("old-turn", historyTestItem("old", "agentMessage", "![old](/tmp/old.png)")),
-		historyTestTurn("new-turn", historyTestItem("new", "agentMessage", "![a](/tmp/a.jpg) ![b](/tmp/b.jpg) ![c](/tmp/c.jpg) ![d](/tmp/d.jpg)")))
+		historyTestTurn("new-turn", historyTestItem("new", "agentMessage", strings.Repeat("![remote](https://example.com/image.png) ", skippedImages)+"![a](/tmp/a.jpg) ![b](/tmp/b.jpg) ![c](/tmp/c.jpg) ![d](/tmp/d.jpg)")))
 	view, err := projectDesktopHistory(state, "session")
 	if err != nil {
 		t.Fatal(err)
@@ -25,11 +27,11 @@ func TestDesktopMediaUsesLatestRecordedAssistantAndPinsGeneration(t *testing.T) 
 	entry := &desktopHistoryEntry{sessionID: "session", generation: "owner-generation", ctx: context.Background(), raw: raw, view: view, ready: true, lastUsed: time.Now(), changed: make(chan struct{}), cursors: map[string]desktopHistoryAnchor{}, anchorTokens: map[desktopHistoryAnchor]string{}}
 	reader.entries["session"] = entry
 	refs, generation, err := reader.ListSessionMedia(context.Background(), "session", "", "", "", protocol.MaxSessionMedia)
-	if err != nil || len(refs) != 3 || generation != "owner-generation" {
+	if err != nil || len(refs) != protocol.MaxSessionMedia || generation != "owner-generation" {
 		t.Fatalf("list media %+v %q %v", refs, generation, err)
 	}
 	for i, ref := range refs {
-		if ref.ItemID != "new" || ref.TurnID != "new-turn" || ref.Ordinal != i {
+		if ref.ItemID != "new" || ref.TurnID != "new-turn" || ref.Ordinal != skippedImages+i {
 			t.Fatalf("wrong newest selection %+v", ref)
 		}
 	}

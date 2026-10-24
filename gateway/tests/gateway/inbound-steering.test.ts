@@ -10,7 +10,7 @@ import { ILinkClient } from "../../src/wechat/client.js";
 import { WeChatGateway } from "../../src/gateway.js";
 import { QueryProgress } from "../../src/leader/progress.js";
 
-test("polling admits consecutive messages into the running query and sends one final with shared progress", { timeout: 30_000 }, async t => {
+test("polling deduplicates repeated root and supplemental messages while steering a running query", { timeout: 30_000 }, async t => {
   const directory = mkdtempSync(join(tmpdir(), "gateway-steering-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const credentials = join(directory, "account.json"), statePath = join(directory, "state.json");
@@ -36,10 +36,12 @@ test("polling admits consecutive messages into the running query and sends one f
     fetchImpl: async (url, init) => {
       if (String(url).endsWith("getupdates")) {
         polls++;
-        if (polls === 1) return Response.json({ ret: 0, get_updates_buf: "one", msgs: [message("one", "查一下部署情况")] });
+        if (polls === 1) return Response.json({ ret: 0, get_updates_buf: "one",
+          msgs: [message("one", "查一下部署情况")].flatMap(message => [message, message]) });
         if (polls === 2) {
           await started;
-          return Response.json({ ret: 0, get_updates_buf: "two", msgs: [message("two", "只看今天"), message("three", "按服务分组")] });
+          return Response.json({ ret: 0, get_updates_buf: "two",
+            msgs: [message("two", "只看今天"), message("three", "按服务分组")].flatMap(message => [message, message]) });
         }
         await new Promise(resolve => setTimeout(resolve, 1));
         return Response.json({ ret: 0, get_updates_buf: "done", msgs: [] });

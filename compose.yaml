@@ -21,7 +21,12 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: 8790
-      DATABASE_URL: postgresql://leader:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/leader
+      DATABASE_URL: ${DATABASE_URL:-}
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: leader
+      PGDATABASE: leader
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
       CONTROLLER_TOKEN: ${CONTROLLER_TOKEN:?set CONTROLLER_TOKEN}
       NODE_TOKENS: ${NODE_TOKENS:?set NODE_TOKENS}
       ALLOWED_CHAT_IDS: ${ALLOWED_CHAT_IDS:-}

@@ -2,7 +2,8 @@ import type { ExecutionView } from "./scheduler.js";
 
 const labels: Record<string, string> = {
   active: "自动推进中", completed: "已完成", failed: "已停止（失败）", cancelled: "已取消后续派发",
-  expired: "授权已过期", waiting: "等待前序完成或会话可用", claimed: "发送中，等待回执",
+  expired: "授权已过期", waiting: "等待前序完成或会话可用", claimed: "派发校验中，尚未发送",
+  queued: "已排队，等待会话可用或前序指令结束",
   pending: "等待接收", accepted: "已接收，等待完成", uncertain: "结果不明，暂停后续",
 };
 

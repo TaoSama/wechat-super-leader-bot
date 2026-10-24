@@ -4,7 +4,7 @@ import { groupSessionProjects, MAX_DIRECTORY_CHARS, renderSessionDirectory, sess
 import { SessionTitles } from "../../../src/leader/queries/session-titles.js";
 
 const session = (id: string, overrides: Partial<DirectorySession> = {}): DirectorySession => ({
-  id, title: `原始标题 ${id}`, nodeId: "demoair", nodeName: "demoair", cwd: "/work/app",
+  id, title: `原始标题 ${id}`, nodeId: "macair", nodeName: "Mac Air", cwd: "/work/app",
   updatedAt: "2026-10-21T01:00:00Z", executionStatus: "idle", modelView: { model: "gpt-6.1-sol" }, ...overrides,
 });
 const visible = (text: string) => markdownToWeChat(text, Number.MAX_SAFE_INTEGER);
@@ -19,15 +19,15 @@ describe("WeChat project directory", () => {
       session("unknown", { updatedAt: undefined }),
     ] });
     expect(result.sessions.map(item => item.id)).toEqual(["new", "old", "unknown", "other"]);
-    expect(result.sessions[0]).toMatchObject({ project: { name: "app", path: "/work/app", machineName: "demoair", groupLabel: "app（demoair）" } });
-    const body = visible(titles.render("按机器列出：\n[demoair] 改写的标题"));
-    expect(body.indexOf("app（demoair）")).toBeLessThan(body.indexOf("other（demoair）"));
+    expect(result.sessions[0]).toMatchObject({ project: { name: "app", path: "/work/app", machineName: "Mac Air", groupLabel: "app（Mac Air）" } });
+    const body = visible(titles.render("按机器列出：\n[macair] 改写的标题"));
+    expect(body.indexOf("app（Mac Air）")).toBeLessThan(body.indexOf("other（Mac Air）"));
     expect(body.indexOf("原始标题 new")).toBeLessThan(body.indexOf("原始标题 old"));
     expect(body).toContain("1. [忙] 原始标题 new\n2. [闲] 原始标题 old\n3. [闲] 原始标题 unknown");
-    expect(body).toContain("other（demoair）\n4. [闲] 原始标题 other");
+    expect(body).toContain("other（Mac Air）\n4. [闲] 原始标题 other");
     expect(body).not.toContain("模型：");
     expect(body).not.toContain("gpt-6.1-sol");
-    expect(body).not.toContain("[demoair]");
+    expect(body).not.toContain("[macair]");
     expect(body).not.toContain("改写的标题");
   });
 
@@ -46,12 +46,12 @@ describe("WeChat project directory", () => {
 
   it("keeps same-named projects on different machines and different paths separate", () => {
     const groups = groupSessionProjects([
-      session("air"), session("mini", { nodeId: "mini", nodeName: "demomini" }),
+      session("air"), session("mini", { nodeId: "mini", nodeName: "Mac Mini" }),
       session("other-path", { cwd: "/other/app" }),
     ]);
     expect(groups).toHaveLength(3);
     expect(groups.map(group => group.project.groupLabel).sort()).toEqual([
-      "app（demoair · /other/app）", "app（demoair · /work/app）", "app（demomini）",
+      "app（Mac Air · /other/app）", "app（Mac Air · /work/app）", "app（Mac Mini）",
     ].sort());
   });
 
@@ -79,7 +79,7 @@ describe("WeChat project directory", () => {
       session("abcdefgh-three", { title, cwd: "/work/other" }),
     ]));
     expect(body).toContain(`1. [闲] ${title}\n2. [闲] ${title}`);
-    expect(body).toContain(`other（demoair）\n3. [闲] ${title}`);
+    expect(body).toContain(`other（Mac Air）\n3. [闲] ${title}`);
     expect(body).not.toContain("abcdefgh");
     expect(body).not.toContain("模型：");
   });
@@ -88,7 +88,7 @@ describe("WeChat project directory", () => {
     const title = " **完整原题** `代码` #tag\n[链接](https://example.com) ①② ";
     const body = visible(renderSessionDirectory([session("s", { title, cwd: "/work/**project**" })]));
     expect(body).toContain(title);
-    expect(body).toContain("**project**（demoair）");
+    expect(body).toContain("**project**（Mac Air）");
   });
 
   it("keeps projectless sessions explicit and normalizes Windows and trailing separators", () => {
@@ -99,7 +99,7 @@ describe("WeChat project directory", () => {
     ]);
     expect(groups).toHaveLength(2);
     expect(groups.find(group => group.project.name === "project")?.sessions).toHaveLength(2);
-    expect(groups.find(group => group.project.name === "未关联 Project")?.project.machineName).toBe("demoair");
+    expect(groups.find(group => group.project.name === "未关联 Project")?.project.machineName).toBe("macair");
   });
 
   it("renders more than a model reply limit without dropping or truncating a session", () => {
@@ -167,7 +167,7 @@ describe("WeChat project directory", () => {
     expect(raw.length).toBeLessThanOrEqual(MAX_DIRECTORY_CHARS);
     expect(raw).toContain("另有1个会话因消息长度限制未展示。");
     expect(raw).not.toContain("完整超长原题");
-    expect(raw).not.toContain("app（demoair）");
+    expect(raw).not.toContain("app（Mac Air）");
   });
 
   it("returns all sessions when the complete directory fits exactly within the budget", () => {

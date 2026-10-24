@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ApiAuthError } from "../../../api/errors";
 import { fetchCommand } from "../../../api/sessions";
-import { setUnauthenticatedSession } from "../../../auth/bootstrap";
+import { getAuthSessionSnapshot, setUnauthenticatedSession } from "../../../auth/bootstrap";
 import type { CommandRecord } from "../../../types";
 
 interface OutputState { output?: string; loading: boolean; error?: string; cancelled?: boolean }
@@ -17,6 +17,7 @@ export function CommandOutput({ command, expanded }: { command: CommandRecord; e
     if (!expanded) { setState(EMPTY); return; }
     if (terminal || command.output !== undefined || !command.hasOutput) return;
     const controller = new AbortController();
+    const requestGeneration = getAuthSessionSnapshot().generation;
     active.current = controller;
     setState({ loading: true });
     void fetchCommand(command.commandId, controller.signal).then(receipt => {
@@ -26,7 +27,12 @@ export function CommandOutput({ command, expanded }: { command: CommandRecord; e
       setState({ output: receipt.output, loading: false });
     }).catch(cause => {
       if (controller.signal.aborted) return;
-      if (cause instanceof ApiAuthError) { setUnauthenticatedSession("expired"); return; }
+      if (cause instanceof ApiAuthError) {
+        if (!setUnauthenticatedSession("expired", requestGeneration)) {
+          setState({ loading: false, error: "登录状态已更新，请重新加载完整结果。" });
+        }
+        return;
+      }
       setState({ loading: false, error: "完整结果加载失败，可重试；摘要不代表完整结果。" });
     }).finally(() => { if (active.current === controller) active.current = null; });
     return () => { controller.abort(); if (active.current === controller) active.current = null; };

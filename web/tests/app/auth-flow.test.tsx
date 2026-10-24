@@ -102,7 +102,7 @@ describe("Web Console One-Time Link Authentication Flow", () => {
           status: 200,
           json: async () => ({
             leaderMode: "model",
-            nodes: [{ nodeId: "demomini", connected: true, lastHeartbeat: "", sessionCount: 1 }],
+            nodes: [{ nodeId: "macmini", connected: true, lastHeartbeat: "", sessionCount: 1 }],
             sessions: [],
             commands: [], goals: emptyGoals(), executions: emptyExecutions(),
           }),
@@ -123,7 +123,7 @@ describe("Web Console One-Time Link Authentication Flow", () => {
 
     // Wait until authenticated and telemetry appears
     await waitFor(() => {
-      expect(screen.getByTestId("node-card-demomini")).toBeInTheDocument();
+      expect(screen.getByTestId("node-card-macmini")).toBeInTheDocument();
     });
 
     // Address bar hash must have been stripped immediately
@@ -170,7 +170,7 @@ describe("Web Console One-Time Link Authentication Flow", () => {
           status: 200,
           json: async () => ({
             leaderMode: "model",
-            nodes: [{ nodeId: "demomini", connected: true, lastHeartbeat: "", sessionCount: 1 }],
+            nodes: [{ nodeId: "macmini", connected: true, lastHeartbeat: "", sessionCount: 1 }],
             sessions: [],
             commands: [], goals: emptyGoals(), executions: emptyExecutions(),
           }),
@@ -185,7 +185,7 @@ describe("Web Console One-Time Link Authentication Flow", () => {
 
     await waitFor(() => {
       expect(screen.getByText("定时更新", { exact: false })).toBeInTheDocument();
-      expect(screen.getByTestId("node-card-demomini")).toBeInTheDocument();
+      expect(screen.getByTestId("node-card-macmini")).toBeInTheDocument();
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -262,7 +262,7 @@ describe("Web Console One-Time Link Authentication Flow", () => {
             ok: true,
             status: 200,
             json: async () => ({
-              nodes: [{ nodeId: "demomini", connected: true, lastHeartbeat: "", sessionCount: 1 }],
+              nodes: [{ nodeId: "macmini", connected: true, lastHeartbeat: "", sessionCount: 1 }],
               sessions: [],
               commands: [], goals: emptyGoals(), executions: emptyExecutions(),
             }),
@@ -283,7 +283,7 @@ describe("Web Console One-Time Link Authentication Flow", () => {
 
     // First poll succeeds and displays node
     await waitFor(() => {
-      expect(screen.getByTestId("node-card-demomini")).toBeInTheDocument();
+      expect(screen.getByTestId("node-card-macmini")).toBeInTheDocument();
     });
 
     // Trigger manual refresh which returns 401
@@ -291,7 +291,7 @@ describe("Web Console One-Time Link Authentication Flow", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("auth-expired-banner")).toHaveTextContent("控制台会话已过期");
-      expect(screen.queryByTestId("node-card-demomini")).toBeNull();
+      expect(screen.queryByTestId("node-card-macmini")).toBeNull();
     });
   });
 
@@ -380,7 +380,7 @@ describe("Web Console One-Time Link Authentication Flow", () => {
           ok: true,
           status: 200,
           json: async () => ({
-            nodes: [{ nodeId: "demomini", connected: true, lastHeartbeat: "", sessionCount: 1 }],
+            nodes: [{ nodeId: "macmini", connected: true, lastHeartbeat: "", sessionCount: 1 }],
             sessions: [],
             commands: [], goals: emptyGoals(), executions: emptyExecutions(),
           }),
@@ -405,7 +405,7 @@ describe("Web Console One-Time Link Authentication Flow", () => {
 
     // App receives auth state change without full page reload
     await waitFor(() => {
-      expect(screen.getByTestId("node-card-demomini")).toBeInTheDocument();
+      expect(screen.getByTestId("node-card-macmini")).toBeInTheDocument();
     });
 
     // Address bar hash stripped immediately

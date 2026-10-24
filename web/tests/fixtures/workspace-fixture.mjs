@@ -24,16 +24,16 @@ const MODEL_EXPIRY_PROBE_AGE_MS = 40_000;
 const FIXTURE_TIMEOUT_MS = 20 * 60 * 1000;
 const now = () => new Date().toISOString();
 const sessions = [
-  { id: "fixture-workspace", nodeId: "demoair", title: "工作台体验 · 实时会话与历史阅读", status: "idle", model: "gpt-6.1-sol", cwd: "/Users/demo/Workspaces/super-leader", preview: "已完成会话列表分组，正在验证手机上的长消息阅读。" },
-  { id: "fixture-api", nodeId: "demoair", title: "检查微信查询超时与安全重试", status: "busy", model: "gpt-6.1-sol", cwd: "/Users/demo/Workspaces/super-leader", preview: "正在核对请求预算和错误处理。不会向其他会话发送指令。" },
-  { id: "fixture-review", nodeId: "demoair", title: "数据库事务与回执关联复核", status: "idle", model: "gpt-6-astra", cwd: "/Users/demo/Workspaces/control-plane", preview: "测试通过，等待查看审查结论。" },
-  { id: "fixture-offline", nodeId: "demomini", title: "离线机器上的架构研究", status: "unknown", model: "gpt-6.1-sol", cwd: "/Users/demo/Workspaces/research", preview: "机器离线时保留最后已知状态。" },
+  { id: "fixture-workspace", nodeId: "macair", title: "工作台体验 · 实时会话与历史阅读", status: "idle", model: "gpt-6.1-sol", cwd: "/Users/demo/Workspaces/super-leader", preview: "已完成会话列表分组，正在验证手机上的长消息阅读。" },
+  { id: "fixture-api", nodeId: "macair", title: "检查微信查询超时与安全重试", status: "busy", model: "gpt-6.1-sol", cwd: "/Users/demo/Workspaces/super-leader", preview: "正在核对请求预算和错误处理。不会向其他会话发送指令。" },
+  { id: "fixture-review", nodeId: "macair", title: "数据库事务与回执关联复核", status: "idle", model: "gpt-6-astra", cwd: "/Users/demo/Workspaces/control-plane", preview: "测试通过，等待查看审查结论。" },
+  { id: "fixture-offline", nodeId: "macmini", title: "离线机器上的架构研究", status: "unknown", model: "gpt-6.1-sol", cwd: "/Users/demo/Workspaces/research", preview: "机器离线时保留最后已知状态。" },
 ].map((s) => ({ ...s, provider: "codex-app", modelProvider: "openai_http", reasoningEffort: "high", capabilities: ["read", "send"], loaded: true, observedAt: now(), updatedAt: now() }));
 const plans = createPlanFixture(sessions);
 const goals = createGoalFixture(sessions);
 const toolHistory = createToolHistoryFixture(sessions[0].id);
 const commands = ["uncertain", "accepted", "completed", "failed"].map((status, i) => ({
-  commandId: `fixture-command-${i}`, requestId: `fixture-request-${i}`, nodeId: "demoair", sessionId: sessions[i % 3].id,
+  commandId: `fixture-command-${i}`, requestId: `fixture-request-${i}`, nodeId: "macair", sessionId: sessions[i % 3].id,
   action: "send", prompt: ["检查实时刷新是否正常", "复核查询预算与重试边界", "阅读测试结果并总结", "确认节点连接状态"][i], status,
   output: status === "completed" ? "验证已完成。\n\n所有测试通过，未向外部发送消息。" : undefined,
   error: status === "uncertain" ? "连接断开，回执未确认，请先核查原请求。" : status === "failed" ? "机器暂时无法访问。" : undefined,
@@ -58,8 +58,8 @@ let failOlder = false;
 let desktopHistoryTooLarge = false;
 const status = () => ({ leaderMode: "model", leaderModel: "gpt-6.1-sol", sessions, commands,
   goals: goals.snapshot(), executions: plans.snapshot(), nodes: [
-  { nodeId: "demoair", connected: true, lastHeartbeat: now(), sessionCount: sessions.filter(session => session.nodeId === "demoair").length },
-  { nodeId: "demomini", connected: false, lastHeartbeat: now(), sessionCount: sessions.filter(session => session.nodeId === "demomini").length },
+  { nodeId: "macair", connected: true, lastHeartbeat: now(), sessionCount: sessions.filter(session => session.nodeId === "macair").length },
+  { nodeId: "macmini", connected: false, lastHeartbeat: now(), sessionCount: sessions.filter(session => session.nodeId === "macmini").length },
 ] });
 function broadcast() { for (const stream of streams) stream.write(`event: status\ndata: ${JSON.stringify(status())}\n\n`); }
 function json(res, value, code = 200) { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(value)); }

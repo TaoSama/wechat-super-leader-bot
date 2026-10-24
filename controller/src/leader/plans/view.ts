@@ -1,8 +1,8 @@
 import type { IStore } from "../../store/interface.js";
 import { TurnIdSchema } from "../../types.js";
-import { assertNativeExecutionPlan, executionRequestId, matchesExecutionCommand, type ExecutionRecord } from "./execution.js";
+import { assertNativeExecutionPlan, matchesExecutionCommand, type ExecutionRecord } from "./execution.js";
 import { summarizeExecutionInput, type ExecutionResultSourceView } from "./input.js";
-import { verifyExecutionInput, verifyExecutionInputMetadata } from "./input-source.js";
+import { createExecutionInputReader } from "./input-source.js";
 
 export type { ExecutionResultSourceView } from "./input.js";
 
@@ -22,14 +22,15 @@ export interface ExecutionView {
 export async function readExecutionView(store: Pick<IStore, "findCommandByRequestId">, execution: ExecutionRecord, now: number,
   metadataOnly = false): Promise<ExecutionView> {
   assertNativeExecutionPlan(execution.plan);
+  const reader = createExecutionInputReader(store, execution);
   const steps: ExecutionView["steps"] = [];
   for (const [index, action] of execution.plan.actions.entries()) {
     const step = { step: index + 1, nodeId: action.nodeId, sessionId: action.sessionId,
       prompt: action.prompt, dependsOn: [...action.dependsOn], resultFrom: [...(action.resultFrom ?? [])],
       ...(execution.attempts[index]?.input ? { resultSources: summarizeExecutionInput(execution.attempts[index]!.input!) } : {}) };
     const attempt = execution.attempts[index];
-    const command = await store.findCommandByRequestId(executionRequestId(execution, index));
-    if (attempt && !await (metadataOnly ? verifyExecutionInputMetadata : verifyExecutionInput)(store, execution, index)) {
+    const command = await reader.command(index);
+    if (attempt && !await (metadataOnly ? reader.verifyMetadata(index) : reader.verify(index))) {
       steps.push({ ...step, status: "uncertain", error: "Execution input snapshot is inconsistent" });
     } else if (command && (!attempt || !matchesExecutionCommand(execution, index, command))) {
       steps.push({ ...step, status: "uncertain", error: "Execution command identity is inconsistent" });
