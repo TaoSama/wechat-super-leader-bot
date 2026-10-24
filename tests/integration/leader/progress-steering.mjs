@@ -246,7 +246,18 @@ childProcess.spawn=function(command,args,options){
     check('gateway shuts down cleanly after all work settles', terminal.code === 0);
     evidence.status = 'passed';
     console.log(JSON.stringify({ status: 'PASS', version: evidence.version, checks: evidence.checks, evidence: join(EVIDENCE, 'result.json') }));
-  } catch (error) { evidence.status = 'failed'; evidence.error = error.stack; throw error; }
+  } catch (error) {
+    evidence.status = 'failed'; evidence.error = error.stack;
+    const frames = await nativeFrames(protocol);
+    console.error(JSON.stringify({ nativeProgressDebug: {
+      requests: evidence.requests.map(item => ({ number: item.number, inputItems: Array.isArray(item.body?.input) ? item.body.input.length : 0 })),
+      replies: evidence.replies.map(item => item.text),
+      errors,
+      polls: pollBatches.map(batch => batch.texts),
+      nativeMethods: frames.map(item => ({ direction: item.direction, method: item.frame.method, id: item.frame.id })),
+    } }));
+    throw error;
+  }
   finally {
     for (const child of children) stop(child);
     if (gateway) await gateway.done;
