@@ -84,4 +84,16 @@ describe("project session groups", () => {
   it("returns no groups for an empty directory", () => {
     expect(groupSessionProjects([])).toEqual([]);
   });
+
+  it("merges the main checkout with managed worktrees of the same repository", () => {
+    const groups = groupSessionProjects([
+      session("main", { cwd: "/Users/demo/Workspaces/wechat-super-leader-bot" }),
+      session("codex-worktree", { cwd: "/Users/demo/.codex/worktrees/6a1b/wechat-super-leader-bot" }),
+      session("claude-worktree", { cwd: "/Users/demo/Workspaces/wechat-super-leader-bot/.claude/worktrees/review" }),
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].name).toBe("wechat-super-leader-bot");
+    expect(groups[0].sessions.map(item => item.id)).toEqual(["main", "codex-worktree", "claude-worktree"]);
+    expect(groups[0].path).toBe("/Users/demo/Workspaces/wechat-super-leader-bot");
+  });
 });

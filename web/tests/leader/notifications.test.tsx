@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AutomationsSection } from "../../src/features/notifications/AutomationsSection";
 import { DeliveriesSection } from "../../src/features/notifications/DeliveriesSection";
+import { parseAutomationRuns } from "../../src/features/notifications/automation-runs";
 import { parseAutomations, type ConsoleAutomation } from "../../src/features/notifications/automation-contract";
 import { parseDeliveries, type ConsoleDelivery } from "../../src/features/notifications/delivery-contract";
 import { normalizeControlPlaneStatus } from "../../src/api/normalizers";
@@ -107,6 +108,26 @@ describe("task notification console", () => {
     expect(screen.queryByText("暂停或取消只影响后续安排；本轮结果仍会保存。")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "取消任务" }));
     expect(screen.getByText("停止后续安排，并停止后台会话的后续检查与追问？")).toBeInTheDocument();
+  });
+
+  it("opens a schedule detail view and loads execution records there", async () => {
+    const run = { id: "run-1", scheduleId: "schedule-1", scheduledAt: NOW, status: "completed", createdAt: NOW, updatedAt: NOW,
+      commandId: "command-1", result: { text: "本轮执行完成，结果已保存。" } };
+    const fetchMock = vi.fn(async (url: string) => url.includes("/runs")
+      ? new Response(JSON.stringify({ items: [run] })) : new Response("{}", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<AutomationsSection items={[schedule()]} />);
+    fireEvent.click(screen.getByRole("button", { name: "查看执行详情" }));
+    expect(screen.getByRole("heading", { name: "每天研究更新" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "成果交付" })).not.toBeInTheDocument();
+    expect(await screen.findByTestId("automation-run-run-1")).toHaveTextContent("本轮执行完成");
+    expect(fetchMock).toHaveBeenCalledWith("/v1/automations/schedule-1/runs?chatId=chat-1", expect.objectContaining({ method: "GET" }));
+    fireEvent.click(screen.getByRole("button", { name: /返回定时任务/ }));
+    expect(screen.getByRole("button", { name: "查看执行详情" })).toBeVisible();
+  });
+
+  it("rejects run records belonging to another schedule", () => {
+    expect(() => parseAutomationRuns({ items: [{ id: "run", scheduleId: "other", status: "completed", scheduledAt: NOW, createdAt: NOW, updatedAt: NOW }] }, "schedule-1")).toThrow("执行记录格式无效");
   });
 
   it("treats expired notification freshness independently of saved artifact retention", () => {
