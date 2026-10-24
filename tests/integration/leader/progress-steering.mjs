@@ -165,6 +165,10 @@ async function main() {
           return send({ ret: 0, errcode: 0 });
         case '/v1/chats/authorize': assert.deepEqual(body, { chatId: CHAT }); return send({ allowed: true });
         case '/v1/chats/notification-interest': return send({ chatIds: [], interested: [] });
+        case '/v1/deliveries/resume':
+          assert.equal(body.chatId, CHAT);
+          assert.equal(typeof body.generation, 'string');
+          return send({ resumed: 0 });
         case '/v1/tools/list':
           assert.equal(req.method, 'POST');
           assert.deepEqual(Object.keys(body).sort(), ['chatId', 'messageId', 'text']);
