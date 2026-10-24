@@ -1,6 +1,7 @@
 import { Router, type ErrorRequestHandler, type Request, type Response } from "express";
 import { z } from "zod";
 import { CreateScheduleSchema } from "./contracts.js";
+import type { AutomationRun, RunResult } from "./contracts.js";
 import type { AutomationService, CreationAuthority } from "./service.js";
 import { AutomationConflictError, AutomationValidationError } from "./errors.js";
 
@@ -16,6 +17,28 @@ export interface AutomationRouterOptions {
   authority: (req: Request, chatId: string) => Promise<CreationAuthority | null>;
   now?: () => number;
 }
+
+/** Keep worker claims and retention bookkeeping private to the controller. */
+function publicRun(run: AutomationRun): Omit<AutomationRun, "chatId" | "claimOwner" | "claimUntil" | "bodyClearedAt"> {
+  const result: RunResult | undefined = run.result && {
+    text: run.result.text,
+    ...(run.result.meaningful === undefined ? {} : { meaningful: run.result.meaningful }),
+    ...(run.result.fingerprint === undefined ? {} : { fingerprint: run.result.fingerprint }),
+    ...(run.result.error === undefined ? {} : { error: run.result.error }),
+  };
+  return {
+    id: run.id,
+    scheduleId: run.scheduleId,
+    scheduledAt: run.scheduledAt,
+    status: run.status,
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt,
+    ...(run.commandId === undefined ? {} : { commandId: run.commandId }),
+    ...(result === undefined ? {} : { result }),
+    ...(run.error === undefined ? {} : { error: run.error }),
+  };
+}
+
 export function createAutomationRouter(service: AutomationService, options: AutomationRouterOptions): Router {
   const router = Router();
   const allowed = (chatId: string, res: Response): boolean => {
@@ -55,7 +78,7 @@ export function createAutomationRouter(service: AutomationService, options: Auto
     if (!query.success || !id.success) { res.status(400).json({ error: "Invalid schedule query" }); return; }
     if (!allowed(query.data.chatId, res)) return;
     if (!await service.repository.get(id.data, query.data.chatId)) { res.status(404).json({ error: "Schedule not found" }); return; }
-    res.json({ items: await service.repository.listRuns(id.data, query.data.chatId) });
+    res.json({ items: (await service.repository.listRuns(id.data, query.data.chatId)).map(publicRun) });
   });
   router.post("/:id/status", async (req, res) => {
     const body = UpdateSchema.safeParse(req.body), id = IdSchema.safeParse(req.params.id);

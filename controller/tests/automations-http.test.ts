@@ -6,7 +6,7 @@ import { AutomationService, MemoryAutomationRepository, createAutomationRouter }
 const servers: Server[] = [];
 afterEach(async () => { await Promise.all(servers.splice(0).map(server => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())))); });
 async function appFixture() {
-  const now = Date.parse("2026-10-18T00:00:00Z");
+  let now = Date.parse("2026-10-18T00:00:00Z");
   const repository = new MemoryAutomationRepository();
   const service = new AutomationService({ repository, now: () => now, runner: {
     start: async () => ({ status: "unknown", error: "not configured" }), inspect: async () => ({ status: "unknown", error: "not configured" }),
@@ -24,7 +24,7 @@ async function appFixture() {
   const create = (chatId = "allowed", consent = true) => fetch(`${origin}/v1/automations`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": "test-create", ...(consent ? { "x-test-user-action": "current" } : {}) },
     body: JSON.stringify({ chatId, input: { kind: "reminder", title: "test reminder", text: "hello", timing: { type: "at", at: "2026-10-18T01:00:00Z" }, timezone: "Asia/Shanghai" } }),
   });
-  return { origin, create };
+  return { origin, create, advanceTo: (value: number) => { now = value; }, tick: () => service.tick() };
 }
 
 describe("automation HTTP management", () => {
@@ -51,5 +51,24 @@ describe("automation HTTP management", () => {
     const response = await fetch(`${f.origin}/v1/automations?chatId=second-user`);
     expect((await response.json()).items).toEqual([]);
     expect((await fetch(`${f.origin}/v1/automations?chatId=blocked`)).status).toBe(403);
+  });
+
+  it("projects execution records without exposing worker lease metadata", async () => {
+    const f = await appFixture();
+    const created = await f.create();
+    const { schedule } = await created.json();
+    const scheduledAt = Date.parse("2026-10-18T01:00:00Z");
+    f.advanceTo(scheduledAt + 1);
+    await f.tick();
+
+    const response = await fetch(`${f.origin}/v1/automations/${schedule.id}/runs?chatId=allowed`);
+    expect(response.status).toBe(200);
+    const { items } = await response.json();
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ id: expect.any(String), scheduleId: schedule.id, status: "completed", result: { text: "hello" } });
+    expect(items[0]).not.toHaveProperty("chatId");
+    expect(items[0]).not.toHaveProperty("claimOwner");
+    expect(items[0]).not.toHaveProperty("claimUntil");
+    expect(items[0]).not.toHaveProperty("bodyClearedAt");
   });
 });
