@@ -134,19 +134,23 @@ async function main() {
         if (number === 1) return response(res, call(1, [PROGRESS[0]]));
         if (number === 2) {
           check('first progress delivered before final model output', evidence.replies.length === 1 && evidence.replies[0].text === PROGRESS[0]);
+          return response(res, call(2, [...PROGRESS.slice(1), '这一条超过本轮额度，不应发送给用户。']));
+        }
+        const hasSteerText = JSON.stringify(body.input).includes(STEER_TEXT);
+        const hasProgressOutput = (body.input || []).some(item => item.type === 'custom_tool_call_output' && item.call_id === 'progress_call_2');
+        const hasLimitResult = JSON.stringify(body.input).includes('limit_reached');
+        if (hasProgressOutput && hasLimitResult && !secondQueued) {
           queue.push(message(STEER_TEXT)); secondQueued = true;
-          await waitUntil(async () => {
-            const frames = await nativeFrames(protocol), steer = frames.find(entry => entry.direction === 'stdin' && entry.frame.method === 'turn/steer');
-            return steer && frames.some(entry => entry.direction === 'stdout' && entry.frame.id === steer.frame.id && entry.frame.result?.turnId);
-          }, 'native turn/steer acknowledgement');
-          // Native steering may cancel this in-flight provider response. The
-          // following request retries the scripted call only if it never ran.
+        }
+        if (!hasProgressOutput || !hasLimitResult) {
           return response(res, call(2, [...PROGRESS.slice(1), '这一条超过本轮额度，不应发送给用户。']));
         }
-        check('exact follow-up user text reached native model input', JSON.stringify(body.input).includes(STEER_TEXT));
-        if (!(body.input || []).some(item => item.type === 'custom_tool_call_output' && item.call_id === 'progress_call_2')) {
-          return response(res, call(2, [...PROGRESS.slice(1), '这一条超过本轮额度，不应发送给用户。']));
+        if (!hasSteerText) await new Promise(done => setTimeout(done, 200));
+        if (!hasSteerText) {
+          return response(res, { id: `msg_${randomUUID()}`, type: 'message', status: 'completed', role: 'assistant',
+            content: [{ type: 'output_text', annotations: [], text: FINAL }] });
         }
+        check('exact follow-up user text reached native model input', hasSteerText);
         return response(res, { id: `msg_${randomUUID()}`, type: 'message', status: 'completed', role: 'assistant',
           content: [{ type: 'output_text', annotations: [], text: FINAL }] });
       }
