@@ -8,6 +8,13 @@ import { fallbackSummary, observationInput, observeSources } from "./observation
 
 const terminal = (receipt: WorkerReceipt) => !["running", "queued", "unknown"].includes(receipt.status);
 const running = (): RunnerOutcome => ({ status: "running" });
+function settledBeforeExpiry(worker: BackgroundWorker, now: number): boolean {
+  if (worker.expiresAt <= now || !["completed", "failed"].includes(worker.phase) || !worker.initialOutcome ||
+    (!worker.initialAcceptedAt && !worker.initialDiscardedAt) || worker.activeInvocationId) return false;
+  if (worker.prompts.some(prompt => !prompt.deliveredAt && !prompt.cancelledAt)) return false;
+  return !worker.invocations.some(invocation => ["prepared", "running"].includes(invocation.status) ||
+    (invocation.result && !invocation.acceptedAt && !invocation.discardedAt));
+}
 export class BackgroundService {
   readonly repository;
   private readonly now: () => number;
@@ -40,7 +47,7 @@ export class BackgroundService {
     // Claim recovery may happen before start created a worker: no submission has taken place.
     if (!worker) return spec ? this.start(run, spec) : { status: "unknown", error: "Background worker binding is unavailable; automatic redispatch is disabled" };
     if (worker.chatId !== run.chatId || worker.scheduleId !== run.scheduleId || worker.scheduledAt !== run.scheduledAt) throw new Error("Background run identity mismatch");
-    return this.advance(worker.id);
+    return this.advance(worker.id, worker);
   }
   async list(chatId: string, limit = 100): Promise<BackgroundWorker[]> { return this.repository.list(chatId, limit); }
   async get(workerId: string, chatId: string): Promise<BackgroundWorker | null> {
@@ -98,7 +105,7 @@ export class BackgroundService {
   }
   async maintenance(limit = 100): Promise<void> {
     const workers = await this.repository.listLive(limit);
-    const results = await Promise.allSettled(workers.map(worker => this.advance(worker.id)));
+    const results = await Promise.allSettled(workers.map(worker => this.advance(worker.id, worker)));
     const failures = results.flatMap((result, index) => {
       if (result.status === "fulfilled") return [];
       this.options.onError?.(result.reason, `background maintenance ${workers[index].id}`);
@@ -112,11 +119,14 @@ export class BackgroundService {
     if (worker.chatId !== chatId) throw new Error("Background worker does not belong to this chat");
     if (!this.allowed(chatId)) throw new Error("Background authorization has been revoked");
   }
-  private async advance(workerId: string): Promise<RunnerOutcome> {
+  private async advance(workerId: string, knownWorker?: BackgroundWorker): Promise<RunnerOutcome> {
     const owner = randomUUID();
     const now = this.now();
+    const existing = knownWorker ?? await this.repository.get(workerId);
+    if (existing && settledBeforeExpiry(existing, now)) return existing.initialOutcome ?? running();
     let acquired = false;
     let worker = await this.repository.update(workerId, current => {
+      if (settledBeforeExpiry(current, now)) return;
       if (current.leaseUntil > now || current.phase === "cleaned") return;
       current.leaseOwner = owner; current.leaseUntil = now + BACKGROUND_LEASE_MS; current.updatedAt = now; acquired = true;
     });

@@ -120,6 +120,15 @@ describe("24-hour isolated background workers", () => {
     expect(f.runtime.cleanup).toHaveBeenCalledTimes(1);
     expect((await f.worker())!.phase).toBe("cleaned");
   });
+  it("does not renew a settled worker before its retention deadline", async () => {
+    const f = setup();
+    f.runtime.start.mockResolvedValue({ status: "completed", summary: "result" });
+    await f.service.start(f.run, f.spec);
+    await f.service.acceptResult(f.run.id);
+    const before = await f.worker();
+    await f.service.maintenance();
+    expect(await f.worker()).toEqual(before);
+  });
   it("serializes queued followups, reuses worker and only delivers results through the outbox callback", async () => {
     const f = setup();
     f.runtime.start.mockResolvedValueOnce({ status: "completed", summary: "initial" }).mockResolvedValue({ status: "running" });
