@@ -46,7 +46,7 @@ export class TaskNotifications {
     model: LeaderModel | undefined, private readonly now: () => number, private readonly changed: () => void) {
     this.pool = config.persistenceMode === "postgres" ? new pg.Pool({ connectionString: config.databaseUrl, max: 3 }) : undefined;
     const schedules = this.pool ? new PostgresAutomationRepository(this.pool) : new MemoryAutomationRepository();
-    const deliveries = this.pool ? new PostgresDeliveryRepository(this.pool) : new MemoryDeliveryRepository();
+    const deliveries = this.pool ? new PostgresDeliveryRepository(this.pool) : new MemoryDeliveryRepository(now);
     this.fallbackRepository = this.pool ? new PostgresFallbackRepository(this.pool) : new MemoryFallbackRepository();
     const backgroundProvider = config.background;
     this.results = new ResultDeliveryService(deliveries, {

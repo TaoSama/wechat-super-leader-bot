@@ -115,6 +115,52 @@ it("dispatches queued commands in session FIFO order and waits for each accepted
   expect(f.hub.sendCommand.mock.calls.map(([command]) => command.commandId)).toEqual(records.map(record => record.commandId));
 });
 
+it("paginates queued work by durable queue order instead of random command IDs", async () => {
+  const store = new MemoryStore();
+  const createdAt = new Date(START_TIME).toISOString();
+  for (let index = 0; index < 65; index++) {
+    await store.createCommandIfAbsent({
+      commandId: `cmd-${String(64 - index).padStart(3, "0")}`,
+      requestId: `queue-page-${index}`,
+      nodeId: `page-node-${index}`,
+      sessionId: `page-session-${index}`,
+      action: "send",
+      prompt: `page ${index}`,
+      sendRoute: "control-socket",
+      deliveryMode: "next-turn",
+      authority: { type: "admin" },
+      status: "queued",
+      createdAt,
+      updatedAt: createdAt,
+      expiresAt: new Date(START_TIME + TTL_SECONDS * 1000).toISOString(),
+    });
+  }
+  const first = await store.listQueuedCommands(64, 0);
+  const second = await store.listQueuedCommands(64, first.at(-1)!.queueOrder);
+  expect(first).toHaveLength(64);
+  expect(second).toHaveLength(1);
+  expect(new Set([...first, ...second].map(command => command.commandId)).size).toBe(65);
+  expect(second[0].queueOrder).toBeGreaterThan(first.at(-1)!.queueOrder!);
+});
+
+it("rescans blocked queue entries after a later eligible entry was dispatched", async () => {
+  const f = await setup({ busy: true });
+  const blocked = await f.commands.submit(input, 0);
+  const otherSession = { ...f.session, id: "other-session", status: "idle" as const };
+  f.hub.getNodeSession.mockImplementation((nodeId, sessionId) =>
+    nodeId === "other-node" && sessionId === "other-session" ? otherSession : f.session);
+  const later = await f.commands.submit({ ...nextRequest(1), nodeId: "other-node", sessionId: "other-session" }, 0);
+
+  await f.commands.dispatchQueued();
+  expect(await f.store.getCommand(blocked.commandId)).toMatchObject({ status: "queued" });
+  expect(await f.store.getCommand(later.commandId)).toMatchObject({ status: "accepted" });
+
+  f.session.status = "idle";
+  await f.commands.dispatchQueued();
+  expect(await f.store.getCommand(blocked.commandId)).toMatchObject({ status: "accepted" });
+  expect(f.hub.sendCommand.mock.calls.map(([command]) => command.commandId)).toEqual([later.commandId, blocked.commandId]);
+});
+
 it.each(["pending", "accepted", "uncertain"] as const)("never skips a %s command for the same target", async status => {
   const f = await setup({ busy: true });
   const first = await f.commands.submit(input, 0);

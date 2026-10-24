@@ -4,12 +4,12 @@ import { inspectionLimit } from "./command-state.js";
 import { sameAuthority } from "../commands/queue.js";
 
 type Mapper = (row: any) => CommandRecord;
-export async function pgListQueuedCommands(pool: pg.Pool, map: Mapper, limit = 64, after = ""): Promise<CommandRecord[]> {
-  const result = await pool.query(`SELECT c.* FROM commands c WHERE c.status='queued' AND c.command_id>$1
+export async function pgListQueuedCommands(pool: pg.Pool, map: Mapper, limit = 64, afterQueueOrder = 0): Promise<CommandRecord[]> {
+  const result = await pool.query(`SELECT c.* FROM commands c WHERE c.status='queued' AND COALESCE(c.queue_order,0)>$1
     AND (c.delivery_mode='steer' OR NOT EXISTS (SELECT 1 FROM commands earlier WHERE earlier.node_id=c.node_id AND earlier.session_id=c.session_id
       AND earlier.action='send' AND (earlier.status IN ('pending','accepted','uncertain') OR
         earlier.status IN ('admitting','queued') AND earlier.queue_order<c.queue_order)))
-    ORDER BY c.command_id LIMIT $2`, [after, inspectionLimit(limit)]);
+    ORDER BY COALESCE(c.queue_order,0), c.command_id LIMIT $2`, [afterQueueOrder, inspectionLimit(limit)]);
   return result.rows.map(map);
 }
 
@@ -34,6 +34,11 @@ export async function pgClaimQueuedCommand(pool: pg.Pool, map: Mapper, id: strin
 /** Atomic row update retains FIFO order and cannot revive expired, accepted, or uncertain work. */
 export function pgAdmitCommand(pool: pg.Pool, map: Mapper, id: string): Promise<CommandRecord | null> {
   return pgQueueUnsentCommand(pool,map,id,"admitting");
+}
+export async function pgFailAdmittingCommand(pool: pg.Pool, map: Mapper, id: string, error: string): Promise<CommandRecord | null> {
+  const result = await pool.query(`UPDATE commands SET status='failed',error=$2,updated_at=NOW()
+    WHERE command_id=$1 AND status='admitting' RETURNING *`, [id, error]);
+  return result.rows[0] ? map(result.rows[0]) : null;
 }
 export function pgRequeueClaimedCommand(pool: pg.Pool, map: Mapper, id: string): Promise<CommandRecord | null> {
   return pgQueueUnsentCommand(pool,map,id,"pending");

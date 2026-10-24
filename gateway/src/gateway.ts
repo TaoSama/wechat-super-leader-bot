@@ -440,19 +440,25 @@ export class WeChatGateway {
       this.stateManager.recordProcessedMessageKey(msg.deliveryKey);
       return "skipped";
     }
+    const retryingAdmission = this.stateManager.contextBudgets[msg.chatId]?.lastInboundKey === msg.deliveryKey &&
+      !this.stateManager.isMessageProcessed(msg.deliveryKey);
     if (this.inbox.has(msg.deliveryKey)) {
       try { this.inbox.put(msg); }
       catch (error) {
         if (!(error instanceof InboxConflictError)) throw error;
         traceEvent("message.inbox.conflict");
       }
+      if (retryingAdmission && msg.contextToken?.trim()) this.resultDispatcher?.noteInbound(msg.chatId, msg.deliveryKey);
       return "skipped";
     }
     const fresh = this.stateManager.recordInboundContext(msg.deliveryKey, msg.chatId, msg.createdAtMs,
       Boolean(msg.contextToken?.trim()), msg.contextToken);
-    if (fresh && msg.contextToken?.trim()) this.resultDispatcher?.noteInbound(msg.chatId, msg.deliveryKey);
     const { createdAtMs, ...message } = msg;
     this.inbox.put({ ...message, ...(Number.isSafeInteger(createdAtMs) && createdAtMs! >= 0 ? { createdAtMs } : {}) });
+    // Persist the inbound message before creating a result resume intent. If the
+    // inbox checkpoint fails, retrying the poll must not release deferred results
+    // for a message that was never durably admitted.
+    if ((fresh || retryingAdmission) && msg.contextToken?.trim()) this.resultDispatcher?.noteInbound(msg.chatId, msg.deliveryKey);
     this.inboundRunner.schedule();
     return "processed";
   }

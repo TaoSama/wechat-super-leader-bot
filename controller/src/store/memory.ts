@@ -162,14 +162,15 @@ export class MemoryStore implements IStore {
     }
   }
 
-  async listQueuedCommands(limit = 64, afterCommandId = ""): Promise<CommandRecord[]> {
+  async listQueuedCommands(limit = 64, afterQueueOrder = 0): Promise<CommandRecord[]> {
     inspectionLimit(limit);
     const all = [...this.commands.values()];
-    return structuredClone(all.filter(cmd => cmd.status === "queued" && cmd.commandId > afterCommandId &&
+    return structuredClone(all.filter(cmd => cmd.status === "queued" &&
+      (cmd.queueOrder !== undefined ? cmd.queueOrder > afterQueueOrder : afterQueueOrder === 0) &&
       (cmd.deliveryMode === "steer" || !all.some(other => other.commandId !== cmd.commandId && other.action === "send" && other.nodeId === cmd.nodeId && other.sessionId === cmd.sessionId &&
         (ACTIVE_COMMAND_STATUSES.includes(other.status) || ["admitting", "queued"].includes(other.status) && beforeInQueue(other, cmd))))
       )
-      .sort((a,b) => a.commandId.localeCompare(b.commandId)).slice(0,limit));
+      .sort((a,b) => (a.queueOrder ?? 0) - (b.queueOrder ?? 0) || a.commandId.localeCompare(b.commandId)).slice(0,limit));
   }
   async claimQueuedCommand(commandId: string, route: SendRoute): Promise<CommandRecord | null> {
     const cmd = this.commands.get(commandId);
@@ -181,6 +182,13 @@ export class MemoryStore implements IStore {
     this.commands.set(commandId,next); return structuredClone(next);
   }
   async admitCommand(commandId: string): Promise<CommandRecord | null> { return this.queueUnsentCommand(commandId,"admitting"); }
+  async failAdmittingCommand(commandId: string, error: string): Promise<CommandRecord | null> {
+    const command = this.commands.get(commandId);
+    if (!command || command.status !== "admitting") return null;
+    const next = nextCommandState(command, "failed", undefined, error);
+    this.commands.set(commandId, next);
+    return structuredClone(next);
+  }
   async requeueClaimedCommand(commandId: string): Promise<CommandRecord | null> { return this.queueUnsentCommand(commandId,"pending"); }
   private queueUnsentCommand(commandId: string, status: "admitting" | "pending"): CommandRecord | null {
     const cmd = this.commands.get(commandId);
