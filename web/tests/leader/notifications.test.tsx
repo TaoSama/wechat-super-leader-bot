@@ -120,6 +120,7 @@ describe("task notification console", () => {
     fireEvent.click(screen.getByRole("button", { name: "查看执行详情" }));
     expect(screen.getByRole("heading", { name: "每天研究更新" })).toBeVisible();
     expect(screen.queryByRole("heading", { name: "成果交付" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/成果交付/)).not.toBeInTheDocument();
     expect(await screen.findByTestId("automation-run-run-1")).toHaveTextContent("本轮执行完成");
     expect(fetchMock).toHaveBeenCalledWith("/v1/automations/schedule-1/runs?chatId=chat-1", expect.objectContaining({ method: "GET" }));
     fireEvent.click(screen.getByRole("button", { name: /返回定时任务/ }));

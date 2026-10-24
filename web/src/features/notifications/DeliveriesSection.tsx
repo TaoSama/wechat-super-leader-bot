@@ -52,7 +52,7 @@ function DeliveryCard({ item }: { item: ConsoleDelivery }) {
 export function DeliveriesSection({ items }: { items: ConsoleDelivery[] }) {
   return <section className="execution-section" aria-labelledby="deliveries-heading">
     <div className="section-heading"><div><h2 id="deliveries-heading">成果交付 <span>{items.length}</span></h2></div><FileCheck2 size={22} aria-hidden="true" /></div>
-    <p className="section-description">执行完成后先保存成果，再安排通知。微信投递等待或状态未确认时，也可在此读取完整内容。</p>
+    <p className="section-description">这里仅保存可交付成果和通知状态；定时任务的派发与执行回执请从定时任务详情查看。</p>
     {!items.length ? <p className="empty-panel">暂无已保存成果</p> : <div className="execution-list">{items.map(item => <DeliveryCard key={item.id} item={item} />)}</div>}
   </section>;
 }
