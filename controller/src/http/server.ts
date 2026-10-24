@@ -18,7 +18,6 @@ import { renderSessionDirectory } from "../leader/queries/session-directory.js";
 import { selectExecutionObservation, selectModelObservation } from "../sessions/observation.js";
 import { CommandService, CommandError } from "../commands/service.js";
 import { publicCommand } from "../commands/public.js";
-import { HttpLeaderModel } from "../leader/model/client.js";
 import { LeaderModel } from "../leader/model/contracts.js";
 import { LeaderOrchestrator } from "../leader/orchestrator.js";
 import { ExecutionScheduler } from "../leader/plans/scheduler.js";
@@ -43,6 +42,9 @@ import { TaskNotifications } from "../runtime/task-notifications.js";
 import { createAutomationRouter } from "../automations/routes.js";
 import { createResultArtifactRouter, createResultDeliveryRouter } from "../deliveries/routes.js";
 import { createBackgroundRouter, createSourceAutomationRouter } from "../background/routes.js";
+import { LocalSettingsService } from "../settings/local-service.js";
+import { GatewaySettingsClient } from "../settings/gateway-client.js";
+import { createSettingsRouter } from "../settings/routes.js";
 
 function makeMessageRequestId(chatId: string, messageId: string): string {
   // Use sha256 of JSON tuple to guarantee zero collision even if chatId or messageId contains delimiter characters
@@ -69,6 +71,7 @@ export class ControllerServer {
   private taskNotifications: TaskNotifications;
   private progress?: ModelProgressRunner;
   private stopping = false;
+  private settings: LocalSettingsService;
 
   // Chat context cache: chatId -> { nodeId, sessionId }
   private chatContexts = new Map<string, { nodeId: string; sessionId: string }>();
@@ -82,8 +85,10 @@ export class ControllerServer {
       (authority, command) => this.taskNotifications.authorizeCommand(authority, command));
     this.consoleAuth = new ConsoleAuthService(store, config.consolePublicUrl, config.controllerToken, now,
       token => this.statusEvents?.revoke(token));
-    const leaderModel = model ?? (config.leader ? new HttpLeaderModel(config.leader) : undefined);
-    this.taskNotifications = new TaskNotifications(config, store, this.hub, this.commands, leaderModel, now, () => this.statusEvents?.changed());
+    this.settings = new LocalSettingsService({ root: config.settingsRoot, leader: config.leader, background: config.background, now });
+    const initialModel = model ?? (config.leader ? this.settings.wrapHttpModel(config.leader) : undefined);
+    const leaderModel = initialModel ? this.settings.wrapModel(initialModel) : undefined;
+    this.taskNotifications = new TaskNotifications(config, store, this.hub, this.commands, leaderModel, now, () => this.statusEvents?.changed(), this.settings);
     if (leaderModel) {
       this.progress = new ModelProgressRunner(store, leaderModel, now, () => this.statusEvents?.changed(), undefined,
         chatId => this.config.allowedChatIds.has(chatId));
@@ -114,7 +119,7 @@ export class ControllerServer {
     this.directLeader = new LeaderOrchestrator(store, this.hub, this.commands, businessModel, now,
       requestId => this.consoleAuth.issueLink(requestId), this.executions, this.goals, this.taskNotifications.automations,
       this.taskNotifications.background, { isAllowed: chatId => this.config.allowedChatIds.has(chatId),
-        goalsAvailable: Boolean(leaderModel) });
+        goalsAvailable: Boolean(leaderModel), settings: this.settings });
     if (leaderModel) this.leader = this.directLeader;
     this.resolver = new NaturalLanguageResolver();
     this.statusEvents = new StatusEvents(() => this.statusSnapshot());
@@ -238,6 +243,14 @@ export class ControllerServer {
     // Authenticated API router for /v1
     const apiRouter = express.Router();
     apiRouter.use(this.authMiddleware.bind(this));
+    apiRouter.use("/settings", createSettingsRouter({ local: this.settings,
+      gateway: new GatewaySettingsClient(this.config.gatewaySettingsUrl, this.config.controllerToken),
+      allowedChats: () => this.config.allowedChatIds,
+      diagnostics: () => {
+        const nodes = new Map(this.hub.getNodeStatusList().map(node => [node.nodeId, node]));
+        return Object.keys(this.config.nodeTokens).map(nodeId => ({ id: `node-${nodeId}`, label: nodeId,
+          value: nodes.get(nodeId)?.connected ? "在线" : "离线", status: nodes.get(nodeId)?.connected ? "ok" as const : "warning" as const }));
+      } }));
     apiRouter.use(createDirectToolsRouter(this.directLeader.direct, chatId => this.config.allowedChatIds.has(chatId)));
     apiRouter.use(createMediaRouter(this.store, () => this.config.allowedChatIds, this.now));
     apiRouter.use(createMessageReplyRouter(this.store, () => this.config.allowedChatIds));

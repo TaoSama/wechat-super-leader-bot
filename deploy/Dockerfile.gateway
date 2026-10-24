@@ -35,7 +35,7 @@ LABEL org.opencontainers.image.revision=$VCS_REF
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 curl python3-bs4 python3-html2text \
     && rm -rf /var/lib/apt/lists/*
-ENV NODE_ENV=production SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV NODE_ENV=production SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt SOURCE_REVISION=$VCS_REF
 WORKDIR /app
 COPY --from=build --chown=node:node /work/gateway/package.json ./package.json
 COPY --from=runtime-dependencies --chown=node:node /work/gateway/node_modules ./node_modules

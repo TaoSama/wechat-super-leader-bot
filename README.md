@@ -114,8 +114,31 @@ Web 提供机器与会话搜索、原来源历史、直接发送、排队取消�
 3. 页面立即清除地址栏 fragment/query，兑换 `HttpOnly` Cookie；登录态固定有效 1 小时。
 
 链接有效 1 小时、仅可兑换一次，持有即可登录，请勿转发。
-浏览器不保存管理 Bearer token；Cookie 仅授予状态/历史查询与准确会话发送权限。
+浏览器不保存管理 Bearer token；Cookie 授予工作台查询、准确会话发送及明确列出的设置操作。
 发送要求同源 Origin、专用 intent header 和有效会话资格，通用管理写接口不接受 Cookie。
+
+## 设置与运行资源
+
+在工作台选项中打开「设置」，日常设置分为三组：
+
+- **模型**：分别管理微信助手、Controller 和后台任务的模型与推理强度。目录从对应执行环境读取，刷新不自动切换模型；保存从下一轮生效，已有桌面会话继续使用自身设置。
+- **记忆与偏好**：选择微信聊天后查看、纠正 Task、Memory 和 Preference。回复长短、通知习惯保存在 Preference，也可直接在微信里用自然语言维护。定时条件仍在具体任务中表达。
+- **外观与诊断**：浅色、深色或跟随系统，外观保存在当前浏览器；查看连接、组件版本、模型目录来源与设置请求耗时。
+
+模型组的「高级资源」可查看和编辑实际运行的提示词、技能 Markdown 及文本子文件、已注册工具的 Schema。资源显示作用对象、来源版本、内容修订和生效方式。保存检查当前修订，其他页面或 Agent 修改过的资源会返回冲突，避免静默覆盖。工具名称、真正的执行能力和程序校验不能通过编辑 Schema 凭空添加。
+
+微信主会话资源由 Gateway 管理，Controller 只代理受认证的资源操作，不复制另一份记忆。Gateway 未连接时显示原因，Controller 本地资源仍可查看。模型目录可能来自上游缓存；显示目录不等于已经验证每个模型可推理，也不会把桌面登录身份的目录当作线上 provider 目录。
+
+| 变量 | 用途 |
+| --- | --- |
+| `SETTINGS_ROOT` | Controller 设置持久化目录；默认当前目录下 `.runtime/controller-settings` |
+| `GATEWAY_SETTINGS_URL` | Controller 使用的固定 Gateway 管理 origin；不接受浏览器传入目标地址 |
+| `GATEWAY_SETTINGS_HOST` / `GATEWAY_SETTINGS_PORT` | 显式启用 Gateway 内网管理监听，使用 Controller Bearer token 认证 |
+| `GATEWAY_SETTINGS_ROOT` | Gateway 设置和技能覆盖存储目录，放在其持久状态卷中 |
+
+生产 Compose 将 Controller 设置挂载到专用卷 `/var/lib/super-leader-settings`；Gateway 管理端口 `8791` 仅在容器网络监听，不映射到宿主机，设置目录位于已有 Gateway 状态卷。更换容器保留这两个存储卷，不能把编辑后的资源只留在镜像层。
+
+接口及生效合同见 [设置契约](docs/settings-contract.md)。
 
 ## 本机开发
 

@@ -4,8 +4,8 @@ import { MediaError, type MediaTarget } from "../../sessions/media-contracts.js"
 import { prepareMessageImages, type MediaHub, type MessageImageStore } from "../../sessions/message-images.js";
 
 const AUTH_TOOL = "classify_image_delivery";
-const ImageAuthorizationSchema = z.object({ sendImages: z.boolean() }).strict();
-const ImageAuthorizationTool: ModelTool = { type: "function", function: {
+export const ImageAuthorizationSchema = z.object({ sendImages: z.boolean() }).strict();
+export const ImageAuthorizationTool: ModelTool = { type: "function", function: {
   name: AUTH_TOOL, description: "判断当前用户是否明确要求向当前微信聊天发送图片，不读取图片、不发送。",
   parameters: z.toJSONSchema(ImageAuthorizationSchema) as Record<string, unknown>,
 } };

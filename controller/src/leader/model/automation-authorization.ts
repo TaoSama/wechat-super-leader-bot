@@ -4,7 +4,7 @@ import type { LeaderModel, ModelTool } from "./contracts.js";
 export const AUTOMATION_AUTHORIZATION_TOOL_NAME = "classify_automation_authorization";
 const MAX_CLASSIFICATION_CHARS = 256;
 const OperationSchema = z.enum(["create", "pause", "resume", "cancel"]);
-const ClassificationSchema = z.object({ operations: z.array(OperationSchema).max(4) }).strict();
+export const ClassificationSchema = z.object({ operations: z.array(OperationSchema).max(4) }).strict();
 export type AutomationOperation = z.infer<typeof OperationSchema>;
 export const AUTOMATION_AUTHORIZATION_RULES = `create：明确要求新建定时提醒、周期任务、定时监控，包括“每天9点提醒我”“明早检查会话”等自然表达。
 pause：明确暂停已有定时任务。resume：明确恢复已有定时任务。cancel：明确取消或删除已有定时任务。
@@ -13,7 +13,7 @@ pause：明确暂停已有定时任务。resume：明确恢复已有定时任务
 export const PROMPT = `仅判断用户当前这条消息明确要求哪些定时任务操作，不创建、更新或执行任何任务。
 必须且只能调用一次 classify_automation_authorization。operations 只列出用户明确要求的操作，不输出正文。
 ${AUTOMATION_AUTHORIZATION_RULES}`;
-const TOOL: ModelTool = { type: "function", function: {
+export const AUTOMATION_AUTHORIZATION_TOOL: ModelTool = { type: "function", function: {
   name: AUTOMATION_AUTHORIZATION_TOOL_NAME,
   description: "只分类当前用户消息明确授权的定时任务操作，不执行任何操作。",
   parameters: z.toJSONSchema(ClassificationSchema) as Record<string, unknown>,
@@ -23,7 +23,7 @@ const TOOL: ModelTool = { type: "function", function: {
 export async function classifyAutomationAuthorization(model: LeaderModel, currentUserMessage: string,
   signal: AbortSignal): Promise<Set<AutomationOperation>> {
   signal.throwIfAborted();
-  const reply = await model.complete([{ role: "system", content: PROMPT }, { role: "user", content: currentUserMessage }], [TOOL], signal);
+  const reply = await model.complete([{ role: "system", content: PROMPT }, { role: "user", content: currentUserMessage }], [AUTOMATION_AUTHORIZATION_TOOL], signal);
   signal.throwIfAborted();
   if (reply.content?.trim() || reply.toolCalls.length !== 1 || reply.toolCalls[0].function.name !== AUTOMATION_AUTHORIZATION_TOOL_NAME) {
     throw new Error("Automation authorization requires exactly one classification");

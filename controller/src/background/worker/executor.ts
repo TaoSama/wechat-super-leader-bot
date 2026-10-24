@@ -72,8 +72,9 @@ export class CodexCliExecutor implements WorkerExecutor {
     ];
     if (this.options.baseUrl) config.push('model_provider="background_api"',
       `model_providers.background_api={name="Background API",base_url=${JSON.stringify(this.options.baseUrl)},env_key="CODEX_API_KEY",wire_api="responses",supports_standalone_web_search=true}`);
+    if (request.reasoningEffort) config.push(`model_reasoning_effort=${JSON.stringify(request.reasoningEffort)}`);
     const args = ["exec", "--json", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",
-      "--model", this.options.model, "--output-schema", request.schemaPath,
+      "--model", request.model ?? this.options.model, "--output-schema", request.schemaPath,
       ...config.flatMap(value => ["--config", value]),
       ...(request.threadId ? ["resume", request.threadId] : []), "-"];
     const env: NodeJS.ProcessEnv = { HOME: request.workspace, CODEX_HOME: request.home };

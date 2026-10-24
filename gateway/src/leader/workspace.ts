@@ -214,7 +214,7 @@ function assertRegularFile(file: string): boolean {
   return true;
 }
 
-function readText(file: string, limit: number): string | undefined {
+function readText(file: string, limit: number, strictUtf8 = false): string | undefined {
   if (!assertRegularFile(file)) return undefined;
   const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
@@ -232,6 +232,10 @@ function readText(file: string, limit: number): string | undefined {
       length += count;
     }
     if (length > limit) throw new WorkspaceValidationError("Workspace file exceeds the size limit");
+    if (strictUtf8) {
+      try { return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer.subarray(0, length)); }
+      catch { throw new WorkspaceValidationError("Editable file must be valid UTF-8 text"); }
+    }
     return buffer.subarray(0, length).toString("utf8");
   } finally {
     fs.closeSync(fd);
@@ -359,6 +363,26 @@ export class LeaderWorkspace {
       this.checkLayout();
       return Object.fromEntries((Object.keys(MEMORY_TEMPLATES) as MemoryFile[])
         .map(name => [name, readMemoryPrefix(path.join(this.workspacePath, name))])) as MemorySnapshot;
+    });
+  }
+
+  public readEditableFile(name: MemoryFile | "AGENTS.md"): { content: string; revision: string } {
+    return storageOperation(() => {
+      if (!["task.md", "memory.md", "preference.md", "AGENTS.md"].includes(name)) throw new WorkspaceValidationError("Invalid editable file");
+      this.checkLayout();
+      const content = readText(path.join(this.workspacePath, name), MAX_MIGRATION_BYTES, true);
+      if (content === undefined) throw new WorkspaceValidationError("Editable file is missing");
+      return { content, revision: digest(content) };
+    });
+  }
+
+  public writeEditableFile(name: MemoryFile | "AGENTS.md", content: string, expectedRevision: string): boolean {
+    return storageOperation(() => {
+      validateText(content, MAX_MIGRATION_BYTES);
+      if (content.includes("\0") || Buffer.from(content, "utf8").toString("utf8") !== content) throw new WorkspaceValidationError("Invalid editable text");
+      if (this.readEditableFile(name).revision !== expectedRevision) return false;
+      atomicWrite(path.join(this.workspacePath, name), content);
+      return true;
     });
   }
 

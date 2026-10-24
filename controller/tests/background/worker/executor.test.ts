@@ -48,6 +48,27 @@ process.stdin.on('end', () => {
 }
 
 describe("Codex CLI process contract", () => {
+  it("consumes each next invocation's frozen model, effort and worker SP in actual CLI arguments and stdin", async () => {
+    const f = fixture("complete", 20_000);
+    let settings = { model: "worker-first", reasoningEffort: "low", systemPrompt: "首轮后台SP" };
+    const runtime = new CodexWorkerRuntime({ ...f.options, runtimeSettings: () => structuredClone(settings) });
+    await runtime.start(f.input);
+    expect((await wait(runtime, f.input)).status).toBe("completed");
+    let observed = JSON.parse(fs.readFileSync(path.join(f.workspace, "observed.json"), "utf8"));
+    expect(observed.args).toContain("worker-first");
+    expect(observed.args).toContain('model_reasoning_effort="low"');
+    expect(observed.input).toContain("首轮后台SP");
+    settings = { model: "worker-second", reasoningEffort: "high", systemPrompt: "新轮后台SP" };
+    const next = { ...f.input, invocationId: randomUUID() };
+    await runtime.start(next);
+    expect((await wait(runtime, next)).status).toBe("completed");
+    observed = JSON.parse(fs.readFileSync(path.join(f.workspace, "observed.json"), "utf8"));
+    expect(observed.args).toContain("worker-second");
+    expect(observed.args).toContain('model_reasoning_effort="high"');
+    expect(observed.input).toContain("新轮后台SP");
+    expect(observed.args).toContain("resume");
+    await runtime.shutdown();
+  });
   it("uses explicit persistent resume IDs, schema, isolated home and permissions with no inherited controller secrets", async () => {
     process.env.WORKER_TEST_SECRET = "must-not-inherit";
     const f = fixture();

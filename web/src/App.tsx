@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useSyncExternalStore } from "react";
-import { CalendarClock, Ellipsis, LockKeyhole, LogOut, RefreshCw, Layers, LayoutDashboard, MessagesSquare, Moon, Sun, X } from "lucide-react";
+import { CalendarClock, Ellipsis, LockKeyhole, LogOut, RefreshCw, Layers, LayoutDashboard, MessagesSquare, Moon, Settings, Sun, X } from "lucide-react";
 import { LeaderOverview } from "./features/leader/components/LeaderOverview";
 import { AutomationsSection } from "./features/notifications/AutomationsSection";
 import { SessionWorkspace } from "./features/sessions/components/SessionWorkspace";
@@ -10,6 +10,8 @@ import { POLL_INTERVAL_MS, ScopedSession } from "./types";
 import { sessionKey } from "./features/sessions/useSessionHistory";
 import { formatTimeShort } from "./format";
 import { useViewportHeight } from "./useViewportHeight";
+import { SettingsWorkspace } from "./features/settings/SettingsWorkspace";
+import { useThemePreference } from "./features/settings/useThemePreference";
 import { SessionDialog } from "./features/sessions/components/SessionDialog";
 
 export interface AppProps { pollIntervalMs?: number }
@@ -18,12 +20,13 @@ export function App({ pollIntervalMs = POLL_INTERVAL_MS }: AppProps) {
   const { state: authState, generation: authGeneration } = useSyncExternalStore(subscribeAuthSession, getAuthSessionSnapshot, getAuthSessionSnapshot);
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
-  const [view, setView] = useState<"sessions" | "leader" | "automations">("sessions");
+  const [view, setView] = useState<"sessions" | "leader" | "automations" | "settings">("sessions");
   const [requestedSessionKey, setRequestedSessionKey] = useState<string | null>(null);
   const [requestedSessionRevision, setRequestedSessionRevision] = useState(0);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [detailVisible, setDetailVisible] = useState(false);
-  const [theme, setTheme] = useState<"light" | "dark">("light");
+  const { theme, preference: themePreference, setPreference: setThemePreference, persistenceError: themeError } = useThemePreference();
+  const [settingsVisited, setSettingsVisited] = useState(false);
   const [utilitiesOpen, setUtilitiesOpen] = useState(false);
   const utilityRef = useRef<HTMLDivElement>(null);
   const viewportHeight = useViewportHeight();
@@ -82,9 +85,11 @@ export function App({ pollIntervalMs = POLL_INTERVAL_MS }: AppProps) {
   const connectionLabels = { connecting: "正在连接", live: "实时连接", reconnecting: "正在重连", polling: "定时更新", offline: "连接中断" };
 
   function toggleTheme() {
-    setTheme((current) => current === "dark" ? "light" : "dark");
+    setThemePreference(theme === "dark" ? "light" : "dark");
   }
+  function openSettings() { setSettingsVisited(true); setView("settings"); }
   const utilityActions = <>
+    {authenticated && <button type="button" aria-label="设置" aria-pressed={view === "settings"} onClick={openSettings}><Settings size={18} aria-hidden="true" /><span>设置</span></button>}
     <button type="button" className="theme-toggle" aria-label="切换明暗外观" aria-pressed={theme === "dark"} title={theme === "light" ? "切换为深色外观" : "切换为浅色外观"} onClick={toggleTheme}><Sun className="theme-sun" size={18} aria-hidden="true" /><Moon className="theme-moon" size={18} aria-hidden="true" /><span className="utility-theme-label">{theme === "light" ? "切换深色外观" : "切换浅色外观"}</span></button>
     {authenticated ? <>
       <span className={`header-connection ${telemetry.error ? "degraded" : ""}`} role="status"><span className="connection-dot" aria-hidden="true" /><span>{telemetry.error ? "状态待恢复" : connectionLabels[telemetry.connectionState]}<small>{telemetry.lastUpdatedAt ? `更新于 ${formatTimeShort(telemetry.lastUpdatedAt)}` : "正在同步状态"}</small></span></span>
@@ -123,6 +128,7 @@ export function App({ pollIntervalMs = POLL_INTERVAL_MS }: AppProps) {
       </section>}
       {authenticated && telemetry.error && <div role="alert" data-testid="telemetry-error-banner" className="notice">连接暂时中断，正在显示上次的内容。<button type="button" onClick={telemetry.manualRefresh}>重新连接</button><details><summary>查看原因</summary>{telemetry.error}</details></div>}
       {authenticated && telemetry.isLoading && !telemetry.data && <div role="status" data-testid="telemetry-loading-state" className="workspace-loading"><span className="sr-only">正在同步机器与会话…</span>{[0, 1, 2, 3].map(row => <div key={row} className="session-skeleton" aria-hidden="true"><i /><i /><i /></div>)}</div>}
+      {authenticated && settingsVisited && <section className="settings-panel" hidden={view !== "settings"} aria-label="设置"><SettingsWorkspace theme={themePreference} onThemeChange={setThemePreference} themeError={themeError} onAuthFailure={handleAuthFailure} onBack={() => setView("sessions")} /></section>}
       {authenticated && telemetry.data && <>
         <div hidden={view !== "sessions"} className="workspace-panel"><SessionWorkspace data={telemetry.data} nodes={telemetry.derivedNodes} active={view === "sessions"} requestedSessionKey={requestedSessionKey} requestedSessionRevision={requestedSessionRevision} stale={!!telemetry.error || telemetry.controllerHealthy === false} onAuthFailure={handleAuthFailure} onDetailVisibilityChange={setDetailVisible} /></div>
         <section className="leader-panel" hidden={view !== "leader"} aria-label="运行状态与发送记录"><LeaderOverview data={telemetry.data} nodes={telemetry.derivedNodes} selectedNodeId={selectedNodeId} onSelectNodeId={setSelectedNodeId} onOpenSession={openSession} onBrowseSessions={() => setView("sessions")} /></section>

@@ -28,6 +28,8 @@ import { DIRECT_TOOL_INSTRUCTIONS, DirectAuthorizationSchema,
   type DirectCall, type DirectRequest, type DirectToolResult } from "./direct-contracts.js";
 import { goalConfirmation } from "./goals/conversation.js";
 import { traceSpan } from "../runtime/telemetry.js";
+import type { LocalSettingsService, LocalRuntimeSettings } from "../settings/local-service.js";
+import { DIRECT_EXTRA_TOOLS } from "../settings/local-registry.js";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const sanitize = (text: string) => text.replace(/#login=[A-Za-z0-9_.~%-]+/g, "#login=[REDACTED]");
@@ -36,16 +38,12 @@ function canonical(value: unknown): unknown {
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, canonical(item)]));
   return value;
 }
-const EMPTY = { type: "object", properties: {}, additionalProperties: false };
 const EXPLICIT_CONFIRM = /^(?:请)?(?:确认|执行|开始|开始执行|确认执行|确认开始|按这个计划执行|就按这个执行|确认这个计划)[。！!]?$/;
 const CONFIRM = /^(?:请)?(?:确认|执行|开始|开始执行|确认执行|确认开始|按这个计划执行|就按这个执行|确认这个计划|是|是的|对|对的|没错|好的|好|可以|就这样|就这个|就是这个|就是它|嗯|嗯嗯)[。！!]?$/;
-const EXTRA_TOOLS = [
-  { name: "confirm_pending", description: "Consume the real current user's confirmation of the uniquely displayed, unexpired plan or goal; never confirms the agent's own preview." },
-  { name: "cancel_plan", description: "Cancel pending or future fixed-plan steps when explicitly requested; does not stop an already running source task." },
-  { name: "cancel_goal", description: "Cancel this chat's pending or active goal when explicitly requested; does not stop source tasks already running." },
-];
+
 interface LinkContext { requestId: string; cachedLinkPromise?: Promise<ConsoleLinkIssued>; issuedLink?: ConsoleLinkIssued }
 interface Options {
+  settings?: LocalSettingsService;
   store: IStore; hub: Hub; now: () => number; isAllowed: (chatId: string) => boolean;
   automations?: AutomationService; background?: BackgroundToolService; goalsAvailable: boolean;
   goals: GoalConversation; executions: ExecutionScheduler;
@@ -68,12 +66,12 @@ export class DirectToolExecutor {
   async list(request: DirectRequest) {
     await this.journal.bind(request);
     const state = await this.context(request);
+    const settings = await this.settingsView(request);
     const tools = [...LEADER_TOOLS.filter(tool => this.options.goalsAvailable || !["execute_goal", "propose_goal"].includes(tool.function.name)), ...(this.options.automations ? AUTOMATION_TOOLS : []),
-      ...(this.options.background ? BACKGROUND_TOOLS : [])].map(tool => ({ name: tool.function.name,
+      ...(this.options.background ? BACKGROUND_TOOLS : []), ...DIRECT_EXTRA_TOOLS].map(base => settings?.tool(base) ?? base).map(tool => ({ name: tool.function.name,
       description: tool.function.description, inputSchema: this.wrapper(tool.function.parameters),
       annotations: { readOnlyHint: this.isReadOnly(tool.function.name) } }));
-    tools.push(...EXTRA_TOOLS.map(tool => ({ ...tool, inputSchema: this.wrapper(EMPTY), annotations: { readOnlyHint: false } })));
-    return { tools, instructions: DIRECT_TOOL_INSTRUCTIONS,
+    return { tools, instructions: settings?.prompt("direct") ?? DIRECT_TOOL_INSTRUCTIONS,
       context: { history: state.history.map(item => ({ ...item, content: sanitize(item.content) })), memories: state.memories,
         pending: state.pending ?? null, pendingGoal: state.pendingGoal ?? null } };
   }
@@ -93,6 +91,12 @@ export class DirectToolExecutor {
     this.validate(request);
     await this.journal.bind(request);
     await this.context(request);
+    const settings = await this.settingsView(request);
+    const base = [...LEADER_TOOLS, ...AUTOMATION_TOOLS, ...BACKGROUND_TOOLS, ...DIRECT_EXTRA_TOOLS].find(tool => tool.function.name === request.name);
+    if (base && settings) {
+      try { settings.assertArguments(base, request.arguments); }
+      catch { throw new DirectToolRejectedError(400, "Business arguments rejected by this turn's configured tool schema"); }
+    }
     if (this.isReadOnly(request.name)) return this.journal.call(request, () => this.read(request));
     const effect = ["execute_plan", "execute_goal", "confirm_pending"].includes(request.name)
       ? "dispatch" : ["propose_plan", "propose_goal"].includes(request.name) ? "preview" : request.name === "send_session_images" ? "images" : `${request.name}:${JSON.stringify(canonical(request.arguments))}`;
@@ -116,6 +120,28 @@ export class DirectToolExecutor {
       throw new DirectToolRejectedError(503, "Business tool unavailable");
     }
     this.checkAuthorization(request);
+  }
+
+  private async settingsView(request: DirectRequest): Promise<LocalRuntimeSettings | undefined> {
+    const settings = this.options.settings;
+    if (!settings) return undefined;
+    // A disjoint journal namespace stores snapshots, never real user text or conversation history.
+    const messageId = `direct_settings_${hash([request.messageId])}`;
+    let frozen = await this.options.store.getMessage(request.chatId, messageId);
+    if (!frozen) {
+      await this.options.store.recordMessage({ chatId: request.chatId, messageId,
+        text: hash(request.text), replyText: JSON.stringify(settings.turnSnapshot()), createdAt: new Date(this.options.now()).toISOString() });
+      frozen = await this.options.store.getMessage(request.chatId, messageId);
+    }
+    if (!frozen || frozen.text !== hash(request.text)) throw new DirectToolRejectedError(409, "Frozen runtime snapshot does not match this user message");
+    let value: unknown;
+    try { value = JSON.parse(frozen.replyText); }
+    catch { throw new DirectToolRejectedError(503, "Frozen runtime snapshot is unreadable"); }
+    try { return settings.restoreTurn(value); }
+    catch (error) {
+      const status = error && typeof error === "object" && "statusCode" in error && typeof error.statusCode === "number" ? error.statusCode : 503;
+      throw new DirectToolRejectedError(status, "Frozen runtime version is incompatible; start a new user message");
+    }
   }
 
   private async context(request: DirectRequest): Promise<LeaderData> {
