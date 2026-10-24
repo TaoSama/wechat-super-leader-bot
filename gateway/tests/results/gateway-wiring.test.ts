@@ -35,12 +35,15 @@ test("an inbox checkpoint failure does not release result resumes before admissi
   const gateway = new WeChatGateway({ stateManager: f.state, ilink: f.ilink, controller: f.controller,
     resultClient: client, resultOutbox: outbox });
   const createdAtMs = Date.now(), deliveryKey = "inbox-admission";
+  const previousBudget = { ...f.state.contextBudgets.chat };
   t.mock.method(f.ilink, "pollBatch", async () => ({ messages: [{ chatId: "chat", deliveryKey,
     messageId: "message", text: "hello", contextToken: "new-context", createdAtMs }],
     rawMessageCount: 1, nextSyncBuf: "next" }));
   const inbox = (gateway as unknown as { inbox: { put: (message: unknown) => void } }).inbox;
   const checkpoint = t.mock.method(inbox, "put", () => { throw new Error("injected inbox disk failure"); });
   await assert.rejects(gateway.pollOnce(false), /injected inbox disk failure/);
+  assert.deepEqual(f.state.contextBudgets.chat, previousBudget, "failed inbox admission must not refresh the context budget");
+  assert.equal(f.state.contextTokens.chat, "synthetic-context", "failed inbox admission must not replace the context token");
   assert.deepEqual(outbox.pendingResumes(), []);
   checkpoint.mock.restore();
   await gateway.pollOnce(false);
