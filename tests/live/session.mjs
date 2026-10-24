@@ -13,7 +13,7 @@ const { values } = parseArgs({
     help: { type: 'boolean', short: 'h' },
     controller: { type: 'string', default: 'http://127.0.0.1:8790' },
     session: { type: 'string' },
-    node: { type: 'string', default: 'macair' },
+    node: { type: 'string', default: 'demoair' },
     timeout: { type: 'string', default: '60000' },
     pollInterval: { type: 'string', default: '500' },
   },
@@ -25,7 +25,7 @@ if (values.help) {
 Options:
   --session <id>        Required. Target with fresh send eligibility and completed-turn receipts.
                        terminal-pane input-written receipts require separate acceptance.
-  --node <id>           Target node ID (default: "macair").
+  --node <id>           Target node ID (default: "demoair").
   --controller <url>    Controller base URL (default: "http://127.0.0.1:8790").
   --timeout <ms>        Max timeout in milliseconds for command completion (default: 60000).
   --pollInterval <ms>   Interval between polling checks in milliseconds (default: 500).

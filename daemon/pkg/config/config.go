@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	DefaultNodeID           = "macair"
+	DefaultNodeID           = "demoair"
 	DefaultControllerURL    = "ws://127.0.0.1:8790/v1/daemon"
 	DefaultTokenEnv         = "NODE_TOKEN"
 	DefaultHeartbeatSeconds = 15
@@ -68,7 +68,7 @@ func ParseFlags(args []string) (*Config, error) {
 
 	defaultSock := strings.TrimSpace(os.Getenv("CODEX_APP_SERVER_SOCKET"))
 
-	nodeID := fs.String("node-id", defaultNodeID, "Node identifier (e.g. macair)")
+	nodeID := fs.String("node-id", defaultNodeID, "Node identifier (e.g. demoair)")
 	controllerURL := fs.String("controller-url", defaultControllerURL, "Controller WebSocket URL (e.g. ws://127.0.0.1:8790/v1/daemon)")
 	tokenEnv := fs.String("token-env", DefaultTokenEnv, "Environment variable name containing node token")
 	tokenFile := fs.String("token-file", "", "Path to file containing node token (overrides token-env)")

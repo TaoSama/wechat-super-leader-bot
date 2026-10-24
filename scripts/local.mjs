@@ -104,7 +104,7 @@ async function main(values) {
   if (mode === 'init') {
     await mkdir(runtime, { recursive: true, mode: 0o700 });
     const secret = () => randomBytes(32).toString('hex');
-    const config = { nodeId: 'macair', postgresPassword: secret(), controllerToken: secret(), nodeToken: secret(), allowedChatIds: [] };
+    const config = { nodeId: 'demoair', postgresPassword: secret(), controllerToken: secret(), nodeToken: secret(), allowedChatIds: [] };
     try { await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, { flag: 'wx', mode: 0o600 }); }
     catch (error) {
       if (error.code !== 'EEXIST') throw error;

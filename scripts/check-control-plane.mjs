@@ -6,12 +6,12 @@ import { setTimeout as delay } from 'node:timers/promises';
 const { values } = parseArgs({ options: {
   help: { type: 'boolean', short: 'h' },
   url: { type: 'string', default: 'http://127.0.0.1:8790' },
-  node: { type: 'string', default: 'macair' },
+  node: { type: 'string', default: 'demoair' },
   session: { type: 'string' },
 } });
 
 if (values.help) {
-  console.log('Usage: node scripts/check-control-plane.mjs [--url URL] [--node macair] [--session ID]\nRequires CONTROLLER_TOKEN. Checks auth and discovery; optionally reads one session. Never sends a prompt.');
+  console.log('Usage: node scripts/check-control-plane.mjs [--url URL] [--node demoair] [--session ID]\nRequires CONTROLLER_TOKEN. Checks auth and discovery; optionally reads one session. Never sends a prompt.');
 } else {
   try { await check(); }
   catch (error) { console.error(error.message); process.exitCode = 1; }
