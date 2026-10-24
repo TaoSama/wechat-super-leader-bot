@@ -31,6 +31,8 @@ export interface AppServerTurn {
   close(): Promise<void>;
 }
 
+export type ThreadStartedHandler = (threadId: string) => void | Promise<void>;
+
 function toml(value: unknown): string {
   if (typeof value === "string") return JSON.stringify(value);
   if (typeof value === "number" && Number.isFinite(value) || typeof value === "boolean") return String(value);
@@ -253,7 +255,8 @@ class Connection {
 
 /** One isolated native process owns one query, including all its steered input. */
 export async function startAppServerTurn(options: CodexOptions, threadOptions: ThreadOptions,
-  threadId: string | undefined, input: string, signal: AbortSignal): Promise<AppServerTurn> {
+  threadId: string | undefined, input: string, signal: AbortSignal,
+  onThreadStarted?: ThreadStartedHandler): Promise<AppServerTurn> {
   if (signal.aborted) throw new Error("Codex app-server turn aborted");
   const native = binary(options);
   const config = { ...options.config,
@@ -283,6 +286,7 @@ export async function startAppServerTurn(options: CodexOptions, threadOptions: T
       { ...threadParams, ...(threadId ? { threadId, excludeTurns: true } : {}) }));
     connection.threadId = string(object(response.thread).id);
     if (!connection.threadId) throw new Error("Codex app-server returned no thread ID");
+    await onThreadStarted?.(connection.threadId);
     connection.queue.push({ type: "thread.started", thread_id: connection.threadId });
     connection.queue.push({ type: "turn.started" });
     const started = object(await connection.rpc("turn/start", { threadId: connection.threadId,

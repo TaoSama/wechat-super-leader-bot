@@ -554,7 +554,8 @@ export class CodexReplyEngine implements GatewayReplyEngine {
         query.resolveReady(false);
       } else {
         native = await traceSpan("codex.run_streamed", () => (this.options.appServerFactory ?? startAppServerTurn)(
-          settings, threadOptions, threadId, prompt(memory, request, control.instructions), abort.signal));
+          settings, threadOptions, threadId, prompt(memory, request, control.instructions), abort.signal,
+          startedThreadId => traceSpan("codex.thread.save", async () => { workspace.setThreadId(startedThreadId); })));
         await traceSpan("codex.thread.save", async () => workspace.setThreadId(native!.threadId));
         query.workspace = workspace;
         query.native = native;

@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { test, type TestContext } from "node:test";
 import { AppServerRejectedError, startAppServerTurn } from "../../src/leader/app-server.js";
 
-type FixtureMode = "normal" | "reject" | "lost" | "lateAck" | "failed" | "interrupted" | "invalid" | "oversized" | "timeout" | "crash";
+type FixtureMode = "normal" | "reject" | "lost" | "lateAck" | "failed" | "interrupted" | "turn-fail" | "invalid" | "oversized" | "timeout" | "crash";
 async function fixture(context: TestContext, mode: FixtureMode = "normal") {
   const root = await mkdtemp(path.join(os.tmpdir(), "wechat-app-server-"));
   const executable = path.join(root, "codex");
@@ -40,6 +40,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   }
   if (message.method === 'thread/start' || message.method === 'thread/resume') send({ id: message.id, result: { thread: { id: 'thread-1' } } });
   if (message.method === 'turn/start') {
+    if (mode === 'turn-fail') return send({ id: message.id, error: { code: -32000, message: 'synthetic turn failure' } });
     send({ id: message.id, result: { turn: { id: 'turn-1' } } });
     if (mode === 'failed' || mode === 'interrupted') complete(mode);
     if (mode === 'invalid') process.stdout.write('not json\\n');
@@ -129,6 +130,18 @@ test("resume and protocol steer refusals stay distinct from uncertain transport 
     assert.equal(records[3].params.threadId, "saved-thread");
     assertExited(records[0].pid);
   }
+});
+
+test("persists the thread identity before a failed turn/start response", async context => {
+  const fake = await fixture(context, "turn-fail");
+  let saved: string | undefined;
+  await assert.rejects(
+    startAppServerTurn({ codexPathOverride: fake.executable }, {}, undefined, "first", new AbortController().signal,
+      threadId => { saved = threadId; }),
+    error => !String(error).includes("synthetic turn failure"),
+  );
+  assert.equal(saved, "thread-1");
+  assertExited((await fake.records())[0].pid);
 });
 
 test("natural event drain keeps a pending accepted steer alive until its late receipt arrives", async context => {
