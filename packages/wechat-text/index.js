@@ -74,17 +74,15 @@ function stripEmphasis(text, marker, boundary, strong = false) {
   parts.push(text.slice(previous));
   return parts.join("");
 }
-function prose(value, layout) {
-  if (layout) {
-    value = value.replace(
-      /(?:\*\*|__)([^\n*]{1,80}[:：])[ \t]*(?:(?:\r?\n[ \t]*)*(?:\*\*|__)|(?=\n|[①-⑳]|$))/g,
-      (whole, heading, offset) => {
-        const before = value.slice(0, offset);
-        const after = value.slice(offset + whole.length);
-        return (before && !before.endsWith("\n") ? "\n\n" : "") + heading + (after.startsWith("\n") ? "" : "\n");
-      }
-    );
-  }
+function prose(value) {
+  value = value.replace(
+    /(?:\*\*|__)([^\n*]{1,80}[:：])[ \t]*(?:(?:\r?\n[ \t]*)*(?:\*\*|__)|(?=\n|[①-⑳]|$))/g,
+    (whole, heading, offset) => {
+      const before = value.slice(0, offset);
+      const after = value.slice(offset + whole.length);
+      return (before && !before.endsWith("\n") ? "\n\n" : "") + heading + (after.startsWith("\n") ? "" : "\n");
+    }
+  );
   const markers = [
     { marker: "**", boundary: /[*/\\]/u, strong: true },
     { marker: "__", boundary: /[\p{L}\p{N}_/\\]/u, strong: true },
@@ -96,17 +94,15 @@ function prose(value, layout) {
     value = stripEmphasis(value, marker, boundary, strong);
   }
   value = value.replace(/^[ \t]*(?:\*\*|__)[ \t]*(?:\r?\n|$)/gm, "");
-  if (layout) {
-    value = value.replace(/^#{1,6}[ \t]+(.+)$/gm, "$1");
-    value = value.replace(/^[ \t]*[-+*][ \t]+/gm, "\u2022 ");
-    value = value.replace(/^•[ \t]+(?=[①-⑳])/gm, "");
-    value = value.split(/(\n[ \t]*\n)/).map((paragraph) => {
-      const count = paragraph.match(/[①-⑳]/g)?.length ?? 0;
-      const pattern = count > 1 ? /[ \t]*([①-⑳])[ \t]*/g : /(?<=^|[:：])[ \t]*([①-⑳])[ \t]*/g;
-      return paragraph.replace(pattern, (_whole, marker, offset) => (offset === 0 || paragraph[offset - 1] === "\n" ? "" : "\n") + marker + " ");
-    }).join("");
-    value = value.replace(/\n{3,}/g, "\n\n");
-  }
+  value = value.replace(/^#{1,6}[ \t]+(.+)$/gm, "$1");
+  value = value.replace(/^[ \t]*[-+*][ \t]+/gm, "\u2022 ");
+  value = value.replace(/^•[ \t]+(?=[①-⑳])/gm, "");
+  value = value.split(/(\n[ \t]*\n)/).map((paragraph) => {
+    const count = paragraph.match(/[①-⑳]/g)?.length ?? 0;
+    const pattern = count > 1 ? /[ \t]*([①-⑳])[ \t]*/g : /(?<=^|[:：])[ \t]*([①-⑳])[ \t]*/g;
+    return paragraph.replace(pattern, (_whole, marker, offset) => (offset === 0 || paragraph[offset - 1] === "\n" ? "" : "\n") + marker + " ");
+  }).join("");
+  value = value.replace(/\n{3,}/g, "\n\n");
   return value;
 }
 function protectCodeBlocks(text, token, inline) {
@@ -175,7 +171,7 @@ function scanCodeSpans(text) {
   }
   return spans.reverse();
 }
-function protectInline(text, pattern, token, layout) {
+function protectInline(text, pattern, token) {
   const links = scanLinks(text);
   const codeSpans = scanCodeSpans(text);
   const parts = [];
@@ -204,9 +200,9 @@ function protectInline(text, pattern, token, layout) {
     const codeFirst = code && (!match || code.start < match.index);
     const nextStart = codeFirst ? code.start : match?.index;
     if (link && (nextStart === void 0 || link.start < nextStart)) {
-      const label = prose(text.slice(link.opening + 1, link.labelEnd), layout);
+      const label = prose(text.slice(link.opening + 1, link.labelEnd));
       const destination = text.slice(link.labelEnd + 2, link.end - 1);
-      const displayed = link.start < link.opening ? label : layout ? label + " (" + destination + ")" : label + ": " + destination;
+      const displayed = link.start < link.opening ? label : label + " (" + destination + ")";
       parts.push(text.slice(cursor, link.start), token(displayed));
       cursor = link.end;
     } else if (codeFirst) {
@@ -229,7 +225,7 @@ function protectInline(text, pattern, token, layout) {
   parts.push(text.slice(cursor));
   return parts.join("");
 }
-function renderMarkdown(text, maxChars = DEFAULT_MESSAGE_MAX_CHARS, layout = true) {
+function markdownToWeChat(text, maxChars = DEFAULT_MESSAGE_MAX_CHARS) {
   if (!Number.isSafeInteger(maxChars) || maxChars < 0) {
     throw new RangeError("maxChars must be a nonnegative safe integer");
   }
@@ -241,9 +237,9 @@ function renderMarkdown(text, maxChars = DEFAULT_MESSAGE_MAX_CHARS, layout = tru
     const index = opaque.push(value) - 1;
     return `${tokenPrefix}${index}\uE001`;
   };
-  const inline = (value) => protectInline(value, pattern, token, layout);
+  const inline = (value) => protectInline(value, pattern, token);
   const protectedText = protectCodeBlocks(text, token, inline);
-  const formatted = prose(protectedText, layout).trim();
+  const formatted = prose(protectedText).trim();
   const rendered = formatted.replace(
     new RegExp(tokenPrefix + "(\\d+)\uE001", "g"),
     (_whole, index) => opaque[Number(index)]
@@ -258,19 +254,11 @@ function renderMarkdown(text, maxChars = DEFAULT_MESSAGE_MAX_CHARS, layout = tru
   const end = unicodeSafeBoundary(rendered, maxChars - notice.length);
   return rendered.slice(0, end) + notice;
 }
-function markdownToWeChat(text, maxChars = DEFAULT_MESSAGE_MAX_CHARS) {
-  return renderMarkdown(text, maxChars, true);
-}
-function markdownForWeChat(text, maxChars = DEFAULT_MESSAGE_MAX_CHARS) {
-  return renderMarkdown(text, maxChars, false);
-}
 export {
   DEFAULT_MESSAGE_MAX_CHARS,
   TRUNCATION_NOTICE,
   isConsoleLinkQuery,
-  markdownForWeChat,
   markdownToWeChat,
   parseSessionDirectoryQuery,
-  renderMarkdown,
   unicodeSafeBoundary
 };

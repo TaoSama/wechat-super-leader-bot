@@ -202,19 +202,20 @@ export function useStatusPolling(
       if (!live) setConnectionState("polling");
       if (loaded) setIsRefreshing(true);
       else setIsLoading(true);
+      const health = probeControllerHealth(abort.signal);
       try {
-        const [status, health] = await Promise.allSettled([
-          fetchControlPlaneStatus(abort.signal).catch(failure => {
-            // Authentication has priority over a slow public health probe or request timeout.
-            if (failure instanceof ApiAuthError && available() && (!abort.signal.aborted || timedOut)) rejectAuth();
-            throw failure;
-          }), fetchControllerHealth(abort.signal),
-        ]);
+        const status = await fetchControlPlaneStatus(abort.signal).catch(failure => {
+          // Authentication has priority over a slow public health probe or request timeout.
+          if (failure instanceof ApiAuthError && available() && (!abort.signal.aborted || timedOut)) rejectAuth();
+          throw failure;
+        });
+        clearTimeout(deadline);
         if (!available() || abort.signal.aborted) return;
-        if (status.status === "rejected") throw status.reason;
         if (startedAtVersion === version) {
-          accept(status.value);
-          setControllerHealthy(health.status === "fulfilled" && health.value.status === "ok");
+          accept(status);
+          const acceptedAtVersion = version;
+          const healthy = await health;
+          if (available() && !abort.signal.aborted && acceptedAtVersion === version) setControllerHealthy(healthy);
         }
       } catch (failure) {
         if (!available() || abort.signal.aborted) return;
@@ -226,6 +227,7 @@ export function useStatusPolling(
         }
       } finally {
         clearTimeout(deadline);
+        abort.abort();
         if (pollAbort === abort) pollAbort = null;
         if (available()) {
           setIsLoading(false);
@@ -336,6 +338,31 @@ export function useStatusPolling(
     connectionState,
     manualRefresh,
   };
+}
+
+async function probeControllerHealth(signal: AbortSignal): Promise<boolean> {
+  const abort = new AbortController();
+  const cancel = () => {
+    clearTimeout(deadline);
+    abort.abort();
+  };
+  const cancelled = new Promise<boolean>(resolve => {
+    abort.signal.addEventListener("abort", () => resolve(false), { once: true });
+  });
+  const deadline = setTimeout(cancel, REQUEST_DEADLINE_MS);
+  signal.addEventListener("abort", cancel, { once: true });
+  if (signal.aborted) cancel();
+  try {
+    // Resolve at the deadline even if a transport ignores cancellation.
+    return await Promise.race([
+      fetchControllerHealth(abort.signal).then(health => health.status === "ok", () => false),
+      cancelled,
+    ]);
+  } finally {
+    clearTimeout(deadline);
+    signal.removeEventListener("abort", cancel);
+    abort.abort();
+  }
 }
 
 const REQUEST_DEADLINE_MS = 20_000;

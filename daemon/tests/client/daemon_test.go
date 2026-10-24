@@ -71,7 +71,7 @@ func TestDaemon_ExecuteCommand_DedupeAndPayloadTamper(t *testing.T) {
 	mock := &mockAdapter{
 		readOutputs: map[string]string{"sess-1": "output from sess-1"},
 	}
-	cfg := &config.Config{NodeID: "demoair"}
+	cfg := &config.Config{NodeID: "macair"}
 	d := client.NewDaemon(cfg, mock)
 
 	now := time.Now().UTC()
@@ -80,7 +80,7 @@ func TestDaemon_ExecuteCommand_DedupeAndPayloadTamper(t *testing.T) {
 	cmd := protocol.ControllerCommandMessage{
 		Type:      "command",
 		CommandID: "cmd-100",
-		NodeID:    "demoair",
+		NodeID:    "macair",
 		SessionID: "sess-1",
 		Action:    protocol.ActionRead,
 		ExpiresAt: future,
@@ -117,7 +117,7 @@ func TestDaemon_ExecuteCommand_SessionSerialization(t *testing.T) {
 		readOutputs:  map[string]string{"sess-1": "data"},
 		delayPerCall: 50 * time.Millisecond,
 	}
-	cfg := &config.Config{NodeID: "demoair"}
+	cfg := &config.Config{NodeID: "macair"}
 	d := client.NewDaemon(cfg, mock)
 
 	future := time.Now().UTC().Add(1 * time.Minute).Format(time.RFC3339Nano)
@@ -132,7 +132,7 @@ func TestDaemon_ExecuteCommand_SessionSerialization(t *testing.T) {
 		d.ExecuteCommand(context.Background(), protocol.ControllerCommandMessage{
 			Type:      "command",
 			CommandID: "cmd-seq-1",
-			NodeID:    "demoair",
+			NodeID:    "macair",
 			SessionID: "sess-1",
 			Action:    protocol.ActionRead,
 			ExpiresAt: future,
@@ -144,7 +144,7 @@ func TestDaemon_ExecuteCommand_SessionSerialization(t *testing.T) {
 		d.ExecuteCommand(context.Background(), protocol.ControllerCommandMessage{
 			Type:      "command",
 			CommandID: "cmd-seq-2",
-			NodeID:    "demoair",
+			NodeID:    "macair",
 			SessionID: "sess-1",
 			Action:    protocol.ActionRead,
 			ExpiresAt: future,
@@ -192,7 +192,7 @@ func TestDaemon_Run_HelloAndHeartbeatFlow(t *testing.T) {
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 
 	cfg := &config.Config{
-		NodeID:            "demoair",
+		NodeID:            "macair",
 		ControllerURL:     wsURL,
 		NodeToken:         "secret-token-123",
 		HeartbeatInterval: 50 * time.Millisecond,
@@ -222,7 +222,7 @@ func TestDaemon_Run_HelloAndHeartbeatFlow(t *testing.T) {
 	// 1. Verify Hello message received
 	select {
 	case msg := <-receivedMsgs:
-		if msg["type"] != "hello" || msg["nodeId"] != "demoair" {
+		if msg["type"] != "hello" || msg["nodeId"] != "macair" {
 			t.Fatalf("expected hello message, got %+v", msg)
 		}
 	case <-time.After(2 * time.Second):

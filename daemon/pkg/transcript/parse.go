@@ -6,14 +6,19 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 )
 
-const maxJSONDepth = 32
+const (
+	maxJSONDepth      = 32
+	unicodeEscapeSize = len(`\u0000`)
+)
 
 type object map[string]json.RawMessage
 
@@ -45,10 +50,48 @@ func optionalString(obj object, key string) (string, error) {
 	return value, nil
 }
 
-// Validate before decoding: duplicate identity keys, excessive nesting and
-// Unicode replacement during decoding must not silently select a new identity.
-func validateJSON(ctx context.Context, data []byte) error {
+func unicodeEscape(data []byte) (rune, bool) {
+	if len(data) < unicodeEscapeSize || data[0] != '\\' || data[1] != 'u' {
+		return 0, false
+	}
+	code, err := strconv.ParseUint(string(data[2:unicodeEscapeSize]), 16, 16)
+	return rune(code), err == nil
+}
+
+func validJSONUnicode(data []byte) bool {
 	if !utf8.Valid(data) {
+		return false
+	}
+	for offset := 0; offset < len(data); {
+		if data[offset] != '\\' {
+			offset++
+			continue
+		}
+		// JSON syntax is checked separately. Skip non-Unicode escapes in pairs.
+		if offset+1 >= len(data) || data[offset+1] != 'u' {
+			offset += 2
+			continue
+		}
+		code, valid := unicodeEscape(data[offset:])
+		if !valid {
+			return false
+		}
+		offset += unicodeEscapeSize
+		if utf16.IsSurrogate(code) {
+			next, valid := unicodeEscape(data[offset:])
+			if !valid || utf16.DecodeRune(code, next) == utf8.RuneError {
+				return false
+			}
+			offset += unicodeEscapeSize
+		}
+	}
+	return true
+}
+
+// Validate before decoding: duplicate identity keys, excessive nesting and
+// invalid Unicode must not silently select a new identity. Literal U+FFFD is valid.
+func validateJSON(ctx context.Context, data []byte) error {
+	if !validJSONUnicode(data) {
 		return failure(protocol.HistoryIncomplete)
 	}
 	d := json.NewDecoder(bytes.NewReader(data))
@@ -65,9 +108,6 @@ func validateJSON(ctx context.Context, data []byte) error {
 		if err != nil {
 			return failure(protocol.HistoryIncomplete)
 		}
-		if text, ok := token.(string); ok && strings.ContainsRune(text, '\ufffd') {
-			return failure(protocol.HistoryIncomplete)
-		}
 		delim, composite := token.(json.Delim)
 		if !composite {
 			return nil
@@ -80,7 +120,7 @@ func validateJSON(ctx context.Context, data []byte) error {
 					return failure(protocol.HistoryIncomplete)
 				}
 				key, ok := keyToken.(string)
-				if !ok || keys[key] || strings.ContainsRune(key, '\ufffd') {
+				if !ok || keys[key] {
 					return failure(protocol.HistoryIncomplete)
 				}
 				keys[key] = true

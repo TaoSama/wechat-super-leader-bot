@@ -3,19 +3,18 @@ import { randomUUID } from 'node:crypto';
 import { withTestCleanup } from '../../support/cleanup.mjs';
 
 const NODE_PREFIX = 'inventory-store-fixture-';
-const SNAPSHOT_LOCK_SQL = 'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))';
+const OBSERVATION_LOCK_SQL = 'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))';
 const session = (id, title = id) => ({ id, title, provider: 'codex-app', cwd: '/synthetic',
   status: 'idle', loaded: true, capabilities: ['read', 'send'], observedAt: new Date().toISOString() });
-const ids = rows => rows.map(row => row.id).sort();
 
 // Runs ONLY inside the runner-owned temporary PostgreSQL database, using its
 // two existing Store instances. No node socket, credentials or user data.
 export async function verifyNodeSessionStore({ stores, pool, waitFor }) {
   const nodeId = NODE_PREFIX + randomUUID(), otherNode = NODE_PREFIX + randomUUID();
-  const snapshot = async () => (await stores[0].getNodeSessions(nodeId)).sort((a, b) => a.id.localeCompare(b.id));
-  const assertSnapshot = async expected => assert.deepEqual(await snapshot(),
-    expected.map(item => ({ ...item, nodeId })).sort((a, b) => a.id.localeCompare(b.id)),
-    'Whole-node replacement mixed stale and current data/capabilities');
+  const assertKnown = async expected => {
+    for (const item of expected) assert.deepEqual(await stores[0].getKnownSession(nodeId, item.id), item,
+      'Historical identity lost its most recent complete observation');
+  };
 
   // Holding the actual namespaced PG lock creates deterministic cross-pool
   // contention. Wait for each real blocked backend before queuing the next.
@@ -25,7 +24,7 @@ export async function verifyNodeSessionStore({ stores, pool, waitFor }) {
     await withTestCleanup(async () => {
       await client.query('BEGIN');
       holding = true;
-      await client.query(SNAPSHOT_LOCK_SQL, [JSON.stringify(['node_sessions', nodeId])]);
+      await client.query(OBSERVATION_LOCK_SQL, [JSON.stringify(['node_sessions', nodeId])]);
       const { rows: [{ pid }] } = await client.query('SELECT pg_backend_pid() AS pid');
       for (const operation of operations) {
         pending.push(operation().then(() => undefined, error => { failures.push(error); }));
@@ -57,43 +56,39 @@ export async function verifyNodeSessionStore({ stores, pool, waitFor }) {
     const initial = [session('shared', 'initial'), session('seed-only')];
     const older = [session('shared', 'older'), session('old-only')];
     const latest = [session('shared', 'latest'), { ...session('new-only'), capabilities: ['read'], loaded: false }];
-    // Both empty and non-empty replacement races must preserve a single complete snapshot.
+    // Concurrent observations keep each identity whole and preserve offline history.
     for (const seed of [[], initial]) {
       await stores[0].upsertNodeSessions(nodeId, seed);
       await contend([
         () => stores[0].upsertNodeSessions(nodeId, older),
         () => stores[1].upsertNodeSessions(nodeId, latest),
       ], async () => {
-        await stores[1].upsertNodeSessions(otherNode, [session('independent')]);
-        assert.deepEqual(ids(await stores[0].getNodeSessions(otherNode)), ['independent']);
+        const independent = session('independent');
+        await stores[1].upsertNodeSessions(otherNode, [independent]);
+        assert.deepEqual(await stores[0].getKnownSession(otherNode, independent.id), independent);
       });
-      await assertSnapshot(latest);
+      await assertKnown([older[1], ...latest]);
     }
-    await contend([
-      () => stores[0].removeNodeSessions(nodeId),
-      () => stores[1].upsertNodeSessions(nodeId, latest),
-    ]);
-    await assertSnapshot(latest);
-    await contend([
-      () => stores[1].upsertNodeSessions(nodeId, older),
-      () => stores[0].removeNodeSessions(nodeId),
-    ]);
-    await assertSnapshot([]);
-    await stores[1].upsertNodeSessions(nodeId, latest);
+    await stores[0].removeNodeSessions(nodeId);
+    await assertKnown([initial[1], older[1], ...latest]);
+    await stores[1].upsertNodeSessions(nodeId, []);
+    await assertKnown(latest);
     for (const store of stores) {
       await assert.rejects(store.upsertNodeSessions(nodeId, [session('duplicate'),
         { ...session('duplicate'), capabilities: [] }]), /Duplicate session IDs/);
-      await assertSnapshot(latest);
+      await assertKnown(latest);
+      assert.equal(await stores[0].getKnownSession(nodeId, 'duplicate'), null);
     }
-    // A real INSERT failure after DELETE must roll back and release the lock.
-    await assert.rejects(stores[0].upsertNodeSessions(nodeId, [session('x'.repeat(65))]),
+    // A failed observation batch must roll back earlier identities and release the lock.
+    await assert.rejects(stores[0].upsertNodeSessions(nodeId, [session('shared', 'must roll back'), session('x'.repeat(65))]),
       error => error.code === '22001');
-    await assertSnapshot(latest);
+    await assertKnown(latest);
     await stores[1].upsertNodeSessions(nodeId, older);
-    await assertSnapshot(older);
-    console.log('PASS real PostgreSQL node inventories: cross-store contended whole-snapshot replacements (empty/populated), no stale subset/capability merge, per-node isolation, remove/replace both orders, duplicate-ID rejection and rollback preserve prior snapshot; lock released after failure');
+    await assertKnown([...older, latest[1]]);
+    console.log('PASS real PostgreSQL session observations: same-node cross-store ordering, whole identity/capability updates, per-node isolation, offline history after disconnect and empty inventories, duplicate-ID rejection and atomic rollback; lock released after failure');
   }, [
     { label: 'synthetic inventory node cleanup', cleanup: () => stores[0].removeNodeSessions(nodeId) },
     { label: 'synthetic independent node cleanup', cleanup: () => stores[0].removeNodeSessions(otherNode) },
+    { label: 'synthetic session history cleanup', cleanup: () => pool.query('DELETE FROM known_sessions WHERE node_id=ANY($1::text[])', [[nodeId, otherNode]]) },
   ]);
 }

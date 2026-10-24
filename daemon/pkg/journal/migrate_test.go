@@ -91,9 +91,9 @@ func readBucketDump(t *testing.T, dir string) (scope string, records map[string]
 
 func TestMigrate_SuccessRetainsRecordsByteIdentical(t *testing.T) {
 	dir := testPrivateDir(t)
-	nodeID := "demoair"
+	nodeID := "macair"
 	fromURL := "ws://127.0.0.1:8790/v1/daemon"
-	toURL := "wss://leader.example.com/v1/daemon"
+	toURL := "wss://leader.taoai.site/v1/daemon"
 	sockPath := "/tmp/test.sock"
 
 	fromScope, err := ScopeDigest(nodeID, fromURL, sockPath)
@@ -228,9 +228,9 @@ func TestMigrate_SuccessRetainsRecordsByteIdentical(t *testing.T) {
 
 func TestMigrate_WrongScopeRejected(t *testing.T) {
 	dir := testPrivateDir(t)
-	nodeID := "demoair"
+	nodeID := "macair"
 	fromURL := "ws://127.0.0.1:8790/v1/daemon"
-	toURL := "wss://leader.example.com/v1/daemon"
+	toURL := "wss://leader.taoai.site/v1/daemon"
 	sockPath := "/tmp/test.sock"
 
 	// Create journal with a mismatched scope
@@ -252,9 +252,9 @@ func TestMigrate_WrongScopeRejected(t *testing.T) {
 
 func TestMigrate_PendingRejected(t *testing.T) {
 	dir := testPrivateDir(t)
-	nodeID := "demoair"
+	nodeID := "macair"
 	fromURL := "ws://127.0.0.1:8790/v1/daemon"
-	toURL := "wss://leader.example.com/v1/daemon"
+	toURL := "wss://leader.taoai.site/v1/daemon"
 	sockPath := "/tmp/test.sock"
 	fromScope, err := ScopeDigest(nodeID, fromURL, sockPath)
 	if err != nil {
@@ -292,9 +292,9 @@ func TestMigrate_PendingRejected(t *testing.T) {
 
 func TestMigrate_UnfinishedRejected(t *testing.T) {
 	dir := testPrivateDir(t)
-	nodeID := "demoair"
+	nodeID := "macair"
 	fromURL := "ws://127.0.0.1:8790/v1/daemon"
-	toURL := "wss://leader.example.com/v1/daemon"
+	toURL := "wss://leader.taoai.site/v1/daemon"
 	sockPath := "/tmp/test.sock"
 	fromScope, err := ScopeDigest(nodeID, fromURL, sockPath)
 	if err != nil {
@@ -331,9 +331,9 @@ func TestMigrate_UnfinishedRejected(t *testing.T) {
 
 func TestMigrate_UncertainRejected(t *testing.T) {
 	dir := testPrivateDir(t)
-	nodeID := "demoair"
+	nodeID := "macair"
 	fromURL := "ws://127.0.0.1:8790/v1/daemon"
-	toURL := "wss://leader.example.com/v1/daemon"
+	toURL := "wss://leader.taoai.site/v1/daemon"
 	sockPath := "/tmp/test.sock"
 	fromScope, err := ScopeDigest(nodeID, fromURL, sockPath)
 	if err != nil {
@@ -370,9 +370,9 @@ func TestMigrate_UncertainRejected(t *testing.T) {
 
 func TestMigrate_AcceptedWithoutReceiptRejected(t *testing.T) {
 	dir := testPrivateDir(t)
-	nodeID := "demoair"
+	nodeID := "macair"
 	fromURL := "ws://127.0.0.1:8790/v1/daemon"
-	toURL := "wss://leader.example.com/v1/daemon"
+	toURL := "wss://leader.taoai.site/v1/daemon"
 	sockPath := "/tmp/test.sock"
 	fromScope, err := ScopeDigest(nodeID, fromURL, sockPath)
 	if err != nil {
@@ -410,9 +410,9 @@ func TestMigrate_AcceptedWithoutReceiptRejected(t *testing.T) {
 
 func TestMigrate_AcceptedWithMismatchedReceiptRejected(t *testing.T) {
 	dir := testPrivateDir(t)
-	nodeID := "demoair"
+	nodeID := "macair"
 	fromURL := "ws://127.0.0.1:8790/v1/daemon"
-	toURL := "wss://leader.example.com/v1/daemon"
+	toURL := "wss://leader.taoai.site/v1/daemon"
 	sockPath := "/tmp/test.sock"
 	fromScope, err := ScopeDigest(nodeID, fromURL, sockPath)
 	if err != nil {
@@ -489,9 +489,9 @@ func TestMigrate_AcceptedWithMismatchedReceiptRejected(t *testing.T) {
 
 func TestMigrate_NonExistentFileNotCreated(t *testing.T) {
 	dir := testPrivateDir(t)
-	nodeID := "demoair"
+	nodeID := "macair"
 	fromURL := "ws://127.0.0.1:8790/v1/daemon"
-	toURL := "wss://leader.example.com/v1/daemon"
+	toURL := "wss://leader.taoai.site/v1/daemon"
 	sockPath := "/tmp/test.sock"
 
 	// Directory exists, but commands.db does not exist

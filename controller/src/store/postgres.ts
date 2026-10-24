@@ -2,20 +2,22 @@ import { PROGRESS_OUTPUT_LIMIT, progressNotificationBudgetAvailable, progressNot
 import { notificationCommands, planNotificationRequestIds, goalNotificationRequestIds } from "../notifications/presentation.js";
 import { notificationFromRow, type NotificationRow } from "./notification-postgres.js";
 import pg from "pg";
-import { CommandRecord, MessageRecord, ScopedSession, Session, SendRouteSchema, validateCommandSendRoute } from "../types.js";
+import { CommandRecord, MessageRecord, Session, SendRouteSchema, validateCommandSendRoute } from "../types.js";
 import { InputReceipt, InputReceiptSchema } from "../sessions/input-receipt.js";
 import { commandSummary, COMMAND_PREVIEW_CODE_POINTS, type CommandSummary } from "../commands/public.js";
 import { IStore, CreateCommandResult, ConflictError } from "./interface.js";
 import { sameSkillRefs, SkillRefsSchema } from "../skills/catalog.js";
 import { nextCommandState, inspectionLimit, validateStoredCommandInput } from "./command-state.js";
 import { validateNodeSessionInventory, withNodeSessionsLock } from "./node-sessions.js";
+import { pgGetKnownSession, pgPruneKnownSessions } from "./known-sessions-postgres.js";
+import { KNOWN_SESSION_CLEANUP_BATCH_SIZE } from "./known-sessions.js";
 import type { CreateExecutionResult, ExecutionRecord } from "../leader/plans/execution.js";
 import type { ExecutionConfirmationAuthority } from "../leader/plans/confirmation.js";
 import { NotificationSourceSchema, validateNotificationTime, type Notification, type StoredNotification, type NotificationReceiptStatus, type NotificationDeferReason } from "../notifications/contracts.js";
 import type { GoalRecord, GoalConfirmationAuthority, CreateGoalResult } from "../leader/goals/goal.js";
 import { pgConfirmGoal, pgGetGoal, pgGetLatestGoal, pgCompareAndSetGoal, pgListRunnableGoals, pgListRecentGoals } from "./goal-postgres.js";
 import { pgListPendingNotifications, pgGetNotification, pgClaimNotification, pgRecordNotificationReceipt, pgDeferNotification } from "./notification-postgres.js";
-import { initNotificationCandidateState, pgListNotificationCandidates, pgGetNotificationParts, pgMarkNotificationPrepared } from "./notification-candidates-postgres.js";
+import { pgListNotificationCandidates, pgGetNotificationParts, pgMarkNotificationPrepared } from "./notification-candidates-postgres.js";
 import { pgCreateExecutionIfAbsent, pgGetExecution, pgGetLatestExecution,
   pgCompareAndSetExecution, pgListActiveExecutions, pgConfirmExecution, pgListRecentExecutions, pgCreateLockedExecution } from "./execution-postgres.js";
 import {
@@ -50,6 +52,16 @@ const { Pool } = pg;
 
 export class PostgresStore implements IStore {
   private pool: pg.Pool;
+  private liveNodeSessions = new Map<string, Set<string>>();
+  private knownSessionMaintenance: Promise<unknown> = Promise.resolve();
+
+  private maintainKnownSessions<T>(operation: () => Promise<T>): Promise<T> {
+    // Keep in-process inventory pins stable until the corresponding cleanup query commits.
+    // Each caller receives its own failure; a failed operation must not block later heartbeats.
+    const result = this.knownSessionMaintenance.then(operation, operation);
+    this.knownSessionMaintenance = result;
+    return result;
+  }
   recordMessageImages(chatId: string, messageId: string, images: StoredMessageImage[], expiresAt: number) {
     return recordMessageImages(this.pool, chatId, messageId, images, expiresAt);
   }
@@ -57,13 +69,15 @@ export class PostgresStore implements IStore {
     return getMessageImage(this.pool, chatId, messageId, imageId, now);
   }
 
-  constructor(databaseUrl: string) {
+  constructor(databaseUrl?: string) {
     this.pool = new Pool({ connectionString: databaseUrl });
+    this.pool.on("error", () => {
+      console.error("PostgreSQL idle client connection failed; the pool removed the client");
+    });
   }
 
   async init(): Promise<void> {
     await initializeDatabase(this.pool);
-    await initNotificationCandidateState(this.pool);
   }
 
   async close(): Promise<void> {
@@ -289,50 +303,41 @@ export class PostgresStore implements IStore {
 
   async upsertNodeSessions(nodeId: string, sessions: Session[]): Promise<void> {
     validateNodeSessionInventory(sessions);
+    const inventory = structuredClone(sessions);
+    const ids = new Set(inventory.map(session => session.id));
     await withNodeSessionsLock(this.pool, nodeId, async client => {
-      await client.query("DELETE FROM node_sessions WHERE node_id = $1", [nodeId]);
+      const live = new Map(this.liveNodeSessions);
+      live.set(nodeId, ids);
       const now = new Date().toISOString();
-      for (const s of sessions) {
-        await client.query(
-          `
-          INSERT INTO node_sessions (node_id, session_id, data, updated_at)
-          VALUES ($1, $2, $3, $4)
-          `,
-          [nodeId, s.id, JSON.stringify(s), now]
-        );
+      for (const s of inventory) {
         await client.query(`INSERT INTO known_sessions(node_id,session_id,data,updated_at) VALUES($1,$2,$3,$4)
-          ON CONFLICT(node_id,session_id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at`,[nodeId,s.id,JSON.stringify(s),now]);
+          ON CONFLICT(node_id,session_id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at,
+            observed_order=excluded.observed_order`,[nodeId,s.id,JSON.stringify(s),now]);
       }
-    });
+      await pgPruneKnownSessions(client, live, Date.now(), inventory.length + KNOWN_SESSION_CLEANUP_BATCH_SIZE);
+    }, transaction => this.maintainKnownSessions(async () => {
+      await transaction();
+      this.liveNodeSessions.set(nodeId, ids);
+    }));
   }
   async getKnownSession(nodeId: string, sessionId: string): Promise<Session | null> {
-    const result = await this.pool.query("SELECT data FROM known_sessions WHERE node_id=$1 AND session_id=$2",[nodeId,sessionId]);
-    return result.rows[0] ? (typeof result.rows[0].data === "string" ? JSON.parse(result.rows[0].data) : result.rows[0].data) : null;
-  }
-
-  async getNodeSessions(nodeId: string): Promise<ScopedSession[]> {
-    const res = await this.pool.query(
-      "SELECT data FROM node_sessions WHERE node_id = $1",
-      [nodeId]
-    );
-    return res.rows.map((r) => ({
-      ...(typeof r.data === "string" ? JSON.parse(r.data) : r.data),
-      nodeId,
-    }));
-  }
-
-  async getAllSessions(): Promise<ScopedSession[]> {
-    const res = await this.pool.query("SELECT node_id, data FROM node_sessions");
-    return res.rows.map((r) => ({
-      ...(typeof r.data === "string" ? JSON.parse(r.data) : r.data),
-      nodeId: r.node_id,
-    }));
+    // Waiting writers already hold their clients; acquire ours before entering maintenance.
+    const client = await this.pool.connect();
+    try {
+      return await this.maintainKnownSessions(() => pgGetKnownSession(client, this.liveNodeSessions, nodeId, sessionId));
+    } finally { client.release(); }
   }
 
   async removeNodeSessions(nodeId: string): Promise<void> {
     await withNodeSessionsLock(this.pool, nodeId, async client => {
-      await client.query("DELETE FROM node_sessions WHERE node_id = $1", [nodeId]);
-    });
+      const live = new Map(this.liveNodeSessions);
+      live.delete(nodeId);
+      const released = this.liveNodeSessions.get(nodeId)?.size ?? 0;
+      await pgPruneKnownSessions(client, live, Date.now(), released + KNOWN_SESSION_CLEANUP_BATCH_SIZE);
+    }, transaction => this.maintainKnownSessions(async () => {
+      await transaction();
+      this.liveNodeSessions.delete(nodeId);
+    }));
   }
 
   async getLeaderState(chatId: string): Promise<LeaderState | null> {

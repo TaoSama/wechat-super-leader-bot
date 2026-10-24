@@ -20,6 +20,7 @@ function createPostgresStoreWithFakePool() {
 }
 
 class FakePgPool {
+  on = vi.fn();
   public links = new Map<string, { token_hash: string; created_at: string; expires_at: string; consumed_at?: string }>();
   public sessions = new Map<string, { token_hash: string; created_at: string; expires_at: string }>();
   public queries: { sql: string; params?: unknown[] }[] = [];

@@ -7,6 +7,7 @@ import { ControllerServer } from "../../src/http/server.js";
 import { MemoryStore } from "../../src/store/memory.js";
 import { SessionSchema } from "../../src/types.js";
 import { MESSAGE_IMAGE_TTL_MS } from "../../src/sessions/message-images.js";
+import { MEDIA_TIMEOUT_MS } from "../../src/sessions/media-contracts.js";
 import type { LeaderModel, ModelReply } from "../../src/leader/model/contracts.js";
 import type { Config } from "../../src/runtime/config.js";
 
@@ -27,6 +28,7 @@ class Socket extends EventEmitter {
   sent: Record<string, any>[] = [];
   context = randomUUID(); mediaId = randomUUID();
   corrupt = false;
+  silentReads = false;
   send(raw: string, callback?: (error?: Error) => void) {
     const request = JSON.parse(raw); this.sent.push(request); callback?.();
     const common = { requestId: request.requestId, sessionId: target.sessionId, mediaContext: this.context };
@@ -34,7 +36,7 @@ class Socket extends EventEmitter {
       mediaId: this.mediaId, itemId: "original-item", turnId: "original-turn", ordinal: 0,
       totalSize: png.length, mime: "image/png", sha256: createHash("sha256").update(png).digest("hex"),
     }] }));
-    if (request.type === "read_media") this.emit("message", JSON.stringify({ ...common, type: "media_chunk", mediaId: this.mediaId,
+    if (request.type === "read_media" && !this.silentReads) this.emit("message", JSON.stringify({ ...common, type: "media_chunk", mediaId: this.mediaId,
       offset: request.offset, totalSize: png.length, mime: "image/png", sha256: createHash("sha256").update(png).digest("hex"),
       data: (this.corrupt ? Buffer.alloc(png.length) : png).toString("base64"), eof: true,
     }));
@@ -112,5 +114,24 @@ describe("original session → message-scoped authenticated images", () => {
   it("never publishes attachment references after a failed integrity check", async () => {
     const f = await fixture(); f.ws.corrupt = true; const reply = await f.post();
     expect(reply.body.images).toBeUndefined(); expect(reply.body.text).toContain("未发送图片");
+  });
+  it("reports a silent media daemon as a timeout through the message HTTP entrypoint", async () => {
+    const f = await fixture(); f.ws.silentReads = true;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const pending = f.post("media-timeout");
+      await vi.waitFor(() => expect(f.ws.sent.some(item => item.type === "read_media")).toBe(true), { timeout: 10000 });
+      await vi.advanceTimersByTimeAsync(MEDIA_TIMEOUT_MS);
+      const reply = await pending;
+      expect(reply.status).toBe(200);
+      expect(reply.body.images).toBeUndefined();
+      expect(reply.body.text).toContain("media_timeout");
+      expect(reply.body.text).not.toContain("media_cancelled");
+      const read = f.ws.sent.find(item => item.type === "read_media");
+      expect(f.ws.sent.filter(item => item.type === "cancel_media")).toEqual([
+        expect.objectContaining({ requestId: read?.requestId }),
+      ]);
+      expect((await f.store.getMessage("chat", "media-timeout"))?.images).toBeUndefined();
+    } finally { vi.useRealTimers(); }
   });
 });

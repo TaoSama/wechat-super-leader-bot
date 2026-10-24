@@ -24,7 +24,7 @@ function fixture(t: TestContext, policy: Partial<ContextPolicy> = {}) {
 function reference(deliveryKey = "reply-reference", overrides: Partial<DeliveryOutboxItem> = {}): DeliveryOutboxItem {
   return {
     kind: "reply", deliveryKey, chatId: CHAT_ID, messageId: "synthetic-message-id",
-    splitMaxChars: 1000, splitMultiPart: true, status: "pending", ...overrides,
+    splitMaxChars: 1000, status: "pending", ...overrides,
   };
 }
 
@@ -349,9 +349,23 @@ test("the durable outbox stores delivery references and receipts without message
   assert.deepEqual(stored, reload().outbox["notification-reference"]);
   assert.deepEqual(Object.keys(stored).sort(), [
     "attemptId", "chatId", "deliveryKey", "expiresAt", "kind", "messageId", "notificationKind",
-    "receiptStatus", "source", "splitMaxChars", "splitMultiPart", "status",
+    "receiptStatus", "source", "splitMaxChars", "status",
   ].sort());
   for (const bodyField of ["text", "body", "content", "images", "attachments"]) assert.equal(Object.hasOwn(stored, bodyField), false);
+});
+
+test("legacy multipart flags are retired without changing durable delivery references", t => {
+  const { state, reload, statePath } = fixture(t);
+  for (const flag of [false, true]) state.putOutbox(reference(`legacy-${flag}`));
+  const expected = structuredClone(state.outbox);
+  const disk = JSON.parse(fs.readFileSync(statePath, "utf8")) as { delivery_outbox: Record<string, Record<string, unknown>> };
+  for (const flag of [false, true]) disk.delivery_outbox[`legacy-${flag}`].splitMultiPart = flag;
+  fs.writeFileSync(statePath, JSON.stringify(disk));
+  const restarted = reload();
+  assert.deepEqual(restarted.outbox, expected);
+  restarted.saveState();
+  const persisted = JSON.parse(fs.readFileSync(statePath, "utf8")) as { delivery_outbox: Record<string, unknown> };
+  assert.deepEqual(persisted.delivery_outbox, expected);
 });
 
 test("outbox source survives restart and legacy references default to controller", t => {

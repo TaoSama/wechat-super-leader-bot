@@ -71,51 +71,9 @@ func EscapeSystemdArg(arg string) (string, error) {
 
 // GenerateSystemdUnit creates the systemd user service unit content.
 func GenerateSystemdUnit(binPath string, cfg *config.Config, tokenFilePath string) (string, error) {
-	if err := config.ValidateTerminalHistory(cfg.TerminalHistoryRoots, cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
+	rawArgs, err := daemonServiceArgs(binPath, cfg, tokenFilePath)
+	if err != nil {
 		return "", err
-	}
-	if err := config.ValidateTerminalObservation(cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
-		return "", err
-	}
-	if binPath == "" {
-		return "", errors.New("binary path must not be empty")
-	}
-	if cfg.DesktopSend && cfg.DesktopSocketPath == "" {
-		return "", errors.New("desktop-send requires an explicit desktop-sock")
-	}
-	if err := config.ValidateTerminalSend(cfg.TerminalSendMode, cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
-		return "", err
-	}
-	rawArgs := []string{
-		binPath,
-		"--node-id", cfg.NodeID,
-		"--controller-url", cfg.ControllerURL,
-		"--token-file", tokenFilePath,
-		"--sock", cfg.SocketPath,
-		"--state-dir", cfg.StateDir,
-		"--heartbeat", strconv.Itoa(int(cfg.HeartbeatInterval.Seconds())),
-	}
-	if cfg.DesktopSocketPath != "" {
-		rawArgs = append(rawArgs, "--desktop-sock", cfg.DesktopSocketPath)
-	}
-	if cfg.DesktopSend {
-		rawArgs = append(rawArgs, "--desktop-send")
-	}
-	if cfg.CodexHome != "" {
-		rawArgs = append(rawArgs, "--codex-home", cfg.CodexHome)
-	}
-	if cfg.TerminalSocketPath != "" {
-		rawArgs = append(rawArgs, "--terminal-sock", cfg.TerminalSocketPath)
-		for _, pane := range cfg.TerminalPanes {
-			rawArgs = append(rawArgs, "--terminal-pane", pane)
-		}
-	}
-	if cfg.TerminalSendMode != "" {
-		rawArgs = append(rawArgs, "--terminal-send-mode", cfg.TerminalSendMode)
-	}
-	rawArgs = append(rawArgs, config.TerminalHistoryArgs(cfg.TerminalHistoryRoots)...)
-	for _, root := range cfg.SkillRoots {
-		rawArgs = append(rawArgs, "--skill-root", root)
 	}
 
 	escapedArgs := make([]string, 0, len(rawArgs))
@@ -206,10 +164,18 @@ func (m *LinuxManager) Install(ctx context.Context, cfg *config.Config) error {
 	if err := config.ValidateTerminalObservation(cfg.TerminalSocketPath, cfg.TerminalPanes); err != nil {
 		return err
 	}
+	if err := validateTokenFileInput(cfg.StateDir, cfg.NodeToken); err != nil {
+		return fmt.Errorf("write token file: %w", err)
+	}
 	if err := EnsureNotRoot(); err != nil {
 		return err
 	}
 	managedBin, err := ResolveManagedBinaryPath(m.HomeDir)
+	if err != nil {
+		return err
+	}
+	tokenFile := ResolveTokenFilePath(cfg.StateDir)
+	unitContent, err := GenerateSystemdUnit(managedBin, cfg, tokenFile)
 	if err != nil {
 		return err
 	}
@@ -227,13 +193,8 @@ func (m *LinuxManager) Install(ctx context.Context, cfg *config.Config) error {
 	if err := InstallManagedBinary("", managedBin); err != nil {
 		return fmt.Errorf("install managed binary: %w", err)
 	}
-	tokenFile, err := WritePrivateTokenFile(cfg.StateDir, cfg.NodeToken)
-	if err != nil {
+	if _, err := WritePrivateTokenFile(cfg.StateDir, cfg.NodeToken); err != nil {
 		return fmt.Errorf("write token file: %w", err)
-	}
-	unitContent, err := GenerateSystemdUnit(managedBin, cfg, tokenFile)
-	if err != nil {
-		return err
 	}
 	if err := AtomicWriteFile(unitPath, []byte(unitContent), 0644); err != nil {
 		return fmt.Errorf("write systemd unit: %w", err)

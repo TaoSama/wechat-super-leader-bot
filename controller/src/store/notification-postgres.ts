@@ -1,12 +1,14 @@
 import type pg from "pg";
 import { normalizeNotification, readNotification, claimNotificationRecord, receiptNotificationRecord, deferNotificationRecord, NotificationDeferReasonSchema,
   NotificationIdSchema, NotificationReceiptStatusSchema, validateNotificationTime, NOTIFICATION_BATCH_LIMIT,
-  terminalNotificationPartEligible, NOTIFICATION_PART_LIMIT,
+  NOTIFICATION_PART_LIMIT,
   type Notification, type StoredNotification, type NotificationReceiptStatus, type NotificationDeferReason } from "../notifications/contracts.js";
 import { executionListQuery } from "./execution-list.js";
 import { ConflictError } from "./interface.js";
 import { lockNotificationSource } from "./notification-source-postgres.js";
 import { progressNotificationEligible } from "../notifications/progress.js";
+
+const NOTIFICATION_MIGRATION_PAGE_SIZE = 100;
 
 export interface NotificationRow {
   id: string; execution_id: string | null; goal_id: string | null; chat_id: string; kind: string; status: string;
@@ -39,22 +41,28 @@ export async function initNotificationTables(client: pg.PoolClient): Promise<voi
   await client.query('ALTER TABLE leader_notifications ADD COLUMN IF NOT EXISTS goal_id VARCHAR(36) COLLATE "C"');
   // Validate before conversion, never silently discard an unknown field or
   // repair forged metadata. Any invalid row aborts the whole caller transaction.
-  const existing = await client.query<NotificationRow>("SELECT * FROM leader_notifications ORDER BY id FOR UPDATE");
-  for (const row of existing.rows) {
-    const data: unknown = typeof row.data === "string" ? JSON.parse(row.data) : row.data;
-    if (data !== null && typeof data === "object" && !Array.isArray(data) && Object.hasOwn(data, "executionId")) {
-      const legacy = data as Record<string, unknown>;
-      if (Object.hasOwn(legacy, "source")) throw new Error("Mixed legacy notification source");
-      const { executionId, ...retained } = legacy;
-      const converted = { ...retained, source: { type: "plan", id: executionId } };
-      notificationFromRow({ ...row, data: converted });
-      const saved = await client.query<NotificationRow>("UPDATE leader_notifications SET data=$2::jsonb WHERE id=$1 RETURNING *",
-        [row.id, JSON.stringify(converted)]);
-      if (saved.rows.length !== 1) throw new Error("Notification migration lost its locked record");
-      notificationFromRow(saved.rows[0]);
-    } else {
-      notificationFromRow(row);
+  let afterId: string | null = null;
+  while (true) {
+    const existing: pg.QueryResult<NotificationRow> = await client.query<NotificationRow>(`SELECT * FROM leader_notifications
+      WHERE ($1::text IS NULL OR id>$1) ORDER BY id LIMIT $2 FOR UPDATE`, [afterId, NOTIFICATION_MIGRATION_PAGE_SIZE]);
+    if (!existing.rows.length) break;
+    for (const row of existing.rows) {
+      const data: unknown = typeof row.data === "string" ? JSON.parse(row.data) : row.data;
+      if (data !== null && typeof data === "object" && !Array.isArray(data) && Object.hasOwn(data, "executionId")) {
+        const legacy = data as Record<string, unknown>;
+        if (Object.hasOwn(legacy, "source")) throw new Error("Mixed legacy notification source");
+        const { executionId, ...retained } = legacy;
+        const converted = { ...retained, source: { type: "plan", id: executionId } };
+        notificationFromRow({ ...row, data: converted });
+        const saved = await client.query<NotificationRow>("UPDATE leader_notifications SET data=$2::jsonb WHERE id=$1 RETURNING *",
+          [row.id, JSON.stringify(converted)]);
+        if (saved.rows.length !== 1) throw new Error("Notification migration lost its locked record");
+        notificationFromRow(saved.rows[0]);
+      } else {
+        notificationFromRow(row);
+      }
     }
+    afterId = existing.rows.at(-1)!.id;
   }
   await client.query("ALTER TABLE leader_notifications DROP CONSTRAINT IF EXISTS leader_notifications_check");
   await client.query("ALTER TABLE leader_notifications DROP CONSTRAINT IF EXISTS leader_notifications_execution_id_key");
@@ -165,8 +173,13 @@ export async function pgClaimNotification(pool: pg.Pool, id: string, attemptId: 
       if (!record || !progressNotificationEligible(snapshot, record, now)) throw new ConflictError("Progress notification source is no longer active");
       if (snapshot.kind !== "progress") {
         const column = snapshot.source.type === "plan" ? "execution_id" : "goal_id";
-        const previous = await client.query<NotificationRow>(`SELECT * FROM leader_notifications WHERE ${column}=$1 ORDER BY created_at ASC,id ASC`, [snapshot.source.id]);
-        if (!terminalNotificationPartEligible(snapshot, previous.rows.map(notificationFromRow))) throw new ConflictError("Previous terminal notification part is not accepted");
+        const eligibility = await client.query<{ eligible: boolean }>(`SELECT
+          COUNT(DISTINCT (data->'part'->>'index')::int)=$4::int-1 AS eligible
+          FROM leader_notifications WHERE ${column}=$1 AND kind=$2 AND status='accepted'
+            AND (data->'part'->>'total')::int=$3
+            AND (data->'part'->>'index')::int BETWEEN 1 AND $4::int-1`,
+        [snapshot.source.id, snapshot.kind, snapshot.part!.total, snapshot.part!.index]);
+        if (!eligibility.rows[0]?.eligible) throw new ConflictError("Previous terminal notification part is not accepted");
       }
     } : undefined);
 }

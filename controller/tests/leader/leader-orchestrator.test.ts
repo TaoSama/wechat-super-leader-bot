@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { LeaderOrchestrator } from "../../src/leader/orchestrator.js";
 import { MemoryStore } from "../../src/store/memory.js";
 import { ExecutionScheduler } from "../../src/leader/plans/scheduler.js";
-import { CLAIM_TTL_MS, PLAN_TTL_MS } from "../../src/leader/contracts.js";
+import { CLAIM_TTL_MS, LeaderDataSchema, PLAN_TTL_MS } from "../../src/leader/contracts.js";
 import { selectSendRoute } from "../../src/sessions/send-eligibility.js";
 import type { LeaderModel, ModelMessage, ModelReply } from "../../src/leader/model/contracts.js";
 import type { CommandRecord, PostCommandRequest, ScopedSession, SendRoute } from "../../src/types.js";
@@ -24,13 +24,13 @@ class ScriptedModel implements LeaderModel {
     return next;
   }
 }
-const actions = [{ nodeId: "demoair", sessionId: "s1", prompt: "只回复测试成功" }];
+const actions = [{ nodeId: "macair", sessionId: "s1", prompt: "只回复测试成功" }];
 function fixture(replies: ModelReply[] = []) {
   const store = new MemoryStore();
   let clock = Date.now();
   const sessions: ScopedSession[] = [
-    { id: "s1", nodeId: "demoair", provider: "codex-app", title: "测试", cwd: "/test", status: "idle", loaded: true, capabilities: ["read", "send"], observedAt: new Date(clock).toISOString() },
-    { id: "s2", nodeId: "demomini", provider: "codex-app", title: "测试", cwd: "/test", status: "idle", loaded: true, capabilities: ["read", "send"], observedAt: new Date(clock).toISOString() },
+    { id: "s1", nodeId: "macair", provider: "codex-app", title: "测试", cwd: "/test", status: "idle", loaded: true, capabilities: ["read", "send"], observedAt: new Date(clock).toISOString() },
+    { id: "s2", nodeId: "macmini", provider: "codex-app", title: "测试", cwd: "/test", status: "idle", loaded: true, capabilities: ["read", "send"], observedAt: new Date(clock).toISOString() },
   ];
   const hub = {
     getAllSkills: () => [], getNodeSkills: () => [],
@@ -95,7 +95,7 @@ describe("Leader orchestration", () => {
       return final(sessions.map((session: { displayLabel: string }) => `${session.displayLabel}\n空闲`).join("\n\n"));
     } };
     const reply = await f.create(model).handle("chat", "references", "显示会话列表，并核对观测来源");
-    expect(reply.text).toBe("已观测会话：\n\ntest（demoair）\n1. [闲] 测试\n\ntest（demomini）\n2. [闲] 测试\n\n仅展示在线节点已观测的会话。");
+    expect(reply.text).toBe("已观测会话：\n\ntest（macair）\n1. [闲] 测试\n\ntest（macmini）\n2. [闲] 测试\n\n仅展示在线节点已观测的会话。");
     expect(JSON.stringify((await f.store.getLeaderState("chat"))?.data.receipts)).not.toContain("⟦session:");
   });
 
@@ -110,7 +110,7 @@ describe("Leader orchestration", () => {
     expect(content).not.toContain("private-preview-");
     expect(output.sessions[0].desktopObservation).toEqual(f.sessions[0].desktopObservation);
     expect(output.sessions[0].model).toBe("control-model");
-    expect(output.sessions[0]).toMatchObject({ nodeId: "demoair", id: "s1", title: "测试", status: "idle",
+    expect(output.sessions[0]).toMatchObject({ nodeId: "macair", id: "s1", title: "测试", status: "idle",
       executionStatus: "idle", capabilities: ["read", "send"], modelView: { model: "desktop-model" },
       displayLabel: expect.stringMatching(/^⟦session:/) });
     expect(output.modelSummary).toMatchObject({ truncated: false, omittedSessions: 0, directoryRetainedOnServer: true });
@@ -195,8 +195,8 @@ describe("Leader orchestration", () => {
       return final(`未找到「旧版标题」的会话。你指的是当前这个会话吗？\n${output.candidates[0].displayLabel}\n尚未派发任务，等你确认目标。`);
     } };
     const reply = await f.create(model).handle("chat", "candidate-clarification", "你让「旧版标题 · 可靠通知交付 · 合并上线」会话修改项目，把网络搜索工具打开并验证可用。找不到这个原题时先问我是不是当前的微信异步 typing 会话，不要直接派发。");
-    expect(reply.text).toBe(`未找到「旧版标题」的会话。你指的是当前这个会话吗？\n[demoair] ${f.sessions[0].title}\n尚未派发任务，等你确认目标。`);
-    expect(reply.text).not.toContain("[demomini]");
+    expect(reply.text).toBe(`未找到「旧版标题」的会话。你指的是当前这个会话吗？\n[macair] ${f.sessions[0].title}\n尚未派发任务，等你确认目标。`);
+    expect(reply.text).not.toContain("[macmini]");
     expect(f.commands.submit).not.toHaveBeenCalled();
   });
 
@@ -204,14 +204,14 @@ describe("Leader orchestration", () => {
     const f = fixture();
     let step = 0;
     const model: LeaderModel = { complete: async messages => {
-      if (++step === 1) return tool("read_session", { nodeId: "demoair", sessionId: "s1" });
+      if (++step === 1) return tool("read_session", { nodeId: "macair", sessionId: "s1" });
       if (step === 2) return tool("list_sessions", {});
       const output = JSON.parse(messages.filter(message => message.role === "tool").at(-1)!.content!);
       return final(`${output.sessions[0].displayLabel}\n空闲\n改写后的第二个会话：空闲`);
     } };
     const reply = await f.create(model).handle("chat", "history-then-directory", "看看具体会话，再列出所有会话");
-    expect(reply.text).toContain("test（demoair）\n1. [闲] 测试");
-    expect(reply.text).toContain("test（demomini）\n2. [闲] 测试");
+    expect(reply.text).toContain("test（macair）\n1. [闲] 测试");
+    expect(reply.text).toContain("test（macmini）\n2. [闲] 测试");
     expect(reply.text).not.toContain("改写后的第二个会话");
     expect(f.commands.submit).not.toHaveBeenCalled();
   });
@@ -221,7 +221,7 @@ describe("Leader orchestration", () => {
     f.sessions[0].title = "🟢 [微信] 保留完整原题 | GPT-6.1-Sol";
     const reply = await f.create().handle("chat", "list-and-nodes", "列出会话并看看机器");
     expect(reply.text).toContain(f.sessions[0].title);
-    expect(reply.text).toContain("test（demomini）\n2. [闲] 测试");
+    expect(reply.text).toContain("test（macmini）\n2. [闲] 测试");
     expect(reply.text).not.toContain("改写的会话");
     expect(f.commands.submit).not.toHaveBeenCalled();
   });
@@ -234,8 +234,8 @@ describe("Leader orchestration", () => {
     const query = new ScriptedModel([tool("list_sessions", {}),
       tool(name, name === "get_command" ? { commandId: "cmd-1" } : {}), final("已接收本次任务，尚未确认完成。")]);
     const reply = await f.create(query).handle("chat", `progress-${name}`, "看看本次任务进度");
-    expect(reply.text).toBe(`[demoair] ${f.sessions[0].title}\n\n已接收本次任务，尚未确认完成。`);
-    expect(reply.text).not.toContain("[demomini]");
+    expect(reply.text).toBe(`[macair] ${f.sessions[0].title}\n\n已接收本次任务，尚未确认完成。`);
+    expect(reply.text).not.toContain("[macmini]");
     const projection = JSON.parse(query.calls[2].filter(message => message.role === "tool").at(-1)!.content!);
     expect(name === "get_command" ? projection.displayLabel : projection.steps[0].displayLabel).toMatch(/^⟦session:/);
     expect(f.commands.submit).toHaveBeenCalledTimes(1);
@@ -250,22 +250,22 @@ describe("Leader orchestration", () => {
   });
 
   it("uses multiple model tools to inspect real targets without treating tool output as user authority", async () => {
-    const f = fixture([tool("list_sessions", {}), tool("read_session", { nodeId: "demoair", sessionId: "s1" }), final("该会话已有输出，尚未确认任务完成。")]);
-    const reply = await f.create().handle("chat", "m1", "帮我看看 demoair 上的任务做到哪了");
-    expect(reply.text).toBe("[demoair] 测试\n\n该会话已有输出，尚未确认任务完成。");
+    const f = fixture([tool("list_sessions", {}), tool("read_session", { nodeId: "macair", sessionId: "s1" }), final("该会话已有输出，尚未确认任务完成。")]);
+    const reply = await f.create().handle("chat", "m1", "帮我看看 Mac Air 上的任务做到哪了");
+    expect(reply.text).toBe("[macair] 测试\n\n该会话已有输出，尚未确认任务完成。");
     expect(f.commands.submit).not.toHaveBeenCalled();
-    expect(f.hub.readHistory).toHaveBeenCalledExactlyOnceWith("demoair", "s1", { limit: 8 }, expect.any(AbortSignal));
+    expect(f.hub.readHistory).toHaveBeenCalledExactlyOnceWith("macair", "s1", { limit: 8 }, expect.any(AbortSignal));
     expect((await f.store.getLeaderState("chat"))?.data.commandIds).toEqual([]);
     expect(f.model.calls[2].find(m => m.role === "tool" && m.content?.includes("UNTRUSTED"))).toBeDefined();
     expect(f.model.calls[2].filter(m => m.role === "user")).toHaveLength(1);
   });
 
   it("persists a multi-node plan, confirms once after restart and deduplicates repeat confirmations", async () => {
-    const planned = [...actions, { nodeId: "demomini", sessionId: "s2", prompt: "检查测试结果" }];
+    const planned = [...actions, { nodeId: "macmini", sessionId: "s2", prompt: "检查测试结果" }];
     const f = fixture([tool("propose_plan", { actions: planned }), final("当前没有待确认计划；已有任务不会重复派发")]);
     const preview = await f.create().handle("chat", "plan", "让两台机器分别检查任务");
     expect(preview.text).toContain("尚未派发");
-    expect(preview.text).toContain("demomini");
+    expect(preview.text).toContain("macmini");
     expect(f.commands.submit).not.toHaveBeenCalled();
     const restarted = f.create();
     const reply = await restarted.handle("chat", "confirm", "就按这个执行");
@@ -342,6 +342,44 @@ describe("Leader orchestration", () => {
     expect(f.commands.submit).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["retry", "new-message"] as const)("retains a preview after an interrupted query is recovered by %s", async recovery => {
+    const f = fixture([tool("propose_plan", { actions })]);
+    await f.create().handle("chat", "preview", "安排任务");
+    const pending = LeaderDataSchema.parse((await f.store.getLeaderState("chat"))!.data).pending!;
+    const save = f.store.compareAndSetLeaderState.bind(f.store);
+    const persistence = vi.spyOn(f.store, "compareAndSetLeaderState")
+      .mockImplementationOnce(save)
+      .mockRejectedValueOnce(new Error("query receipt persistence interrupted"));
+    await expect(f.create(new ScriptedModel([final("计划尚未执行")]))
+      .handle("chat", "interrupted-query", "先看看状态")).rejects.toThrow("query receipt persistence interrupted");
+    persistence.mockRestore();
+    const interrupted = LeaderDataSchema.parse((await f.store.getLeaderState("chat"))!.data);
+    expect(interrupted.pending).toEqual(pending);
+    expect(interrupted.inflight?.messageId).toBe("interrupted-query");
+    expect(interrupted.inflight?.plan).toBeUndefined();
+    expect(interrupted.receipts.some(receipt => receipt.messageId === "interrupted-query")).toBe(false);
+
+    f.tick(CLAIM_TTL_MS + 1);
+    f.refresh();
+    const response = recovery === "retry"
+      ? await f.create().handle("chat", "interrupted-query", "先看看状态")
+      : await f.create(new ScriptedModel([final("仍未执行")])).handle("chat", "new-query", "再看看状态");
+    expect(response.text).toContain(recovery === "retry" ? "未自动重试" : "仍未执行");
+    const recovered = LeaderDataSchema.parse((await f.store.getLeaderState("chat"))!.data);
+    expect(recovered.pending).toEqual(pending);
+    expect(recovered.inflight).toBeUndefined();
+    expect(recovered.receipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ messageId: "interrupted-query", text: expect.stringContaining("未自动重试") }),
+    ]));
+    expect(f.commands.submit).not.toHaveBeenCalled();
+    const confirmation = await f.create().handle("chat", "confirm-after-recovery", "确认");
+    expect(confirmation.text).toContain("已接收");
+    expect(f.commands.submit).toHaveBeenCalledTimes(1);
+    expect((await f.store.getLatestExecution("chat"))?.id).toBe(pending.id);
+    expect(await f.create().handle("chat", "confirm-after-recovery", "确认")).toEqual(confirmation);
+    expect(f.commands.submit).toHaveBeenCalledTimes(1);
+  });
+
   it("isolates short confirmations by chat and expires retained previews during queries", async () => {
     const f = fixture([tool("propose_plan", { actions }), final("状态已更新")]);
     await f.create().handle("chat", "preview", "安排任务");
@@ -358,14 +396,14 @@ describe("Leader orchestration", () => {
     const f = fixture([tool("propose_plan", { actions: [actions[0], { ...actions[0], sessionId: "sibling", prompt: "另一个任务" }] })]);
     f.sessions.push({ ...f.sessions[0], id: "sibling" });
     const response = await f.create().handle("chat", "preview", "安排两个同名会话");
-    expect(response.text).toContain("[demoair] 测试（s1）");
-    expect(response.text).toContain("[demoair] 测试（sibling）");
+    expect(response.text).toContain("[macair] 测试（s1）");
+    expect(response.text).toContain("[macair] 测试（sibling）");
     expect(f.commands.submit).not.toHaveBeenCalled();
   });
 
   it("previews frozen dependencies and advances only after exact completion, independent of chat queries", async () => {
     const f = fixture([tool("propose_plan", { actions: [...actions,
-      { nodeId: "demomini", sessionId: "s2", prompt: "后续检查", dependsOn: [1] }] })]);
+      { nodeId: "macmini", sessionId: "s2", prompt: "后续检查", dependsOn: [1] }] })]);
     const preview = await f.create().handle("chat", "plan", "先让 Air 检查，完成后 Mini 再检查");
     expect(preview.text).toContain("步骤 1 完成后");
     expect(preview.text).toContain("24小时");

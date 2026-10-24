@@ -113,6 +113,7 @@ test('image contracts reject emulated toolchains, unpruned dependencies and leak
     assert.throws(() => assertImageContract(unpruned, component));
     assert.throws(() => assertImageContract(source.replace(`FROM ${BASE_IMAGE}\n`, `FROM --platform=$BUILDPLATFORM ${BASE_IMAGE}\n`), component));
     assert.throws(() => assertImageContract(`${source}\nCOPY --from=toolchain /usr/local/bin/pnpm /usr/local/bin/pnpm\n`, component));
+    assert.throws(() => assertImageContract(source.replace('chmod -R go-w', 'chmod -R a+w'), component));
   }
   assert.throws(() => assertImageContract(controllerDockerfile.replace('/web/dist ./web', '/web/node_modules ./web'), 'controller'));
   assert.throws(() => assertImageContract(controllerDockerfile.replace('FROM toolchain AS web-build', `FROM ${BASE_IMAGE} AS web-build`), 'controller'));

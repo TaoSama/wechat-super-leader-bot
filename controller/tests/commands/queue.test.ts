@@ -26,6 +26,7 @@ async function setup(options: { connected?: boolean; busy?: boolean; ttlSeconds?
   await store.upsertNodeSessions(NODE_ID, [session]);
   const hub = {
     isNodeConnected: vi.fn(() => options.connected !== false),
+    supportsDeliveryMode: vi.fn(() => true),
     getNodeSession: vi.fn((nodeId: string, sessionId: string) =>
       nodeId === NODE_ID && sessionId === SESSION_ID ? session : undefined),
     getNodeSkills: vi.fn(() => []),
@@ -373,8 +374,65 @@ it("compares persisted authorization fields independently of JSONB property orde
   expect(sameAuthority({ type: "plan", id: "plan-id", chatId: "chat" }, { chatId: "chat", id: "plan-id", type: "plan" })).toBe(true);
   expect(sameAuthority({ type: "goal", id: "goal-id", chatId: "chat" }, { chatId: "chat", id: "goal-id", type: "goal" })).toBe(true);
   expect(sameAuthority({ type: "chat", chatId: "chat" }, { chatId: "chat", type: "chat" })).toBe(true);
+  expect(sameAuthority({ type: "chat", chatId: "chat" }, { chatId: "chat", type: "chat", steerGeneration: 0 })).toBe(false);
+  expect(sameAuthority({ type: "chat", chatId: "chat", steerGeneration: 1 }, { chatId: "chat", type: "chat", steerGeneration: 0 })).toBe(false);
   expect(sameAuthority(undefined, { type: "admin" })).toBe(true);
   expect(sameAuthority({ type: "console", tokenHash, expiresAt }, { type: "console", tokenHash, expiresAt: new Date(START_TIME).toISOString() })).toBe(false);
   expect(sameAuthority({ type: "chat", chatId: "chat" }, { type: "chat", chatId: "other-chat" })).toBe(false);
   expect(sameAuthority({ type: "plan", id: "same-id", chatId: "chat" }, { type: "goal", id: "same-id", chatId: "chat" })).toBe(false);
+});
+
+it("revokes chat steer commands while retaining another chat's queued authorization", async () => {
+  const f = await setup({ connected: false });
+  const cancelledChat = "cancelled-chat", otherChat = "other-chat";
+  await f.store.compareAndSetLeaderState(cancelledChat, 0, { steerGeneration: 0 });
+  await f.store.compareAndSetLeaderState(otherChat, 0, { steerGeneration: 0 });
+  const cancelled = await f.commands.submit({ ...input, deliveryMode: "steer", expectedTurnId: "cancelled-turn" },
+    0, undefined, undefined, { type: "chat", chatId: cancelledChat, steerGeneration: 0 });
+  const other = await f.commands.submit({ ...nextRequest(1), deliveryMode: "steer", expectedTurnId: "other-turn" },
+    0, undefined, undefined, { type: "chat", chatId: otherChat, steerGeneration: 0 });
+  expect(cancelled.status).toBe("queued");
+  expect(other.status).toBe("queued");
+  await f.store.compareAndSetLeaderState(cancelledChat, 1, { steerGeneration: 1 });
+  f.hub.isNodeConnected.mockReturnValue(true);
+  await new CommandService(f.store, f.hub, TTL_SECONDS).dispatchQueued();
+  expect(await f.store.getCommand(cancelled.commandId)).toMatchObject({ status: "cancelled" });
+  expect(await f.store.getCommand(other.commandId)).toMatchObject({ status: "accepted" });
+  expect(f.hub.sendCommand.mock.calls.map(([command]) => command.commandId)).toEqual([other.commandId]);
+});
+
+it("rejects a persisted steer without its durable chat state", async () => {
+  const f = await setup({ connected: false });
+  const queued = await f.commands.submit({ ...input, deliveryMode: "steer", expectedTurnId: "missing-state-turn" },
+    0, undefined, undefined, { type: "chat", chatId: "missing-chat", steerGeneration: 0 });
+  expect(queued.status).toBe("cancelled");
+  f.hub.isNodeConnected.mockReturnValue(true);
+  await new CommandService(f.store, f.hub, TTL_SECONDS).dispatchQueued();
+  expect(f.hub.sendCommand).not.toHaveBeenCalled();
+});
+
+it("rejects a legacy unscoped chat steer rather than restoring its permanent authorization", async () => {
+  const f = await setup({ connected: false });
+  const chatId = "legacy-steer-chat";
+  await f.store.compareAndSetLeaderState(chatId, 0, { steerGeneration: 0 });
+  const stamp = new Date().toISOString();
+  const { command } = await f.store.createCommandIfAbsent({ ...input, commandId: "legacy-queued-steer",
+    status: "queued", sendRoute: "control-socket", deliveryMode: "steer", expectedTurnId: "legacy-turn",
+    authority: { type: "chat", chatId }, createdAt: stamp, updatedAt: stamp,
+    expiresAt: new Date(START_TIME + TTL_SECONDS * 1000).toISOString() });
+  expect(command.status).toBe("queued");
+  f.hub.isNodeConnected.mockReturnValue(true);
+  await new CommandService(f.store, f.hub, TTL_SECONDS).dispatchQueued();
+  expect(await f.store.getCommand(command.commandId)).toMatchObject({ status: "cancelled" });
+  expect(f.hub.sendCommand).not.toHaveBeenCalled();
+});
+
+it.each([undefined, null, -1, 0.5, "0"])("rejects a persisted steer with invalid cancellation generation %s", async steerGeneration => {
+  const f = await setup();
+  const chatId = "invalid-generation-chat";
+  await f.store.compareAndSetLeaderState(chatId, 0, { steerGeneration });
+  const command = await f.commands.submit({ ...input, deliveryMode: "steer", expectedTurnId: "invalid-state-turn" },
+    0, undefined, undefined, { type: "chat", chatId, steerGeneration: 0 });
+  expect(command.status).toBe("cancelled");
+  expect(f.hub.sendCommand).not.toHaveBeenCalled();
 });

@@ -11,7 +11,7 @@ interface Options {
   nextCursor: string | null;
   loadingOlder: boolean;
   automaticLoadPaused?: boolean;
-  loadOlder: () => Promise<boolean>;
+  loadOlder: (beforeId?: string) => Promise<boolean>;
   onReadingLatestChange?: (latest: boolean) => void;
 }
 interface Anchor { element: HTMLElement; offset: number; fallback?: { element: HTMLElement; offset: number } }
@@ -78,6 +78,12 @@ export function useHistoryScroll(options: Options) {
     measuredViewportHeightRef.current = element.clientHeight;
   }
 
+  function hasContentResized(content: Element) {
+    const size = content.getBoundingClientRect();
+    const previous = measuredContentSizeRef.current;
+    return Math.abs(size.width - previous.width) >= 0.5 || Math.abs(size.height - previous.height) >= 0.5;
+  }
+
   function capture(): Anchor | null {
     const container = scrollRef.current;
     if (!container) return null;
@@ -129,9 +135,9 @@ export function useHistoryScroll(options: Options) {
     return resized;
   }
 
-  const loadOlder = useCallback(async (): Promise<boolean> => {
+  const loadOlder = useCallback(async (beforeId?: string): Promise<boolean> => {
     const current = optionsRef.current;
-    if (current.visible === false || busyRef.current || current.loadingOlder || !current.nextCursor) return false;
+    if (current.visible === false || busyRef.current || current.loadingOlder || beforeId === undefined && !current.nextCursor) return false;
     busyRef.current = true;
     blockedRef.current = false;
     setAutoLoadBlocked(false);
@@ -140,7 +146,7 @@ export function useHistoryScroll(options: Options) {
     const generation = generationRef.current;
     const belongsToCurrent = () => optionsRef.current.owner === owner && generationRef.current === generation;
     try {
-      const loaded = await current.loadOlder();
+      const loaded = await current.loadOlder(beforeId);
       if (!belongsToCurrent()) return false;
       if (!loaded) { anchorRef.current = null; blockedRef.current = true; setAutoLoadBlocked(true); }
       return loaded;
@@ -208,8 +214,9 @@ export function useHistoryScroll(options: Options) {
     const viewportResized = element && measuredViewportHeightRef.current > 0 && element.clientHeight > 0 &&
       measuredViewportHeightRef.current !== element.clientHeight;
     const paginationChanged = processedRef.current?.hasOlder !== !!options.nextCursor;
-    if (!ownerChanged && !visibilityChanged && !elementChanged && processedRef.current?.items === options.items &&
-      processedRef.current.loadingOlder === options.loadingOlder && !viewportResized && !paginationChanged) return;
+    const inputsUnchanged = !ownerChanged && !visibilityChanged && !elementChanged && processedRef.current?.items === options.items &&
+      processedRef.current.loadingOlder === options.loadingOlder;
+    if (inputsUnchanged && !viewportResized && !paginationChanged) return;
     processedRef.current = { items: options.items, loadingOlder: options.loadingOlder, hasOlder: !!options.nextCursor };
     visibleRef.current = visible;
     elementRef.current = element;
@@ -235,6 +242,8 @@ export function useHistoryScroll(options: Options) {
       if (visible && element && !resumeRef.current) element.scrollTop = element.scrollHeight;
     }
     if (!visible || !element || !options.items.length) return;
+    const reuseGeometry = inputsUnchanged && viewportResized &&
+      !hasContentResized(element.querySelector(".history-content") ?? element);
     if (!ownerChanged && !reopened) followViewportResize(element);
     const resume = resumeRef.current;
     if (resume) {
@@ -266,7 +275,9 @@ export function useHistoryScroll(options: Options) {
       element.scrollTop = element.scrollHeight;
       anchorRef.current = null;
     } else if (!bottomRef.current) restore(element);
-    measure(element);
+    // A viewport-only resize preserves row coordinates, including cached tool groups.
+    if (reuseGeometry) measuredViewportHeightRef.current = element.clientHeight;
+    else measure(element);
     anchorRef.current = bottomRef.current ? null : capture();
     if (!bottomRef.current && tailRef.current && signature !== tailRef.current) setNewContent(true);
     tailRef.current = signature;
@@ -289,9 +300,7 @@ export function useHistoryScroll(options: Options) {
     lastScrollTopRef.current = element.scrollTop;
     const observer = new ResizeObserver(() => {
       if (observerRef.current?.observer !== observer || scrollRef.current !== element || optionsRef.current.visible === false) return;
-      const size = content.getBoundingClientRect();
-      const previous = measuredContentSizeRef.current;
-      const contentResized = Math.abs(size.width - previous.width) >= 0.5 || Math.abs(size.height - previous.height) >= 0.5;
+      const contentResized = hasContentResized(content);
       const viewportResized = followViewportResize(element);
       if (!contentResized && !viewportResized) return;
       if (bottomRef.current) element.scrollTop = element.scrollHeight;

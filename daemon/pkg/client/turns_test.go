@@ -44,8 +44,8 @@ func TestInspectTurnStates(t *testing.T) {
 	} {
 		t.Run(tc.state, func(t *testing.T) {
 			a := &inspectingAdapter{status: tc.state}
-			d := NewDaemon(&config.Config{NodeID: "demoair"}, a)
-			msg := protocol.InspectTurnMessage{Type: "inspect_turn", CommandID: "command", NodeID: "demoair", SessionID: "session", TurnID: "target"}
+			d := NewDaemon(&config.Config{NodeID: "macair"}, a)
+			msg := protocol.InspectTurnMessage{Type: "inspect_turn", CommandID: "command", NodeID: "macair", SessionID: "session", TurnID: "target"}
 			res := d.InspectTurn(context.Background(), msg)
 			if res.Status != tc.want || res.TurnID != "target" {
 				t.Fatalf("unexpected result: %+v", res)
@@ -60,8 +60,8 @@ func TestInspectTurnStates(t *testing.T) {
 
 func TestInspectionFailureIsUncertainAndRetryable(t *testing.T) {
 	a := &inspectingAdapter{status: "completed", err: errors.New("private upstream detail")}
-	d := NewDaemon(&config.Config{NodeID: "demoair"}, a)
-	msg := protocol.InspectTurnMessage{Type: "inspect_turn", CommandID: "command", NodeID: "demoair", SessionID: "session", TurnID: "target"}
+	d := NewDaemon(&config.Config{NodeID: "macair"}, a)
+	msg := protocol.InspectTurnMessage{Type: "inspect_turn", CommandID: "command", NodeID: "macair", SessionID: "session", TurnID: "target"}
 	res := d.InspectTurn(context.Background(), msg)
 	if res.Status != protocol.StatusUncertain || res.Output != "" || res.Error == a.err.Error() {
 		t.Fatalf("unsafe failure: %+v", res)

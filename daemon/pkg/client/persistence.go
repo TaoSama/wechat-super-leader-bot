@@ -148,17 +148,19 @@ func boundedReceiptText(text string, limit int) string {
 
 func (d *Daemon) flushJournal(send func(any) error) error {
 	d.persistenceMu.Lock()
-	var retryErr error
+	failed := 0
 	for id, result := range d.pendingPersistence {
 		if err := d.journal.Finish(result); err != nil {
-			retryErr = errors.New("pending result persistence failed")
-			break
+			failed++
+			continue
 		}
 		delete(d.pendingPersistence, id)
 	}
 	d.persistenceMu.Unlock()
-	if retryErr != nil {
-		return retryErr
+	if failed > 0 {
+		// Durable receipts must still reach the Controller so its ACKs can
+		// release journal space for the pending results on the next retry.
+		log.Printf("Command result persistence unavailable for %d results; retaining for retry", failed)
 	}
 	results, err := d.journal.Unacked()
 	if err != nil {

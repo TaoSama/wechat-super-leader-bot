@@ -10,6 +10,7 @@ import {
 const MAX_PENDING_MEDIA = 8;
 const MAX_PENDING_PER_NODE = 2;
 const MAX_WIRE_BYTES = MAX_MEDIA_CHUNK_BYTES * 2;
+const MEDIA_TIMEOUT_REASON = Symbol("media_timeout");
 const ListResponseSchema = z.object({
   type: z.literal("media_list"), requestId: z.string().uuid(), sessionId: z.string().min(1).max(128),
   mediaContext: z.string().uuid().optional(), source: z.enum(["control-socket", "codex-desktop"]).optional(),
@@ -30,12 +31,14 @@ interface PendingMedia extends MediaTarget {
 const invalid = () => new MediaError(502, "media_invalid_response");
 const disconnected = () => new MediaError(503, "media_disconnected");
 const cancelled = () => new MediaError(499, "media_cancelled");
+const timedOut = () => new MediaError(504, "media_timeout");
+const abortError = (signal?: AbortSignal) => signal?.reason === MEDIA_TIMEOUT_REASON ? timedOut() : cancelled();
 function remoteError(error: string) {
   switch (error) {
     case "Media context expired": return new MediaError(410, "media_context_expired");
     case "Media unavailable": return new MediaError(404, "media_unavailable");
     case "Too many media requests": return new MediaError(429, "media_busy");
-    case "Media request timed out": return new MediaError(504, "media_timeout");
+    case "Media request timed out": return timedOut();
     default: return new MediaError(502, "media_failed");
   }
 }
@@ -46,7 +49,7 @@ export class SessionMediaRequests {
 
   private request(target: MediaTarget, ws: WebSocket, type: "list_media" | "read_media",
     args: Record<string, unknown>, signal?: AbortSignal): Promise<WireResponse> {
-    if (signal?.aborted) return Promise.reject(cancelled());
+    if (signal?.aborted) return Promise.reject(abortError(signal));
     if (ws.readyState !== WebSocket.OPEN) return Promise.reject(disconnected());
     if (this.pending.size >= MAX_PENDING_MEDIA ||
         [...this.pending.values()].filter(item => item.nodeId === target.nodeId).length >= MAX_PENDING_PER_NODE) {
@@ -65,8 +68,8 @@ export class SessionMediaRequests {
           });
         } catch { console.warn("[media] cancellation transport failed"); }
       };
-      const onAbort = () => stop(cancelled());
-      const timer = setTimeout(() => stop(new MediaError(504, "media_timeout")), MEDIA_TIMEOUT_MS);
+      const onAbort = () => stop(abortError(signal));
+      const timer = setTimeout(() => stop(timedOut()), MEDIA_TIMEOUT_MS);
       const pending: PendingMedia = { ...target, ws,
         expectedType: type === "list_media" ? "media_list" : "media_chunk",
         settle: (value, error) => {
@@ -100,7 +103,7 @@ export class SessionMediaRequests {
     const expected = validated.media.find(item => item.mediaId === image.mediaId);
     if (!expected || JSON.stringify(expected) !== JSON.stringify(MediaDescriptorSchema.parse(image))) throw invalid();
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), MEDIA_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(MEDIA_TIMEOUT_REASON), MEDIA_TIMEOUT_MS);
     const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
     const bytes = Buffer.alloc(expected.totalSize);
     let offset = 0;
@@ -119,7 +122,7 @@ export class SessionMediaRequests {
             chunk.toString("base64") !== response.data || response.eof !== (offset + chunk.length === expected.totalSize)) throw invalid();
         chunk.copy(bytes, offset); offset += chunk.length;
       }
-      combined.throwIfAborted();
+      if (combined.aborted) throw abortError(combined);
       if (createHash("sha256").update(bytes).digest("hex") !== expected.sha256 || detectImageMime(bytes) !== expected.mime) throw invalid();
       return bytes;
     } finally { clearTimeout(timer); }

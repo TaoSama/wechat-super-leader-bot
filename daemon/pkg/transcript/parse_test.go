@@ -84,3 +84,91 @@ func TestInvalidOptionalFieldsAndUnknownFormat(t *testing.T) {
 	_, _, err := r.Read(context.Background(), ref, "", "", 1)
 	assertError(t, err, protocol.HistoryUnavailable)
 }
+
+func TestReadPreservesValidUnicode(t *testing.T) {
+	for name, tc := range map[string]struct {
+		encoded string
+		text    string
+	}{
+		"literal-replacement": {`"日志里出现 �"`, "日志里出现 �"},
+		"escaped-replacement": {`"日志里出现 \uFFFD"`, "日志里出现 �"},
+		"surrogate-pair":      {`"emoji: \uD83D\uDE00"`, "emoji: 😀"},
+		"escaped-surrogate":   {`"literal: \\ud800"`, `literal: \ud800`},
+	} {
+		for _, agent := range []string{"codex", "claude", "grok"} {
+			t.Run(agent+"/"+name, func(t *testing.T) {
+				r, ref, _ := fixture(t, agent, unicodeRecord(agent, tc.encoded))
+				page, generation, err := r.Read(context.Background(), ref, "", "", 10)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(page.Items) != 1 || page.Items[0].Text != tc.text || generation == "" || page.Truncated {
+					t.Fatalf("Unicode text changed: %+v", page)
+				}
+			})
+		}
+	}
+}
+
+func TestReadRejectsMalformedUnicode(t *testing.T) {
+	for name, encoded := range map[string]string{
+		"invalid-utf8":            "\"invalid: \xff\"",
+		"unpaired-high":           `"\ud800"`,
+		"unpaired-low":            `"\udfff"`,
+		"high-followed-by-ascii":  `"\ud800\u0061"`,
+		"high-followed-by-high":   `"\ud800\ud800"`,
+		"low-followed-by-high":    `"\udc00\ud800"`,
+		"pair-with-text-between":  `"\ud800x\udc00"`,
+		"pair-with-escaped-slash": `"\ud800\\udc00"`,
+		"replacement-and-high":    `"�\ud800"`,
+		"invalid-unicode-escape":  `"\uZZZZ"`,
+		"truncated-escape":        `"\uFFF"`,
+		"truncated-string":        `"incomplete`,
+	} {
+		for _, agent := range []string{"codex", "claude", "grok"} {
+			t.Run(agent+"/"+name, func(t *testing.T) {
+				r, ref, _ := fixture(t, agent, unicodeRecord(agent, encoded))
+				page, generation, err := r.Read(context.Background(), ref, "", "", 10)
+				assertError(t, err, protocol.HistoryIncomplete)
+				if len(page.Items) != 0 || generation != "" {
+					t.Fatalf("malformed text published: %+v", page)
+				}
+			})
+		}
+	}
+}
+
+func TestReadUnicodeKeepsIdentityValidation(t *testing.T) {
+	for name, tc := range map[string]struct {
+		record string
+		err    string
+	}{
+		"escaped-duplicate-identity": {`{"type":"session_meta","payload":{"id":"` + testID + `","\u0069d":"other"}}`, protocol.HistoryIncomplete},
+		"replacement-identity":       {`{"type":"session_meta","payload":{"id":"�"}}`, protocol.HistoryUnavailable},
+		"surrogate-identity":         {`{"type":"session_meta","payload":{"id":"\ud800"}}`, protocol.HistoryIncomplete},
+		"surrogate-key":              {`{"type":"session_meta","payload":{"id":"` + testID + `","\ud800":"other"}}`, protocol.HistoryIncomplete},
+		"duplicate-replacement-key":  {`{"type":"session_meta","payload":{"id":"` + testID + `","�":1,"\uFFFD":2}}`, protocol.HistoryIncomplete},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, ref, _ := fixture(t, "codex", tc.record+"\n"+codexText("public"))
+			page, _, err := r.Read(context.Background(), ref, "", "", 10)
+			assertError(t, err, tc.err)
+			if len(page.Items) != 0 {
+				t.Fatalf("invalid identity published text: %+v", page)
+			}
+		})
+	}
+}
+
+func unicodeRecord(agent, encoded string) string {
+	switch agent {
+	case "codex":
+		return meta() + `{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":` + encoded + `}]}}` + "\n"
+	case "claude":
+		return `{"type":"assistant","sessionId":"` + testID + `","message":{"role":"assistant","content":` + encoded + `}}` + "\n"
+	case "grok":
+		return `{"method":"session/update","params":{"sessionId":"` + testID + `","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":` + encoded + `}}}}` + "\n"
+	default:
+		panic("unsupported test agent")
+	}
+}

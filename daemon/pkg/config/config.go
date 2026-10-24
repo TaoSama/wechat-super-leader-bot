@@ -100,14 +100,9 @@ func ParseFlags(args []string) (*Config, error) {
 	probeSkills := fs.Bool("probe-skills", false, "Read-only scan configured skill roots and exit; no socket or Controller connection")
 	serviceAction := fs.String("service", "", "Manage user service: install|start|stop|restart|status|uninstall")
 	stateDir := fs.String("state-dir", os.Getenv("DAEMON_STATE_DIR"), "Private durable command journal directory; defaults to ~/.super-leader/daemon/<node hash>")
-	var skillRoots []string
-	if raw := os.Getenv("SKILL_ROOTS"); raw != "" {
-		if err := json.Unmarshal([]byte(raw), &skillRoots); err != nil {
-			return nil, errors.New("SKILL_ROOTS must be a JSON array of absolute directory paths")
-		}
-	}
+	var additionalSkillRoots []string
 	fs.Func("skill-root", "Additional permitted skill directory (repeatable); defaults to SKILL_ROOTS JSON array or none", func(value string) error {
-		skillRoots = append(skillRoots, value)
+		additionalSkillRoots = append(additionalSkillRoots, value)
 		return nil
 	})
 
@@ -139,6 +134,18 @@ func ParseFlags(args []string) (*Config, error) {
 	if modeCount > 1 {
 		return nil, errors.New("choose only one of probe, probe-skills, or service")
 	}
+	if action != "" && action != ServiceActionInstall {
+		// Existing services use their installed configuration for lifecycle actions.
+		return &Config{ServiceAction: action}, nil
+	}
+
+	var skillRoots []string
+	if raw := os.Getenv("SKILL_ROOTS"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &skillRoots); err != nil {
+			return nil, errors.New("SKILL_ROOTS must be a JSON array of absolute directory paths")
+		}
+	}
+	skillRoots = append(skillRoots, additionalSkillRoots...)
 	if len(skillRoots) > MaxSkillRoots {
 		return nil, errors.New("at most 16 skill roots are supported")
 	}
@@ -228,6 +235,9 @@ func ParseFlags(args []string) (*Config, error) {
 
 		if token == "" {
 			return nil, fmt.Errorf("node token is required: set %s or specify -token-file", *tokenEnv)
+		}
+		if err := ValidateNodeToken(token); err != nil {
+			return nil, err
 		}
 		cfg.NodeToken = token
 

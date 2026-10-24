@@ -6,7 +6,7 @@ import type { ScopedSession } from "../../src/types";
 const NOW = Date.parse("2026-10-23T00:00:00Z");
 const iso = (offset = 0) => new Date(NOW + offset).toISOString();
 const checking: ScopedSession = {
-  id: "original", nodeId: "demoair", provider: "codex-app", title: "原会话", cwd: "/fixture",
+  id: "original", nodeId: "macair", provider: "codex-app", title: "原会话", cwd: "/fixture",
   status: "notLoaded", loaded: false, capabilities: ["read"], observedAt: iso(),
   desktopObservation: { source: "codex-desktop", status: "idle", availability: "available", observedAt: iso() },
   sendAvailability: { route: "desktop-owner", state: "blocked", reason: "checking",

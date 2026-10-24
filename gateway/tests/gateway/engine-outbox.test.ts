@@ -114,7 +114,7 @@ for (const remainsFull of [false, true]) {
       const chatId = index === 0 ? CHAT : `unfunded-chat-${index}`;
       f.start.putOutbox({ kind: "reply", source: "engine", chatId, messageId: `old-${index}`,
         deliveryKey: f.start.computeDeliveryKey(chatId, `old-${index}`), splitMaxChars: 100,
-        splitMultiPart: true, status: "pending" });
+        status: "pending" });
     }
     assert.equal(f.start.policy.outboxLimit, 1000, "Gateway capacity must exceed the full engine journal");
     const operations: string[] = [];
@@ -269,7 +269,7 @@ for (const status of ["expired", "uncertain"] as const) {
   test(`${status} engine receipt persists acknowledgement once and never repeats journal I/O after restart`, async t => {
     const f = fixture(t);
     f.start.putOutbox({ kind: "reply", source: "engine", deliveryKey: f.key, chatId: CHAT,
-      messageId: MESSAGE, status, splitMaxChars: 3, splitMultiPart: true });
+      messageId: MESSAGE, status, splitMaxChars: 3 });
     const engine = f.engine();
     const ack = engine.ackReply.bind(engine);
     let acknowledgements = 0;

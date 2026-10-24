@@ -53,7 +53,7 @@ test("transport renders Markdown before splitting and resumes the same display a
   const original = " \n# 标题🚀\n\n**重点** [文档](https://example.test/a_b)\n```ts\n  a_b += 1;\n```\n\t";
   assert.ok(original.length > 9);
   const result = await f.client().sendMarkdownReply("chat", original, {
-    deliveryKey: "full", maxCharsPerChunk: 9, splitMultiPart: false,
+    deliveryKey: "full", maxCharsPerChunk: 9,
   });
   assert.equal(result, f.sent.length);
   assert.equal(f.sent.join(""), "标题🚀\n\n重点 文档 (https://example.test/a_b)\n  a_b += 1;\n");

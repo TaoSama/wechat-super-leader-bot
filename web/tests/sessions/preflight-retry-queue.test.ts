@@ -47,7 +47,7 @@ describe("durable queue admission while an idle owner's failed preflight is retr
     { sendAvailability: { ...waiting.sendAvailability!, validUntil: iso(-9_001) } },
     { sendAvailability: { ...waiting.sendAvailability!, validUntil: iso(36_001) } },
     { id: "invalid/id" },
-    { nodeId: "invalid/node" },
+    { nodeId: "" },
     { id: "terminal:unverified", provider: "terminal" },
     { status: "unknown", loaded: undefined, desktopObservation: undefined, sendAvailability: undefined },
   ])("does not grant queueing from invalid, missing or contradictory identity/proof %#", changes => {

@@ -24,6 +24,7 @@ func newRPCRejectedError(value any, hasResult bool) *rpcRejectedError {
 	if err != nil {
 		return &rpcRejectedError{message: fmt.Sprintf("codex rpc error: %v", value)}
 	}
+
 	rejected := &rpcRejectedError{message: fmt.Sprintf("codex rpc error: %s", encoded)}
 	var detail struct {
 		Code    *int    `json:"code"`

@@ -60,6 +60,33 @@ test('production tmpfs options form exactly one mount', () => {
   assert.deepEqual(production.services.controller.tmpfs, ['/tmp:size=64m,mode=1777']);
 });
 
+test('database passwords with URI delimiters reach PostgreSQL and the controller unchanged', () => {
+  for (const password of ['synthetic#password', 'synthetic/password', ' synthetic#/%:@? password ']) {
+    const configured = JSON.parse(execCompose([
+      '--env-file', '/dev/null',
+      '-f', fileURLToPath(new URL('../../../compose.yaml', import.meta.url)),
+      'config', '--format', 'json',
+    ], { encoding: 'utf8', timeout: 10000, env: { ...fakeEnv, POSTGRES_PASSWORD: password } }));
+    assert.equal(configured.services.postgres.environment.POSTGRES_PASSWORD, password);
+    assert.equal(configured.services.controller.environment.PGPASSWORD, password);
+    assert.equal(configured.services.controller.environment.DATABASE_URL, '');
+    assert.equal(configured.services.controller.environment.PGHOST, 'postgres');
+    assert.equal(configured.services.controller.environment.PGPORT, '5432');
+    assert.equal(configured.services.controller.environment.PGUSER, 'leader');
+    assert.equal(configured.services.controller.environment.PGDATABASE, 'leader');
+  }
+});
+
+test('an explicit DATABASE_URL remains available as a controller override', () => {
+  const databaseUrl = 'postgresql://synthetic:synthetic%23%2Fpassword@external-db.invalid:5544/external';
+  const configured = JSON.parse(execCompose([
+    '--env-file', '/dev/null',
+    '-f', fileURLToPath(new URL('../../../compose.yaml', import.meta.url)),
+    'config', '--format', 'json',
+  ], { encoding: 'utf8', timeout: 10000, env: { ...fakeEnv, DATABASE_URL: databaseUrl } }));
+  assert.equal(configured.services.controller.environment.DATABASE_URL, databaseUrl);
+});
+
 test('small-host memory and worker concurrency overrides preserve the sandbox', () => {
   const configured = JSON.parse(execCompose([
     '--env-file', '/dev/null',

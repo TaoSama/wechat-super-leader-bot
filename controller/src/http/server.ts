@@ -68,6 +68,7 @@ export class ControllerServer {
   private statusEvents: StatusEvents<Awaited<ReturnType<ControllerServer["statusSnapshot"]>>>;
   private taskNotifications: TaskNotifications;
   private progress?: ModelProgressRunner;
+  private stopping = false;
 
   // Chat context cache: chatId -> { nodeId, sessionId }
   private chatContexts = new Map<string, { nodeId: string; sessionId: string }>();
@@ -483,6 +484,10 @@ export class ControllerServer {
 
   private setupWebSocket(): void {
     this.server.on("upgrade", (request, socket, head) => {
+      if (this.stopping) {
+        socket.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", () => socket.destroy());
+        return;
+      }
       let url: URL;
       try {
         url = new URL(request.url || "", "http://localhost");
@@ -536,6 +541,7 @@ export class ControllerServer {
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
     await Promise.all([this.taskNotifications.stop(), this.executions?.stop(), this.goals?.stop(),this.progress?.stop(),this.commands.stop()]);
     this.statusEvents.stop();
     // Proactively close all active node websocket connections first

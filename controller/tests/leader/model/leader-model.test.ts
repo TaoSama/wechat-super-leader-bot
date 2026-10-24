@@ -80,7 +80,7 @@ describe("HTTP Leader model", () => {
     const nextMessages: ModelMessage[] = [
       ...messages,
       { role: "assistant", content: null, responseOutput: step1.responseOutput },
-      { role: "tool", tool_call_id: "tool-1", content: '{"nodes":["demoair"]}' },
+      { role: "tool", tool_call_id: "tool-1", content: '{"nodes":["macair"]}' },
     ];
 
     const step2 = await model.complete(nextMessages, [sampleTool]);
@@ -92,7 +92,7 @@ describe("HTTP Leader model", () => {
       { role: "user", content: "查询" },
       reasoningItem,
       fnItem,
-      { type: "function_call_output", call_id: "tool-1", output: '{"nodes":["demoair"]}' },
+      { type: "function_call_output", call_id: "tool-1", output: '{"nodes":["macair"]}' },
     ]);
   });
 

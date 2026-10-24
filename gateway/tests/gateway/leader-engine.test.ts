@@ -9,7 +9,7 @@ import { ControllerClient } from "../../src/controller/client.js";
 import { WeChatGateway } from "../../src/gateway.js";
 
 for (const allowed of [true, false]) {
-  test(`Codex reply engine is ${allowed ? 'used and checkpointed' : 'never invoked for an unauthorized chat'}`, async t => {
+  test(`Codex reply engine ${allowed ? 'handles duplicate page messages once' : 'skips duplicate unauthorized messages'}`, async t => {
     const root = mkdtempSync(join(tmpdir(), "leader-gateway-"));
     t.after(() => rmSync(root, { recursive: true, force: true }));
     const credentials = join(root, "account.json");
@@ -29,7 +29,7 @@ for (const allowed of [true, false]) {
         if (String(url).endsWith("getupdates")) return new Response(JSON.stringify({ ret: 0, get_updates_buf: "next", msgs: [{
           message_type: 1, from_user_id: "chat", client_id: "message", context_token: "ctx", create_time_ms: Date.now() - 1000,
           item_list: [{ type: 1, text_item: { text: "记住我喜欢简短回复" } }],
-        }] }));
+        }].flatMap(message => [message, message]) }));
         if (String(url).endsWith("getconfig")) return new Response(JSON.stringify({ ret: 0, typing_ticket: "ticket" }));
         if (String(url).endsWith("sendtyping")) return new Response(JSON.stringify({ ret: 0 }));
         if (String(url).endsWith("sendmessage")) {
@@ -55,7 +55,9 @@ for (const allowed of [true, false]) {
     const first = await gateway.pollOnce();
     assert.deepEqual(calls, allowed ? ["authorize", "codex"] : ["authorize"]);
     assert.deepEqual(replies, allowed ? ["已经记下简短回复的偏好。"] : []);
+    assert.equal(first.polledCount, 2);
     assert.equal(first.processedCount, allowed ? 1 : 0);
+    assert.equal(first.skippedCount, allowed ? 1 : 2);
     assert.equal(state.syncBuf, "next");
     await gateway.pollOnce();
     assert.equal(calls.length, allowed ? 2 : 1);

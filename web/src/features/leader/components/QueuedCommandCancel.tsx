@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "../../../components/ui/ConfirmDialog";
 import { ApiAuthError, ApiHttpError } from "../../../api/errors";
 import { cancelSessionMessage } from "../../../api/sessions";
-import { setUnauthenticatedSession } from "../../../auth/bootstrap";
+import { getAuthSessionSnapshot, setUnauthenticatedSession } from "../../../auth/bootstrap";
 import type { CommandRecord } from "../../../types";
 
 const WEB_REQUEST_ID = /^web_[a-f0-9]{64}$/;
@@ -22,6 +22,7 @@ export function QueuedCommandCancel({ command, onReceipt }: { command: CommandRe
   async function cancel() {
     if (active.current || !canCancelWebQueue(command)) return;
     const controller = new AbortController();
+    const requestGeneration = getAuthSessionSnapshot().generation;
     active.current = controller;
     setBusy(true);
     setError(undefined);
@@ -30,7 +31,7 @@ export function QueuedCommandCancel({ command, onReceipt }: { command: CommandRe
       if (!controller.signal.aborted) onReceipt(receipt);
     } catch (cause) {
       if (controller.signal.aborted) return;
-      if (cause instanceof ApiAuthError) { setUnauthenticatedSession("expired"); return; }
+      if (cause instanceof ApiAuthError) { setUnauthenticatedSession("expired", requestGeneration); return; }
       setError(cause instanceof ApiHttpError && cause.statusCode === 409
         ? "无法取消：请求已开始发送，或不属于当前登录。请刷新状态核查。"
         : "取消结果尚未确认，请刷新状态核查原请求。");

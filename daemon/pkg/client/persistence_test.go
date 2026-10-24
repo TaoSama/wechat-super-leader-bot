@@ -31,11 +31,11 @@ func (a *receiptAdapter) SendPrompt(context.Context, string, string) (string, er
 }
 
 func persistenceConfig(dir string) *config.Config {
-	return &config.Config{NodeID: "demoair", ControllerURL: "ws://127.0.0.1:8790/v1/daemon", SocketPath: "/test/socket", StateDir: filepath.Join(dir, "state")}
+	return &config.Config{NodeID: "macair", ControllerURL: "ws://127.0.0.1:8790/v1/daemon", SocketPath: "/test/socket", StateDir: filepath.Join(dir, "state")}
 }
 func persistenceCommand(expiry string) protocol.ControllerCommandMessage {
 	return protocol.ControllerCommandMessage{
-		Type: "command", CommandID: "durable-command", NodeID: "demoair", SessionID: "fixture-session", Action: protocol.ActionSend, Prompt: "fixture only", ExpiresAt: expiry,
+		Type: "command", CommandID: "durable-command", NodeID: "macair", SessionID: "fixture-session", Action: protocol.ActionSend, Prompt: "fixture only", ExpiresAt: expiry,
 	}
 }
 func closeDaemon(t *testing.T, d *Daemon) {
@@ -183,8 +183,11 @@ func TestJournalWriteFailuresNeverRepeatDispatch(t *testing.T) {
 	if d.ExecuteCommand(context.Background(), cmd).Status != protocol.StatusUncertain || a.sends.Load() != 1 {
 		t.Fatal("replayed claimed command")
 	}
-	if err := d.flushResults(func(any) error { t.Fatal("unpersisted result sent"); return nil }); err == nil {
-		t.Fatal("save failure ignored")
+	if err := d.flushResults(func(any) error { t.Fatal("unpersisted result sent"); return nil }); err != nil {
+		t.Fatalf("pending save failure must not close the ACK reader: %v", err)
+	}
+	if len(d.pendingPersistence) != 1 {
+		t.Fatal("failed result was not retained for persistence retry")
 	}
 	fault.failFinish = false
 	var result protocol.DaemonResultMessage

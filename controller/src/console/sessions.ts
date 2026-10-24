@@ -6,10 +6,10 @@ import { publicCommand } from "../commands/public.js";
 import { NodeHub } from "../nodes/hub.js";
 import { HistoryError } from "../sessions/history.js";
 import { TERMINAL_SESSION_ID_PATTERN } from "../sessions/terminal.js";
-import { DeliveryModeSchema, TurnIdSchema, type CommandAuthority } from "../types.js";
+import { DeliveryModeSchema, PostCommandRequestSchema, TurnIdSchema, type CommandAuthority } from "../types.js";
 
 const TargetSchema = z.object({
-  nodeId: z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/),
+  nodeId: PostCommandRequestSchema.shape.nodeId,
   sessionId: z.string().min(1).max(64).refine(value => /^[A-Za-z0-9_-]+$/.test(value) || TERMINAL_SESSION_ID_PATTERN.test(value)),
 });
 const HistoryQuerySchema = z.object({

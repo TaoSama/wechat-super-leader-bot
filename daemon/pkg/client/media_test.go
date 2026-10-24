@@ -110,6 +110,50 @@ func TestMediaChunksAreBoundedAndReassembleWithFixedMetadata(t *testing.T) {
 	}
 }
 
+func TestMediaListPreservesSafeOriginalImagePositions(t *testing.T) {
+	const maxSafeOrdinal int64 = 1<<53 - 1
+	path := mediaFixturePath(t)
+	mediaPNG(t, path, 32)
+	for _, tc := range []struct {
+		name     string
+		ordinals []int64
+		invalid  bool
+	}{
+		{name: "sparse-positions", ordinals: []int64{255, 256, 258}},
+		{name: "maximum-safe-position", ordinals: []int64{maxSafeOrdinal}},
+		{name: "negative-position", ordinals: []int64{-1}, invalid: true},
+		{name: "unsafe-position", ordinals: []int64{maxSafeOrdinal + 1}, invalid: true},
+		{name: "too-many-attachments", ordinals: []int64{256, 257, 258, 259}, invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			refs := make([]protocol.NativeMediaReference, 0, len(tc.ordinals))
+			for _, ordinal := range tc.ordinals {
+				if int64(int(ordinal)) != ordinal {
+					t.Skip("ordinal exceeds platform int range")
+				}
+				refs = append(refs, protocol.NativeMediaReference{ItemID: "item", TurnID: "turn", Ordinal: int(ordinal), Path: path})
+			}
+			fixture := &mediaFixture{generation: "owner", refs: refs}
+			d := NewDaemon(&config.Config{NodeID: "node"}, fixture)
+			listed := d.ListMedia(context.Background(), protocol.ListMediaMessage{Type: "list_media", RequestID: "list", NodeID: "node", SessionID: "session"})
+			if tc.invalid {
+				if listed.Error != protocol.MediaFailed || len(listed.Media) != 0 || listed.MediaContext != "" {
+					t.Fatalf("invalid original positions published: %+v", listed)
+				}
+				return
+			}
+			if listed.Error != "" || len(listed.Media) != len(tc.ordinals) {
+				t.Fatalf("safe original positions rejected: %+v", listed)
+			}
+			for i, descriptor := range listed.Media {
+				if int64(descriptor.Ordinal) != tc.ordinals[i] {
+					t.Fatalf("original position or order changed: %+v", listed.Media)
+				}
+			}
+		})
+	}
+}
+
 func TestMediaRejectsCrossSessionContextMediaAndExpiredOwner(t *testing.T) {
 	path := mediaFixturePath(t)
 	mediaPNG(t, path, 32)

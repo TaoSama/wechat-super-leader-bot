@@ -1,6 +1,6 @@
 module github.com/TaoSama/wechat-super-leader-bot/daemon
 
-go 1.26.4
+go 1.26.10
 
 require github.com/gorilla/websocket v1.5.3
 

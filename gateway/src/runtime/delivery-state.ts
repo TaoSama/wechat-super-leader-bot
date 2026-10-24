@@ -62,11 +62,13 @@ export abstract class DeliveryState {
     for (const [key, item] of Object.entries(outbox)) {
       if (!item || item.deliveryKey !== key || !["reply", "notification"].includes(item.kind) ||
           typeof item.chatId !== "string" || !item.chatId || typeof item.messageId !== "string" || !item.messageId ||
-          !Number.isSafeInteger(item.splitMaxChars) || item.splitMaxChars <= 0 || typeof item.splitMultiPart !== "boolean" ||
+          !Number.isSafeInteger(item.splitMaxChars) || item.splitMaxChars <= 0 ||
           !OUTBOX_STATUSES.has(item.status) || item.notificationIdentity !== undefined &&
           (item.kind !== "notification" || typeof item.notificationIdentity !== "string" || !NOTIFICATION_IDENTITY.test(item.notificationIdentity))) {
         throw new Error("Invalid delivery outbox reference");
       }
+      // Older state files contain a retired switch that never affected the chunk plan.
+      delete (item as DeliveryOutboxItem & { splitMultiPart?: unknown }).splitMultiPart;
       item.source = outboxSource(item.source);
       validateEngineAcknowledgement(item);
     }

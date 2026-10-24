@@ -2,11 +2,7 @@ package desktop
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"net"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -72,52 +68,6 @@ func TestDesktopScheduleRemovedCursorAndMembershipChanges(t *testing.T) {
 	for _, target := range schedule.targets([]string{"a", "d", "e"}) {
 		if target.known {
 			t.Fatal("failed owner remained in known lane")
-		}
-	}
-}
-
-func desktopScheduleServer(c *desktopConn, owners map[string]string) error {
-	if err := desktopHandshake(c); err != nil {
-		return err
-	}
-	for {
-		message, err := c.read()
-		if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		var params struct {
-			ConversationID string `json:"conversationId"`
-			Following      bool   `json:"following"`
-		}
-		if err := json.Unmarshal(message.Params, &params); err != nil {
-			return err
-		}
-		owner, available := owners[params.ConversationID]
-		switch message.Method {
-		case desktopDiscoverOwner:
-			if available {
-				if err := desktopReply(c, message, owner, nil); err != nil {
-					return err
-				}
-			} // Unknown owners remain silent for longer than the watch window.
-		case desktopFollowingChanged:
-			if !available || len(message.TargetClientIDs) != 1 || message.TargetClientIDs[0] != owner {
-				return errors.New("subscription used unverified owner")
-			}
-			if params.Following {
-				snapshot, err := desktopAnySessionSnapshot(params.ConversationID, owner, "active")
-				if err != nil {
-					return err
-				}
-				if err := c.write(snapshot); err != nil {
-					return err
-				}
-			}
-		default:
-			return fmt.Errorf("unexpected desktop method: %s", message.Method)
 		}
 	}
 }

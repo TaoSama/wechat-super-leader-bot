@@ -42,7 +42,7 @@ func TestAdapterAcknowledgementMustBindExactValidTurn(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			adapter := &sendReceiptAdapter{ack: tc.ack}
-			d := NewDaemon(&config.Config{NodeID: "demoair"}, adapter)
+			d := NewDaemon(&config.Config{NodeID: "macair"}, adapter)
 			cmd := persistenceCommand(time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano))
 			result := d.ExecuteCommand(context.Background(), cmd)
 			if tc.valid {

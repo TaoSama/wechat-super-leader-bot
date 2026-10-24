@@ -6,6 +6,8 @@ import { historyTurns } from "../../src/features/sessions/history-turns";
 import type { HistoryItem } from "../../src/types";
 
 const SELECTOR = "[data-history-id], [data-history-group]";
+const VIEWPORT_HEIGHT = 200;
+const SMALL_VIEWPORT_HEIGHT = 100;
 const heights = new Map<string, number>();
 const geometryCache = new Map<HTMLElement, Map<HTMLElement, { top: number; height: number }>>();
 const observers: Array<{ callback: ResizeObserverCallback; disconnected: boolean }> = [];
@@ -46,12 +48,14 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 const resize = () => act(() => { geometryCache.clear(); for (const observer of observers) if (!observer.disconnected) observer.callback([], {} as ResizeObserver); });
 
-function Window({ items, owner = "one", grouped = false }: { items: HistoryItem[]; owner?: string; grouped?: boolean }) {
+function Window({ items, owner = "one", grouped = false, viewportHeight = VIEWPORT_HEIGHT }: {
+  items: HistoryItem[]; owner?: string; grouped?: boolean; viewportHeight?: number;
+}) {
   const scroll = useHistoryScroll({ owner, items, loadingOlder: false, nextCursor: null, loadOlder: async () => false });
   return <><div data-reading-window aria-label="滚动窗口" ref={element => {
     scroll.scrollRef.current = element;
     if (element) Object.defineProperties(element, {
-      clientHeight: { configurable: true, value: 200 },
+      clientHeight: { configurable: true, value: viewportHeight },
       scrollHeight: { configurable: true, get: () => [...element.querySelectorAll<HTMLElement>(SELECTOR)].reduce((total, row) => total + (heights.get(rowKey(row)) ?? 100), 0) },
     });
   }} onScroll={scroll.onScroll} onWheel={scroll.onWheel} onTouchStart={scroll.onTouchStart} onTouchMove={scroll.onTouchMove} onKeyDown={scroll.onKeyDown} onClickCapture={scroll.onClickCapture}>
@@ -103,12 +107,17 @@ it.each(["wheel", "touch", "keyboard"])("%s向上阅读意图在靠近底部时�
 
 const groupedRows = () => [row("question", "user", "turn"), row("tool-a", "tool", "turn"), row("tool-b", "tool", "turn"), row("answer", "assistant", "turn"), ...Array.from({ length: 10 }, (_, index) => row(`tail-${index}`))];
 it("收起当前可见工具后锚点回退同轮摘要，消息不会跳到无关轮次", () => {
-  render(<Window grouped items={groupedRows()} />);
+  const rows = groupedRows();
+  const view = render(<Window grouped items={rows} />);
   const container = screen.getByLabelText("滚动窗口");
   const button = screen.getByRole("button", { name: /2 项工具记录/ });
   fireEvent.click(button); resize();
   container.scrollTop = 250; fireEvent.scroll(container);
   expect(container.querySelector('[data-history-id="tool-a"]')).not.toBeNull();
+  view.rerender(<Window grouped items={rows} viewportHeight={SMALL_VIEWPORT_HEIGHT} />);
+  expect(button).toHaveAttribute("aria-expanded", "true");
+  expect(container.querySelector('[data-history-id="tool-a"]')).not.toBeNull();
+  expect(container.scrollTop).toBe(250);
   fireEvent.click(button); resize();
   expect(container.scrollTop).toBe(100);
   expect(button.getBoundingClientRect().top).toBe(0);

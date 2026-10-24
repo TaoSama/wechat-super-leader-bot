@@ -5,7 +5,7 @@ import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { stopTestProcess } from './cleanup.mjs';
-import { localDockerEnvironment } from '../../scripts/verify.mjs';
+import { localDockerEnvironment, verificationEnvironment } from '../../scripts/verify.mjs';
 
 const POSTGRES_IMAGE = 'postgres:16-alpine';
 const POSTGRES_OWNER_LABEL = 'super-leader.test.fixture-owner';
@@ -63,14 +63,15 @@ export function createPostgresFixture({ env = process.env } = {}) {
   };
 }
 
-export async function createControllerFixture({ env, secrets = [], logs = [] }) {
+export async function createControllerFixture({ env = verificationEnvironment(), secrets = [], logs = [] }) {
   const reservation = createServer();
   reservation.listen(0, '127.0.0.1');
   await once(reservation, 'listening');
   const port = reservation.address().port;
   await new Promise((resolve, reject) => reservation.close(error => error ? reject(error) : resolve()));
   const base = `http://127.0.0.1:${port}`;
-  const controllerEnv = { ...process.env, ...env, HOST: '127.0.0.1', PORT: String(port), CONSOLE_PUBLIC_URL: base };
+  // Supplied environments are complete; do not restore values removed by callers.
+  const controllerEnv = { ...env, HOST: '127.0.0.1', PORT: String(port), CONSOLE_PUBLIC_URL: base };
   let child;
   const appendLog = chunk => {
     let text = chunk.toString();

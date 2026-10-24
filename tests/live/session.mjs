@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
+import { loadSendEligibility } from '../../scripts/lib/send-eligibility.mjs';
 
 const configPath = fileURLToPath(new URL('../../.runtime/local.json', import.meta.url));
 
@@ -22,7 +23,8 @@ if (values.help) {
   console.log(`Usage: node tests/live/session.mjs --session <sessionId> [options]
 
 Options:
-  --session <id>        Required. Target session ID to test (must be idle and support send).
+  --session <id>        Required. Target with fresh send eligibility and completed-turn receipts.
+                       terminal-pane input-written receipts require separate acceptance.
   --node <id>           Target node ID (default: "demoair").
   --controller <url>    Controller base URL (default: "http://127.0.0.1:8790").
   --timeout <ms>        Max timeout in milliseconds for command completion (default: 60000).
@@ -119,8 +121,10 @@ async function main() {
     capabilities: sessionObj.capabilities,
   }, null, 2));
 
-  assert.equal(sessionObj.status, 'idle', `Session status must be 'idle' before sending, got '${sessionObj.status}'`);
-  assert(sessionObj.capabilities.includes('send'), `Session does not advertise 'send' capability: ${JSON.stringify(sessionObj.capabilities)}`);
+  const { selectSendRoute } = await loadSendEligibility();
+  const eligibility = selectSendRoute(sessionObj);
+  assert(eligibility.ready, `Session cannot send now: ${eligibility.reason}`);
+  assert.notEqual(eligibility.route, 'terminal-pane', 'terminal-pane reports input-written only; this harness requires completed-turn receipts and cannot verify terminal input');
 
   // 4. Construct fixed zero-side-effect marker task
   const marker = `LIVE_HARNESS_MARKER_${randomUUID()}`;

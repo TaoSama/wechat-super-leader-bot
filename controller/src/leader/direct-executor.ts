@@ -16,6 +16,8 @@ import type { GoalProposal } from "./goals/goal.js";
 import { goalPreview } from "./goals/presentation.js";
 import type { GoalConversation } from "./goals/conversation.js";
 import type { ExecutionScheduler } from "./plans/scheduler.js";
+import { recoverSteerPlanCommand } from "./plans/steer.js";
+import { retainLeaderData } from "./persistence.js";
 import { SessionTitles } from "./queries/session-titles.js";
 import { sendSessionImages } from "./queries/session-images.js";
 import type { MediaHub } from "../sessions/message-images.js";
@@ -120,15 +122,35 @@ export class DirectToolExecutor {
     for (let attempt = 0; attempt < 8; attempt++) {
       const saved = await this.options.store.getLeaderState(request.chatId);
       const data = LeaderDataSchema.parse(saved?.data ?? {}), inputHash = hash(request.text);
-      if (data.directContext?.messageId === request.messageId && data.directContext.inputHash === inputHash && data.directContext.expiresAt > this.options.now()) return data;
+      const expiredSteer = data.inflight && data.inflight.expiresAt <= this.options.now() &&
+        data.inflight.plan?.actions.length === 1 && data.inflight.plan.actions[0].deliveryMode === "steer";
+      if (!expiredSteer && data.directContext?.messageId === request.messageId && data.directContext.inputHash === inputHash && data.directContext.expiresAt > this.options.now()) return data;
       if (data.inflight && data.inflight.expiresAt > this.options.now()) throw new CommandError(409, "Previous chat request is still active");
+      if (expiredSteer) {
+        await this.recoverSteerReceipt(request.chatId, data);
+        data.inflight = undefined;
+      }
       if (data.directPreview && data.directPreview.messageId !== request.messageId && !data.directPreview.followupMessageId) data.directPreview.followupMessageId = request.messageId;
       data.directContext = { messageId: request.messageId, inputHash, expiresAt: this.options.now() + CLAIM_TTL_MS,
         discoveredRunIds: [], discoveredSources: {}, discoveredSessions: [] };
+      retainLeaderData(data);
       const next = await this.options.store.compareAndSetLeaderState(request.chatId, saved?.revision ?? 0, data);
       if (next) return LeaderDataSchema.parse(next.data);
     }
     throw new CommandError(409, "Chat context changed repeatedly; retry discovery");
+  }
+
+  private async recoverSteerReceipt(chatId: string, data: LeaderData): Promise<void> {
+    const prior = data.inflight;
+    if (!prior?.plan) return;
+    const command = await recoverSteerPlanCommand(this.options.store, chatId, prior.plan);
+    if (!command) return;
+    data.commandIds.push(command.commandId);
+    if (data.pending?.id === prior.plan.id) data.pending = undefined;
+    if (!data.receipts.some(receipt => receipt.messageId === prior.messageId)) {
+      data.receipts.push({ messageId: prior.messageId, inputHash: prior.inputHash, commandId: command.commandId,
+        text: `已找回本次当前轮补充的持久指令：${command.commandId}（状态：${command.status}）。补充执行情况仍需核查，不会重复发送。` });
+    }
   }
 
   private titles(data: LeaderData): SessionTitles {
@@ -195,8 +217,11 @@ export class DirectToolExecutor {
     const saved = await o.store.getLeaderState(chatId);
     const data = LeaderDataSchema.parse(saved?.data ?? {});
     if (data.inflight && data.inflight.expiresAt > o.now()) throw new CommandError(409, "Previous chat request is still active");
+    await this.recoverSteerReceipt(chatId, data);
     const inputHash = hash(request.text);
     const priorPlan = data.pending, priorGoal = data.pendingGoal;
+    // Revoke queued supplements in the same durable claim as the cancellation.
+    if (name === "cancel_plan" || name === "cancel_goal") data.steerGeneration++;
     data.inflight = { messageId, inputHash, expiresAt: o.now() + CLAIM_TTL_MS };
     if (!data.directContext || data.directContext.messageId !== messageId || data.directContext.inputHash !== inputHash || data.directContext.expiresAt <= o.now()) {
       data.directContext = { messageId, inputHash, expiresAt: o.now() + CLAIM_TTL_MS, discoveredRunIds: [], discoveredSources: {}, discoveredSessions: [] };
@@ -328,6 +353,7 @@ export class DirectToolExecutor {
       const current = await o.store.getLeaderState(chatId);
       if (current?.revision === claimed.revision) {
         const latest = LeaderDataSchema.parse(current.data);
+        await this.recoverSteerReceipt(chatId, latest);
         latest.inflight = undefined;
         await o.save(chatId, current.revision, latest);
       }

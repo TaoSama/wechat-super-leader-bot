@@ -71,7 +71,7 @@ func Scan(roots []string) ([]Skill, error) {
 			s.problem(root, "root unavailable")
 			continue
 		}
-		handle, err := os.OpenRoot(real)
+		handle, err := openSkillRoot(real)
 		if err != nil {
 			s.problem(root, "root cannot be opened")
 			continue
@@ -136,11 +136,7 @@ func (s *scanner) walk(path string, depth int) {
 	if !info.IsDir() && (!info.Mode().IsRegular() || filepath.Base(real) != "SKILL.md") {
 		return
 	}
-	if !info.IsDir() && info.Size() > MaxFileBytes {
-		s.problem(path, "file too large")
-		return
-	}
-	file, err := root.Open(rel)
+	file, info, err := openSkillFile(root, rel, info.IsDir())
 	if err != nil {
 		s.problem(path, "path cannot be opened safely")
 		return
@@ -150,6 +146,10 @@ func (s *scanner) walk(path string, depth int) {
 			s.problem(path, "file close failed")
 		}
 	}()
+	if !info.IsDir() && info.Size() > MaxFileBytes {
+		s.problem(path, "file too large")
+		return
+	}
 	if info.IsDir() {
 		entries, err := file.ReadDir(MaxEntries - s.entries + 1)
 		if err != nil && !errors.Is(err, io.EOF) {

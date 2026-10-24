@@ -10,7 +10,7 @@ async function main() {
 
     const store =
       config.persistenceMode === "postgres"
-        ? new PostgresStore(config.databaseUrl!)
+        ? new PostgresStore(config.databaseUrl)
         : new MemoryStore();
 
     const server = new ControllerServer(config, store);

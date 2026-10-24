@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { vi } from "vitest";
 import { MemoryStore } from "../../src/store/memory.js";
 import { CommandService } from "../../src/commands/service.js";
-import { createGoal, GOAL_LEASE_MS, renderGoalAction, type GoalDecision, type GoalDecisionInput, type GoalProposal, type GoalRecord } from "../../src/leader/goals/goal.js";
+import { createGoal, GOAL_LEASE_MS, freezeGoalActionInput, type GoalDecision, type GoalDecisionInput, type GoalProposal, type GoalRecord } from "../../src/leader/goals/goal.js";
 import { GoalScheduler, type GoalDecider } from "../../src/leader/goals/scheduler.js";
 import type { ControllerCommandMessage, Session } from "../../src/types.js";
 
@@ -30,7 +30,7 @@ export function commit(goal: GoalRecord, decision: GoalDecision): GoalRecord {
   if (decision.type === "next") {
     const sources = decision.sourceActions.map(i => input.actions[i - 1].result!);
     result.actions = [...goal.actions, { index: goal.actions.length + 1, target: decision.target, prompt: decision.prompt,
-      sourceActions: decision.sourceActions, input: { prompt: renderGoalAction(goal.proposal, decision.prompt, sources), sources } }];
+      sourceActions: decision.sourceActions, input: freezeGoalActionInput(goal.proposal, decision.prompt, sources) }];
   } else { result.status = decision.type === "complete" ? "completed" : "blocked"; if (decision.type === "blocked") result.blockedReason = decision.reason; }
   return result;
 }
@@ -40,9 +40,9 @@ export async function authorize(store: MemoryStore, goal: GoalRecord) {
     inflight: { messageId: "confirm", inputHash: "hash", expiresAt: goal.proposal.expiresAt, goal: goal.proposal } });
   return { revision: saved!.revision, messageId: "confirm", inputHash: "hash" };
 }
-export async function fixture(decide: GoalDecider = async () => nextDecision()) {
+export async function fixture(decide: GoalDecider = async () => nextDecision(), authorization?: GoalProposal) {
   const store = new MemoryStore(); let now = Date.now(), allowed = true, ready = true;
-  const goal = createGoal("chat", proposal(now), now);
+  const goal = createGoal("chat", authorization ?? proposal(now), now);
   await store.confirmGoal(goal, await authorize(store, goal), () => now);
   const sendCommand = vi.fn(async (message: ControllerCommandMessage) => {
     await store.updateCommandStatus(message.commandId, "accepted", undefined, undefined, `turn-${message.commandId}`);

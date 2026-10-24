@@ -55,7 +55,7 @@ func TestReconnectReplaysAcceptanceAndOnlyInspectsTurn(t *testing.T) {
 		}
 		first := connections.Add(1) == 1
 		if first {
-			err = conn.WriteJSON(protocol.ControllerCommandMessage{Type: "command", CommandID: "command", NodeID: "demoair", SessionID: "session", Action: protocol.ActionSend, Prompt: "fixture only", ExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339Nano)})
+			err = conn.WriteJSON(protocol.ControllerCommandMessage{Type: "command", CommandID: "command", NodeID: "macair", SessionID: "session", Action: protocol.ActionSend, Prompt: "fixture only", ExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339Nano)})
 			if err != nil {
 				done <- err
 				return
@@ -77,7 +77,7 @@ func TestReconnectReplaysAcceptanceAndOnlyInspectsTurn(t *testing.T) {
 			done <- err
 			return
 		}
-		if err := conn.WriteJSON(protocol.InspectTurnMessage{Type: "inspect_turn", CommandID: "command", NodeID: "demoair", SessionID: "session", TurnID: "target"}); err != nil {
+		if err := conn.WriteJSON(protocol.InspectTurnMessage{Type: "inspect_turn", CommandID: "command", NodeID: "macair", SessionID: "session", TurnID: "target"}); err != nil {
 			done <- err
 			return
 		}
@@ -99,7 +99,7 @@ func TestReconnectReplaysAcceptanceAndOnlyInspectsTurn(t *testing.T) {
 	}))
 	defer server.Close()
 	a := &transportAdapter{inspectingAdapter: inspectingAdapter{status: "completed"}}
-	d := NewDaemon(&config.Config{NodeID: "demoair", NodeToken: "test", ControllerURL: "ws" + strings.TrimPrefix(server.URL, "http"), HeartbeatInterval: time.Minute}, a)
+	d := NewDaemon(&config.Config{NodeID: "macair", NodeToken: "test", ControllerURL: "ws" + strings.TrimPrefix(server.URL, "http"), HeartbeatInterval: time.Minute}, a)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	exited := make(chan error, 1)

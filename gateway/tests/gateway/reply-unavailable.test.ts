@@ -73,7 +73,7 @@ async function fixture(t: TestContext, status: number | "network") {
   }
   const key = state.computeDeliveryKey("chat", OLD_MESSAGE);
   state.putOutbox({ kind: "reply", deliveryKey: key, chatId: "chat", messageId: OLD_MESSAGE,
-    splitMaxChars: 100, splitMultiPart: true, status: "pending" });
+    splitMaxChars: 100, status: "pending" });
   const sends: Record<string, unknown>[] = [];
   let freshInbound = false;
   const create = (current = state) => new WeChatGateway({ stateManager: current, controller: mock.controller,
@@ -129,7 +129,7 @@ test("unavailable queue head leaves another chat's reply reachable in the next b
   const f = await fixture(t, 404);
   const healthyKey = f.state.computeDeliveryKey("other-chat", "healthy-message");
   f.state.putOutbox({ kind: "reply", deliveryKey: healthyKey, chatId: "other-chat", messageId: "healthy-message",
-    splitMaxChars: 100, splitMultiPart: true, status: "pending" });
+    splitMaxChars: 100, status: "pending" });
   const gateway = f.create();
   await gateway.flushRepliesOnce();
   assert.equal(f.state.outbox[f.key].status, "expired");

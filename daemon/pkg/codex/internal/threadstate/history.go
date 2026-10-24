@@ -38,9 +38,9 @@ func PublicHistoryItem(wrapper map[string]any) (protocol.HistoryItem, bool) {
 	case "userMessage":
 		item.Kind, item.Text = "user", PublicTextContent(raw["content"])
 	case "agentMessage":
-		item.Kind, item.Text = "assistant", ExtractString(raw, "text")
+		item.Kind, item.Text = "assistant", rawHistoryText(raw, "text")
 	case "commandExecution":
-		item.Kind, item.Text, item.Title = "tool", ExtractString(raw, "aggregatedOutput"), ExtractString(raw, "command")
+		item.Kind, item.Text, item.Title = "tool", rawHistoryText(raw, "aggregatedOutput"), ExtractString(raw, "command")
 	case "fileChange":
 		item.Kind, item.Title = "tool", "File changes"
 		changes, _ := raw["changes"].([]any)
@@ -50,7 +50,7 @@ func PublicHistoryItem(wrapper map[string]any) (protocol.HistoryItem, bool) {
 			if !ok {
 				continue
 			}
-			parts = append(parts, ExtractString(change, "path")+"\n"+ExtractString(change, "diff"))
+			parts = append(parts, ExtractString(change, "path")+"\n"+rawHistoryText(change, "diff"))
 		}
 		item.Text = strings.Join(parts, "\n")
 	case "mcpToolCall":
@@ -63,14 +63,14 @@ func PublicHistoryItem(wrapper map[string]any) (protocol.HistoryItem, bool) {
 	case "functionCallOutput":
 		// Desktop input injection can be represented as a function output. Retain
 		// its native tool kind; never infer the author from the output text.
-		item.Kind, item.Title, item.Text = "tool", "Tool result", ExtractString(raw, "output")
+		item.Kind, item.Title, item.Text = "tool", "Tool result", rawHistoryText(raw, "output")
 	case "webSearch":
 		item.Kind, item.Title = "tool", "Web search"
 		if action, ok := raw["action"].(map[string]any); ok {
 			item.Text = ExtractString(action, "query", "url")
 		}
 	case "enteredReviewMode", "exitedReviewMode":
-		item.Kind, item.Text = "system", ExtractString(raw, "review")
+		item.Kind, item.Text = "system", rawHistoryText(raw, "review")
 	case "contextCompaction":
 		item.Kind, item.Text = "system", "Context compacted"
 	default:
@@ -89,6 +89,12 @@ func PublicHistoryItem(wrapper map[string]any) (protocol.HistoryItem, bool) {
 	return item, true
 }
 
+// Body whitespace affects Markdown and copied output, including whitespace-only text.
+func rawHistoryText(raw map[string]any, key string) string {
+	text, _ := raw[key].(string)
+	return text
+}
+
 func PublicTextContent(raw any) string {
 	content, _ := raw.([]any)
 	parts := []string{}
@@ -99,7 +105,7 @@ func PublicTextContent(raw any) string {
 		}
 		switch block["type"] {
 		case "text", "inputText":
-			parts = append(parts, ExtractString(block, "text"))
+			parts = append(parts, rawHistoryText(block, "text"))
 		case "image", "localImage", "inputImage":
 			parts = append(parts, "[Image]")
 		}

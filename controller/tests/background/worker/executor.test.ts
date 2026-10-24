@@ -5,17 +5,23 @@ import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { CodexWorkerRuntime, type WorkerInput, type WorkerRuntimeStatus } from "../../../src/background/worker/index.js";
 
+// Process contract checks include interpreter startup and durable filesystem I/O.
+const CLI_EXECUTION_TIMEOUT_MS = 10_000;
+const CLI_CLEANUP_MARGIN_MS = 5_000;
+const CLI_TEST_TIMEOUT_MS = 2 * (CLI_EXECUTION_TIMEOUT_MS + CLI_CLEANUP_MARGIN_MS);
+const STATUS_POLL_INTERVAL_MS = 10;
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 async function wait(runtime: CodexWorkerRuntime, input: WorkerInput): Promise<WorkerRuntimeStatus> {
-  for (let attempt = 0; attempt < 800; attempt++) {
+  const deadline = performance.now() + CLI_EXECUTION_TIMEOUT_MS + CLI_CLEANUP_MARGIN_MS;
+  while (performance.now() < deadline) {
     const status = await runtime.inspect(input.workerId, input.invocationId);
     if (!["running", "queued"].includes(status.status)) return status;
-    await new Promise(resolve => setTimeout(resolve, 5));
+    await new Promise(resolve => setTimeout(resolve, STATUS_POLL_INTERVAL_MS));
   }
   throw new Error("Child process did not stop within test budget");
 }
-function fixture(mode = "complete", timeoutMs = 2000) {
+function fixture(mode = "complete", timeoutMs = CLI_EXECUTION_TIMEOUT_MS) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "worker-child-test-")); roots.push(root);
   const script = path.join(root, "codex");
   fs.writeFileSync(script, `#!${process.execPath}
@@ -84,15 +90,15 @@ describe("Codex CLI process contract", () => {
       expect(observed.home).toBe(observed.codexHome.replace(/home$/, "workspace"));
       expect(observed.unexpected).toBeUndefined();
     } finally { delete process.env.WORKER_TEST_SECRET; }
-  });
+  }, CLI_TEST_TIMEOUT_MS);
   it.each(["fail", "garbage", "incomplete"])("does not accept an unverified CLI completion (%s)", async mode => {
     const f = fixture(mode);
     await f.runtime.start(f.input);
     const status = await wait(f.runtime, f.input);
-    expect(status.status).toBe("needs_attention");
+    expect(status).toMatchObject({ status: "needs_attention", error: "worker_execution_unverified" });
     expect(JSON.stringify(status)).not.toContain("secret-provider-key");
     expect((await f.runtime.start(f.input)).status).toBe("needs_attention");
-  });
+  }, CLI_TEST_TIMEOUT_MS);
   it("terminates and reaps a real child process after its budget", async () => {
     const f = fixture("hang", 50);
     await f.runtime.start(f.input);
@@ -100,13 +106,13 @@ describe("Codex CLI process contract", () => {
     await f.runtime.exportArtifacts(f.input.workerId, f.input.invocationId);
     await f.runtime.cleanup(f.input.workerId);
     expect(fs.existsSync(f.workspace)).toBe(false);
-  });
+  }, CLI_TEST_TIMEOUT_MS);
   it("records a launch failure without exposing raw provider diagnostics", async () => {
     const f = fixture();
     fs.unlinkSync(f.options.codexPath);
     await f.runtime.start(f.input);
     expect(await wait(f.runtime, f.input)).toMatchObject({ status: "needs_attention", error: "worker_execution_unverified" });
-  });
+  }, CLI_TEST_TIMEOUT_MS);
   it("bounds shutdown when an escaped descendant holds pipes and quarantines its worker and capacity", async () => {
     const f = fixture("escape", 20000);
     await f.runtime.start(f.input);

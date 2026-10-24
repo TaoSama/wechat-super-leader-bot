@@ -28,25 +28,35 @@ function legacy(index: number, status: StoredNotification["status"] = "pending")
 // Tracks transaction boundaries and the relevant DDL effects; actual constraints
 // and DDL rollback are also verified in the isolated PostgreSQL integration test.
 class MigrationPool {
+  on = vi.fn();
   rows = new Map<string, Row>(); statements: string[] = []; executionRequired = true; goalColumn = false;
-  released = 0; private snapshot?: { rows: Map<string, Row>; executionRequired: boolean; goalColumn: boolean };
+  versions = new Set<number>(); migrationPageSizes: number[] = [];
+  released = 0; private snapshot?: { rows: Map<string, Row>; executionRequired: boolean; goalColumn: boolean; versions: Set<number> };
   async connect() { return { query: this.query.bind(this), release: () => { this.released++; } }; }
   async query(raw: string, values: unknown[] = []) {
     const sql = raw.replace(/\s+/g, " ").trim(); this.statements.push(sql);
     if (sql === "BEGIN") {
-      this.snapshot = structuredClone({ rows: this.rows, executionRequired: this.executionRequired, goalColumn: this.goalColumn });
+      this.snapshot = structuredClone({ rows: this.rows, executionRequired: this.executionRequired, goalColumn: this.goalColumn, versions: this.versions });
       return { rows: [] };
     }
     if (sql === "COMMIT") { this.snapshot = undefined; return { rows: [] }; }
     if (sql === "ROLLBACK") {
       if (this.snapshot) Object.assign(this, this.snapshot); this.snapshot = undefined; return { rows: [] };
     }
+    if (sql.startsWith("SELECT pg_advisory_xact_lock(")) return { rows: [] };
+    if (sql === "SELECT version FROM controller_schema_migrations") return { rows: [...this.versions].map(version => ({ version })) };
+    if (sql === "INSERT INTO controller_schema_migrations(version) VALUES($1)") {
+      this.versions.add(Number(values[0])); return { rows: [] };
+    }
     if (sql === "ALTER TABLE leader_notifications ALTER COLUMN execution_id DROP NOT NULL") this.executionRequired = false;
     if (sql.startsWith("ALTER TABLE leader_notifications ADD COLUMN IF NOT EXISTS goal_id")) {
       this.goalColumn = true; for (const row of this.rows.values()) row.goal_id ??= null;
     }
-    if (sql === "SELECT * FROM leader_notifications ORDER BY id FOR UPDATE") {
-      return { rows: structuredClone([...this.rows.values()].sort((a, b) => a.id.localeCompare(b.id))) };
+    if (sql === "SELECT * FROM leader_notifications WHERE ($1::text IS NULL OR id>$1) ORDER BY id LIMIT $2 FOR UPDATE") {
+      const rows = [...this.rows.values()].filter(row => values[0] === null || row.id > String(values[0]))
+        .sort((a, b) => a.id.localeCompare(b.id)).slice(0, Number(values[1]));
+      this.migrationPageSizes.push(rows.length);
+      return { rows: structuredClone(rows) };
     }
     if (sql === "UPDATE leader_notifications SET data=$2::jsonb WHERE id=$1 RETURNING *") {
       const row = this.rows.get(String(values[0])); if (!row) return { rows: [] };
@@ -79,7 +89,14 @@ it("atomically converts all legacy statuses without changing text, timestamps or
     expect(converted).toEqual({ ...previous, goal_id: null, data: { ...fields, source: { type: "plan", id: executionId } } });
     expect(normalizeNotification(converted.data)).not.toHaveProperty("executionId");
   }
-  const first = JSON.stringify([...pool.rows]); await store.init(); expect(JSON.stringify([...pool.rows])).toBe(first);
+  const first = JSON.stringify([...pool.rows]), restartIndex = pool.statements.length;
+  await store.init(); expect(JSON.stringify([...pool.rows])).toBe(first);
+  const restarted = pool.statements.slice(restartIndex);
+  expect(restarted.filter(sql => sql.includes("leader_notifications"))).toEqual([]);
+  expect(restarted.filter(sql => /^(ALTER |DROP INDEX |CREATE (UNIQUE )?INDEX)/.test(sql))).toEqual([]);
+  expect(restarted.filter(sql => sql.includes("node_sessions") || sql.includes("known_sessions"))).toEqual([]);
+  expect(restarted.some(sql => sql.startsWith("UPDATE commands SET status = 'uncertain'"))).toBe(true);
+  expect(pool.versions).toEqual(new Set([1, 2]));
   expect(pool.statements.filter(s => s.startsWith("UPDATE leader_notifications SET data="))).toHaveLength(4);
   expect((await store.listPendingNotifications(["allowed"], NOW + NOTIFICATION_ATTEMPT_MS)).map(n => n.id)).toEqual([old[0].id]);
   expect((await store.getNotification(old[1].id, NOW + NOTIFICATION_ATTEMPT_MS + 1))!.status).toBe("uncertain");
@@ -90,6 +107,22 @@ it("atomically converts all legacy statuses without changing text, timestamps or
   expect(execution).toBeLessThan(goal); expect(goal).toBeLessThan(notification);
   expect(pool.statements[0]).toBe("BEGIN"); expect(pool.statements.at(-1)).toBe("SELECT * FROM leader_notifications WHERE id=$1");
   expect(pool.released).toBe(2);
+});
+
+it("applies only the observation migration to version 1 and skips it on later startups", async () => {
+  const { pool, store } = fixture([]); pool.versions.add(1);
+  await store.init();
+  expect(pool.versions).toEqual(new Set([1, 2]));
+  expect(pool.statements.filter(sql => sql.includes("leader_notifications"))).toEqual([]);
+  const alter = pool.statements.indexOf("ALTER TABLE known_sessions ADD COLUMN IF NOT EXISTS observed_order BIGSERIAL");
+  const backfill = pool.statements.findIndex(sql => sql.startsWith("INSERT INTO known_sessions (node_id,session_id,data,updated_at)"));
+  const clear = pool.statements.indexOf("DELETE FROM node_sessions;");
+  const version = pool.statements.indexOf("INSERT INTO controller_schema_migrations(version) VALUES($1)");
+  expect(alter).toBeGreaterThan(0); expect(alter).toBeLessThan(backfill);
+  expect(backfill).toBeLessThan(clear); expect(clear).toBeLessThan(version);
+  expect(pool.statements.at(-1)).toBe("COMMIT");
+  const restart = pool.statements.length; await store.init();
+  expect(pool.statements.slice(restart).filter(sql => sql.includes("known_sessions") || sql.includes("node_sessions"))).toEqual([]);
 });
 
 it.each([
@@ -108,9 +141,31 @@ it.each([
   expect(pool.statements).toContain("UPDATE leader_notifications SET data=$2::jsonb WHERE id=$1 RETURNING *");
   expect(pool.statements.at(-1)).toBe("ROLLBACK"); expect(pool.statements).not.toContain("COMMIT");
   expect(pool.rows).toEqual(before); expect(pool.executionRequired).toBe(true); expect(pool.goalColumn).toBe(false);
+  expect(pool.versions.size).toBe(0);
   pool.rows.set(second.id, legacy(2)); await store.init();
   expect(pool.rows.get(first.id)!.data.source).toEqual({ type: "plan", id: first.id });
   expect(pool.rows.get(second.id)!.data.source).toEqual({ type: "plan", id: second.id });
+});
+
+it("pages legacy history and rolls back every page when a later record is invalid", async () => {
+  const old = Array.from({ length: 205 }, (_, index) => legacy(index + 1));
+  const invalid = structuredClone(old.at(-1)!); invalid.data.unexpected = true;
+  const { pool, store } = fixture([...old.slice(0, -1), invalid]), before = structuredClone(pool.rows);
+  await expect(store.init()).rejects.toThrow();
+  expect(pool.migrationPageSizes).toEqual([100, 100, 5]);
+  expect(pool.rows).toEqual(before); expect(pool.versions.size).toBe(0);
+  pool.rows.set(old.at(-1)!.id, old.at(-1)!); pool.migrationPageSizes = [];
+  await store.init();
+  expect(pool.migrationPageSizes).toEqual([100, 100, 5, 0]);
+  expect([...pool.rows.values()].every(row => Object.hasOwn(row.data, "source") && !Object.hasOwn(row.data, "executionId"))).toBe(true);
+  const pages = pool.migrationPageSizes.slice(); await store.init(); expect(pool.migrationPageSizes).toEqual(pages);
+});
+
+it("does not skip invalid empty IDs on the first migration page", async () => {
+  const row = legacy(1); row.id = "";
+  const { pool, store } = fixture([row]);
+  await expect(store.init()).rejects.toThrow("metadata");
+  expect(pool.versions.size).toBe(0); expect(pool.statements.at(-1)).toBe("ROLLBACK");
 });
 
 it("strictly validates already-converted rows rather than accepting legacy aliases or repairing metadata", async () => {

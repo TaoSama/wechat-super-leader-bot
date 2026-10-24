@@ -13,7 +13,7 @@ const OUTPUT_PREVIEW_POINTS = 512;
 const LARGE_OUTPUT_BYTES = 8 * 1024 * 1024;
 const STATUS_LIMIT_BYTES = 2 * 1024 * 1024;
 const COMMAND_COUNT = 50;
-const MESSAGE_PATH = "/v1/sessions/demoair/thread/messages";
+const MESSAGE_PATH = "/v1/sessions/macair/thread/messages";
 const bearer = { Authorization: `Bearer ${ADMIN_TOKEN}` };
 let server: ControllerServer;
 let store: MemoryStore;
@@ -30,7 +30,7 @@ class BusyDaemon extends EventEmitter {
 
 function command(id: string, overrides: Partial<CommandRecord> = {}): CommandRecord {
   return {
-    commandId: id, requestId: `request-${id}`, nodeId: "demoair", sessionId: "thread",
+    commandId: id, requestId: `request-${id}`, nodeId: "macair", sessionId: "thread",
     action: "send", prompt: "public prompt", sendRoute: "control-socket", status: "completed",
     authority: { type: "chat", chatId: "private-chat-authority" },
     createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(),
@@ -70,7 +70,7 @@ beforeEach(async () => {
   store = new MemoryStore();
   const config: Config = {
     port: 0, host: "127.0.0.1", controllerToken: ADMIN_TOKEN,
-    nodeTokens: { demoair: "public-dto-node" }, tokenToNode: new Map([["public-dto-node", "demoair"]]),
+    nodeTokens: { macair: "public-dto-node" }, tokenToNode: new Map([["public-dto-node", "macair"]]),
     allowedChatIds: new Set(["allowed-chat"]), persistenceMode: "memory", commandTtlSeconds: 60,
     consolePublicUrl: CONSOLE_ORIGIN,
   };
@@ -202,12 +202,12 @@ it("admin cancellation exposes a public command while retaining its stored autho
 
 it("console submission, request lookup and cancellation all return public commands", async () => {
   const daemon = new BusyDaemon();
-  server.getNodeHub().handleConnection(daemon as unknown as WebSocket, "demoair");
-  daemon.emit("message", JSON.stringify({ type: "hello", version: 1, nodeId: "demoair", skills: [], sessions: [{
+  server.getNodeHub().handleConnection(daemon as unknown as WebSocket, "macair");
+  daemon.emit("message", JSON.stringify({ type: "hello", version: 1, nodeId: "macair", skills: [], sessions: [{
     id: "thread", provider: "codex-app", title: "Busy thread", cwd: "/workspace", status: "busy", loaded: true,
     capabilities: ["read", "send"], observedAt: new Date(now).toISOString(),
   }] }));
-  await vi.waitFor(async () => expect(await store.getNodeSessions("demoair")).toHaveLength(1));
+  await vi.waitFor(async () => expect((await store.getKnownSession("macair", "thread"))?.id).toBe("thread"));
   const headers = { Cookie: cookie, Origin: CONSOLE_ORIGIN, "Content-Type": "application/json", "X-Super-Leader-Intent": "session-message" };
   const submitted = await fetch(baseUrl + MESSAGE_PATH, {
     method: "POST", headers, body: JSON.stringify({ prompt: "queued public message", requestId: "public-console-request" }),

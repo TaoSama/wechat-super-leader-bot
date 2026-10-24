@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 )
 
 func TestNativeMediaListsOnlyBoundedExistingThreadAttachments(t *testing.T) {
+	const skippedImages = 256
 	directory, err := os.MkdirTemp("/tmp", "media-rpc-")
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +75,7 @@ func TestNativeMediaListsOnlyBoundedExistingThreadAttachments(t *testing.T) {
 					return
 				}
 				result = map[string]any{"data": []any{
-					map[string]any{"turnId": "new-turn", "item": map[string]any{"id": "new", "type": "agentMessage", "text": "![a](/tmp/a.jpg)"}},
+					map[string]any{"turnId": "new-turn", "item": map[string]any{"id": "new", "type": "agentMessage", "text": strings.Repeat("![remote](https://example.com/image.png) ", skippedImages) + "![a](/tmp/a.jpg) ![b](/tmp/b.jpg) ![c](/tmp/c.jpg) ![d](/tmp/d.jpg)"}},
 					map[string]any{"turnId": "old-turn", "item": map[string]any{"id": "old", "type": "agentMessage", "text": "![old](/tmp/old.jpg)"}},
 				}}
 			}
@@ -91,11 +93,11 @@ func TestNativeMediaListsOnlyBoundedExistingThreadAttachments(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	refs, generation, err := adapter.ListSessionMedia(ctx, "session", "", "", "", protocol.MaxSessionMedia)
-	if err != nil || generation == "" || len(refs) != 1 {
+	if err != nil || generation == "" || len(refs) != protocol.MaxSessionMedia {
 		t.Fatalf("native refs %+v %q %v", refs, generation, err)
 	}
 	for i, ref := range refs {
-		if ref.ItemID != "new" || ref.TurnID != "new-turn" || ref.Ordinal != i {
+		if ref.ItemID != "new" || ref.TurnID != "new-turn" || ref.Ordinal != skippedImages+i {
 			t.Fatalf("did not select latest assistant %+v", ref)
 		}
 	}

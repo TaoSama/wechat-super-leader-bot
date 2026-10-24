@@ -118,7 +118,8 @@ export class HealthTracker {
   private setPhase(name: "polling" | "processing", budgetMs: number): void {
     const maxBudget = name === "processing" ? MAX_PROCESSING_PHASE_MS : MAX_POLL_PHASE_MS;
     if (!Number.isSafeInteger(budgetMs) || budgetMs <= 0 || budgetMs > maxBudget) throw new Error("Invalid health phase budget");
-    this.currentData!.phase = { name, started_at: new Date().toISOString(), deadline_at: new Date(Date.now() + budgetMs).toISOString() };
+    const nowMs = Date.now();
+    this.currentData!.phase = { name, started_at: new Date(nowMs).toISOString(), deadline_at: new Date(nowMs + budgetMs).toISOString() };
     this.phaseRevision++;
   }
 

@@ -1,6 +1,8 @@
 import dotenv from "dotenv";
 import { loadBackgroundConfig, type BackgroundConfig } from "./background-config.js";
 
+const TOKEN_CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/;
+
 if (process.env.SUPER_LEADER_NO_DOTENV !== "1") {
   dotenv.config();
 }
@@ -35,6 +37,12 @@ function parseStrictInt(value: string | undefined, name: string, min: number, ma
     throw new Error(`Invalid ${name}: '${value}'. Must be between ${min} and ${max}`);
   }
   return parsed;
+}
+
+function validateTokenFormat(token: string, name: string): void {
+  if (token !== token.trim() || TOKEN_CONTROL_CHARACTER_PATTERN.test(token)) {
+    throw new Error(`${name} must not contain leading/trailing whitespace or control characters`);
+  }
 }
 
 export function validateConsolePublicUrl(raw: string | undefined): string | undefined {
@@ -86,6 +94,7 @@ export function loadConfig(): Config {
   if (!controllerToken || controllerToken.trim().length === 0) {
     throw new Error("CONTROLLER_TOKEN environment variable is required and cannot be empty");
   }
+  validateTokenFormat(controllerToken, "CONTROLLER_TOKEN");
 
   const rawNodeTokens = process.env.NODE_TOKENS || "{}";
   let parsedTokens: unknown;
@@ -109,6 +118,7 @@ export function loadConfig(): Config {
     if (typeof token !== "string" || token.trim().length === 0) {
       throw new Error(`NODE_TOKENS token for node '${nodeId}' must be a non-empty string`);
     }
+    validateTokenFormat(token, "NODE_TOKENS");
     if (tokenToNode.has(token)) {
       throw new Error(
         `NODE_TOKENS contains duplicate token for nodes '${tokenToNode.get(token)}' and '${nodeId}' (mapping ambiguity)`
@@ -131,13 +141,15 @@ export function loadConfig(): Config {
     throw new Error("PERSISTENCE_MODE must be strictly either 'postgres' or 'memory'");
   }
 
-  const databaseUrl = process.env.DATABASE_URL;
-  if (persistenceModeRaw === "postgres") {
-    if (!databaseUrl || databaseUrl.trim().length === 0) {
+  const databaseUrl = process.env.DATABASE_URL?.trim() ? process.env.DATABASE_URL : undefined;
+  if (persistenceModeRaw === "postgres" && !databaseUrl) {
+    const pgVariables = ["PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGPASSWORD"] as const;
+    if (pgVariables.some((name) => !process.env[name] || (name !== "PGPASSWORD" && !process.env[name]?.trim()))) {
       throw new Error(
-        "DATABASE_URL is required when PERSISTENCE_MODE is postgres (fail closed). Set PERSISTENCE_MODE=memory explicitly for test/dev."
+        "DATABASE_URL is required when PERSISTENCE_MODE is postgres unless PGHOST, PGPORT, PGUSER, PGDATABASE and PGPASSWORD are all set (fail closed). Set PERSISTENCE_MODE=memory explicitly for test/dev."
       );
     }
+    parseStrictInt(process.env.PGPORT, "PGPORT", 1, 65535, 5432);
   }
 
   const commandTtlSeconds = parseStrictInt(process.env.COMMAND_TTL_SECONDS, "COMMAND_TTL_SECONDS", 5, 86400, 300);

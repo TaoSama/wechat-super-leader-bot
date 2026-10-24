@@ -1,4 +1,4 @@
-import { CommandRecord, CommandAuthority, MessageRecord, ScopedSession, Session, SendRoute, validateCommandSendRoute } from "../types.js";
+import { CommandRecord, CommandAuthority, MessageRecord, Session, SendRoute, validateCommandSendRoute } from "../types.js";
 import { ACTIVE_COMMAND_STATUSES, beforeInQueue, sameAuthority, sameCommandPayload } from "../commands/queue.js";
 import { InputReceipt } from "../sessions/input-receipt.js";
 import { commandSummary, type CommandSummary } from "../commands/public.js";
@@ -7,6 +7,7 @@ import { MemoryMessageImages, type StoredMessageImage } from "../sessions/messag
 import { sameSkillRefs } from "../skills/catalog.js";
 import { nextCommandState, inspectionLimit, validateStoredCommandInput } from "./command-state.js";
 import { validateNodeSessionInventory } from "./node-sessions.js";
+import { KNOWN_SESSION_TTL_MS, KNOWN_SESSION_LIMIT, KNOWN_SESSION_COMMAND_STATUSES } from "./known-sessions.js";
 import { executionListQuery } from "./execution-list.js";
 import { TERMINAL_RESULT_TTL_MS, PROGRESS_RESULT_TTL_MS, RESULT_COLLECTOR_BATCH_SIZE } from "../notifications/result-collector.js";
 import { normalizeGoal, assertGoalConfirmation, validateGoalUpdate, goalIsOpen, type GoalRecord,
@@ -39,9 +40,6 @@ import {
   validateConsoleTokenHash,
   validateIsoTimestamp,
 } from "../console/types.js";
-
-const KNOWN_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
-const KNOWN_SESSION_LIMIT = 4096;
 
 export class MemoryStore implements IStore {
   private messageImages = new MemoryMessageImages();
@@ -233,19 +231,19 @@ export class MemoryStore implements IStore {
   async recordMessage(msg: MessageRecord): Promise<void> {
     const key = JSON.stringify([msg.chatId, msg.messageId]);
     if (!this.messages.has(key)) {
-      this.messages.set(key, { ...msg });
+      this.messages.set(key, structuredClone(msg));
     }
   }
 
   async getMessage(chatId: string, messageId: string): Promise<MessageRecord | null> {
     const key = JSON.stringify([chatId, messageId]);
     const rec = this.messages.get(key);
-    return rec ? { ...rec } : null;
+    return rec ? structuredClone(rec) : null;
   }
 
   async upsertNodeSessions(nodeId: string, sessions: Session[]): Promise<void> {
     validateNodeSessionInventory(sessions);
-    this.nodeSessions.set(nodeId, sessions.map((s) => ({ ...s })));
+    this.nodeSessions.set(nodeId, structuredClone(sessions));
     for (const session of sessions) {
       const key = JSON.stringify([nodeId,session.id]);
       this.knownSessions.delete(key);
@@ -261,30 +259,17 @@ export class MemoryStore implements IStore {
   private pruneKnownSessions(): void {
     const pinned = new Set<string>();
     const pin = (nodeId:string,sessionId:string) => pinned.add(JSON.stringify([nodeId,sessionId]));
-    for (const command of this.commands.values()) if (["admitting","queued",...ACTIVE_COMMAND_STATUSES].includes(command.status)) pin(command.nodeId,command.sessionId);
+    for (const [nodeId, sessions] of this.nodeSessions) for (const session of sessions) pin(nodeId,session.id);
+    for (const command of this.commands.values()) if (KNOWN_SESSION_COMMAND_STATUSES.includes(command.status)) pin(command.nodeId,command.sessionId);
     for (const execution of this.executions.values()) if (execution.status === "active") for (const action of execution.plan.actions) pin(action.nodeId,action.sessionId);
     for (const goal of this.goals.values()) if (goalIsOpen(goal)) for (const target of goal.proposal.targets) pin(target.nodeId,target.sessionId);
     const threshold = Date.now()-KNOWN_SESSION_TTL_MS;
     for (const [key,entry] of this.knownSessions) if (!pinned.has(key) && (entry.observedAt<threshold || this.knownSessions.size>KNOWN_SESSION_LIMIT)) this.knownSessions.delete(key);
   }
 
-  async getNodeSessions(nodeId: string): Promise<ScopedSession[]> {
-    const list = this.nodeSessions.get(nodeId) || [];
-    return list.map((s) => ({ ...s, nodeId }));
-  }
-
-  async getAllSessions(): Promise<ScopedSession[]> {
-    const all: ScopedSession[] = [];
-    for (const [nodeId, sessions] of this.nodeSessions.entries()) {
-      for (const s of sessions) {
-        all.push({ ...s, nodeId });
-      }
-    }
-    return all;
-  }
-
   async removeNodeSessions(nodeId: string): Promise<void> {
     this.nodeSessions.delete(nodeId);
+    this.pruneKnownSessions();
   }
 
   async getLeaderState(chatId: string): Promise<LeaderState | null> {

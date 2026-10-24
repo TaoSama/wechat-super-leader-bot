@@ -12,13 +12,13 @@ const MOCK_STATUS_PAYLOAD: ControlPlaneStatusResponse = {
   goals: emptyGoals(), executions: emptyExecutions(),
   nodes: [
     {
-      nodeId: "demomini",
+      nodeId: "macmini",
       connected: true,
       lastHeartbeat: "2026-10-10T10:00:00.000Z",
       sessionCount: 2,
     },
     {
-      nodeId: "demoair",
+      nodeId: "macair",
       connected: false,
       lastHeartbeat: "2026-10-10T09:50:00.000Z",
       sessionCount: 1,
@@ -27,17 +27,17 @@ const MOCK_STATUS_PAYLOAD: ControlPlaneStatusResponse = {
   sessions: [
     {
       id: "sess_alpha",
-      nodeId: "demomini",
+      nodeId: "macmini",
       provider: "codex-app",
       title: "重构 控制平面状态存储",
-      cwd: "/Users/developer/Documents/ordinary/wechat-super-leader-bot",
+      cwd: "/Users/luwentao/Documents/ordinary/wechat-super-leader-bot",
       status: "running",
       capabilities: ["read", "send"],
       observedAt: "2026-10-10T10:00:00.000Z",
     },
     {
       id: "sess_readonly",
-      nodeId: "demomini",
+      nodeId: "macmini",
       provider: "codex-app",
       title: "生产日志只读巡检",
       cwd: "/var/log/super-leader",
@@ -60,7 +60,7 @@ const MOCK_STATUS_PAYLOAD: ControlPlaneStatusResponse = {
     {
       commandId: "cmd_101_pending",
       requestId: "req_101",
-      nodeId: "demomini",
+      nodeId: "macmini",
       sessionId: "sess_alpha",
       action: "read",
       status: "pending",
@@ -71,7 +71,7 @@ const MOCK_STATUS_PAYLOAD: ControlPlaneStatusResponse = {
     {
       commandId: "cmd_102_accepted",
       requestId: "req_102",
-      nodeId: "demomini",
+      nodeId: "macmini",
       sessionId: "sess_alpha",
       action: "send",
       prompt: "运行单元测试并汇报覆盖率",
@@ -85,7 +85,7 @@ const MOCK_STATUS_PAYLOAD: ControlPlaneStatusResponse = {
     {
       commandId: "cmd_103_completed",
       requestId: "req_103",
-      nodeId: "demomini",
+      nodeId: "macmini",
       sessionId: "sess_readonly",
       action: "read",
       status: "completed",
@@ -97,7 +97,7 @@ const MOCK_STATUS_PAYLOAD: ControlPlaneStatusResponse = {
     {
       commandId: "cmd_104_failed",
       requestId: "req_104",
-      nodeId: "demoair",
+      nodeId: "macair",
       sessionId: "sess_alpha",
       action: "send",
       prompt: "deploy production",
@@ -238,23 +238,23 @@ describe("Super Leader 会话工作台", () => {
 
     // Wait for nodes to render
     await waitFor(() => {
-      expect(screen.getByTestId("node-card-demomini")).toBeInTheDocument();
+      expect(screen.getByTestId("node-card-macmini")).toBeInTheDocument();
     });
 
     // Online node & Offline nodes (including inferred offline node linux-worker-9)
-    expect(screen.getByTestId("node-card-demomini")).toHaveTextContent("在线 (ONLINE)");
-    expect(screen.getByTestId("node-card-demoair")).toHaveTextContent("离线 (OFFLINE)");
+    expect(screen.getByTestId("node-card-macmini")).toHaveTextContent("在线 (ONLINE)");
+    expect(screen.getByTestId("node-card-macair")).toHaveTextContent("离线 (OFFLINE)");
     expect(screen.getByTestId("node-card-linux-worker-9")).toHaveTextContent(
       "离线 (OFFLINE)"
     );
 
     // Sessions and capabilities
-    const alphaRow = screen.getByTestId("session-row-demomini-sess_alpha");
+    const alphaRow = screen.getByTestId("session-row-macmini-sess_alpha");
     expect(alphaRow).not.toHaveTextContent("模型未报告");
     expect(within(alphaRow).getByText("忙")).toBeInTheDocument();
     expect(alphaRow).toHaveTextContent("重构 控制平面状态存储");
 
-    const roRow = screen.getByTestId("session-row-demomini-sess_readonly");
+    const roRow = screen.getByTestId("session-row-macmini-sess_readonly");
     expect(within(roRow).getByText("闲")).toBeInTheDocument();
 
     const noneRow = screen.getByTestId("session-row-linux-worker-9-sess_legacy");
@@ -304,7 +304,7 @@ describe("Super Leader 会话工作台", () => {
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("node-card-demomini")).toBeInTheDocument();
+      expect(screen.getByTestId("node-card-macmini")).toBeInTheDocument();
     });
 
     // Verify commands endpoints are strictly GET
@@ -394,7 +394,7 @@ describe("Super Leader 会话工作台", () => {
     });
 
     // Previous data remains visible without full page reload
-    expect(screen.getByTestId("node-card-demomini")).toBeInTheDocument();
+    expect(screen.getByTestId("node-card-macmini")).toBeInTheDocument();
 
     // Start an actual pending refresh; completed reads need no cancellation.
     fireEvent.click(screen.getByRole("button", { name: "立即刷新控制平面状态" }));
@@ -414,7 +414,7 @@ describe("Super Leader 会话工作台", () => {
       expect(screen.getByTestId("telemetry-error-banner")).toHaveTextContent("持久计划状态格式无效，无法确认计划进度");
     });
     expect(screen.queryByText("当前窗口没有已确认计划")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("node-card-demomini")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("node-card-macmini")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: /任务计划/ })).not.toBeInTheDocument();
     unmount();
   });
@@ -498,16 +498,16 @@ describe("Super Leader 会话工作台", () => {
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("node-card-demomini")).toBeInTheDocument();
+      expect(screen.getByTestId("node-card-macmini")).toBeInTheDocument();
     });
 
-    // Filter by node demoair
+    // Filter by node macair
     fireEvent.click(screen.getByRole("button", { name: "工作看板" }));
     fireEvent.click(
-      screen.getByRole("button", { name: "按节点 demoair 筛选会话与指令" })
+      screen.getByRole("button", { name: "按节点 macair 筛选会话与指令" })
     );
 
-    // Only demoair commands should remain visible
+    // Only macair commands should remain visible
     expect(
       screen.getByTestId("command-item-cmd_104_failed")
     ).toBeInTheDocument();
@@ -516,7 +516,7 @@ describe("Super Leader 会话工作台", () => {
     ).not.toBeInTheDocument();
 
     // Clear node filter
-    fireEvent.click(screen.getByRole("button", { name: "取消筛选节点 demoair" }));
+    fireEvent.click(screen.getByRole("button", { name: "取消筛选节点 macair" }));
     expect(
       screen.getByTestId("command-item-cmd_101_pending")
     ).toBeInTheDocument();
@@ -529,7 +529,7 @@ describe("Super Leader 会话工作台", () => {
       expect(screen.getByTestId("logout-error-banner")).toHaveTextContent("退出登录失败");
     });
     // Ensure still authenticated, not falsely revoked
-    expect(screen.getByTestId("node-card-demomini")).toBeInTheDocument();
+    expect(screen.getByTestId("node-card-macmini")).toBeInTheDocument();
 
     // 2. Simulate successful logout
     logoutShouldFail = false;

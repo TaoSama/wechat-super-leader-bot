@@ -8,7 +8,7 @@ describe("NaturalLanguageResolver Security & Edge Cases", () => {
   const sessions: ScopedSession[] = [
     {
       id: "session-1",
-      nodeId: "demoair",
+      nodeId: "macair",
       provider: "codex-app",
       title: "Codex App Main",
       cwd: "/Users/test/project",
@@ -19,7 +19,7 @@ describe("NaturalLanguageResolver Security & Edge Cases", () => {
     },
     {
       id: "session-2",
-      nodeId: "demoair",
+      nodeId: "macair",
       provider: "codex-app",
       title: "Codex Worker",
       cwd: "/Users/test/worker",
@@ -39,10 +39,10 @@ describe("NaturalLanguageResolver Security & Edge Cases", () => {
     },
   ];
 
-  it("Fix 1: correctly routes '查看 demoair 的会话 session-1 的输出' to read_session, not list_sessions", () => {
-    const res = resolver.resolve("查看 demoair 的会话 session-1 的输出", { sessions });
+  it("Fix 1: correctly routes '查看 macair 的会话 session-1 的输出' to read_session, not list_sessions", () => {
+    const res = resolver.resolve("查看 macair 的会话 session-1 的输出", { sessions });
     expect(res.action).toBe("read_session");
-    expect(res.nodeId).toBe("demoair");
+    expect(res.nodeId).toBe("macair");
     expect(res.sessionId).toBe("session-1");
   });
 
@@ -56,7 +56,7 @@ describe("NaturalLanguageResolver Security & Edge Cases", () => {
   it("Fix 3: prompt containing another session ID does not confuse target resolution", () => {
     const res = resolver.resolve("让 session-1 执行：检查 session-2 的状态", { sessions });
     expect(res.action).toBe("send_session");
-    expect(res.nodeId).toBe("demoair");
+    expect(res.nodeId).toBe("macair");
     expect(res.sessionId).toBe("session-1");
     expect(res.prompt).toBe("检查 session-2 的状态");
   });
@@ -73,7 +73,7 @@ describe("NaturalLanguageResolver Security & Edge Cases", () => {
   it("Fix 4b: explicit non-existent session does not fallback to lastContext", () => {
     const res = resolver.resolve("让不存在的会话 ghost-sess 执行：rm -rf /", {
       sessions,
-      lastContext: { nodeId: "demoair", sessionId: "session-1" },
+      lastContext: { nodeId: "macair", sessionId: "session-1" },
     });
     expect(res.action).toBe("unknown");
     expect(res.replyText).toContain("未找到指定的目标");

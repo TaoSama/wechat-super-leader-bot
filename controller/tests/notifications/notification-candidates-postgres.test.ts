@@ -13,7 +13,7 @@ function fixture() {
   const row = { id: ID, execution_id: null, goal_id: ID, chat_id: "chat", kind: "completed", status: "pending",
     created_at: String(NOW), expires_at: String(NOW + NOTIFICATION_TTL_MS), data: notification };
   const query = vi.fn(async (_sql: string, _params: unknown[]) => ({ rows: [row] }));
-  vi.mocked(pg.Pool).mockImplementation(function () { return { query } as unknown as pg.Pool; });
+  vi.mocked(pg.Pool).mockImplementation(function () { return { query, on: vi.fn() } as unknown as pg.Pool; });
   return { store: new PostgresStore("postgresql://unused/notification-candidates"), query, row, notification };
 }
 

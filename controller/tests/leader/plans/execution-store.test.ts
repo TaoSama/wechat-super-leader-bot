@@ -32,6 +32,7 @@ interface Row {
 }
 // Exercise production SQL and row decoding without a database or credentials.
 class FakeExecutionPool {
+  on = vi.fn();
   rows = new Map<string, Row>();
   queries: string[] = [];
   released = 0;
@@ -50,8 +51,9 @@ class FakeExecutionPool {
     const normalized = sql.replace(/\s+/g, " ").trim();
     this.queries.push(normalized);
     if (normalized.startsWith("SELECT pg_advisory_xact_lock(") || normalized.startsWith("SELECT id FROM leader_goals WHERE chat_id=$1")) return this.result([]);
-    if (normalized === "SELECT * FROM leader_notifications ORDER BY id FOR UPDATE") return this.result([]);
-    if (/^(CREATE (UNIQUE )?(TABLE|INDEX)|ALTER TABLE|DROP INDEX|DELETE FROM node_sessions|UPDATE commands|INSERT INTO known_sessions)/.test(normalized)) {
+    if (normalized === "SELECT version FROM controller_schema_migrations" ||
+        normalized === "SELECT * FROM leader_notifications WHERE ($1::text IS NULL OR id>$1) ORDER BY id LIMIT $2 FOR UPDATE") return this.result([]);
+    if (/^(CREATE (UNIQUE )?(TABLE|INDEX)|ALTER TABLE|DROP INDEX|DELETE FROM node_sessions|UPDATE commands|INSERT INTO known_sessions|INSERT INTO controller_schema_migrations)/.test(normalized)) {
       return this.result([]);
     }
     if (normalized.startsWith("INSERT INTO leader_executions")) {

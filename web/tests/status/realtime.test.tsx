@@ -12,7 +12,7 @@ class FakeEventSource extends EventTarget {
   status(title = "初始会话", executions: unknown = emptyExecutions(), goals: unknown = emptyGoals()) {
     this.dispatchEvent(new MessageEvent("status", { data: JSON.stringify({
       nodes: [], commands: [], goals, executions, leaderMode: "model", leaderModel: "gpt-6.1-sol",
-      sessions: [{ id: "session", nodeId: "demoair", title, status: "active", capabilities: ["read"] }],
+      sessions: [{ id: "session", nodeId: "macair", title, status: "active", capabilities: ["read"] }],
     }) }));
   }
   fail() { this.onerror?.(); }

@@ -185,6 +185,25 @@ test("direct tools freeze discovery, parallelize reads, deduplicate canonical ca
   assert.equal(calls.length, 3);
 });
 
+test("a mutation invalidates a cached read so a later query observes fresh Controller state", async t => {
+  const tools = [
+    { ...schema, name: "inspect_current", annotations: { readOnlyHint: true } },
+    { ...schema, name: "mutate", annotations: { readOnlyHint: false } },
+  ];
+  const calls: string[] = [];
+  const tool = new ControlMcp({ chatId: "c", messageId: "m", text: "查询并更新" }, {
+    listTools: async () => ({ tools, instructions: "" }),
+    callTool: async input => { calls.push(input.name); return { result: { observed: calls.length } }; },
+  });
+  await tool.start();
+  t.after(() => tool.close());
+  const invoke = (name: string) => call(tool, "tools/call", { name, arguments: { arguments: {} } });
+  await invoke("inspect_current");
+  await invoke("mutate");
+  await invoke("inspect_current");
+  assert.deepEqual(calls, ["inspect_current", "mutate", "inspect_current"]);
+});
+
 
 test("MCP accepts the largest escaped background prompt within the Controller HTTP budget", async t => {
   let received = "";

@@ -263,14 +263,15 @@ export class ILinkClient {
       const createdAtMs = Number.isSafeInteger(parsedCreateTime) && parsedCreateTime >= 0
         ? parsedCreateTime : undefined;
 
-      // Deterministic messageId and deliveryKey across poll retries
+      // Preserve client identities already stored in checkpoints before using server IDs.
       let messageId: string;
       let deliveryKey: string;
       if (stableId) {
         messageId = stableId;
         deliveryKey = this.stateManager.computeDeliveryKey(sender, stableId);
       } else {
-        // Compute deterministic hash without randomUUID so retry has stable messageId & deliveryKey
+        // Without a stable ID, only retries of the same page position are identifiable.
+        // Keep positions distinct so identical commands are not silently merged across pages.
         const rawDigest = crypto.createHash("sha256")
           .update(`${account.accountId}:${sender}:${createTimeMs}:${currentSyncBuf}:${msgIdx}:${textContent}`, "utf8")
           .digest("hex").slice(0, 24);
@@ -417,7 +418,7 @@ export class ILinkClient {
   public async sendMarkdownReply(
     chatId: string,
     rawMarkdown: string,
-    options?: { deliveryKey?: string; maxCharsPerChunk?: number; splitMultiPart?: boolean;
+    options?: { deliveryKey?: string; maxCharsPerChunk?: number;
       timeoutMs?: number; signal?: AbortSignal; shouldContinue?: () => boolean; kind?: "final" | "progress";
       /** Controller result messages are already split and must keep their frozen boundaries. */
       verbatim?: boolean }

@@ -4,7 +4,7 @@ import { DISPLAY_TIME_GUIDANCE } from "../display-time.js";
 import { SESSION_TITLE_GUIDANCE } from "./queries/session-titles.js";
 import type { ModelTool } from "./model/contracts.js";
 import { MAX_SELECTED_SKILLS, SkillRefsSchema } from "../skills/catalog.js";
-import { SendRouteSchema, DeliveryModeSchema, TurnIdSchema } from "../types.js";
+import { SendRouteSchema, DeliveryModeSchema, TurnIdSchema, SteerGenerationSchema } from "../types.js";
 import { GoalProposalSchema, GoalTargetSchema } from "./goals/goal.js";
 import { ReplyImagesSchema, type ReplyImage } from "../sessions/media-contracts.js";
 
@@ -22,6 +22,7 @@ export const MAX_RESULT_JSON_CHARS = 3000;
 export const MAX_REPLY_CHARS = 8000;
 export { MAX_HISTORY_ITEMS } from "./conversation-history.js";
 export const MAX_RECEIPTS = 8;
+export const MAX_COMMAND_IDS = 64;
 export const MAX_SKILL_QUERY_CHARS = 100;
 const id = z.string().trim().min(1).max(64);
 const memoryKey = z.string().trim().min(1).max(80).refine(
@@ -94,7 +95,8 @@ export const LeaderDataSchema = z.object({
   memories: z.record(z.string(), z.string()).default({}),
   pending: PlanSchema.optional(),
   pendingGoal: GoalProposalSchema.optional(),
-  commandIds: z.array(z.string()).max(64).default([]),
+  steerGeneration: SteerGenerationSchema.default(0),
+  commandIds: z.array(z.string()).max(MAX_COMMAND_IDS).default([]),
   receipts: z.array(z.object({ messageId: z.string(), inputHash: z.string(), text: z.string(), commandId: z.string().optional(), images: ReplyImagesSchema.optional() })).max(MAX_RECEIPTS).default([]),
   inflight: z.object({ messageId: z.string(), inputHash: z.string(), expiresAt: z.number(), plan: PlanSchema.optional(), goal: GoalProposalSchema.optional() }).optional(),
   directPreview: z.object({ id: z.string(), messageId: z.string(), followupMessageId: z.string().optional() }).optional(),

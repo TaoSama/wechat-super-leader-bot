@@ -4,7 +4,7 @@ import { groupSessionProjects } from "../../src/features/sessions/project-groups
 
 function session(id: string, overrides: Partial<ScopedSession> = {}): ScopedSession {
   return {
-    id, nodeId: "demoair", provider: "codex-app", title: id, cwd: "/workspace/project",
+    id, nodeId: "macair", provider: "codex-app", title: id, cwd: "/workspace/project",
     status: "idle", capabilities: ["read"], observedAt: "2026-10-22T15:00:00Z",
     ...overrides,
   };
@@ -15,19 +15,19 @@ describe("project session groups", () => {
     const sessions = [
       session("first", { cwd: "C:\\work\\project\\" }),
       session("second", { cwd: "C:/work/project///" }),
-      session("other-machine", { cwd: "C:/work/project", nodeId: "demomini" }),
+      session("other-machine", { cwd: "C:/work/project", nodeId: "macmini" }),
       session("same-name", { cwd: "C:/another/project" }),
     ];
     const before = structuredClone(sessions);
     const groups = groupSessionProjects(sessions);
 
     expect(groups.map(group => [group.name, group.path, group.nodeId, group.sessions.map(item => item.id)])).toEqual([
-      ["project", "C:/work/project", "demoair", ["first", "second"]],
-      ["project", "C:/work/project", "demomini", ["other-machine"]],
-      ["project", "C:/another/project", "demoair", ["same-name"]],
+      ["project", "C:/work/project", "macair", ["first", "second"]],
+      ["project", "C:/work/project", "macmini", ["other-machine"]],
+      ["project", "C:/another/project", "macair", ["same-name"]],
     ]);
     expect(new Set(groups.map(group => group.key)).size).toBe(3);
-    expect(groups[0].key).toBe(JSON.stringify(["demoair", "C:/work/project"]));
+    expect(groups[0].key).toBe(JSON.stringify(["macair", "C:/work/project"]));
     expect(sessions).toEqual(before);
     expect(groups[0].sessions[0]).toBe(sessions[0]);
   });

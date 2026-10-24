@@ -23,6 +23,7 @@ function row(record: CommandRecord): Row {
 
 /** Exercises the actual PG mutation path without a live database or credentials. */
 class TransactionPool {
+  on = vi.fn();
   rows = new Map<string, Row>();
   statements: string[] = [];
   release = vi.fn();

@@ -27,7 +27,7 @@ class LocalDaemon extends EventEmitter {
   }
   close() { this.readyState = WebSocket.CLOSED; this.emit("close"); }
   report(type: "hello" | "heartbeat", title: string) {
-    this.emit("message", JSON.stringify({ type, version: 1, nodeId: "demoair", skills: [],
+    this.emit("message", JSON.stringify({ type, version: 1, nodeId: "macair", skills: [],
       sessions: [{ id: "thread", provider: "codex-app", title, cwd: "/workspace", status: "idle",
         loaded: true, capabilities: ["read", "send"], observedAt: new Date(now).toISOString() }] }));
   }
@@ -59,7 +59,7 @@ beforeEach(async () => {
   store = new MemoryStore();
   const config: Config = {
     port: 0, host: "127.0.0.1", controllerToken: ADMIN_TOKEN,
-    nodeTokens: { demoair: "events-node-token" }, tokenToNode: new Map([["events-node-token", "demoair"]]),
+    nodeTokens: { macair: "events-node-token" }, tokenToNode: new Map([["events-node-token", "macair"]]),
     allowedChatIds: new Set(["plan-chat"]), persistenceMode: "memory", commandTtlSeconds: 60,
     consolePublicUrl: CONSOLE_ORIGIN,
     leader: { baseUrl: "https://private-provider.example/v1", apiKey: "private-api-key", model: "configured-model" },
@@ -108,12 +108,12 @@ it("pushes hello/heartbeat/disconnect changes and command receipts without retra
   const stream = await eventStream();
   await stream.next();
   const daemon = new LocalDaemon();
-  server.getNodeHub().handleConnection(daemon as unknown as WebSocket, "demoair");
+  server.getNodeHub().handleConnection(daemon as unknown as WebSocket, "macair");
   daemon.report("hello", "初始标题");
   expect(await stream.next()).toContain("初始标题");
   daemon.report("heartbeat", "修改后的标题");
   expect(await stream.next()).toContain("修改后的标题");
-  const sent = await fetch(`${baseUrl}/v1/sessions/demoair/thread/messages`, {
+  const sent = await fetch(`${baseUrl}/v1/sessions/macair/thread/messages`, {
     method: "POST", headers: { Cookie: cookie, Origin: CONSOLE_ORIGIN, "Content-Type": "application/json",
       "X-Super-Leader-Intent": "session-message" }, body: JSON.stringify({ prompt: "hello", requestId: "same-message" }),
   });
@@ -144,7 +144,7 @@ it("expiry is detected before the next sensitive status even after a successful 
   await stream.next();
   now += 3601_000;
   const daemon = new LocalDaemon();
-  server.getNodeHub().handleConnection(daemon as unknown as WebSocket, "demoair");
+  server.getNodeHub().handleConnection(daemon as unknown as WebSocket, "macair");
   daemon.report("hello", "禁止过期泄漏");
   expect(await stream.next()).toBe("event: auth-expired\ndata: {}");
   expect(await stream.next()).toBe("closed");
@@ -211,7 +211,7 @@ it("execution receipt changes reuse the existing stream and expired Cookie canno
   expect(await stream.next()).toContain('"turnId":"plan-exact-turn"');
   await store.updateCommandStatus(`command-${record.id}`, "completed", "private-finished-output", undefined, "plan-exact-turn");
   const daemon = new LocalDaemon();
-  server.getNodeHub().handleConnection(daemon as unknown as WebSocket, "demoair");
+  server.getNodeHub().handleConnection(daemon as unknown as WebSocket, "macair");
   daemon.report("hello", "receipt update");
   const updated = JSON.parse((await stream.next()).split("data: ")[1]);
   expect(updated.executions.items[0]).toMatchObject({ status: "active", steps: [{ status: "completed" }, { status: "waiting" }] });
@@ -261,7 +261,7 @@ it.each(["plan", "goal"] as const)("keeps the existing SSE stream open when a %s
     authority: { type: kind, id, chatId: "plan-chat" }, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(),
     expiresAt: new Date(now + 600_000).toISOString() });
   const daemon = new LocalDaemon();
-  server.getNodeHub().handleConnection(daemon as unknown as WebSocket, "demoair");
+  server.getNodeHub().handleConnection(daemon as unknown as WebSocket, "macair");
   daemon.report("hello", "queued snapshot");
   const queuedFrame = await stream.next();
   expect(queuedFrame).not.toBe("closed");

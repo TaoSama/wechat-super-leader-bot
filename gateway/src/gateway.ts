@@ -64,7 +64,6 @@ export class WeChatGateway {
   public readonly ilink: ILinkClient;
   public readonly controller: ControllerClient;
   public readonly splitMaxChars: number;
-  public readonly splitMultiPart: boolean;
   public readonly healthTracker?: HealthTracker;
   private readonly replyEngine?: GatewayReplyEngine;
   private stopped: boolean = false;
@@ -89,7 +88,6 @@ export class WeChatGateway {
     ilink: ILinkClient;
     controller: ControllerClient;
     splitMaxChars?: number;
-    splitMultiPart?: boolean;
     healthTracker?: HealthTracker;
     replyEngine?: GatewayReplyEngine;
     resultClient?: ResultClient;
@@ -100,7 +98,6 @@ export class WeChatGateway {
     this.ilink = options.ilink;
     this.controller = options.controller;
     this.splitMaxChars = options.splitMaxChars ?? DEFAULT_MESSAGE_MAX_CHARS;
-    this.splitMultiPart = options.splitMultiPart ?? true;
     this.healthTracker = options.healthTracker;
     this.inbox = new FileInboundInbox(`${this.stateManager.statePath}.inbox.json`,
       () => this.stateManager.getLoginFingerprint(), this.stateManager.policy.outboxLimit);
@@ -132,7 +129,7 @@ export class WeChatGateway {
       const deferReason = (chatId: string, kind: "final" | "progress") => getDeferReason(this.stateManager.contextBudgets[chatId], this.stateManager.policy, kind) ?? "context_changed";
       const runner = new ResultDeliveryRunner({ state: this.stateManager,
         transport: {
-          sendText: (chatId, text, sendOptions) => this.ilink.sendMarkdownReply(chatId, text, { ...sendOptions, maxCharsPerChunk: RESULT_TEXT_CHARS, splitMultiPart: false, verbatim: true }),
+          sendText: (chatId, text, sendOptions) => this.ilink.sendMarkdownReply(chatId, text, { ...sendOptions, maxCharsPerChunk: RESULT_TEXT_CHARS, verbatim: true }),
           sendFile: (chatId, artifact, bytes, sendOptions) => this.ilink.sendFileReply(chatId, bytes,
             { fileName: artifact.name, byteLength: artifact.size, sha256: artifact.sha256 }, sendOptions),
         },
@@ -158,7 +155,7 @@ export class WeChatGateway {
       if (options.resultClient || options.resultOutbox) throw new Error("Result client and outbox must be configured together");
       this.notificationOutbox = new NotificationOutbox({ stateManager: this.stateManager, ilink: this.ilink,
         controller: this.controller, splitMaxChars: this.splitMaxChars, signal: this.notificationAbort.signal,
-        splitMultiPart: this.splitMultiPart, shouldContinue: () => !this.stopped && this.stateManager.isReadyForActivePolling() });
+        shouldContinue: () => !this.stopped && this.stateManager.isReadyForActivePolling() });
     }
   }
 
@@ -319,6 +316,7 @@ export class WeChatGateway {
   }
 
   private async processMessage(msg: InboundWeChatMessage, batch?: { batchId: string; batchIndex: number; receivedClock: number }): Promise<string> {
+    if (this.stateManager.isMessageProcessed(msg.deliveryKey)) return "skipped";
     let ready!: () => void;
     const starting = new Promise<void>(resolve => { ready = resolve; });
     this.queryStarts.set(msg.chatId, starting);
@@ -378,7 +376,7 @@ export class WeChatGateway {
         }
       }
       await traceSpan("message.outbox.persist", async () => this.stateManager.putOutbox({ kind: "reply", source, chatId: msg.chatId, messageId: msg.messageId,
-        deliveryKey: msg.deliveryKey, splitMaxChars: this.splitMaxChars, splitMultiPart: this.splitMultiPart, status: "pending" }));
+        deliveryKey: msg.deliveryKey, splitMaxChars: this.splitMaxChars, status: "pending" }));
       if (msg.deliveryKey) {
         this.stateManager.recordProcessedMessageKey(msg.deliveryKey, { preserveReplyEvidence: true });
       }
@@ -421,7 +419,7 @@ export class WeChatGateway {
       if (this.stateManager.hasUncertainReply(id)) return { sent: false, reason: "previous_send_unknown" };
       try {
         await this.ilink.sendMarkdownReply(chatId, text, { deliveryKey: id, kind: "progress",
-          maxCharsPerChunk: MAX_PROGRESS_CHARS, splitMultiPart: false, signal: this.notificationAbort.signal,
+          maxCharsPerChunk: MAX_PROGRESS_CHARS, signal: this.notificationAbort.signal,
           shouldContinue: () => !this.stopped });
         return { sent: true };
       } catch (error) {
@@ -492,7 +490,7 @@ export class WeChatGateway {
           const timeoutMs = deadline - Date.now();
           if (timeoutMs <= 0) throw new Error("WeChat reply timed out before completion");
           await this.ilink.sendMarkdownReply(item.chatId, reply.text, { deliveryKey: item.deliveryKey,
-            maxCharsPerChunk: item.splitMaxChars, splitMultiPart: item.splitMultiPart, timeoutMs,
+            maxCharsPerChunk: item.splitMaxChars, timeoutMs,
             shouldContinue: () => !this.stopped });
         }
         if (item.source === "engine") this.stateManager.updateOutbox(item.deliveryKey, { status: "receipt", receiptStatus: "accepted" });

@@ -57,6 +57,10 @@ export class ControlMcp {
   private readonly invocations = new Map<string, Promise<ControllerToolResult>>();
   private readonly responses = new Map<string, ResponseEntry>();
   private readonly rejections = new Set<string>();
+  // A successful or uncertain mutation invalidates cached read-only calls. The
+  // mutation may have changed state even when its receipt is unavailable, so a
+  // later read must query the Controller again instead of reusing an old result.
+  private readGeneration = 0;
   private readonly appendHolds = new Set<Promise<void>>();
   private readonly progress: QueryProgress;
   private pending = 0;
@@ -208,7 +212,8 @@ export class ControlMcp {
     const batch = this.selectBatch(request);
     const args = structuredClone(wrapper.arguments as Record<string, unknown>);
     const authorization = wrapper.authorization === undefined ? undefined : structuredClone(wrapper.authorization) as ToolAuthorization;
-    const key = canonicalJson({ request: batch.request, name, arguments: args, authorization });
+    const key = canonicalJson({ request: batch.request, name, arguments: args, authorization,
+      ...(tool.annotations.readOnlyHint ? { readGeneration: this.readGeneration } : {}) });
     let invocation = this.invocations.get(key);
     if (!invocation) {
       const callId = createHash("sha256").update(key).digest("hex");
@@ -247,7 +252,10 @@ export class ControlMcp {
         if (error instanceof ControllerToolRejectedError) this.rejections.add(key);
         else this.failed = true;
         throw error;
-      }).finally(() => { this.pending--; });
+      }).finally(() => {
+        this.pending--;
+        if (!tool.annotations.readOnlyHint) this.readGeneration++;
+      });
       this.invocations.set(key, invocation);
       if (!tool.annotations.readOnlyHint) batch.mutationTail = invocation.then(() => undefined, () => undefined);
     } else traceEvent("codex.mcp.invocation.reused");

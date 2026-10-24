@@ -226,7 +226,7 @@ test("pending ordinary reply reserves its chat budget against progress notificat
   const base = notification(1), item: Notification = { ...notification(2), source: base.source,
     kind: "progress", progress: { sequence: 1, eventKey: "started" } }, f = setup(t, [item]);
   f.state.putOutbox({ kind: "reply", deliveryKey: "ordinary-reply", chatId: "chat", messageId: "message",
-    splitMaxChars: 100, splitMultiPart: true, status: "pending" });
+    splitMaxChars: 100, status: "pending" });
   assert.equal((await f.create().deliverOnce()).skipped, 1);
   assert.equal(f.sends.length, 0); assert.equal(f.calls.some(call => call.startsWith("claim:")), false);
   f.state.removeOutbox("ordinary-reply");
@@ -237,7 +237,7 @@ test("pending ordinary reply reserves its chat budget against progress notificat
 test("pending ordinary reply does not block a final notification", async t => {
   const f = setup(t);
   f.state.putOutbox({ kind: "reply", deliveryKey: "ordinary-reply", chatId: "chat", messageId: "message",
-    splitMaxChars: 100, splitMultiPart: true, status: "pending" });
+    splitMaxChars: 100, status: "pending" });
   assert.equal((await f.create().deliverOnce()).accepted, 1);
   assert.equal(f.state.contextBudgets.chat.progressSent, 0);
 });
@@ -246,7 +246,7 @@ test("an existing blocked progress reference does not hide a new final notificat
   const final = notification(1), progress: Notification = { ...notification(2), source: final.source,
     kind: "progress", progress: { sequence: 1, eventKey: "started" } }, f = setup(t, [progress]);
   f.state.putOutbox({ kind: "reply", deliveryKey: "ordinary", chatId: "chat", messageId: "message",
-    splitMaxChars: 100, splitMultiPart: true, status: "pending" });
+    splitMaxChars: 100, status: "pending" });
   assert.equal((await f.create().deliverOnce()).skipped, 1);
   f.records.set(final.id, final);
   assert.equal((await f.create().deliverOnce()).accepted, 1);
@@ -291,7 +291,7 @@ test("progress claim recovery yields to a pending ordinary reply through durable
   await assert.rejects(f.create().deliverOnce(), /claim response lost/);
   f.hooks.claim = undefined; f.restart();
   f.state.putOutbox({ kind: "reply", deliveryKey: "ordinary", chatId: "chat", messageId: "message",
-    splitMaxChars: 100, splitMultiPart: true, status: "pending" });
+    splitMaxChars: 100, status: "pending" });
   await f.create().deliverOnce();
   assert.equal(f.sends.length, 0); assert.equal(f.records.get(progress.id)!.status, "pending");
   assert.equal(f.records.get(progress.id)!.lastDeferReason, "budget_exhausted");
@@ -382,7 +382,7 @@ test("a stale progress claim conflict cannot starve a final notification in the 
   const final = notification(1), progress: Notification = { ...notification(2), source: final.source,
     kind: "progress", progress: { sequence: 1, eventKey: "started" } }, f = setup(t, [progress]);
   f.state.putOutbox({ kind: "reply", deliveryKey: "ordinary", chatId: "chat", messageId: "message",
-    splitMaxChars: 100, splitMultiPart: true, status: "pending" });
+    splitMaxChars: 100, status: "pending" });
   await f.create().deliverOnce(); f.state.removeOutbox("ordinary"); f.records.set(final.id, final);
   const claim = f.controller.claimNotification.bind(f.controller);
   t.mock.method(f.controller, "claimNotification", (id: string, attemptId: string) => {

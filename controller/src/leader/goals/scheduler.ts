@@ -3,10 +3,10 @@ import { randomUUID, createHash } from "node:crypto";
 import type { IStore } from "../../store/interface.js";
 import type { CommandService } from "../../commands/service.js";
 import { CommandError } from "../../commands/service.js";
-import { GoalDecisionSchema, GOAL_LEASE_MS, GOAL_SEND_CLAIM_MS, goalRequestId, goalIsOpen, validateGoalDecision, renderGoalAction,
+import { GoalDecisionSchema, GOAL_LEASE_MS, GOAL_SEND_CLAIM_MS, goalRequestId, goalIsOpen, validateGoalDecision, freezeGoalActionInput, matchesGoalActionInput,
   type GoalRecord, type GoalDecision, type GoalDecisionInput } from "./goal.js";
 import { readGoalView, type GoalView } from "./view.js";
-import { modelDiagnostic } from "../model/errors.js";
+import { ModelFailure, modelDiagnostic } from "../model/errors.js";
 
 const TICK_MS = 2000;
 const DECISION_TIMEOUT_MS = 90_000;
@@ -109,9 +109,9 @@ export class GoalScheduler {
       lease: { token: randomUUID(), startedAt, expiresAt: startedAt + GOAL_LEASE_MS, input } });
     if (!claimed?.lease || this.stopped) return;
     const abort = new AbortController(); this.modelAborts.set(id, abort);
-    const timer = setTimeout(() => abort.abort(), DECISION_TIMEOUT_MS);
+    const timer = setTimeout(() => abort.abort(new ModelFailure("Goal model timed out", { category: "timeout" })), DECISION_TIMEOUT_MS);
     let onAbort!: () => void;
-    const aborted = new Promise<never>((_resolve, reject) => { onAbort = () => reject(new Error("Goal model aborted")); abort.signal.addEventListener("abort", onAbort, { once: true }); });
+    const aborted = new Promise<never>((_resolve, reject) => { onAbort = () => reject(abort.signal.reason); abort.signal.addEventListener("abort", onAbort, { once: true }); });
     try {
       const decision = GoalDecisionSchema.parse(await Promise.race([this.decide(structuredClone(input), abort.signal), aborted]));
       const current = await this.store.getGoal(id);
@@ -126,7 +126,7 @@ export class GoalScheduler {
         const sources = decision.sourceActions.map(index => input.actions[index - 1].result!);
         await this.save(current, { decisions, lease: undefined, actions: [...current.actions, { index: current.actions.length + 1,
           target: decision.target, prompt: decision.prompt, sourceActions: decision.sourceActions,
-          input: { prompt: renderGoalAction(current.proposal, decision.prompt, sources), sources } }] });
+          input: freezeGoalActionInput(current.proposal, decision.prompt, sources) }] });
       } else await this.save(current, { decisions, lease: undefined, status: decision.type === "complete" ? "completed" : "blocked",
         ...(decision.type === "blocked" ? { blockedReason: decision.reason } : {}) });
     } catch (error) {
@@ -155,7 +155,7 @@ export class GoalScheduler {
         if (!latest || latest.status !== "active" || !this.allowed(latest) || this.stopped || latest.expiresAt <= this.now() ||
           JSON.stringify(latest.actions[index]) !== JSON.stringify(claimed.actions[index]) || latest.actions[index].attempt!.expiresAt <= this.now() ||
           !view || view.actions.slice(0, index).some(a => a.status !== "completed") ||
-          action.input.sources.some(source => JSON.stringify(view.actions[source.action - 1]?.result) !== JSON.stringify(source))) {
+          !matchesGoalActionInput(latest.proposal, action, view.actions)) {
           throw new CommandError(409, "Goal dispatch authority unavailable");
         }
       }, target.sendRoute,{type:"goal",id:goal.id,chatId:goal.chatId});

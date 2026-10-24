@@ -129,7 +129,7 @@ func TestTerminalFailurePreservesTimestampAndOtherSources(t *testing.T) {
 
 func TestTerminalReadNeverFallsBack(t *testing.T) {
 	a := &terminalRouteAdapter{}
-	d := NewDaemon(&config.Config{NodeID: "demoair"}, a)
+	d := NewDaemon(&config.Config{NodeID: "macair"}, a)
 	id := terminalFixtureSession("one").ID
 	var terminalReads, catalogReads atomic.Int32
 	d.sessionSnapshot = []protocol.Session{{ID: id}}

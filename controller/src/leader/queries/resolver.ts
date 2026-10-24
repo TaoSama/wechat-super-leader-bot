@@ -30,6 +30,14 @@ export interface ResolverContext {
 const terminalInputRequiresConfirmation = (): NLIntent => ({ action: "unknown",
   replyText: "规则模式仅支持读取终端观测；终端非原子输入请使用模型模式生成独立单步并确认，或在控制台明确发送。输入写入不代表执行完成。" });
 
+const READ_VERBS = "(?:查看|读取|看看|查一下|汇报|报告|同步|讲讲|说一下|检查)";
+const READ_SUBJECTS = "(?:输出|日志|内容|情况|执行到哪|跑成什么样|结果|tail|log|进度|进展|状态)";
+const READ_QUERY_SUFFIX = `\\s*(?:的)?\\s*(?:最新)?${READ_SUBJECTS}[？?。]*$`;
+const READ_QUERY_PATTERNS = [
+  new RegExp(`^${READ_VERBS}\\s*(.*?)\\s*(?:上)?(?:${READ_VERBS})?${READ_QUERY_SUFFIX}`, "i"),
+  new RegExp(`^在\\s*(.*?)\\s*(?:上)?\\s*${READ_VERBS}${READ_QUERY_SUFFIX}`, "i"),
+];
+
 export class NaturalLanguageResolver {
   resolve(text: string, ctx: ResolverContext): NLIntent {
     const raw = text.trim();
@@ -40,6 +48,10 @@ export class NaturalLanguageResolver {
       };
     }
 
+    // An explicit dispatch owns its task body; query words inside it are prompt content.
+    const sendIntent = this.resolveSendIntent(raw, ctx);
+    if (sendIntent) return sendIntent;
+
     // 1. List / Query nodes/machines
     if (
       /(有哪些|查看|列出|看看|查一下).*(机器|节点|主机|host|node|vps)/i.test(raw) ||
@@ -49,15 +61,10 @@ export class NaturalLanguageResolver {
       return { action: "list_nodes" };
     }
 
-    // 2. Read query check (Fix 1: check read query before global list_sessions if it asks for output/logs/progress or targets a session)
-    const isExplicitReadOutput = /(输出|日志|内容|情况|执行到哪|跑成什么样|结果|tail|log|进度|进展|状态)/i.test(
-      raw
-    );
-    const hasReadVerb = /(查看|读取|看看|查一下|汇报|报告|同步|讲讲|说一下|检查)/i.test(raw);
-    const hasExecuteVerb = /(执行|运行|发送|让它|告诉|输入|继续|跑一下|发给|派发|跑)/i.test(raw);
-
-    if (isExplicitReadOutput && hasReadVerb && !hasExecuteVerb) {
-      return this.resolveReadIntent(raw, ctx);
+    // Parse the complete read query once so classification and target extraction share a grammar.
+    for (const pattern of READ_QUERY_PATTERNS) {
+      const match = raw.match(pattern);
+      if (match) return this.resolveReadIntent(match[1].trim(), ctx);
     }
 
     // 3. List / Query sessions/agents (pure listing without output/logs request)
@@ -70,13 +77,15 @@ export class NaturalLanguageResolver {
       return { action: "list_sessions" };
     }
 
-    // 4. Send / Dispatch / Continue
-    // (Fix 2: Require explicit execute/send verb or continuation, do NOT trigger on random colons)
-    return this.resolveSendIntent(raw, ctx);
+    return {
+      action: "unknown",
+      replyText:
+        "未能识别该指令意图。如果要向会话发送指令，请使用明确的执行动词，例如：“让 session-1 执行：pnpm test” 或 “查看会话列表”。",
+    };
   }
 
-  private resolveReadIntent(raw: string, ctx: ResolverContext): NLIntent {
-    const targetCheck = this.findTargetSession(raw, ctx, "");
+  private resolveReadIntent(target: string, ctx: ResolverContext): NLIntent {
+    const targetCheck = this.findTargetSession(target, ctx);
     if (targetCheck.explicitTargetNotFound) {
       return {
         action: "unknown",
@@ -125,7 +134,7 @@ export class NaturalLanguageResolver {
     };
   }
 
-  private resolveSendIntent(raw: string, ctx: ResolverContext): NLIntent {
+  private resolveSendIntent(raw: string, ctx: ResolverContext): NLIntent | null {
     // Fix 2: Require explicit execute/send verbs or affirmative continuation words
     const isContinuation = /^(继续|继续执行|让它继续跑)$/i.test(raw);
 
@@ -158,17 +167,11 @@ export class NaturalLanguageResolver {
       }
     }
 
-    if (!prompt) {
-      return {
-        action: "unknown",
-        replyText:
-          "未能识别该指令意图。如果要向会话发送指令，请使用明确的执行动词，例如：“让 session-1 执行：pnpm test” 或 “查看会话列表”。",
-      };
-    }
+    if (!prompt) return null;
 
     // Fix 3 & 4: Only match target in targetClause (avoid prompt text interfering),
     // and if targetClause was specified but unresolvable, reject explicitly without fallback!
-    const targetCheck = this.findTargetSession(targetClause, ctx, targetClause);
+    const targetCheck = this.findTargetSession(targetClause, ctx);
 
     if (targetCheck.explicitTargetNotFound) {
       return {
@@ -264,21 +267,13 @@ export class NaturalLanguageResolver {
 
   private findTargetSession(
     targetText: string,
-    ctx: ResolverContext,
-    explicitClause: string
+    ctx: ResolverContext
   ): {
     session?: ScopedSession;
     clarificationMessage?: string;
     explicitTargetNotFound?: string;
   } {
-    if (!targetText && !explicitClause) {
-      return {};
-    }
-
-    const searchScope = (explicitClause || targetText
-      .replace(/^(?:在|查看|读取|看看|查一下|汇报|报告|检查)\s*/, "")
-      .replace(/\s*(?:上)?(?:查看|读取|看看)?\s*(?:的)?\s*(?:最新)?(?:输出|日志|内容|情况|执行到哪|结果|进度|进展|状态)[？?。]*$/, ""))
-      .trim();
+    const searchScope = targetText.trim();
     if (!searchScope) return {};
 
     // Detect if user used an explicit target pattern in searchScope

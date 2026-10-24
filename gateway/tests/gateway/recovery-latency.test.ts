@@ -34,7 +34,7 @@ function fixture(t: TestContext) {
   const put = (messageId: string, status: "pending" | "receipt" | "expired" = "pending", source: "engine" | "controller" = "engine") => {
     const deliveryKey = state.computeDeliveryKey("chat", messageId);
     state.putOutbox({ kind: "reply", source, chatId: "chat", messageId, deliveryKey,
-      splitMaxChars: 1000, splitMultiPart: false, status,
+      splitMaxChars: 1000, status,
       ...(status === "receipt" ? { receiptStatus: "accepted" as const } : {}) });
     return deliveryKey;
   };

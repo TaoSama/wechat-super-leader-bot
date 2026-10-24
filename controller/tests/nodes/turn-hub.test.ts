@@ -13,10 +13,10 @@ class Socket extends EventEmitter {
   receive(message: unknown) { this.emit("message", JSON.stringify(message)); }
 }
 
-const record = (id: string, nodeId = "demoair"): CommandRecord => ({ commandId: id, requestId: id,
+const record = (id: string, nodeId = "macair"): CommandRecord => ({ commandId: id, requestId: id,
   nodeId, sessionId: "session", action: "send", status: "pending", prompt: "fixture",
   createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString() });
-const hello = { type: "hello", version: 1, nodeId: "demoair", sessions: [], skills: [] };
+const hello = { type: "hello", version: 1, nodeId: "macair", sessions: [], skills: [] };
 const heartbeat = { type: "heartbeat", sessions: [], skills: [] };
 
 describe("Turn reconciliation hub", () => {
@@ -26,7 +26,7 @@ describe("Turn reconciliation hub", () => {
     await store.createCommandIfAbsent(record("foreign", "other"));
     const hub = new NodeHub(store, new Map());
     const ws = new Socket();
-    hub.handleConnection(ws as unknown as WebSocket, "demoair");
+    hub.handleConnection(ws as unknown as WebSocket, "macair");
     ws.receive(hello);
     const result = { type: "result", commandId: "command", status: "accepted", turnId: "turn", output: "accepted" };
     try {
@@ -55,10 +55,10 @@ describe("Turn reconciliation hub", () => {
       await store.createCommandIfAbsent(record(id));
       await store.updateCommandStatus(id, "accepted", "", undefined, `turn-${id}`);
     }
-    await store.markNodeActiveCommandsUncertain("demoair", "restart fixture");
+    await store.markNodeActiveCommandsUncertain("macair", "restart fixture");
     const hub = new NodeHub(store, new Map());
     const ws = new Socket();
-    hub.handleConnection(ws as unknown as WebSocket, "demoair");
+    hub.handleConnection(ws as unknown as WebSocket, "macair");
     try {
       ws.receive(hello);
       await vi.waitFor(() => expect(ws.sent.filter(m => m.type === "inspect_turn")).toHaveLength(1));

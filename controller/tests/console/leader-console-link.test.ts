@@ -30,7 +30,7 @@ function fixture(replies: (ModelReply | (() => never))[] = [], issuer?: (request
   const store = new MemoryStore();
   let clock = 1700000000000;
   const sessions: ScopedSession[] = [
-    { id: "s1", nodeId: "demoair", provider: "codex-app", title: "测试", cwd: "/test", status: "idle", loaded: true, capabilities: ["read", "send"], observedAt: new Date(clock).toISOString() },
+    { id: "s1", nodeId: "macair", provider: "codex-app", title: "测试", cwd: "/test", status: "idle", loaded: true, capabilities: ["read", "send"], observedAt: new Date(clock).toISOString() },
   ];
   const hub = {
     getAllSkills: () => [],
@@ -66,7 +66,7 @@ describe("Leader console link integration", () => {
   it.each(["给我控制端链接", "给我控制台链接", "控制台入口"])("issues a plain %s request without model reasoning and replays its exact durable receipt", async text => {
     const chatId = "direct-console-chat", messageId = "direct-console-message";
     const requestId = `console_link_${createHash("sha256").update(JSON.stringify([chatId, messageId])).digest("hex")}`;
-    const url = `https://leader.example.com/#login=direct-private-token-${requestId}`;
+    const url = `https://leader.taoai.site/#login=direct-private-token-${requestId}`;
     const issuer = vi.fn(async (_requestId: string) => ({ url, expiresAt: "2026-10-11T12:00:00.000Z" }));
     const f = fixture([], issuer);
     const inventory = vi.spyOn(f.hub, "getAllSessions");
@@ -83,7 +83,7 @@ describe("Leader console link integration", () => {
     expect(history[0]).toMatchObject({ role: "user", content: text });
     expect(history[1].content).toContain("[一次性控制台登录链接已生成，有效期1小时]");
     expect(JSON.stringify(history)).not.toContain("direct-private-token");
-    expect(JSON.stringify(history)).not.toContain("https://leader.example.com");
+    expect(JSON.stringify(history)).not.toContain("https://leader.taoai.site");
     expect(state!.data.receipts).toEqual([expect.objectContaining({ messageId, text: reply.text })]);
 
     // A fresh orchestrator must replay the persisted delivery receipt without issuing another token.
@@ -117,7 +117,7 @@ describe("Leader console link integration", () => {
 
   it("issues one-time link, appends URL with updated notice, and keeps model trace and history completely sanitized", async () => {
     const issuer = vi.fn(async (requestId: string) => ({
-      url: `https://leader.example.com/#login=secret-otp-token-for-${requestId}`,
+      url: `https://leader.taoai.site/#login=secret-otp-token-for-${requestId}`,
       expiresAt: "2026-10-11T12:00:00.000Z",
     }));
     const f = fixture([tool("get_console_link", {}), final("已为你生成控制台链接。")], issuer);
@@ -127,7 +127,7 @@ describe("Leader console link integration", () => {
 
     // 1. 用户收到的回复包含真实链接，且文案为“打开后地址栏会自动隐藏登录凭证”
     expect(reply.text).toContain("已为你生成控制台链接");
-    expect(reply.text).toContain("https://leader.example.com/#login=secret-otp-token-for-console_link_");
+    expect(reply.text).toContain("https://leader.taoai.site/#login=secret-otp-token-for-console_link_");
     expect(reply.text).toContain("1小时内有效，仅可使用一次，打开后地址栏会自动隐藏登录凭证");
     expect(issuer).toHaveBeenCalledTimes(1);
     const invokedRequestId = issuer.mock.calls[0][0];
@@ -142,7 +142,7 @@ describe("Leader console link integration", () => {
     for (const callMessages of f.model.calls) {
       for (const msg of callMessages) {
         expect(msg.content ?? "").not.toContain("secret-otp-token");
-        expect(msg.content ?? "").not.toContain("https://leader.example.com");
+        expect(msg.content ?? "").not.toContain("https://leader.taoai.site");
       }
     }
 
@@ -153,7 +153,7 @@ describe("Leader console link integration", () => {
     expect(history.length).toBe(2);
     expect(history[1].content).toContain("[一次性控制台登录链接已生成，有效期1小时]");
     expect(history[1].content).not.toContain("secret-otp-token");
-    expect(history[1].content).not.toContain("https://leader.example.com");
+    expect(history[1].content).not.toContain("https://leader.taoai.site");
 
     // 4. 重复消息（相同 messageId 与相同文本）幂等返回已有的 receipt，绝不重新调用 issuer
     const repeatReply = await leader.handle("chat-1", "msg-1", "帮我打开控制台，并说明链接有效期");
@@ -163,12 +163,12 @@ describe("Leader console link integration", () => {
 
   it("reuses the same issuance if get_console_link is called multiple times within the same message turn", async () => {
     const issuer = vi.fn(async (requestId: string) => ({
-      url: `https://leader.example.com/#login=token-${requestId}`,
+      url: `https://leader.taoai.site/#login=token-${requestId}`,
       expiresAt: "2026-10-11T12:00:00.000Z",
     }));
     const f = fixture([tool("get_console_link", {}), tool("get_console_link", {}), final("链接已备妥")], issuer);
     const reply = await f.create().handle("chat-1", "msg-dup-tool", "我需要控制台链接，并说明链接有效期");
-    expect(reply.text).toContain("https://leader.example.com/#login=token-");
+    expect(reply.text).toContain("https://leader.taoai.site/#login=token-");
     expect(issuer).toHaveBeenCalledTimes(1);
   });
 
@@ -199,21 +199,21 @@ describe("Leader console link integration", () => {
 
   it("does not attach console link when model step limit is reached", async () => {
     const issuer = vi.fn(async () => ({
-      url: "https://leader.example.com/#login=test-token-step-limit",
+      url: "https://leader.taoai.site/#login=test-token-step-limit",
       expiresAt: "2026-10-11T12:00:00.000Z",
     }));
     const replies = Array.from({ length: 6 }, () => tool("get_console_link", {}));
     const f = fixture(replies, issuer);
     const reply = await f.create().handle("chat-1", "msg-limit", "疯狂请求链接");
     expect(reply.text).toContain("本轮查询已达到上限");
-    expect(reply.text).not.toContain("https://leader.example.com/#login=");
+    expect(reply.text).not.toContain("https://leader.taoai.site/#login=");
     expect(reply.text).not.toContain("test-token-step-limit");
     expect(reply.text).not.toContain("控制台登录链接");
   });
 
   it("does not attach console link when reason loop fails with an exception", async () => {
     const issuer = vi.fn(async () => ({
-      url: "https://leader.example.com/#login=test-token-failed-reason",
+      url: "https://leader.taoai.site/#login=test-token-failed-reason",
       expiresAt: "2026-10-11T12:00:00.000Z",
     }));
     // 步骤 1 获取链接成功，步骤 2 模型抛出异常模拟 provider 崩溃
@@ -224,7 +224,7 @@ describe("Leader console link integration", () => {
     const f = fixture(replies, issuer);
     const reply = await f.create().handle("chat-1", "msg-crash", "获取链接然后崩溃");
     expect(reply.text).toContain("本次模型处理未成功");
-    expect(reply.text).not.toContain("https://leader.example.com/#login=");
+    expect(reply.text).not.toContain("https://leader.taoai.site/#login=");
     expect(reply.text).not.toContain("test-token-failed-reason");
     expect(reply.text).not.toContain("控制台登录链接");
   });
@@ -235,7 +235,7 @@ describe("Leader console link integration", () => {
     await leader.handle(
       "chat-1",
       "msg-user-paste",
-      "请帮我看看这个控制台链接为什么进不去：https://leader.example.com/#login=super-secret-pasted-token-999"
+      "请帮我看看这个控制台链接为什么进不去：https://leader.taoai.site/#login=super-secret-pasted-token-999"
     );
 
     expect(f.model.calls.length).toBe(1);

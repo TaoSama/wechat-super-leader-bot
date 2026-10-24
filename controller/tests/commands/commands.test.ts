@@ -1,7 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { CommandService } from "../../src/commands/service.js";
 import { MemoryStore } from "../../src/store/memory.js";
-import type { ControllerCommandMessage, Session } from "../../src/types.js";
+import type { CommandAuthority, ControllerCommandMessage, Session } from "../../src/types.js";
 import type { Skill } from "../../src/skills/catalog.js";
 
 function setup() {
@@ -19,7 +19,54 @@ function setup() {
   };
   return { store, hub, session, commands: new CommandService(store, hub, 300) };
 }
-const input = { nodeId: "demoair", sessionId: "s", action: "send" as const, prompt: "test", requestId: "request" };
+const input = { nodeId: "macair", sessionId: "s", action: "send" as const, prompt: "test", requestId: "request" };
+const readInput = { ...input, action: "read" as const, prompt: undefined };
+const chatAuthority: CommandAuthority = { type: "chat", chatId: "read-chat" };
+const otherAuthorities: CommandAuthority[] = [{ type: "chat", chatId: "other-chat" }, { type: "admin" }];
+
+it("persists chat authority for route-free reads and reuses the command on retry", async () => {
+  const f = setup();
+  const first = await f.commands.submit(readInput, 0, undefined, undefined, chatAuthority);
+  await expect(f.commands.submit(readInput, 0, undefined, undefined, chatAuthority)).resolves.toMatchObject({
+    commandId: first.commandId, status: "completed", authority: chatAuthority,
+  });
+  expect(await f.store.findCommandByRequestId(readInput.requestId)).toMatchObject({ authority: chatAuthority });
+  expect(await f.commands.getByRequestId(readInput.requestId, chatAuthority)).toMatchObject({ commandId: first.commandId });
+  expect(first).not.toHaveProperty("sendRoute");
+  expect(first).not.toHaveProperty("deliveryMode");
+  expect(f.hub.sendCommand).toHaveBeenCalledTimes(1);
+});
+
+it("deduplicates concurrent chat reads and preserves their authorization for later retries", async () => {
+  const f = setup();
+  const results = await Promise.all(Array.from({ length: 8 }, () =>
+    f.commands.submit(readInput, 0, undefined, undefined, chatAuthority)));
+  expect(new Set(results.map(result => result.commandId)).size).toBe(1);
+  await expect(f.commands.submit(readInput, 0, undefined, undefined, chatAuthority)).resolves.toMatchObject({
+    commandId: results[0].commandId, authority: chatAuthority,
+  });
+  expect(f.hub.sendCommand).toHaveBeenCalledTimes(1);
+});
+
+it.each(otherAuthorities)("rejects a read retry from different authority %j", async authority => {
+  const f = setup();
+  await f.commands.submit(readInput, 0, undefined, undefined, chatAuthority);
+  await expect(f.commands.submit(readInput, 0, undefined, undefined, authority)).rejects.toThrow("different command payload");
+  expect(await f.commands.getByRequestId(readInput.requestId, authority)).toBeNull();
+  expect(f.hub.sendCommand).toHaveBeenCalledTimes(1);
+});
+
+it.each(otherAuthorities)("rejects concurrent read reuse by different authority %j", async authority => {
+  const f = setup();
+  const [first, duplicate] = await Promise.allSettled([
+    f.commands.submit(readInput, 0, undefined, undefined, chatAuthority),
+    f.commands.submit(readInput, 0, undefined, undefined, authority),
+  ]);
+  expect(first.status).toBe("fulfilled");
+  expect(duplicate).toMatchObject({ status: "rejected", reason: { message: expect.stringContaining("different payload") } });
+  expect(await f.store.findCommandByRequestId(readInput.requestId)).toMatchObject({ authority: chatAuthority });
+  expect(f.hub.sendCommand).toHaveBeenCalledTimes(1);
+});
 
 it("uses one persisted command for concurrent requests and rejects changed payload", async () => {
   const f = setup();

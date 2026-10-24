@@ -3,7 +3,7 @@ import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 import { ArrowLeft, CalendarClock, RefreshCw } from "lucide-react";
 import { changeAutomationStatus, fetchAutomationRuns } from "../../api/automations";
 import { ApiAuthError } from "../../api/errors";
-import { setUnauthenticatedSession } from "../../auth/bootstrap";
+import { getAuthSessionSnapshot, setUnauthenticatedSession } from "../../auth/bootstrap";
 import { formatTimestamp } from "../../format";
 import type { AutomationStatus, ConsoleAutomation } from "./automation-contract";
 import type { ConsoleAutomationRun } from "./automation-runs";
@@ -20,10 +20,11 @@ function AutomationCard({ item, onOpen }: { item: ConsoleAutomation; onOpen: (it
 
   async function change(status: "active" | "paused" | "cancelled") {
     if (busy) return;
+    const requestGeneration = getAuthSessionSnapshot().generation;
     setBusy(true); setError(undefined);
     try { setCurrent(await changeAutomationStatus(current, status)); }
     catch (cause) {
-      if (cause instanceof ApiAuthError) setUnauthenticatedSession("expired");
+      if (cause instanceof ApiAuthError) setUnauthenticatedSession("expired", requestGeneration);
       else setError(cause instanceof Error ? cause.message : "操作未确认，请刷新核验");
     } finally { setBusy(false); setCancelConfirm(false); }
   }

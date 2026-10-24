@@ -41,6 +41,7 @@ type Entry struct {
 	Dispatch         *protocol.DispatchIdentity   `json:"dispatch,omitempty"`
 	TerminalDelivery *terminal.DeliveryIdentity   `json:"terminalDelivery,omitempty"`
 	Result           protocol.DaemonResultMessage `json:"result"`
+	ResultSHA256     string                       `json:"resultSHA256,omitempty"`
 	Finished         bool                         `json:"finished"`
 	Acknowledged     bool                         `json:"acknowledged"`
 }
@@ -172,6 +173,23 @@ func fingerprint(cmd protocol.ControllerCommandMessage) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// The wire encoding preserves output presence while normalizing the redundant
+// presence flag on non-empty output, matching SameResult's receipt semantics.
+func resultFingerprint(result protocol.DaemonResultMessage) (string, error) {
+	if len(result.Output) > protocol.MaxTurnOutputBytes {
+		return "", protocol.ErrTurnOutputLimit
+	}
+	if !utf8.ValidString(result.Output) || !utf8.ValidString(result.Error) {
+		return "", errors.New("command journal result contains invalid UTF-8")
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 func unknownResult(commandID string) protocol.DaemonResultMessage {
 	return protocol.DaemonResultMessage{Type: "result", CommandID: commandID, Status: protocol.StatusUncertain,
 		Error: "Daemon stopped after durable dispatch claim; execution is unconfirmed and will not be replayed"}
@@ -187,6 +205,12 @@ func decode(key, value []byte) (Entry, error) {
 		(entry.Result.Status != protocol.StatusAccepted && entry.Result.Status != protocol.StatusCompleted && entry.Result.Status != protocol.StatusFailed && entry.Result.Status != protocol.StatusUncertain && entry.Result.Status != protocol.StatusInputWritten) ||
 		(entry.Acknowledged && !entry.Finished) {
 		return Entry{}, errors.New("invalid command journal entry")
+	}
+	if entry.ResultSHA256 != "" {
+		resultDigest, err := hex.DecodeString(entry.ResultSHA256)
+		if err != nil || len(resultDigest) != sha256.Size || !entry.Acknowledged {
+			return Entry{}, errors.New("invalid command journal result digest")
+		}
 	}
 	if entry.Dispatch != nil {
 		if err := validateDispatch(*entry.Dispatch, false); err != nil {
@@ -333,9 +357,13 @@ func (j *Journal) Ack(ack protocol.ResultAckMessage) error {
 		if !entry.Finished || entry.Acknowledged || !protocol.ReceiptMatchesAck(entry.Result, ack) {
 			return nil
 		}
+		entry.ResultSHA256, err = resultFingerprint(entry.Result)
+		if err != nil {
+			return err
+		}
 		entry.Acknowledged = true
 		// The Controller owns the full audit output. Retain the replay guard and
-		// turn/status receipt indefinitely, not the acknowledged conversation text.
+		// receipt digest indefinitely, not the acknowledged conversation text.
 		entry.Result.Output = ""
 		entry.Result.OutputPresent = false
 		entry.Result.Error = ""

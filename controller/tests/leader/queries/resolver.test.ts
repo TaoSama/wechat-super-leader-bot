@@ -10,7 +10,7 @@ describe("NaturalLanguageResolver", () => {
   const sessions: ScopedSession[] = [
     {
       id: "session-1",
-      nodeId: "demoair",
+      nodeId: "macair",
       provider: "codex-app",
       title: "Codex App Main",
       cwd: "/Users/test/project",
@@ -21,7 +21,7 @@ describe("NaturalLanguageResolver", () => {
     },
     {
       id: "session-2",
-      nodeId: "demoair",
+      nodeId: "macair",
       provider: "codex-app",
       title: "Codex Worker",
       cwd: "/Users/test/worker",
@@ -55,12 +55,12 @@ describe("NaturalLanguageResolver", () => {
   it("resolves read_session with explicit target", () => {
     const res = resolver.resolve("查看 session-1 的输出", { sessions });
     expect(res.action).toBe("read_session");
-    expect(res.nodeId).toBe("demoair");
+    expect(res.nodeId).toBe("macair");
     expect(res.sessionId).toBe("session-1");
   });
 
   it("requires clarification when ambiguous target in read query", () => {
-    const res = resolver.resolve("在 demoair 上查看输出", { sessions });
+    const res = resolver.resolve("在 macair 上查看输出", { sessions });
     expect(res.action).toBe("clarification");
     expect(res.clarificationMessage).toContain("拥有多个会话");
   });
@@ -68,7 +68,7 @@ describe("NaturalLanguageResolver", () => {
   it("resolves send_session with prompt", () => {
     const res = resolver.resolve("在 session-1 执行: pnpm test", { sessions });
     expect(res.action).toBe("send_session");
-    expect(res.nodeId).toBe("demoair");
+    expect(res.nodeId).toBe("macair");
     expect(res.sessionId).toBe("session-1");
     expect(res.prompt).toBe("pnpm test");
   });
@@ -88,10 +88,10 @@ describe("NaturalLanguageResolver", () => {
   it("resolves target from lastContext when user says 继续", () => {
     const res = resolver.resolve("继续", {
       sessions,
-      lastContext: { nodeId: "demoair", sessionId: "session-1" },
+      lastContext: { nodeId: "macair", sessionId: "session-1" },
     });
     expect(res.action).toBe("send_session");
-    expect(res.nodeId).toBe("demoair");
+    expect(res.nodeId).toBe("macair");
     expect(res.sessionId).toBe("session-1");
     expect(res.prompt).toBe("继续");
   });
@@ -122,8 +122,8 @@ describe("NaturalLanguageResolver", () => {
   it("supports whitespace, exact node and duplicate session IDs", () => {
     const duplicates = [sessions[0], { ...sessions[0], nodeId: "vps-hk" }];
     expect(resolver.resolve("让 session-1 执行：测试", { sessions: duplicates }).action).toBe("clarification");
-    const res = resolver.resolve("在 demoair session-1 上执行: pnpm test", { sessions: duplicates });
-    expect(res).toMatchObject({ action: "send_session", nodeId: "demoair", prompt: "pnpm test" });
+    const res = resolver.resolve("在 macair session-1 上执行: pnpm test", { sessions: duplicates });
+    expect(res).toMatchObject({ action: "send_session", nodeId: "macair", prompt: "pnpm test" });
   });
 
   it("admits known desktop routes for explicit, single and contextual targets while dispatch stays blocked", () => {
@@ -133,7 +133,7 @@ describe("NaturalLanguageResolver", () => {
     const cases = [
       { text: "让 session-1 执行：fixture", context: { sessions: [desktop] } },
       { text: "执行：fixture", context: { sessions: [desktop] } },
-      { text: "继续", context: { sessions: [desktop, sessions[2]], lastContext: { nodeId: "demoair", sessionId: "session-1" } } },
+      { text: "继续", context: { sessions: [desktop, sessions[2]], lastContext: { nodeId: "macair", sessionId: "session-1" } } },
     ];
     for (const entry of cases) expect(resolver.resolve(entry.text, entry.context).action).toBe("send_session");
     desktop.loaded = true;

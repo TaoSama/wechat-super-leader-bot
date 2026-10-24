@@ -437,7 +437,7 @@ func TestControllerConcurrentResultsRemainWholeMessages(t *testing.T) {
 		serverResult <- nil
 	}))
 	defer server.Close()
-	d := NewDaemon(&config.Config{NodeID: "demoair", ControllerURL: "ws" + strings.TrimPrefix(server.URL, "http"),
+	d := NewDaemon(&config.Config{NodeID: "macair", ControllerURL: "ws" + strings.TrimPrefix(server.URL, "http"),
 		HeartbeatInterval: time.Millisecond}, &receiptAdapter{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
