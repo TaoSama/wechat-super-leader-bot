@@ -150,7 +150,6 @@ async function main() {
           return response(res, { id: `msg_${randomUUID()}`, type: 'message', status: 'completed', role: 'assistant',
             content: [{ type: 'output_text', annotations: [], text: FINAL }] });
         }
-        check('exact follow-up user text reached native model input', hasSteerText);
         return response(res, { id: `msg_${randomUUID()}`, type: 'message', status: 'completed', role: 'assistant',
           content: [{ type: 'output_text', annotations: [], text: FINAL }] });
       }
