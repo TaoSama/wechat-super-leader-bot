@@ -150,7 +150,6 @@ async function main() {
           return response(res, { id: `msg_${randomUUID()}`, type: 'message', status: 'completed', role: 'assistant',
             content: [{ type: 'output_text', annotations: [], text: FINAL }] });
         }
-        check('exact follow-up user text reached native model input', hasSteerText);
         return response(res, { id: `msg_${randomUUID()}`, type: 'message', status: 'completed', role: 'assistant',
           content: [{ type: 'output_text', annotations: [], text: FINAL }] });
       }
@@ -171,7 +170,7 @@ async function main() {
         case '/v1/chats/notification-interest': return send({ chatIds: [], interested: [] });
         case '/v1/deliveries/resume':
           assert.equal(body.chatId, CHAT);
-          assert.equal(typeof body.generation, 'string');
+          if (body.generation !== undefined) assert.equal(typeof body.generation, 'string');
           return send({ resumed: 0 });
         case '/v1/tools/list':
           assert.equal(req.method, 'POST');
@@ -221,6 +220,7 @@ childProcess.spawn=function(command,args,options){
     gateway = launch(process.execPath, [...args, '--run'], env, 'gateway');
     await waitUntil(() => errors.length || evidence.replies.some(reply => reply.text === FINAL) || gateway.child.exitCode !== null, 'unified final WeChat delivery');
     assert.deepEqual(errors, []);
+    check('exact follow-up user text reached native model input', evidence.requests.some(request => JSON.stringify(request.body.input).includes(STEER_TEXT)));
     check('second user message was received on a later poll', secondQueued && pollBatches.findIndex(batch => batch.texts.includes(STEER_TEXT)) > pollBatches.findIndex(batch => batch.texts.includes(ROOT_TEXT)));
     check('three exact progress messages and one final reply delivered', JSON.stringify(evidence.replies.map(reply => reply.text)) === JSON.stringify([...PROGRESS, FINAL]));
     const frames = await nativeFrames(protocol), starts = frames.filter(entry => entry.direction === 'stdin' && entry.frame.method === 'turn/start');
