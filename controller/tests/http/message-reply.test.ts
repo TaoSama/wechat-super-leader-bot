@@ -156,6 +156,16 @@ describe("immutable message reply recovery", () => {
     expect(state).not.toHaveBeenCalled();
   });
 
+  it("does not expose internal direct-settings journal records through reply recovery", async () => {
+    const f = await fixture();
+    await seed(f.store, "direct_settings_private");
+    const read = vi.spyOn(f.store, "getMessage");
+    const reply = await f.get("/v1/messages/direct_settings_private/reply?chatId=allowed");
+    expect(reply.status).toBe(404);
+    expect(reply.body).toEqual({ error: "Message reply not found" });
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it("handles storage failure without exposing private error details or replaying work", async () => {
     const f = await fixture();
     vi.spyOn(f.store, "getMessage").mockRejectedValueOnce(new Error("private database details"));
