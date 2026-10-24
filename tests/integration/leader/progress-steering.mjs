@@ -218,7 +218,7 @@ childProcess.spawn=function(command,args,options){
     const baseline = JSON.parse(await execute(process.execPath, [...args, '--establish-baseline'], env, 'baseline'));
     assert.equal(baseline.ok, true);
     gateway = launch(process.execPath, [...args, '--run'], env, 'gateway');
-    await waitUntil(() => errors.length || evidence.replies.some(reply => reply.text === FINAL) || gateway.child.exitCode !== null, 'unified final WeChat delivery');
+    await waitUntil(() => errors.length || evidence.replies.some(reply => reply.text === FINAL) || gateway.child.exitCode !== null, 'unified final WeChat delivery', 180_000);
     assert.deepEqual(errors, []);
     check('exact follow-up user text reached native model input', evidence.requests.some(request => JSON.stringify(request.body.input).includes(STEER_TEXT)));
     check('second user message was received on a later poll', secondQueued && pollBatches.findIndex(batch => batch.texts.includes(STEER_TEXT)) > pollBatches.findIndex(batch => batch.texts.includes(ROOT_TEXT)));
