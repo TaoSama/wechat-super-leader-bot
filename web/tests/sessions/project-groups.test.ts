@@ -96,4 +96,16 @@ describe("project session groups", () => {
     expect(groups[0].sessions.map(item => item.id)).toEqual(["main", "codex-worktree", "claude-worktree"]);
     expect(groups[0].path).toBe("/Users/demo/Workspaces/wechat-super-leader-bot");
   });
+
+  it("uses the repository segment when a worktree session cwd is nested", () => {
+    const groups = groupSessionProjects([
+      session("main", { cwd: "/Users/demo/Workspaces/wechat-super-leader-bot" }),
+      session("codex-nested", { cwd: "/Users/demo/.codex/worktrees/6a1b/wechat-super-leader-bot/web" }),
+      session("codex-short", { cwd: "/Users/demo/.codex/worktrees/wechat-super-leader-bot" }),
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].name).toBe("wechat-super-leader-bot");
+    expect(groups[0].sessions.map(item => item.id)).toEqual(["main", "codex-nested", "codex-short"]);
+  });
 });

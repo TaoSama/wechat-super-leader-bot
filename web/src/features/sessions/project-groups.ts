@@ -22,7 +22,13 @@ function worktreeProjectName(path: string): string | null {
   }
   const worktreeIndex = parts.lastIndexOf("worktrees");
   if (worktreeIndex >= 0 && parts.length > worktreeIndex + 2) {
-    return parts.at(-1) || null;
+    // Codex worktrees use worktrees/<instance>/<repository>. The session cwd
+    // may point below the checkout, so use the repository segment instead of
+    // treating a nested directory as another project.
+    return parts[worktreeIndex + 2] || null;
+  }
+  if (worktreeIndex >= 0 && parts.length === worktreeIndex + 2 && parts[worktreeIndex - 1] === ".codex") {
+    return parts[worktreeIndex + 1] || null;
   }
   return null;
 }
