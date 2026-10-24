@@ -67,6 +67,8 @@ export abstract class DeliveryState {
           (item.kind !== "notification" || typeof item.notificationIdentity !== "string" || !NOTIFICATION_IDENTITY.test(item.notificationIdentity))) {
         throw new Error("Invalid delivery outbox reference");
       }
+      // Older state files contain a retired switch that never affected the chunk plan.
+      delete (item as DeliveryOutboxItem & { splitMultiPart?: unknown }).splitMultiPart;
       item.source = outboxSource(item.source);
       validateEngineAcknowledgement(item);
     }

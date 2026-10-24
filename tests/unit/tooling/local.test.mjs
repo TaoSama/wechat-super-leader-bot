@@ -45,31 +45,31 @@ test('resolveControllerUrls validates and normalizes loopback and remote HTTPS t
   assert.equal(loopback.wsUrl, 'ws://127.0.0.1:8790/v1/daemon');
   assert.equal(loopback.isRemote, false);
 
-  const remote = resolveControllerUrls('https://leader.taoai.site');
-  assert.equal(remote.httpUrl, 'https://leader.taoai.site');
-  assert.equal(remote.wsUrl, 'wss://leader.taoai.site/v1/daemon');
+  const remote = resolveControllerUrls('https://leader.example.com');
+  assert.equal(remote.httpUrl, 'https://leader.example.com');
+  assert.equal(remote.wsUrl, 'wss://leader.example.com/v1/daemon');
   assert.equal(remote.isRemote, true);
 
-  const customPortAndPath = resolveControllerUrls('https://leader.taoai.site:8443/custom/path/');
-  assert.equal(customPortAndPath.httpUrl, 'https://leader.taoai.site:8443/custom/path');
-  assert.equal(customPortAndPath.wsUrl, 'wss://leader.taoai.site:8443/custom/path/v1/daemon');
+  const customPortAndPath = resolveControllerUrls('https://leader.example.com:8443/custom/path/');
+  assert.equal(customPortAndPath.httpUrl, 'https://leader.example.com:8443/custom/path');
+  assert.equal(customPortAndPath.wsUrl, 'wss://leader.example.com:8443/custom/path/v1/daemon');
   assert.equal(customPortAndPath.isRemote, true);
 });
 
 test('resolveControllerUrls rejects insecure, userinfo, queries and fragments', () => {
   assert.throws(() => resolveControllerUrls('http://remote.host.site:8790'), /Remote controller URL requires https/);
-  assert.throws(() => resolveControllerUrls('https://user:pass@leader.taoai.site'), /user credentials/);
-  assert.throws(() => resolveControllerUrls('https://leader.taoai.site?foo=bar'), /query parameters/);
-  assert.throws(() => resolveControllerUrls('https://leader.taoai.site?'), /query parameters/);
-  assert.throws(() => resolveControllerUrls('https://leader.taoai.site#hash'), /URL fragments/);
-  assert.throws(() => resolveControllerUrls('https://leader.taoai.site#'), /URL fragments/);
-  assert.throws(() => resolveControllerUrls('ftp://leader.taoai.site'), /Unsupported protocol/);
+  assert.throws(() => resolveControllerUrls('https://user:pass@leader.example.com'), /user credentials/);
+  assert.throws(() => resolveControllerUrls('https://leader.example.com?foo=bar'), /query parameters/);
+  assert.throws(() => resolveControllerUrls('https://leader.example.com?'), /query parameters/);
+  assert.throws(() => resolveControllerUrls('https://leader.example.com#hash'), /URL fragments/);
+  assert.throws(() => resolveControllerUrls('https://leader.example.com#'), /URL fragments/);
+  assert.throws(() => resolveControllerUrls('ftp://leader.example.com'), /Unsupported protocol/);
   assert.throws(() => resolveControllerUrls(''), /non-empty string/);
 });
 
 test('--controller flag is rejected for --up and --down to protect local Docker lifecycle', () => {
   for (const mode of ['--up', '--down']) {
-    const result = run([mode, '--controller', 'https://leader.taoai.site']);
+    const result = run([mode, '--controller', 'https://leader.example.com']);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /--controller is not allowed with --up or --down/);
   }
@@ -77,7 +77,7 @@ test('--controller flag is rejected for --up and --down to protect local Docker 
 
 test('remote CONTROLLER_URL environment variable rejects --up and --down', () => {
   for (const mode of ['--up', '--down']) {
-    const result = run([mode], { CONTROLLER_URL: 'https://leader.taoai.site' });
+    const result = run([mode], { CONTROLLER_URL: 'https://leader.example.com' });
     assert.equal(result.status, 1);
     assert.match(result.stderr, /CONTROLLER_URL points to a remote controller/);
   }
