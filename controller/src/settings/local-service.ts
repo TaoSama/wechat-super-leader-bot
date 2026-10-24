@@ -68,6 +68,8 @@ export class LocalSettingsService {
   turnSnapshot(): { version: string; data: LocalSettingsData } {
     return { version: REGISTRY_REVISION, data: this.storage.read() };
   }
+  persistTurnSnapshot(reference: string, value: unknown): void { this.storage.writeTurnSnapshot(reference, value, this.now()); }
+  readTurnSnapshot(reference: string): unknown | null { return this.storage.readTurnSnapshot(reference); }
   restoreTurn(value: unknown): LocalRuntimeSettings {
     if (!value || typeof value !== "object" || !("version" in value) || value.version !== REGISTRY_REVISION || !("data" in value)) {
       throw new LocalSettingsError(409, "本轮工具运行版本已变化，请以新消息重新获取工具", "RUNTIME_VERSION_CONFLICT");

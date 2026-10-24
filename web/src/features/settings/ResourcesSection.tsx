@@ -51,7 +51,7 @@ export function ResourcesSection({ memory = false, chats, onAuthFailure }: Props
     if (!selected) throw new Error("请先选择资源");
     try {
       const next = await saveResource({ ...selected, revision: _current.revision }, content, scopeChat);
-      setSelected(next); setResources(items => items.map(item => item.id === next.id ? next : item));
+      setSelected(next); setResources(items => items.map(item => item.id === next.id ? next : item)); setDirty(false);
       return editable(next);
     } catch (reason) { if (reason instanceof ApiAuthError) onAuthFailure(); throw reason; }
   }
@@ -63,7 +63,7 @@ export function ResourcesSection({ memory = false, chats, onAuthFailure }: Props
   return <section className="settings-section">
     <div className="settings-section-heading"><h3>{memory ? "记忆与偏好" : "运行资源"}</h3><button type="button" className="text-button" disabled={loading || saving} onClick={() => guard(() => setRevision(value => value + 1))}><RefreshCw size={14} aria-hidden="true" />重新读取</button></div>
     <p className="settings-description">{memory ? "Task 记录当前任务，Memory 记录长期事实，Preference 记录回复与通知习惯。也可以直接在微信中用自然语言告诉助手。" : "查看和编辑实际使用的系统提示、技能文件与工具 Schema。每项资源显示作用范围、版本和生效方式。"}</p>
-    <label className="settings-field settings-chat-field"><span>{memory ? "微信会话" : "作用对象"}</span><select value={chatId} onChange={event => { const next = event.target.value; guard(() => setChatId(next)); }} disabled={loading || saving}>{!memory && <option value="">实例资源</option>}{chats.map(chat => <option key={chat.chatId} value={chat.chatId}>{chat.label}</option>)}{memory && !chats.length && <option value="">暂无微信会话</option>}</select></label>
+    <label className="settings-field settings-chat-field"><span>{memory ? "微信会话" : "作用对象"}</span><select value={chatId} onChange={event => { const next = event.target.value; guard(() => { setChatId(next); setSelectedId(null); setSelected(null); }); }} disabled={loading || saving}>{!memory && <option value="">实例资源</option>}{chats.map(chat => <option key={chat.chatId} value={chat.chatId}>{chat.label}</option>)}{memory && !chats.length && <option value="">暂无微信会话</option>}</select></label>
     {chats.find(chat => chat.chatId === chatId)?.threadId && <p className="settings-description">Codex Task：<code>{chats.find(chat => chat.chatId === chatId)?.threadId}</code></p>}
     {!memory && resources.length > 0 && <div className="settings-resource-filters"><label className="settings-field"><span>资源类型</span><select value={kind} onChange={event => setKind(event.target.value)}><option value="all">全部</option><option value="prompt">系统提示</option><option value="skill">技能</option><option value="tool">工具</option></select></label><label className="settings-field"><span>筛选资源</span><input type="search" value={filter} onChange={event => setFilter(event.target.value)} placeholder="名称或文件路径" /></label></div>}
     {loading && <p role="status" className="settings-description">正在读取…</p>}

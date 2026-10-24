@@ -7,6 +7,7 @@ const PROCESS_STARTED_AT = Date.now() - process.uptime() * 1000;
 const START_TOLERANCE_MS = 1000;
 const MAX_LOCK_BYTES = 1024;
 interface Owner { pid: number; startedAt: number; token: string }
+const localOwners = new Map<string, { owner: Owner; inode: number }>();
 function ownerAlive(owner: Owner): boolean {
   if (owner.pid === process.pid) return Math.abs(owner.startedAt - PROCESS_STARTED_AT) < START_TOLERANCE_MS;
   try { process.kill(owner.pid, 0); return true; }
@@ -20,6 +21,14 @@ function readOwner(file: string): { owner: Owner; text: string; inode: number } 
   try {
     const stat = fs.lstatSync(file);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_LOCK_BYTES) throw new Error("Invalid lock file");
+    // Metadata can be temporarily absent while a lock created by this process
+    // is being initialized. Only the creator may accept that exact inode;
+    // stale or foreign empty locks remain invalid.
+    if (stat.size === 0) {
+      const local = localOwners.get(file);
+      if (local?.inode === stat.ino) return { ...local, text: "" };
+      throw new Error("Invalid lock file");
+    }
     const text = fs.readFileSync(file, "utf8"), owner = JSON.parse(text) as Owner;
     if (!Number.isSafeInteger(owner.pid) || owner.pid < 1 || !Number.isFinite(owner.startedAt) || typeof owner.token !== "string" || !owner.token) throw new Error("Invalid lock owner");
     return { owner, text, inode: stat.ino };
@@ -48,10 +57,12 @@ export function acquireSettingsLock(root: string): { assertOwned(): void; releas
       }
     }
     if (!acquired) throw new LocalSettingsError(409, "设置写入锁已有变化，请重试", "SETTINGS_WRITE_CONFLICT");
+    const inode = fs.lstatSync(lock).ino;
+    localOwners.set(lock, { owner, inode });
   } finally { fs.unlinkSync(candidate); }
   const assertOwned = () => {
     const existing = readOwner(lock);
     if (!existing || existing.owner.token !== owner.token) throw new LocalSettingsError(503, "设置写入锁的归属发生变化", "SETTINGS_LOCK_LOST");
   };
-  return { assertOwned, release: () => { assertOwned(); fs.unlinkSync(lock); } };
+  return { assertOwned, release: () => { assertOwned(); localOwners.delete(lock); fs.unlinkSync(lock); } };
 }

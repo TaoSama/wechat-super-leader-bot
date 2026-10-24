@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { LocalSettingsService } from "../../src/settings/local-service.js";
 import { assertEditedArguments, parseCompatibleTool } from "../../src/settings/local-tools.js";
@@ -225,5 +225,8 @@ describe("direct runtime consumer", () => {
     expect(JSON.stringify(state.history)).not.toContain("runtime-settings");
     expect(JSON.stringify(state.history)).not.toContain("新业务工具SP");
     expect(await store.getMessage(request.chatId, request.messageId)).toBeNull();
+    const settingsRecord = await store.getMessage(request.chatId, `direct_settings_${createHash("sha256").update(JSON.stringify([request.messageId])).digest("hex")}`);
+    expect(settingsRecord?.replyText.length).toBeLessThan(256);
+    expect(fs.readdirSync(path.join(f.root, "turn-snapshots")).length).toBe(2);
   });
 });

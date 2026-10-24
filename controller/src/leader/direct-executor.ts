@@ -127,15 +127,23 @@ export class DirectToolExecutor {
     if (!settings) return undefined;
     // A disjoint journal namespace stores snapshots, never real user text or conversation history.
     const messageId = `direct_settings_${hash([request.messageId])}`;
+    const snapshotReference = hash(["direct-settings-snapshot", request.chatId, request.messageId, request.text]);
     let frozen = await this.options.store.getMessage(request.chatId, messageId);
     if (!frozen) {
+      settings.persistTurnSnapshot(snapshotReference, settings.turnSnapshot());
       await this.options.store.recordMessage({ chatId: request.chatId, messageId,
-        text: hash(request.text), replyText: JSON.stringify(settings.turnSnapshot()), createdAt: new Date(this.options.now()).toISOString() });
+        text: hash(request.text), replyText: JSON.stringify({ reference: snapshotReference }), createdAt: new Date(this.options.now()).toISOString() });
       frozen = await this.options.store.getMessage(request.chatId, messageId);
     }
     if (!frozen || frozen.text !== hash(request.text)) throw new DirectToolRejectedError(409, "Frozen runtime snapshot does not match this user message");
     let value: unknown;
-    try { value = JSON.parse(frozen.replyText); }
+    try {
+      const marker = JSON.parse(frozen.replyText) as unknown;
+      const reference = marker && typeof marker === "object" && "reference" in marker && typeof marker.reference === "string"
+        ? marker.reference : undefined;
+      value = reference ? settings.readTurnSnapshot(reference) : marker;
+      if (value === null || value === undefined) throw new Error("Missing runtime snapshot");
+    }
     catch { throw new DirectToolRejectedError(503, "Frozen runtime snapshot is unreadable"); }
     try { return settings.restoreTurn(value); }
     catch (error) {

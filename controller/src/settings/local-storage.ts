@@ -6,6 +6,9 @@ import { acquireSettingsLock } from "./local-lock.js";
 
 const MAX_SETTINGS_BYTES = 4 * 1024 * 1024;
 const FILE_NAME = "runtime-settings.json";
+const SNAPSHOT_DIRECTORY = "turn-snapshots";
+const SNAPSHOT_TTL_MS = 24 * 60 * 60_000;
+const MAX_SNAPSHOT_FILES = 256;
 export const revision = (value: unknown): string => createHash("sha256").update(typeof value === "string" ? value : JSON.stringify(value)).digest("hex");
 const empty = (): LocalSettingsData => ({ format: 1, models: {}, resources: {} });
 
@@ -37,6 +40,65 @@ export class LocalSettingsStorage {
     const parsed = LocalSettingsDataSchema.safeParse(value);
     if (!parsed.success) throw new LocalSettingsError(503, "持久设置格式无效", "SETTINGS_STORAGE_INVALID");
     return parsed.data;
+  }
+
+  /** Turn snapshots live outside the settings document so each message row stores only a small reference. */
+  writeTurnSnapshot(reference: string, value: unknown, now = Date.now()): void {
+    if (!/^[a-f0-9]{64}$/.test(reference)) throw new LocalSettingsError(400, "运行快照引用无效", "INVALID_RUNTIME_SNAPSHOT");
+    const serialized = JSON.stringify(value);
+    if (Buffer.byteLength(serialized, "utf8") > MAX_SETTINGS_BYTES) throw new LocalSettingsError(400, "运行快照超过大小限制", "SNAPSHOT_TOO_LARGE");
+    this.read();
+    fs.mkdirSync(this.root, { recursive: true, mode: 0o700 });
+    const lock = acquireSettingsLock(this.root);
+    const directory = path.join(this.root, SNAPSHOT_DIRECTORY);
+    const file = path.join(directory, `${reference}.json`);
+    const temporary = path.join(directory, `.snapshot-${randomUUID()}.tmp`);
+    try {
+      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const directoryStat = fs.lstatSync(directory);
+      if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) throw new LocalSettingsError(503, "运行快照目录不安全", "SETTINGS_STORAGE_UNSAFE");
+      if (!fs.existsSync(file)) {
+        fs.writeFileSync(temporary, serialized, { encoding: "utf8", flag: "wx", mode: 0o600 });
+        const output = fs.openSync(temporary, fs.constants.O_RDONLY);
+        try { fs.fsyncSync(output); } finally { fs.closeSync(output); }
+        fs.renameSync(temporary, file);
+      }
+      const entries = fs.readdirSync(directory).filter(name => /^[a-f0-9]{64}\.json$/.test(name)).map(name => {
+        const namePath = path.join(directory, name), stat = fs.lstatSync(namePath);
+        if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1 || stat.size > MAX_SETTINGS_BYTES) {
+          throw new LocalSettingsError(503, "运行快照文件不安全", "SETTINGS_STORAGE_UNSAFE");
+        }
+        return { name, mtimeMs: stat.mtimeMs };
+      }).sort((left, right) => left.mtimeMs - right.mtimeMs);
+      const cutoff = now - SNAPSHOT_TTL_MS;
+      const removable = entries.filter(entry => entry.mtimeMs < cutoff);
+      for (const entry of [...removable, ...entries.slice(0, Math.max(0, entries.length - MAX_SNAPSHOT_FILES))]) {
+        try { fs.unlinkSync(path.join(directory, entry.name)); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      }
+    } finally {
+      try { fs.unlinkSync(temporary); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      lock.release();
+    }
+  }
+
+  readTurnSnapshot(reference: string): unknown | null {
+    if (!/^[a-f0-9]{64}$/.test(reference)) throw new LocalSettingsError(400, "运行快照引用无效", "INVALID_RUNTIME_SNAPSHOT");
+    this.read();
+    const directory = path.join(this.root, SNAPSHOT_DIRECTORY), file = path.join(directory, `${reference}.json`);
+    try {
+      const directoryStat = fs.lstatSync(directory);
+      if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) throw new LocalSettingsError(503, "运行快照目录不安全", "SETTINGS_STORAGE_UNSAFE");
+      const stat = fs.lstatSync(file);
+      if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1 || stat.size > MAX_SETTINGS_BYTES) {
+        throw new LocalSettingsError(503, "运行快照文件不安全", "SETTINGS_STORAGE_UNSAFE");
+      }
+      try { return JSON.parse(fs.readFileSync(file, "utf8")); }
+      catch { throw new LocalSettingsError(503, "运行快照无法读取", "SETTINGS_STORAGE_INVALID"); }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
   }
   update(change: (data: LocalSettingsData) => void): void {
     fs.mkdirSync(this.root, { recursive: true, mode: 0o700 });
