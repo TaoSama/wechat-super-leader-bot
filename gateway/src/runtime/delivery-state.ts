@@ -5,6 +5,7 @@ const MAX_SAME_TIMESTAMP_KEYS = 256;
 export const MAX_INBOUND_CLOCK_SKEW_MS = 30_000;
 const OUTBOX_STATUSES = new Set(["pending", "claiming", "claimed", "defer", "receipt", "uncertain", "expired"]);
 const OUTBOX_SOURCES = new Set<DeliveryOutboxSource>(["controller", "engine", "codex-conflict"]);
+const NOTIFICATION_IDENTITY = /^[0-9a-f]{64}$/;
 
 function outboxSource(source: unknown): DeliveryOutboxSource {
   if (source === undefined) return "controller";
@@ -62,7 +63,10 @@ export abstract class DeliveryState {
       if (!item || item.deliveryKey !== key || !["reply", "notification"].includes(item.kind) ||
           typeof item.chatId !== "string" || !item.chatId || typeof item.messageId !== "string" || !item.messageId ||
           !Number.isSafeInteger(item.splitMaxChars) || item.splitMaxChars <= 0 || typeof item.splitMultiPart !== "boolean" ||
-          !OUTBOX_STATUSES.has(item.status)) throw new Error("Invalid delivery outbox reference");
+          !OUTBOX_STATUSES.has(item.status) || item.notificationIdentity !== undefined &&
+          (item.kind !== "notification" || typeof item.notificationIdentity !== "string" || !NOTIFICATION_IDENTITY.test(item.notificationIdentity))) {
+        throw new Error("Invalid delivery outbox reference");
+      }
       item.source = outboxSource(item.source);
       validateEngineAcknowledgement(item);
     }
@@ -110,6 +114,10 @@ export abstract class DeliveryState {
 
   public putOutbox(item: DeliveryOutboxItem): void {
     const source = outboxSource(item.source);
+    if (item.notificationIdentity !== undefined &&
+        (item.kind !== "notification" || !NOTIFICATION_IDENTITY.test(item.notificationIdentity))) {
+      throw new Error("Invalid notification outbox identity");
+    }
     validateEngineAcknowledgement(item);
     const previous = this.outbox[item.deliveryKey];
     if (previous) {
@@ -135,6 +143,10 @@ export abstract class DeliveryState {
       throw new Error("Outbox reference identity changed");
     }
     const updated = { ...previous, ...patch, source: outboxSource(previous.source) };
+    if (updated.notificationIdentity !== undefined &&
+        (updated.kind !== "notification" || !NOTIFICATION_IDENTITY.test(updated.notificationIdentity))) {
+      throw new Error("Invalid notification outbox identity");
+    }
     validateEngineAcknowledgement(updated);
     this.outbox[deliveryKey] = updated;
     try { this.saveState(); } catch (error) { this.outbox[deliveryKey] = previous; throw error; }
