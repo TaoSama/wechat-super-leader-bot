@@ -92,7 +92,7 @@ function AutomationDetails({ item, onBack }: { item: ConsoleAutomation; onBack: 
   return <section className="execution-section automation-detail" aria-labelledby="automation-detail-heading">
     <div className="automation-detail-toolbar"><button type="button" className="text-button" onClick={onBack}><ArrowLeft size={16} aria-hidden="true" />返回定时任务</button>{!loading && <button type="button" className="text-button" onClick={() => void load()}><RefreshCw size={14} aria-hidden="true" />刷新记录</button>}</div>
     <div className="section-heading"><div><p className="eyebrow">SCHEDULE DETAIL</p><h2 id="automation-detail-heading">{item.title}</h2></div><CalendarClock size={22} aria-hidden="true" /></div>
-    <p className="section-description">这里只展示该定时任务的执行记录；成果内容仍在工作看板的“成果交付”中单独保存。</p>
+    <p className="section-description">这里记录该定时任务每一轮的派发、执行状态与回执；本页只展示执行记录和本轮结果摘要。</p>
     <dl className="automation-detail-metadata"><div><dt>状态</dt><dd>{LABELS[item.status]}</dd></div><div><dt>类型</dt><dd>{KIND_LABELS[item.kind]}</dd></div><div><dt>时区</dt><dd>{item.timezone}</dd></div><div><dt>任务 ID</dt><dd>{item.id}</dd></div></dl>
     <section className="automation-runs" aria-labelledby="automation-runs-heading">
       <div className="section-heading"><div><h3 id="automation-runs-heading">执行记录 <span>{runs?.length ?? "—"}</span></h3></div></div>
