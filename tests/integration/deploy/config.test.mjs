@@ -103,7 +103,7 @@ test('small-host memory and worker concurrency overrides preserve the sandbox', 
 });
 
 test('production uses the explicitly configured console origin', () => {
-  assert.equal(production.services.controller.environment.CONSOLE_PUBLIC_URL, 'https://leader.taoai.site');
+  assert.equal(production.services.controller.environment.CONSOLE_PUBLIC_URL, 'https://leader.example.com');
 });
 
 test('only loopback controller is published; PostgreSQL remains private', () => {
@@ -120,7 +120,7 @@ test('Nginx keeps WSS upgrades and HTTP requests on the same protected endpoint'
   assert.match(nginx, /proxy_set_header Upgrade \$http_upgrade;/);
   assert.match(nginx, /proxy_set_header Connection \$super_leader_connection_upgrade;/);
   assert.match(nginx, /proxy_pass http:\/\/127\.0\.0\.1:8790;/);
-  assert.match(nginx, /return 308 https:\/\/leader\.taoai\.site\$request_uri;/);
+  assert.match(nginx, /return 308 https:\/\/leader\.example\.com\$request_uri;/);
   assert.match(nginx, /access_log off;/);
   assert.doesNotMatch(nginx, /proxy_set_header Authorization/);
 });

@@ -90,7 +90,7 @@ test('with --profile wechat, gateway is configured with exact production constra
   assert.equal(gateway.ports, undefined, 'gateway must not publish any host ports');
 
   // Reply engine configuration is scoped to Gateway; no DB/node credentials.
-  assert.equal(gateway.environment.CONTROLLER_URL, 'https://leader.taoai.site');
+  assert.equal(gateway.environment.CONTROLLER_URL, 'https://leader.example.com');
   assert.equal(gateway.environment.CONTROLLER_TOKEN, 'synthetic-controller-token');
   assert.equal(gateway.environment.WECHAT_CREDENTIALS_PATH, '/etc/super-leader/wechat-account.json');
   assert.equal(gateway.environment.WECHAT_STATE_PATH, '/var/lib/super-leader-gateway/state.json');
@@ -191,7 +191,7 @@ test('local WeChat policy overrides reach only Gateway', () => {
 
 test('result download origin preserves explicit configuration before console and default fallbacks', () => {
   const cases = [
-    { env: {}, expected: 'https://leader.taoai.site' },
+    { env: {}, expected: 'https://leader.example.com' },
     { env: { CONSOLE_PUBLIC_URL: 'https://console.invalid' }, expected: 'https://console.invalid' },
     { env: { CONSOLE_PUBLIC_URL: 'https://console.invalid', RESULT_PUBLIC_ORIGIN: 'https://results.invalid' },
       expected: 'https://results.invalid' },
