@@ -82,7 +82,7 @@ test("poll carries timestamps without treating malformed values as fresh context
   const { messages } = await client.pollBatch();
   assert.equal(messages[0].createdAtMs, undefined);
   assert.deepEqual(messages.slice(1, 4).map(message => message.createdAtMs), [1_800_000_000_000, 1_800_000_000_001, 0]);
-  assert.ok(messages.slice(4).every(message => Number.isNaN(message.createdAtMs)));
+  assert.ok(messages.slice(4).every(message => message.createdAtMs === undefined));
   assert.ok(messages.every(message => message.contextToken === "new-context"));
   assert.equal(sm.contextTokens, undefined, "polling does not mutate context before authorization and durable dedup");
 });

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import type { ControllerClient } from "../controller/client.js";
 import { NOTIFICATION_CHAT_LIMIT, NOTIFICATION_LIMIT, NOTIFICATION_RECEIPT_RETRIES, NOTIFICATION_TIMEOUT_MS,
@@ -19,6 +19,13 @@ type NotificationController = Pick<ControllerClient, "listNotifications" | "getN
 
 export class NotificationDiagnosticError extends Error {
   constructor() { super("Notification diagnostic write failed"); }
+}
+
+function notificationIdentity(item: Notification): string {
+  return createHash("sha256").update(JSON.stringify([
+    item.id, item.source.type, item.source.id, item.chatId, item.kind, item.text, item.createdAt, item.expiresAt,
+    item.progress?.sequence, item.progress?.eventKey, item.part?.index ?? 1, item.part?.total ?? 1,
+  ])).digest("hex");
 }
 
 export function reportNotificationSendFailure(notificationId: string, attemptId: string, errorType: string): void {
@@ -71,7 +78,8 @@ export class NotificationOutbox {
   private verifyReference(ref: DeliveryOutboxItem, item: Notification): void {
     if (ref.messageId !== item.id || ref.chatId !== item.chatId ||
         ref.notificationKind !== undefined && ref.notificationKind !== item.kind ||
-        ref.expiresAt !== undefined && ref.expiresAt !== item.expiresAt) {
+        ref.expiresAt !== undefined && ref.expiresAt !== item.expiresAt ||
+        ref.notificationIdentity !== undefined && ref.notificationIdentity !== notificationIdentity(item)) {
       throw new Error("Controller notification recovery identity mismatch");
     }
   }
@@ -139,7 +147,7 @@ export class NotificationOutbox {
               if (this.state.outbox[deliveryKey]) continue;
               this.state.putOutbox({ kind: "notification", deliveryKey, chatId, messageId: item.id,
                 splitMaxChars: this.options.splitMaxChars, splitMultiPart: this.options.splitMultiPart ?? true,
-                expiresAt: item.expiresAt, notificationKind: item.kind, status: "pending" });
+                expiresAt: item.expiresAt, notificationKind: item.kind, notificationIdentity: notificationIdentity(item), status: "pending" });
               if (await this.deliver(this.state.outbox[deliveryKey], item, summary, fingerprint)) {
                 if (firstError !== undefined) throw firstError;
                 return summary;

@@ -40,7 +40,7 @@ import { initializeDatabase } from "./migrations.js";
 import { recordMessageImages, getMessageImage } from "./message-images-postgres.js";
 import type { StoredMessageImage } from "../sessions/message-images.js";
 import { ReplyImagesSchema } from "../sessions/media-contracts.js";
-import { pgListQueuedCommands, pgClaimQueuedCommand, pgAdmitCommand, pgRequeueClaimedCommand, pgCancelQueuedCommand } from "./command-queue-postgres.js";
+import { pgListQueuedCommands, pgClaimQueuedCommand, pgAdmitCommand, pgFailAdmittingCommand, pgRequeueClaimedCommand, pgCancelQueuedCommand } from "./command-queue-postgres.js";
 import { sameAuthority, sameCommandPayload } from "../commands/queue.js";
 import type { CommandAuthority, SendRoute } from "../types.js";
 import { pgEnqueueProgressNotification } from "./notification-progress-postgres.js";
@@ -203,8 +203,8 @@ export class PostgresStore implements IStore {
     );
   }
 
-  listQueuedCommands(limit?: number, afterCommandId?: string): Promise<CommandRecord[]> {
-    return pgListQueuedCommands(this.pool,row=>this.mapCommandRow(row),limit,afterCommandId);
+  listQueuedCommands(limit?: number, afterQueueOrder?: number): Promise<CommandRecord[]> {
+    return pgListQueuedCommands(this.pool,row=>this.mapCommandRow(row),limit,afterQueueOrder);
   }
   claimQueuedCommand(id: string, route: SendRoute): Promise<CommandRecord | null> {
     return pgClaimQueuedCommand(this.pool,row=>this.mapCommandRow(row),id,route);
@@ -214,6 +214,9 @@ export class PostgresStore implements IStore {
   }
   admitCommand(id: string): Promise<CommandRecord | null> {
     return pgAdmitCommand(this.pool, row=>this.mapCommandRow(row), id);
+  }
+  failAdmittingCommand(id: string, error: string): Promise<CommandRecord | null> {
+    return pgFailAdmittingCommand(this.pool, row=>this.mapCommandRow(row), id, error);
   }
   requeueClaimedCommand(id: string): Promise<CommandRecord | null> {
     return pgRequeueClaimedCommand(this.pool, row=>this.mapCommandRow(row), id);

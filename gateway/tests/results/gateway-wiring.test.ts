@@ -28,6 +28,26 @@ test("a failed resume checkpoint retries the same admitted generation without re
   assert.equal(f.state.syncBuf, "next");
 });
 
+test("an inbox checkpoint failure does not release result resumes before admission", async t => {
+  const f = harness(t);
+  const outbox = new FileResultOutbox(`${f.statePath}.results.json`, () => f.state.getLoginFingerprint());
+  const client = new ResultClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic" });
+  const gateway = new WeChatGateway({ stateManager: f.state, ilink: f.ilink, controller: f.controller,
+    resultClient: client, resultOutbox: outbox });
+  const createdAtMs = Date.now(), deliveryKey = "inbox-admission";
+  t.mock.method(f.ilink, "pollBatch", async () => ({ messages: [{ chatId: "chat", deliveryKey,
+    messageId: "message", text: "hello", contextToken: "new-context", createdAtMs }],
+    rawMessageCount: 1, nextSyncBuf: "next" }));
+  const inbox = (gateway as unknown as { inbox: { put: (message: unknown) => void } }).inbox;
+  const checkpoint = t.mock.method(inbox, "put", () => { throw new Error("injected inbox disk failure"); });
+  await assert.rejects(gateway.pollOnce(false), /injected inbox disk failure/);
+  assert.deepEqual(outbox.pendingResumes(), []);
+  checkpoint.mock.restore();
+  await gateway.pollOnce(false);
+  assert.deepEqual(outbox.pendingResumes(), [{ chatId: "chat", generation: deliveryKey }]);
+  assert.equal(f.state.syncBuf, "next");
+});
+
 for (const renewal of ["accepted", "failed"] as const) test(`result failure still attempts one ${renewal} renewal for another chat and preserves the first error`, async t => {
   const f = harness(t);
   const outbox = new FileResultOutbox(`${f.statePath}.results.json`, () => f.state.getLoginFingerprint());

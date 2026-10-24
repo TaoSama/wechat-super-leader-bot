@@ -96,6 +96,20 @@ test("claim intent is durable before dispatch and lost response resumes the same
   assert.equal(f.sends.length, 1);
 });
 
+for (const field of ["source", "text"] as const) test(`recovery rejects changed notification ${field}`, async t => {
+  const f = setup(t), item = notification(), key = `notification:${item.id}`;
+  f.hooks.claim = () => { throw new TypeError("claim response lost"); };
+  await assert.rejects(f.create().deliverOnce(), /claim response lost/);
+  const current = f.records.get(item.id)!;
+  f.records.set(item.id, field === "source"
+    ? { ...current, source: { type: "goal", id: current.source.id } }
+    : { ...current, text: "tampered notification" });
+  f.restart();
+  await assert.rejects(f.create().deliverOnce(), /identity mismatch/);
+  assert.equal(f.sends.length, 0);
+  assert.equal(f.state.outbox[key].status, "claiming");
+});
+
 test("receipt intent survives restart and retries only the receipt", async t => {
   const f = setup(t), item = notification(), key = `notification:${item.id}`;
   f.hooks.receipt = () => {

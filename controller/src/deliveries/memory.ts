@@ -5,7 +5,8 @@ export class MemoryDeliveryRepository implements DeliveryRepository {
   private readonly plans = new Map<string, DeliveryPlan>();
   private readonly artifacts = new Map<string, StoredResultArtifact>();
   private readonly resumes = new Map<string, { resumed: number }>();
-  async createIfAbsent(plan: DeliveryPlan, artifact: StoredResultArtifact, now = Date.now()): Promise<DeliveryPlan> {
+  constructor(private readonly now: () => number = Date.now) {}
+  async createIfAbsent(plan: DeliveryPlan, artifact: StoredResultArtifact, now = this.now()): Promise<DeliveryPlan> {
     const existing = [...this.plans.values()].find(value => value.key === plan.key);
     const resumeKey = plan.resumeGeneration ? JSON.stringify([plan.chatId, plan.resumeGeneration]) : undefined;
     if (existing) {
@@ -31,7 +32,7 @@ export class MemoryDeliveryRepository implements DeliveryRepository {
     if (resumeKey) this.resumes.set(resumeKey, { resumed: 1 });
     return structuredClone(plan);
   }
-  async get(id: string, now = Date.now()): Promise<DeliveryPlan | null> {
+  async get(id: string, now = this.now()): Promise<DeliveryPlan | null> {
     const plan = this.plans.get(id);
     if (plan?.status === "claimed" && (plan.attemptExpiresAt ?? 0) <= now) plan.status = "uncertain";
     return structuredClone(plan ?? null);
@@ -71,7 +72,7 @@ export class MemoryDeliveryRepository implements DeliveryRepository {
     delete plan.error;
     return structuredClone(plan);
   }
-  async finishPreparation(id: string, token: string, messages: string[], error?: string, now = Date.now()): Promise<DeliveryPlan | null> {
+  async finishPreparation(id: string, token: string, messages: string[], error?: string, now = this.now()): Promise<DeliveryPlan | null> {
     const plan = this.plans.get(id);
     if (!plan || plan.status !== "preparing" || plan.preparation?.token !== token) return null;
     delete plan.preparation;

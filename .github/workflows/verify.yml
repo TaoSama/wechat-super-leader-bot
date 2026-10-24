@@ -51,4 +51,9 @@ jobs:
           "$RUNNER_TEMP/web-content-fetcher-venv/bin/python" -m pip install --disable-pip-version-check -r deploy/skills/web-content-fetcher/requirements.txt
           echo "$RUNNER_TEMP/web-content-fetcher-venv/bin" >> "$GITHUB_PATH"
       - name: Verify with synthetic fixtures
+        env:
+          SUPER_LEADER_SKIP_NATIVE_PROGRESS: ${{ matrix.os == 'ubuntu-24.04' && '1' || '' }}
         run: node scripts/verify.mjs --suite ${{ matrix.suite }}
+      - name: Verify native app-server steering
+        if: matrix.os == 'macos-14'
+        run: node tests/integration/leader/progress-steering.mjs --run

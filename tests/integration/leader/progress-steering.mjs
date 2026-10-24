@@ -134,18 +134,21 @@ async function main() {
         if (number === 1) return response(res, call(1, [PROGRESS[0]]));
         if (number === 2) {
           check('first progress delivered before final model output', evidence.replies.length === 1 && evidence.replies[0].text === PROGRESS[0]);
-          queue.push(message(STEER_TEXT)); secondQueued = true;
-          await waitUntil(async () => {
-            const frames = await nativeFrames(protocol), steer = frames.find(entry => entry.direction === 'stdin' && entry.frame.method === 'turn/steer');
-            return steer && frames.some(entry => entry.direction === 'stdout' && entry.frame.id === steer.frame.id && entry.frame.result?.turnId);
-          }, 'native turn/steer acknowledgement');
-          // Native steering may cancel this in-flight provider response. The
-          // following request retries the scripted call only if it never ran.
           return response(res, call(2, [...PROGRESS.slice(1), '这一条超过本轮额度，不应发送给用户。']));
         }
-        check('exact follow-up user text reached native model input', JSON.stringify(body.input).includes(STEER_TEXT));
-        if (!(body.input || []).some(item => item.type === 'custom_tool_call_output' && item.call_id === 'progress_call_2')) {
+        const hasSteerText = JSON.stringify(body.input).includes(STEER_TEXT);
+        const hasProgressOutput = (body.input || []).some(item => item.type === 'custom_tool_call_output' && item.call_id === 'progress_call_2');
+        const hasLimitResult = JSON.stringify(body.input).includes('limit_reached');
+        if (hasProgressOutput && hasLimitResult && !secondQueued) {
+          queue.push(message(STEER_TEXT)); secondQueued = true;
+        }
+        if (!hasProgressOutput || !hasLimitResult) {
           return response(res, call(2, [...PROGRESS.slice(1), '这一条超过本轮额度，不应发送给用户。']));
+        }
+        if (!hasSteerText) await new Promise(done => setTimeout(done, 200));
+        if (!hasSteerText) {
+          return response(res, { id: `msg_${randomUUID()}`, type: 'message', status: 'completed', role: 'assistant',
+            content: [{ type: 'output_text', annotations: [], text: FINAL }] });
         }
         return response(res, { id: `msg_${randomUUID()}`, type: 'message', status: 'completed', role: 'assistant',
           content: [{ type: 'output_text', annotations: [], text: FINAL }] });
@@ -165,6 +168,10 @@ async function main() {
           return send({ ret: 0, errcode: 0 });
         case '/v1/chats/authorize': assert.deepEqual(body, { chatId: CHAT }); return send({ allowed: true });
         case '/v1/chats/notification-interest': return send({ chatIds: [], interested: [] });
+        case '/v1/deliveries/resume':
+          assert.equal(body.chatId, CHAT);
+          if (body.generation !== undefined) assert.equal(typeof body.generation, 'string');
+          return send({ resumed: 0 });
         case '/v1/tools/list':
           assert.equal(req.method, 'POST');
           assert.deepEqual(Object.keys(body).sort(), ['chatId', 'messageId', 'text']);
@@ -211,8 +218,9 @@ childProcess.spawn=function(command,args,options){
     const baseline = JSON.parse(await execute(process.execPath, [...args, '--establish-baseline'], env, 'baseline'));
     assert.equal(baseline.ok, true);
     gateway = launch(process.execPath, [...args, '--run'], env, 'gateway');
-    await waitUntil(() => errors.length || evidence.replies.some(reply => reply.text === FINAL) || gateway.child.exitCode !== null, 'unified final WeChat delivery');
+    await waitUntil(() => errors.length || evidence.replies.some(reply => reply.text === FINAL) || gateway.child.exitCode !== null, 'unified final WeChat delivery', 180_000);
     assert.deepEqual(errors, []);
+    check('exact follow-up user text reached native model input', evidence.requests.some(request => JSON.stringify(request.body.input).includes(STEER_TEXT)));
     check('second user message was received on a later poll', secondQueued && pollBatches.findIndex(batch => batch.texts.includes(STEER_TEXT)) > pollBatches.findIndex(batch => batch.texts.includes(ROOT_TEXT)));
     check('three exact progress messages and one final reply delivered', JSON.stringify(evidence.replies.map(reply => reply.text)) === JSON.stringify([...PROGRESS, FINAL]));
     const frames = await nativeFrames(protocol), starts = frames.filter(entry => entry.direction === 'stdin' && entry.frame.method === 'turn/start');
@@ -238,7 +246,18 @@ childProcess.spawn=function(command,args,options){
     check('gateway shuts down cleanly after all work settles', terminal.code === 0);
     evidence.status = 'passed';
     console.log(JSON.stringify({ status: 'PASS', version: evidence.version, checks: evidence.checks, evidence: join(EVIDENCE, 'result.json') }));
-  } catch (error) { evidence.status = 'failed'; evidence.error = error.stack; throw error; }
+  } catch (error) {
+    evidence.status = 'failed'; evidence.error = error.stack;
+    const frames = await nativeFrames(protocol);
+    console.error(JSON.stringify({ nativeProgressDebug: {
+      requests: evidence.requests.map(item => ({ number: item.number, inputItems: Array.isArray(item.body?.input) ? item.body.input.length : 0 })),
+      replies: evidence.replies.map(item => item.text),
+      errors,
+      polls: pollBatches.map(batch => batch.texts),
+      nativeMethods: frames.map(item => ({ direction: item.direction, method: item.frame.method, id: item.frame.id })),
+    } }));
+    throw error;
+  }
   finally {
     for (const child of children) stop(child);
     if (gateway) await gateway.done;

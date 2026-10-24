@@ -135,6 +135,8 @@ describe.each(["memory", "postgres"] as const)("%s admission publication", kind 
     const saved = (await f.store.createCommandIfAbsent(f.record())).command;
     await f.store.updateCommandStatus(saved.commandId, status);
     expect(await f.store.getCommand(saved.commandId)).toMatchObject({ status, turnId: undefined });
+    expect(await f.store.failAdmittingCommand(saved.commandId, "late admission failure")).toBeNull();
+    expect(await f.store.getCommand(saved.commandId)).toMatchObject({ status });
     expect(await f.store.admitCommand(saved.commandId)).toBeNull();
     expect(await f.store.requeueClaimedCommand(saved.commandId)).toBeNull();
   });
@@ -168,17 +170,18 @@ describe.each(["memory", "postgres"] as const)("%s admission publication", kind 
     expect(f.hub.sendCommand).not.toHaveBeenCalled();
   });
 
-  test("keeps the post-insert readiness recheck ahead of publication", async () => {
+  test("does not overwrite a command claimed during the post-insert readiness recheck", async () => {
     const f = fixture(), create = f.store.createCommandIfAbsent.bind(f.store);
     vi.spyOn(f.store, "createCommandIfAbsent").mockImplementation(async command => {
       const result = await create(command);
+      expect(await f.store.admitCommand(result.command.commandId)).toMatchObject({ status: "queued" });
       await f.scanner.dispatchQueued();
       return result;
     });
     await expect(f.commands.submit(f.input, 0, async () => { f.session.status = "active"; },
       "control-socket", f.authority)).rejects.toThrow("changed before transmission");
-    expect(f.hub.sendCommand).not.toHaveBeenCalled();
-    expect(await f.store.findCommandByRequestId(f.input.requestId)).toMatchObject({ status: "failed" });
+    expect(await f.store.findCommandByRequestId(f.input.requestId)).toMatchObject({ status: "accepted" });
+    expect(f.hub.sendCommand).toHaveBeenCalledTimes(1);
   });
 
   test("reserves concurrent duplicates without re-running admission or sending twice", async () => {

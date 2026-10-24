@@ -20,7 +20,6 @@ export type AutomationCommandAuthorizer = (authority: Extract<CommandAuthority, 
 export class CommandService {
   private timer?: ReturnType<typeof setInterval>;
   private tick?: Promise<void>;
-  private cursor = "";
   constructor(private store: IStore, private hub: Hub, private ttlSeconds: number,
     private readonly onStatusChanged?: () => void, private readonly isChatAllowed: (chatId: string) => boolean = () => true,
     private readonly isAutomationAuthorized?: AutomationCommandAuthorizer) {}
@@ -93,9 +92,9 @@ export class CommandService {
     if (!created.created) return created.command;
     this.onStatusChanged?.();
     try { await assertDispatchAllowed?.(); }
-    catch (error) { await this.store.updateCommandStatus(record.commandId,"failed",undefined,"Dispatch authority expired before transmission"); throw error; }
+    catch (error) { await this.store.failAdmittingCommand(record.commandId,"Dispatch authority expired before transmission"); throw error; }
     if (readyAtSubmission && sendRoute && !this.canDispatchSend(request,sendRoute)) {
-      await this.store.updateCommandStatus(record.commandId,"failed",undefined,"Target send route or authority changed before transmission");
+      await this.store.failAdmittingCommand(record.commandId,"Target send route or authority changed before transmission");
       throw new CommandError(409,"Target send route or authority changed before transmission");
     }
     if (request.action === "send" && sendRoute !== "terminal-pane") {
@@ -124,8 +123,11 @@ export class CommandService {
   }
   private async runQueue(): Promise<void> {
     await this.store.markExpiredActiveCommandsUncertain();
-    const records = await this.store.listQueuedCommands(QUEUE_BATCH_SIZE,this.cursor);
-    this.cursor = records.length === QUEUE_BATCH_SIZE ? records.at(-1)!.commandId : "";
+    // Scan from the beginning on every tick. The eligibility query hides commands
+    // blocked by an earlier command for the same session, so advancing a durable
+    // cursor past the returned rows could permanently skip those commands after
+    // their blocker completes.
+    const records = await this.store.listQueuedCommands(QUEUE_BATCH_SIZE,0);
     for (const record of records) await this.dispatchOne(record,0);
   }
   private async authorized(record: CommandRecord): Promise<boolean | "paused"> {

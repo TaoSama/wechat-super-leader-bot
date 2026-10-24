@@ -258,8 +258,10 @@ export class ILinkClient {
         ? String(msg.create_time_ms)
         : "";
       const parsedCreateTime = /^\d+$/.test(createTimeMs) ? Number(createTimeMs) : Number.NaN;
-      const createdAtMs = !Object.hasOwn(msg, "create_time_ms") ? undefined :
-        Number.isSafeInteger(parsedCreateTime) && parsedCreateTime >= 0 ? parsedCreateTime : Number.NaN;
+      // Invalid platform timestamps are absent from the message contract. NaN would
+      // leak an invalid number through pollBatch even though all consumers reject it.
+      const createdAtMs = Number.isSafeInteger(parsedCreateTime) && parsedCreateTime >= 0
+        ? parsedCreateTime : undefined;
 
       // Deterministic messageId and deliveryKey across poll retries
       let messageId: string;

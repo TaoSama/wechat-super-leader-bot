@@ -41,6 +41,8 @@ export interface DeliveryOutboxItem {
   receiptStatus?: "accepted" | "uncertain";
   expiresAt?: number;
   notificationKind?: "completed" | "failed" | "blocked" | "expired" | "progress";
+  /** SHA-256 of the immutable Controller notification identity for recovery. */
+  notificationIdentity?: string;
 }
 
 export interface ReplyDeliveryState {
