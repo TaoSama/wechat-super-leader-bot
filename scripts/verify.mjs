@@ -30,7 +30,7 @@ export function verificationEnvironment(source = process.env) {
     GOARCH: process.arch === 'arm64' ? 'arm64' : 'amd64', CGO_ENABLED: '1' };
 }
 
-export function verificationPlan(suite = 'all') {
+export function verificationPlan(suite = 'all', { skipNativeProgress = false } = {}) {
   if (!SUITES.includes(suite)) throw new Error('Unknown suite; use all, unit or integration');
   const step = (id, command, args, cwd = '.', env = {}) => ({ id, command, args, cwd, env });
   const pnpm = (id, component, script) => step(id, 'pnpm', ['--dir', component, 'run', script]);
@@ -50,7 +50,7 @@ export function verificationPlan(suite = 'all') {
     step('synthetic-integration', process.execPath, ['tests/integration/run.mjs']),
     step('console-auth-integration', process.execPath, ['tests/integration/console-auth.mjs', '--run']),
     step('wechat-interaction', process.execPath, ['tests/integration/leader/wechat-interaction.mjs', '--run']),
-    step('native-progress-steering', process.execPath, ['tests/integration/leader/progress-steering.mjs', '--run']),
+    ...(skipNativeProgress ? [] : [step('native-progress-steering', process.execPath, ['tests/integration/leader/progress-steering.mjs', '--run'])]),
     step('message-latency', process.execPath, ['tests/integration/leader/message-latency.mjs', '--run']),
     step('direct-directory-latency', process.execPath, ['tests/integration/leader/message-latency.mjs', '--run', '--direct-directory']),
     step('direct-console-latency', process.execPath, ['tests/integration/leader/message-latency.mjs', '--run', '--direct-console']),
@@ -110,10 +110,14 @@ export async function main(args = process.argv.slice(2)) {
     console.log('Usage: node scripts/verify.mjs [--suite all|unit|integration] [--list]\nRequires Node >=24, pnpm, Go from daemon/go.mod and installed frozen JS dependencies.\nall/integration also require local Docker and Compose. No dependency install, deployment, real model, WeChat or desktop session tests.\n--list prints commands only, without reading credentials or contacting Docker. Interrupt requests wait for the current check to finish its cleanup.');
     return;
   }
-  const steps = verificationPlan(values.suite);
+  const skipNativeProgress = process.env.SUPER_LEADER_SKIP_NATIVE_PROGRESS === '1';
+  const steps = verificationPlan(values.suite, { skipNativeProgress });
   if (values.list) {
     console.log(JSON.stringify(steps, null, 2));
     return;
+  }
+  if (skipNativeProgress && values.suite !== 'unit') {
+    console.log('[verify] native-progress-steering skipped: this runner cannot provide a working native app-server transport');
   }
   if (!['darwin', 'linux'].includes(process.platform)) throw new Error('Verification currently supports macOS and Linux');
   if (Number(process.versions.node.split('.')[0]) < NODE_MIN_MAJOR) throw new Error('Verification requires Node >=24');
