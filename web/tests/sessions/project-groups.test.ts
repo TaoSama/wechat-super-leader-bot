@@ -108,4 +108,19 @@ describe("project session groups", () => {
     expect(groups[0].name).toBe("wechat-super-leader-bot");
     expect(groups[0].sessions.map(item => item.id)).toEqual(["main", "codex-nested", "codex-short"]);
   });
+
+  it("keeps an ambiguous worktree separate from same-named main checkouts", () => {
+    const groups = groupSessionProjects([
+      session("main-one", { cwd: "/Users/demo/Projects/one/repo" }),
+      session("main-two", { cwd: "/Users/demo/Projects/two/repo" }),
+      session("codex-worktree", { cwd: "/Users/demo/.codex/worktrees/6a1b/repo" }),
+    ]);
+
+    expect(groups).toHaveLength(3);
+    expect(groups.map(group => [group.path, group.sessions.map(item => item.id)])).toEqual([
+      ["/Users/demo/Projects/one/repo", ["main-one"]],
+      ["/Users/demo/Projects/two/repo", ["main-two"]],
+      ["/Users/demo/.codex/worktrees/6a1b/repo", ["codex-worktree"]],
+    ]);
+  });
 });
