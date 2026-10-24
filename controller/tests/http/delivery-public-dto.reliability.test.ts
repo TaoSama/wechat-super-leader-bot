@@ -148,7 +148,7 @@ it("serves bounded HTTP/Cookie/Bearer SSE for 100 full results while content and
   const actualDelivery = (await materialized.json()).delivery;
   expect(actualDelivery.messages).toEqual(first.messages);
   expect(actualDelivery.messages.join("")).toContain("最终证据😀");
-  expect((await runtime.results.repository.get(selected.id))?.messages).toEqual(first.messages);
+  expect((await runtime.results.repository.get(selected.id, NOW))?.messages).toEqual(first.messages);
 
   // A real node update proves both existing streams continue after the large initial state.
   socket = new WebSocket(base.replace("http:", "ws:") + "/v1/daemon", { headers: { Authorization: `Bearer ${NODE_TOKEN}` } });
