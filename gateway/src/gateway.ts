@@ -451,13 +451,17 @@ export class WeChatGateway {
       if (retryingAdmission && msg.contextToken?.trim()) this.resultDispatcher?.noteInbound(msg.chatId, msg.deliveryKey);
       return "skipped";
     }
+    const { createdAtMs, ...message } = msg;
+    // Persist the full inbound message before refreshing the context budget. If
+    // the process stops between these checkpoints, the durable inbox keeps the
+    // message pending and prevents notification delivery from observing a
+    // context that was never admitted.
+    this.inbox.put({ ...message, ...(Number.isSafeInteger(createdAtMs) && createdAtMs! >= 0 ? { createdAtMs } : {}) });
     const fresh = this.stateManager.recordInboundContext(msg.deliveryKey, msg.chatId, msg.createdAtMs,
       Boolean(msg.contextToken?.trim()), msg.contextToken);
-    const { createdAtMs, ...message } = msg;
-    this.inbox.put({ ...message, ...(Number.isSafeInteger(createdAtMs) && createdAtMs! >= 0 ? { createdAtMs } : {}) });
-    // Persist the inbound message before creating a result resume intent. If the
-    // inbox checkpoint fails, retrying the poll must not release deferred results
-    // for a message that was never durably admitted.
+    // Create a result resume intent only after both admission checkpoints have
+    // succeeded. Retrying the poll or inbound runner then observes the same
+    // durable generation without releasing results early.
     if ((fresh || retryingAdmission) && msg.contextToken?.trim()) this.resultDispatcher?.noteInbound(msg.chatId, msg.deliveryKey);
     this.inboundRunner.schedule();
     return "processed";
