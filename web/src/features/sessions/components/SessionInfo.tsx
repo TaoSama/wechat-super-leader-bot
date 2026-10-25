@@ -5,6 +5,7 @@ import { canResumeSession } from "../send-availability";
 import { modelSourceLabel, type selectModelObservation } from "../model-observation";
 import type { useSessionHistory } from "../useSessionHistory";
 import { SessionDetails } from "./SessionDetails";
+import { ExecutionTimeline } from "../execution-timeline";
 
 interface Props {
   session: ScopedSession;
@@ -41,5 +42,6 @@ export function SessionInfo({ session, model, connected, terminal, now, blockRea
     </section>
     {showHistory && <div className="history-controls"><span>{history.history ? `历史更新于 ${formatTimestamp(history.history.fetchedAt)}` : "正在准备会话历史"}</span><button type="button" onClick={() => void history.refresh()} disabled={history.loadingLatest || !history.canRead || history.contextExpired} aria-label="从详情刷新会话历史"><RefreshCw size={14} aria-hidden="true" />刷新历史</button></div>}
     {history.requestedSource === "control-socket" && <div className="detail-subline" role="status"><span>读取当前会话已保存的记录，可能稍有延迟。</span><button type="button" className="text-button" disabled={!history.canRead} onClick={() => void history.useAutomaticHistory()}>恢复自动来源</button></div>}
+    {showHistory && history.history && <ExecutionTimeline items={history.history.items} source={history.history.source} gapBeforeIds={history.gapBeforeIds} now={now} />}
   </SessionDetails>;
 }

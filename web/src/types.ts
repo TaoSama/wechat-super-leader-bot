@@ -86,6 +86,7 @@ export interface HistoryItem {
   title?: string;
   status?: string;
   timestamp?: string;
+  durationMs?: number;
   truncated?: boolean;
 }
 

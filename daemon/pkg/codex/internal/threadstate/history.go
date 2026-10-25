@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
@@ -78,15 +79,37 @@ func PublicHistoryItem(wrapper map[string]any) (protocol.HistoryItem, bool) {
 		return item, false
 	}
 	item.Status = ClipHistoryText(ExtractString(raw, "status"), protocol.MaxHistoryIdentityLength)
-	item.Timestamp = NativeTimestamp(wrapper["completedAtMs"], true)
+	startedAt := NativeTimestamp(wrapper["startedAtMs"], true)
+	completedAt := NativeTimestamp(wrapper["completedAtMs"], true)
+	item.Timestamp = completedAt
 	if item.Timestamp == "" {
-		item.Timestamp = NativeTimestamp(wrapper["startedAtMs"], true)
+		item.Timestamp = startedAt
 	}
+	item.DurationMs = historyDurationMs(startedAt, completedAt)
 	text, title := item.Text, item.Title
 	item.Text = ClipHistoryText(text, protocol.MaxHistoryTextLength)
 	item.Title = ClipHistoryText(title, MaxSessionMetadataLength)
 	item.Truncated = item.Text != text || item.Title != title
 	return item, true
+}
+
+// historyDurationMs exposes only a bounded, derived duration. Native timestamps
+// are treated as untrusted metadata and malformed or implausibly long spans are
+// omitted rather than displayed as fabricated execution time.
+func historyDurationMs(startedAt, completedAt string) int64 {
+	if startedAt == "" || completedAt == "" {
+		return 0
+	}
+	started, startErr := time.Parse(time.RFC3339Nano, startedAt)
+	completed, completeErr := time.Parse(time.RFC3339Nano, completedAt)
+	if startErr != nil || completeErr != nil || completed.Before(started) {
+		return 0
+	}
+	duration := completed.Sub(started).Milliseconds()
+	if duration <= 0 || duration > protocol.MaxHistoryDurationMs {
+		return 0
+	}
+	return duration
 }
 
 // Body whitespace affects Markdown and copied output, including whitespace-only text.
