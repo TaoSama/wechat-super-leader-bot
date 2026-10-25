@@ -140,28 +140,33 @@ test('parallel runner keeps the long WeChat integration outside the PostgreSQL p
 });
 
 test('parallel runner completes controller unit checks before starting the remainder pool', async () => {
-  const events = [], active = { count: 0, max: 0, controllerMax: 0, remainderMax: 0 };
+  const events = [], active = { count: 0, controllerMax: 0, webMax: 0, remainderMax: 0, serialMax: 0 };
   const step = id => ({ id, command: 'synthetic', args: [], cwd: '.', env: {} });
   const execute = async current => {
     active.count++;
-    active.max = Math.max(active.max, active.count);
     if (current.id.startsWith('controller-')) active.controllerMax = Math.max(active.controllerMax, active.count);
+    else if (current.id === 'web-tests') active.webMax = Math.max(active.webMax, active.count);
+    else if (current.id === 'daemon-race' || current.id === 'terminal-delivery-sample') active.serialMax = Math.max(active.serialMax, active.count);
     else active.remainderMax = Math.max(active.remainderMax, active.count);
     events.push(`start:${current.id}`);
     await delay(2);
     events.push(`done:${current.id}`);
     active.count--;
   };
-  await runParallelGroups({ builds: [], unit: [step('controller-typecheck'), step('controller-tests'), step('gateway-tests'), step('web-tests'), step('daemon-race')], integration: [] }, {
+  await runParallelGroups({ builds: [], unit: [step('controller-typecheck'), step('controller-tests'), step('gateway-tests'), step('cli-and-tool-tests'), step('web-tests'), step('daemon-race'), step('terminal-delivery-sample')], integration: [] }, {
     env: {}, signal: new AbortController().signal, execute,
   });
   assert(events.indexOf('start:controller-tests') > events.indexOf('done:controller-typecheck'));
   const controllerDone = Math.max(events.indexOf('done:controller-typecheck'), events.indexOf('done:controller-tests'));
-  for (const id of ['gateway-tests', 'web-tests', 'daemon-race']) {
-    assert(events.indexOf(`start:${id}`) > controllerDone, id);
-  }
+  assert(events.indexOf('start:web-tests') > controllerDone);
+  const webDone = events.indexOf('done:web-tests');
+  for (const id of ['gateway-tests', 'cli-and-tool-tests']) assert(events.indexOf(`start:${id}`) > webDone, id);
+  const remainderDone = Math.max(events.indexOf('done:gateway-tests'), events.indexOf('done:cli-and-tool-tests'));
+  for (const id of ['daemon-race', 'terminal-delivery-sample']) assert(events.indexOf(`start:${id}`) > remainderDone, id);
   assert.equal(active.controllerMax, 1);
+  assert.equal(active.webMax, 1);
   assert.equal(active.remainderMax, 2);
+  assert.equal(active.serialMax, 1);
 });
 
 test('parallel runner keeps controller unit checks serial and stops before the remainder on failure', async () => {

@@ -10,6 +10,8 @@ const NODE_MIN_MAJOR = 24;
 const TOOL_PROBE_MS = 10_000;
 const BUILD_STEP_IDS = new Set(['controller-build', 'gateway-build', 'web-build']);
 const CONTROLLER_UNIT_STEP_IDS = new Set(['controller-typecheck', 'controller-tests']);
+const WEB_UNIT_STEP_IDS = new Set(['web-tests']);
+const SERIAL_UNIT_STEP_IDS = new Set(['daemon-race', 'terminal-delivery-sample']);
 const POSTGRES_STEP_IDS = new Set([
   'synthetic-integration', 'console-auth-integration',
   'task-notifications-postgres', 'scheduled-sessions-postgres',
@@ -214,9 +216,14 @@ export async function runParallelGroups(plan, { env, signal, onStep = () => {}, 
   if (plan.unit.length) {
     groups.push((async () => {
       const controller = plan.unit.filter(step => CONTROLLER_UNIT_STEP_IDS.has(step.id));
-      const remainder = plan.unit.filter(step => !CONTROLLER_UNIT_STEP_IDS.has(step.id));
+      const web = plan.unit.filter(step => WEB_UNIT_STEP_IDS.has(step.id));
+      const serial = plan.unit.filter(step => SERIAL_UNIT_STEP_IDS.has(step.id));
+      const remainder = plan.unit.filter(step => !CONTROLLER_UNIT_STEP_IDS.has(step.id) &&
+        !WEB_UNIT_STEP_IDS.has(step.id) && !SERIAL_UNIT_STEP_IDS.has(step.id));
       if (controller.length) await runParallelPool(controller, { env, concurrency: 1, signal, onStep, execute, stopOnFailure: true });
+      if (web.length) await runParallelPool(web, { env, concurrency: 1, signal, onStep, execute, stopOnFailure: true });
       if (remainder.length) await runParallelPool(remainder, { env, concurrency: UNIT_PARALLELISM, signal, onStep, execute });
+      if (serial.length) await runParallelPool(serial, { env, concurrency: 1, signal, onStep, execute, stopOnFailure: true });
     })());
   }
   if (plan.integration.length) {
