@@ -80,7 +80,7 @@ jobs:
           go-version-file: daemon/go.mod
           cache-dependency-path: daemon/go.sum
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        if: matrix.unit_group != 'daemon' && (matrix.suite == 'unit' || matrix.integration_group == 'core')
+        if: matrix.unit_group != 'daemon' && matrix.suite == 'unit'
         with:
           python-version: '3.12'
           cache: pip
@@ -101,7 +101,7 @@ jobs:
           pnpm --dir gateway install --frozen-lockfile
           pnpm --dir web install --frozen-lockfile
       - name: Install webpage extraction test dependencies
-        if: matrix.unit_group != 'daemon' && (matrix.suite == 'unit' || matrix.integration_group == 'core')
+        if: matrix.unit_group != 'daemon' && matrix.suite == 'unit'
         run: |
           python3 -m venv "$RUNNER_TEMP/web-content-fetcher-venv"
           "$RUNNER_TEMP/web-content-fetcher-venv/bin/python" -m pip install --disable-pip-version-check -r deploy/skills/web-content-fetcher/requirements.txt
