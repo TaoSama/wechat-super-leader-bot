@@ -31,6 +31,12 @@ function timestampMs(item: HistoryItem): number | undefined {
   return Number.isFinite(value) ? value : undefined;
 }
 
+function trustedDurationMs(item: HistoryItem): number | undefined {
+  const duration = item.durationMs;
+  return duration !== undefined && Number.isSafeInteger(duration) && duration > 0 && duration <= MAX_TIMELINE_DURATION_MS
+    ? duration : undefined;
+}
+
 export function formatExecutionDuration(durationMs: number | undefined): string {
   if (durationMs === undefined || !Number.isFinite(durationMs) || durationMs < 0) return "未报告";
   if (durationMs < 1000) return "<1 秒";
@@ -48,8 +54,8 @@ function turnDuration(turn: HistoryTurn, now: number): number | undefined {
     const end = timestampMs(item);
     if (end === undefined) continue;
     ends.push(end);
-    if (item.durationMs !== undefined && item.durationMs > 0) starts.push(end - item.durationMs);
-    else starts.push(end);
+    const duration = trustedDurationMs(item);
+    if (duration !== undefined) starts.push(end - duration);
   }
   if (!starts.length || !ends.length) return undefined;
   const start = Math.min(...starts);

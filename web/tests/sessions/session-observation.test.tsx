@@ -117,7 +117,8 @@ describe("workspace execution indicators", () => {
     expect(within(row).getByText("未载")).toHaveClass("state-notLoaded");
     expect(row).not.toHaveTextContent(/桌面|未加载|空闲/);
     fireEvent.click(row);
-    expect(document.querySelector(".detail-title")).not.toHaveTextContent(/桌面|未加载|空闲/);
+    expect(document.querySelector(".detail-title")).not.toHaveTextContent(/桌面|空闲/);
+    expect(document.querySelector(".detail-title")).toHaveTextContent("未加载");
     fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
     expect(screen.queryByText(/桌面已失联|桌面观测已过期|桌面观测时间异常|桌面观测时间缺失|桌面状态未知|控制接口：/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "关闭会话详情" }));
