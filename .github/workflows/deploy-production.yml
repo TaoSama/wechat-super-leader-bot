@@ -63,6 +63,10 @@ jobs:
           set -Eeuo pipefail
           release_root="$RUNNER_TEMP/super-leader-release-$REVISION"
           mkdir -p "$release_root"
+          cp compose.yaml "$release_root/compose.yaml"
+          cp deploy/compose.production.yaml "$release_root/compose.production.yaml"
+          cp deploy/compose.gateway.yaml "$release_root/compose.gateway.yaml"
+          cp deploy/security/codex-seccomp.json "$release_root/codex-seccomp.json"
 
           build_image() {
             local component="$1" dockerfile="$2" image="$3" archive="$4" log_file="$5"
@@ -112,7 +116,7 @@ jobs:
           done
           (
             cd "$release_root"
-            sha256sum controller.tar gateway.tar > release.sha256
+            sha256sum controller.tar gateway.tar compose.yaml compose.production.yaml compose.gateway.yaml codex-seccomp.json > release.sha256
           )
           printf 'REVISION=%s\nCONTROLLER_IMAGE=%s\nGATEWAY_IMAGE=%s\n' "$REVISION" "$CONTROLLER_IMAGE" "$GATEWAY_IMAGE" \
             > "$release_root/manifest.env"
@@ -143,7 +147,8 @@ jobs:
           ssh "${ssh_opts[@]}" "$target" "umask 077; mkdir -p '$remote_stage'"
           scp -q "${ssh_opts[@]}" \
             "$release_root/controller.tar" "$release_root/gateway.tar" "$release_root/release.sha256" \
-            "$release_root/manifest.env" deploy/compose.release.yaml scripts/deploy/remote-release.sh \
+            "$release_root/manifest.env" deploy/compose.release.yaml compose.yaml deploy/compose.production.yaml \
+            deploy/compose.gateway.yaml deploy/security/codex-seccomp.json scripts/deploy/remote-release.sh \
             "$target:$remote_stage/"
           ssh "${ssh_opts[@]}" "$target" "chmod 700 '$remote_stage/remote-release.sh'"
 
@@ -153,6 +158,10 @@ jobs:
             --controller-image "$CONTROLLER_IMAGE" --gateway-image "$GATEWAY_IMAGE" \
             --controller-archive "$remote_stage/controller.tar" --gateway-archive "$remote_stage/gateway.tar" \
             --checksums "$remote_stage/release.sha256" --compose-overlay "$remote_stage/compose.release.yaml" \
+            --compose-base "$remote_stage/compose.yaml" \
+            --compose-production "$remote_stage/compose.production.yaml" \
+            --compose-gateway "$remote_stage/compose.gateway.yaml" \
+            --seccomp-policy "$remote_stage/codex-seccomp.json" \
             --env-file "$env_file"
           ssh "${ssh_opts[@]}" "$target" "$remote_command"
 

@@ -23,9 +23,9 @@ Docker 归档。两个归档都带有完整 commit SHA 的 `org.opencontainers.i
 已被替代的镜像 tag，并保留当前和上一版本供一次回滚使用；临时归档和脚本会清理。
 生产容器日志仍由现有的 `json-file` 10 MiB × 3 轮转策略限制。
 
-VPS 的 `DEPLOY_PATH` 必须是已准备好的项目 checkout，且包含当前的
-`compose.yaml`、`deploy/compose.production.yaml`、`deploy/compose.gateway.yaml`、
-`deploy/security/codex-seccomp.json`。首次启用前，在该目录创建权限不向组和其他用户
+VPS 的 `DEPLOY_PATH` 只需要提供现有的 Compose 项目目录；每次发布会把与镜像相同
+revision 的 `compose.yaml`、生产/Gateway overlay 和 seccomp 策略随发布包传输并校验，
+因此不会复用旧的声明式配置。首次启用前，在该目录创建权限不向组和其他用户
 开放的 `.runtime/controller.env`，并准备已有的微信账号文件、状态目录和
 `super-leader-codex` AppArmor profile。工作流不会读取、打印或上传这些运行时密钥。
 

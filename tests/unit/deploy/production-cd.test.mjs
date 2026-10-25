@@ -19,6 +19,9 @@ test('production CD deploys one main push with protected, immutable inputs', () 
   assert.match(workflow, /--output "type=docker,dest=\$archive"/);
   assert.match(workflow, /build_image controller[\s\S]*&[\s\S]*build_image gateway[\s\S]*&/);
   assert.match(workflow, /sha256sum controller\.tar gateway\.tar/);
+  assert.match(workflow, /compose\.yaml compose\.production\.yaml compose\.gateway\.yaml codex-seccomp\.json/);
+  assert.match(workflow, /--compose-base/);
+  assert.match(workflow, /--seccomp-policy/);
   assert.match(workflow, /StrictHostKeyChecking=yes/);
   assert.match(workflow, /UserKnownHostsFile=/);
 });
@@ -27,7 +30,10 @@ test('remote release verifies before switching and keeps a bounded rollback path
   assert.match(releaseScript, /sha256sum -c/);
   assert.match(releaseScript, /linux\/amd64/);
   assert.match(releaseScript, /org\.opencontainers\.image\.revision/);
+  assert.match(releaseScript, /release bundle checksum verification failed/);
   assert.match(releaseScript, /config --quiet/);
+  assert.match(releaseScript, /CODEX_SECCOMP_PATH/);
+  assert.match(releaseScript, /compose_base/);
   assert.match(releaseScript, /-u COMPOSE_FILE -u COMPOSE_PROFILES -u COMPOSE_ENV_FILES/);
   assert.match(releaseScript, /up -d --no-build --force-recreate controller gateway/);
   assert.match(releaseScript, /wait_healthy controller/);

@@ -31,7 +31,7 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
-      - seccomp:./deploy/security/codex-seccomp.json
+      - seccomp:${CODEX_SECCOMP_PATH:-./deploy/security/codex-seccomp.json}
       - apparmor:super-leader-codex
     tmpfs: ["/tmp:size=64m,mode=1777"]
     stop_grace_period: 30s

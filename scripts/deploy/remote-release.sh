@@ -7,7 +7,8 @@ usage() {
 Usage: remote-release.sh --release-dir PATH --stage-dir PATH --revision SHA \
   --controller-image IMAGE --gateway-image IMAGE \
   --controller-archive PATH --gateway-archive PATH --checksums PATH \
-  --compose-overlay PATH [--env-file PATH]
+  --compose-overlay PATH --compose-base PATH --compose-production PATH \
+  --compose-gateway PATH --seccomp-policy PATH [--env-file PATH]
 
 Load two verified linux/amd64 images and switch the existing production Compose
 services to them. The command keeps the previous release env for best-effort
@@ -33,6 +34,10 @@ controller_archive=''
 gateway_archive=''
 checksums=''
 compose_overlay=''
+compose_base=''
+compose_production=''
+compose_gateway=''
+seccomp_policy=''
 env_file='.runtime/controller.env'
 
 while (($#)); do
@@ -46,6 +51,10 @@ while (($#)); do
     --gateway-archive|-G) [[ $# -ge 2 ]] || die "$1 requires a value"; gateway_archive=$2; shift 2 ;;
     --checksums|-k) [[ $# -ge 2 ]] || die "$1 requires a value"; checksums=$2; shift 2 ;;
     --compose-overlay|-o) [[ $# -ge 2 ]] || die "$1 requires a value"; compose_overlay=$2; shift 2 ;;
+    --compose-base) [[ $# -ge 2 ]] || die "$1 requires a value"; compose_base=$2; shift 2 ;;
+    --compose-production) [[ $# -ge 2 ]] || die "$1 requires a value"; compose_production=$2; shift 2 ;;
+    --compose-gateway) [[ $# -ge 2 ]] || die "$1 requires a value"; compose_gateway=$2; shift 2 ;;
+    --seccomp-policy) [[ $# -ge 2 ]] || die "$1 requires a value"; seccomp_policy=$2; shift 2 ;;
     --env-file|-e) [[ $# -ge 2 ]] || die "$1 requires a value"; env_file=$2; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     --) shift; (($# == 0)) || die "unexpected arguments: $*" ;;
@@ -54,7 +63,8 @@ while (($#)); do
 done
 
 for required in release_dir stage_dir revision controller_image gateway_image \
-  controller_archive gateway_archive checksums compose_overlay; do
+  controller_archive gateway_archive checksums compose_overlay compose_base \
+  compose_production compose_gateway seccomp_policy; do
   [[ -n ${!required} ]] || die "missing --${required//_/-}"
 done
 
@@ -71,11 +81,8 @@ case "$env_file" in
   *) controller_env=$release_dir/$env_file ;;
 esac
 [[ -f $controller_env ]] || die "controller env file does not exist: $controller_env"
-[[ -f $release_dir/compose.yaml ]] || die 'base Compose file is missing from the release directory'
-[[ -f $release_dir/deploy/compose.production.yaml ]] || die 'production Compose overlay is missing'
-[[ -f $release_dir/deploy/compose.gateway.yaml ]] || die 'Gateway Compose overlay is missing'
-[[ -f $release_dir/deploy/security/codex-seccomp.json ]] || die 'seccomp policy is missing'
-[[ -f $controller_archive && -f $gateway_archive && -f $checksums && -f $compose_overlay ]] || die 'release bundle is incomplete'
+[[ -f $controller_archive && -f $gateway_archive && -f $checksums && -f $compose_overlay && \
+  -f $compose_base && -f $compose_production && -f $compose_gateway && -f $seccomp_policy ]] || die 'release bundle is incomplete'
 
 if command -v stat >/dev/null 2>&1; then
   env_mode=$(stat -c '%a' "$controller_env" 2>/dev/null || stat -f '%Lp' "$controller_env")
@@ -100,9 +107,10 @@ compose_with_env() {
   local release_env_path=$1
   shift
   local args=(--env-file "$controller_env" --env-file "$release_env_path" --project-directory "$release_dir"
-    --profile wechat -f "$release_dir/compose.yaml" -f "$release_dir/deploy/compose.production.yaml"
-    -f "$release_dir/deploy/compose.gateway.yaml" -f "$compose_overlay")
+    --profile wechat -f "$compose_base" -f "$compose_production"
+    -f "$compose_gateway" -f "$compose_overlay")
   env -u COMPOSE_FILE -u COMPOSE_PROFILES -u COMPOSE_ENV_FILES -u COMPOSE_PROJECT_NAME \
+    CODEX_SECCOMP_PATH="$seccomp_policy" \
     "${compose[@]}" "${args[@]}" "$@"
 }
 
@@ -118,19 +126,20 @@ chmod 600 "$release_env_next"
 
 cleanup() {
   rm -f -- "$controller_archive" "$gateway_archive" "$checksums" "$compose_overlay" "$stage_dir/manifest.env" \
+    "$compose_base" "$compose_production" "$compose_gateway" "$seccomp_policy" \
     "$stage_dir/remote-release.sh" "$release_env_next"
   rmdir "$stage_dir" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-log 'read-only Compose preflight'
-if ! compose_with_env "$release_env_next" config --quiet; then
-  die 'read-only Compose preflight failed'
-fi
 checksums_dir=${checksums%/*}
 [[ $checksums_dir == "$checksums" ]] && checksums_dir=.
 if ! (cd "$checksums_dir" && sha256sum -c "${checksums##*/}"); then
-  die 'release archive checksum verification failed'
+  die 'release bundle checksum verification failed'
+fi
+log 'read-only Compose preflight'
+if ! compose_with_env "$release_env_next" config --quiet; then
+  die 'read-only Compose preflight failed'
 fi
 
 inspect_image() {
