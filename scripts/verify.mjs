@@ -13,7 +13,8 @@ const POSTGRES_STEP_IDS = new Set([
   'synthetic-integration', 'console-auth-integration', 'wechat-interaction',
   'task-notifications-postgres', 'scheduled-sessions-postgres',
 ]);
-const UNIT_PARALLELISM = 4;
+// The JS suites already fan out hundreds of workers; keep their outer pool serial to avoid CPU starvation and timing-sensitive flakes.
+const UNIT_PARALLELISM = 1;
 const POSTGRES_PARALLELISM = 2;
 const LOOPBACK_PARALLELISM = 4;
 const ABORT_KILL_GRACE_MS = 1_000;
@@ -43,10 +44,11 @@ export function verificationPlan(suite = 'all', { skipNativeProgress = false } =
   if (!SUITES.includes(suite)) throw new Error('Unknown suite; use all, unit or integration');
   const step = (id, command, args, cwd = '.', env = {}) => ({ id, command, args, cwd, env });
   const pnpm = (id, component, script) => step(id, 'pnpm', ['--dir', component, 'run', script]);
+  const vitest = (id, component) => step(id, 'pnpm', ['--dir', component, 'exec', 'vitest', 'run', '--no-file-parallelism']);
   const builds = [pnpm('controller-build', 'controller', 'build'), pnpm('gateway-build', 'gateway', 'build'),
     pnpm('web-build', 'web', 'build')];
-  const unit = [pnpm('controller-typecheck', 'controller', 'typecheck'), pnpm('controller-tests', 'controller', 'test'),
-    builds[0], pnpm('gateway-tests', 'gateway', 'test'), builds[1], pnpm('web-tests', 'web', 'test'), builds[2],
+  const unit = [pnpm('controller-typecheck', 'controller', 'typecheck'), vitest('controller-tests', 'controller'),
+    builds[0], pnpm('gateway-tests', 'gateway', 'test'), builds[1], vitest('web-tests', 'web'), builds[2],
     step('cli-and-tool-tests', process.execPath, ['--test', ...unitTestFiles()]),
     step('daemon-race', 'go', ['test', '-race', '-count=1', './...'], 'daemon'),
     step('terminal-delivery-sample', 'go', ['run', '-race', './examples/terminal-delivery', '--run'], 'daemon'),

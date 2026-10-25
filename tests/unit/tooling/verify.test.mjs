@@ -51,6 +51,8 @@ test('plans build prerequisites once, include all components, and never invoke l
   }
   const unit = verificationPlan('unit');
   assert(unit.find(step => step.id === 'cli-and-tool-tests').args.includes('tests/unit/deploy/image-build.test.mjs'));
+  assert.deepEqual(unit.find(step => step.id === 'controller-tests').args.slice(-3), ['vitest', 'run', '--no-file-parallelism']);
+  assert.deepEqual(unit.find(step => step.id === 'web-tests').args.slice(-3), ['vitest', 'run', '--no-file-parallelism']);
   assert(unit.some(step => step.id === 'daemon-race' && step.args.includes('-count=1')));
   assert.deepEqual(unit.find(step => step.id === 'terminal-delivery-sample'), {
     id: 'terminal-delivery-sample', command: 'go', args: ['run', '-race', './examples/terminal-delivery', '--run'], cwd: 'daemon', env: {},
