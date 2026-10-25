@@ -6,6 +6,7 @@ import { sessionRequest } from "./request";
 const HISTORY_LIMIT = 20;
 const MAX_TURN_STATUSES = 2048;
 const MAX_TURN_ID_BYTES = 128;
+const MAX_HISTORY_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
 const TURN_STATUSES = new Set(["inProgress", "completed", "failed", "interrupted"]);
 
 function sessionPath(nodeId: string, sessionId: string): string {
@@ -36,7 +37,9 @@ export async function fetchSessionHistory(nodeId: string, sessionId: string, cur
     if (data.source === "terminal-transcript" && ((value.kind !== "user" && value.kind !== "assistant") ||
         (value.type !== "transcript_message" && value.type !== "transcript_chunk"))) throw new Error("CLI 会话记录条目格式无效");
     if (value.turnStatus !== undefined && (typeof value.turnStatus !== "string" || !TURN_STATUSES.has(value.turnStatus))) throw new Error("历史轮次状态无效");
-    return { turnStatus: value.turnStatus as HistoryItem["turnStatus"], id: value.id, text: value.text, turnId: value.turnId, kind: value.kind as HistoryItem["kind"], type: typeof value.type === "string" ? value.type : "unknown", title: typeof value.title === "string" ? value.title : undefined, status: typeof value.status === "string" ? value.status : undefined, timestamp: typeof value.timestamp === "string" ? value.timestamp : undefined, truncated: value.truncated === true };
+    const durationMs = typeof value.durationMs === "number" && Number.isSafeInteger(value.durationMs) && value.durationMs >= 0 && value.durationMs <= MAX_HISTORY_DURATION_MS
+      ? value.durationMs : undefined;
+    return { turnStatus: value.turnStatus as HistoryItem["turnStatus"], id: value.id, text: value.text, turnId: value.turnId, kind: value.kind as HistoryItem["kind"], type: typeof value.type === "string" ? value.type : "unknown", title: typeof value.title === "string" ? value.title : undefined, status: typeof value.status === "string" ? value.status : undefined, timestamp: typeof value.timestamp === "string" ? value.timestamp : undefined, ...(durationMs === undefined ? {} : { durationMs }), truncated: value.truncated === true };
   });
   let turnStatuses: SessionHistory["turnStatuses"];
   if (data.turnStatuses !== undefined) {

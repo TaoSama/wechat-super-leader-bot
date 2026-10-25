@@ -13,6 +13,7 @@ const (
 	MaxHistoryResponseBytes  = 1024 * 1024
 	MaxHistoryTextLength     = 16000
 	MaxHistoryTurnStatuses   = 2048
+	MaxHistoryDurationMs     = int64(7 * 24 * 60 * 60 * 1000)
 	HistoryInvalidRequest    = "Invalid history request"
 	HistoryUnavailable       = "History API unavailable"
 	HistoryFailed            = "History request failed"
@@ -86,5 +87,6 @@ type HistoryItem struct {
 	Title      string `json:"title,omitempty"`
 	Status     string `json:"status,omitempty"`
 	Timestamp  string `json:"timestamp,omitempty"`
+	DurationMs int64  `json:"durationMs,omitempty"`
 	Truncated  bool   `json:"truncated,omitempty"`
 }

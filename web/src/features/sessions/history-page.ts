@@ -3,7 +3,7 @@ import { HistoryItem, SessionHistory } from "../../types";
 function sameItem(left: HistoryItem, right: HistoryItem): boolean {
   return left.id === right.id && left.turnId === right.turnId && left.turnStatus === right.turnStatus && left.kind === right.kind &&
     left.type === right.type && left.text === right.text && left.title === right.title &&
-    left.status === right.status && left.timestamp === right.timestamp && left.truncated === right.truncated;
+    left.status === right.status && left.timestamp === right.timestamp && left.durationMs === right.durationMs && left.truncated === right.truncated;
 }
 
 interface Link { item: HistoryItem; next: Link | null; previous: Link | null }

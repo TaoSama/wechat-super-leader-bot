@@ -116,6 +116,7 @@ export const HISTORY_MAX_LIMIT = 50;
 export const HISTORY_MAX_CURSOR_LENGTH = 4096;
 export const HISTORY_MAX_TEXT_LENGTH = 16000;
 export const HISTORY_MAX_TURN_STATUSES = 2048;
+export const HISTORY_MAX_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
 
 const HistoryTurnStatusSchema = z.enum(["inProgress", "completed", "failed", "interrupted"]);
 
@@ -129,6 +130,7 @@ export const HistoryItemSchema = z.object({
   title: z.string().optional(),
   status: z.string().optional(),
   timestamp: z.string().datetime({ offset: true }).optional(),
+  durationMs: z.number().int().nonnegative().max(HISTORY_MAX_DURATION_MS).optional(),
   truncated: z.boolean().optional(),
 });
 export type HistoryItem = z.infer<typeof HistoryItemSchema>;

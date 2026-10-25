@@ -79,3 +79,35 @@ func TestHistoryTurnStatusUsesOnlyExactTurnMetadata(t *testing.T) {
 		}
 	}
 }
+
+func TestHistoryItemDurationIsDerivedAndBounded(t *testing.T) {
+	base := map[string]any{
+		"turnId":        "turn",
+		"startedAtMs":   float64(1_000),
+		"completedAtMs": float64(3_250),
+		"item":          map[string]any{"id": "tool", "type": "commandExecution", "status": "completed", "aggregatedOutput": "done"},
+	}
+	item, ok := PublicHistoryItem(base)
+	if !ok || item.DurationMs != 2_250 {
+		t.Fatalf("duration=%d included=%v want=2250", item.DurationMs, ok)
+	}
+	for _, tc := range []struct {
+		name  string
+		start float64
+		end   float64
+	}{
+		{name: "reverse", start: 3_250, end: 1_000},
+		{name: "too long", start: 1_000, end: float64(protocol.MaxHistoryDurationMs + 2_000)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wrapper := map[string]any{
+				"turnId": "turn", "startedAtMs": tc.start, "completedAtMs": tc.end,
+				"item": map[string]any{"id": "tool", "type": "commandExecution", "status": "completed", "aggregatedOutput": "done"},
+			}
+			item, ok := PublicHistoryItem(wrapper)
+			if !ok || item.DurationMs != 0 {
+				t.Fatalf("duration=%d included=%v want omitted", item.DurationMs, ok)
+			}
+		})
+	}
+}

@@ -19,6 +19,13 @@ describe("history API contract", () => {
     fetch.mockResolvedValue(response({ ...PAGE, items }));
     await expect(fetchSessionHistory("node", "session")).rejects.toThrow("单页条数限制");
   });
+  it("preserves bounded public execution duration and drops malformed duration metadata", async () => {
+    const fetch = vi.fn().mockResolvedValue(response({ ...PAGE, items: [{ id: "tool", turnId: "turn", kind: "tool", type: "commandExecution", text: "output", durationMs: 2250 }] }));
+    vi.stubGlobal("fetch", fetch);
+    expect((await fetchSessionHistory("node", "session")).items[0].durationMs).toBe(2250);
+    fetch.mockResolvedValue(response({ ...PAGE, items: [{ id: "tool", turnId: "turn", kind: "tool", type: "commandExecution", text: "output", durationMs: 604800001 }] }));
+    expect((await fetchSessionHistory("node", "session")).items[0].durationMs).toBeUndefined();
+  });
   it("only selects the paginated source explicitly and rejects a different response source", async () => {
     const fetch = vi.fn().mockResolvedValue(response({ ...PAGE, source: "control-socket" }));
     vi.stubGlobal("fetch", fetch);
