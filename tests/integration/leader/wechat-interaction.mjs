@@ -54,10 +54,9 @@ const { values } = parseArgs({ options: { help: { type: 'boolean', short: 'h' },
 if (values.help || !values.run) {
   console.log('Usage: node tests/integration/leader/wechat-interaction.mjs --run [--budget-only]\nRequires built Controller/Gateway, Node >=24, OpenSSL and local Docker with postgres:16-alpine. Starts real processes against disposable PostgreSQL, local model HTTP, local WeChat HTTPS and a synthetic Daemon WebSocket. Never reads live credentials or sessions.');
 } else {
-  await (async () => {
-    await main();
-    if (!values['budget-only']) await main({ budgetOnly: true });
-  })().catch(error => { console.error(error.stack); process.exitCode = 1; });
+  const runs = [main()];
+  if (!values['budget-only']) runs.push(main({ budgetOnly: true }));
+  await Promise.all(runs).catch(error => { console.error(error.stack); process.exitCode = 1; });
 }
 
 async function listen(server) {
@@ -357,6 +356,7 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
     progressInspectionPool = new Pool({ connectionString: databaseUrl, max: 1 });
     controller = await createControllerFixture({ logs, secrets: [token, nodeToken, postgres.password], env: {
       ...env, PERSISTENCE_MODE: 'postgres', DATABASE_URL: databaseUrl, CONTROLLER_TOKEN: token,
+      CONTROLLER_DATA_ROOT: join(dir, 'controller-runtime'),
       NODE_TOKENS: JSON.stringify({ [NODE]: nodeToken }), ALLOWED_CHAT_IDS: CHAT, LEADER_MODE: 'model',
       LEADER_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1`, LEADER_MODEL_API_KEY: 'synthetic-model-key',
       LEADER_MODEL_NAME: 'synthetic-wechat-model',
@@ -365,7 +365,8 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
     // The fixture inherits process.env; explicitly replace it with the sanitized environment.
     for (const key of Object.keys(controller.env)) if (!Object.hasOwn(env, key) &&
       !['HOST', 'PORT', 'CONSOLE_PUBLIC_URL', 'PERSISTENCE_MODE', 'DATABASE_URL', 'CONTROLLER_TOKEN', 'NODE_TOKENS',
-        'ALLOWED_CHAT_IDS', 'LEADER_MODE', 'LEADER_MODEL_BASE_URL', 'LEADER_MODEL_API_KEY', 'LEADER_MODEL_NAME', 'TASK_NOTIFICATION_TICK_MS'].includes(key)) {
+        'ALLOWED_CHAT_IDS', 'LEADER_MODE', 'LEADER_MODEL_BASE_URL', 'LEADER_MODEL_API_KEY', 'LEADER_MODEL_NAME',
+        'TASK_NOTIFICATION_TICK_MS', 'CONTROLLER_DATA_ROOT'].includes(key)) {
       delete controller.env[key];
     }
     proxy = createServer(async (request, response) => {

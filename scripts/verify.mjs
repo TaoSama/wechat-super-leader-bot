@@ -9,14 +9,17 @@ const SUITES = ['all', 'unit', 'integration'];
 const NODE_MIN_MAJOR = 24;
 const TOOL_PROBE_MS = 10_000;
 const BUILD_STEP_IDS = new Set(['controller-build', 'gateway-build', 'web-build']);
+const CONTROLLER_UNIT_STEP_IDS = new Set(['controller-typecheck', 'controller-tests']);
 const POSTGRES_STEP_IDS = new Set([
-  'synthetic-integration', 'console-auth-integration', 'wechat-interaction',
+  'synthetic-integration', 'console-auth-integration',
   'task-notifications-postgres', 'scheduled-sessions-postgres',
 ]);
+const WECHAT_STEP_IDS = new Set(['wechat-interaction']);
 const LATENCY_STEP_IDS = new Set(['message-latency', 'direct-directory-latency', 'direct-console-latency']);
-// The JS suites already fan out hundreds of workers; keep their outer pool serial to avoid CPU starvation and timing-sensitive flakes.
-const UNIT_PARALLELISM = 1;
+// Controller tests share timing-sensitive fixtures; keep them serial before the other unit workers.
+const UNIT_PARALLELISM = 3;
 const POSTGRES_PARALLELISM = 2;
+const WECHAT_PARALLELISM = 1;
 const LOOPBACK_PARALLELISM = 4;
 const ABORT_KILL_GRACE_MS = 1_000;
 const INHERITED_ENV = [
@@ -158,7 +161,7 @@ export function formatVerificationError(error, prefix = '') {
   return lines;
 }
 
-export async function runParallelPool(steps, { env, concurrency, signal, onStep = () => {}, execute = executeStep }) {
+export async function runParallelPool(steps, { env, concurrency, signal, onStep = () => {}, execute = executeStep, stopOnFailure = false }) {
   const children = new Set();
   const failures = [];
   let next = 0;
@@ -169,7 +172,10 @@ export async function runParallelPool(steps, { env, concurrency, signal, onStep 
       if (!step) return;
       onStep(step);
       try { await execute(step, env, { children }); }
-      catch (error) { failures.push(error); }
+      catch (error) {
+        failures.push(error);
+        if (stopOnFailure) return;
+      }
     }
   };
   const abort = () => {
@@ -205,12 +211,21 @@ export async function runParallelGroups(plan, { env, signal, onStep = () => {}, 
   await runParallelPool(plan.builds, { env, concurrency: plan.builds.length, signal, onStep, execute });
   const groups = [];
   let latency = [];
-  if (plan.unit.length) groups.push(runParallelPool(plan.unit, { env, concurrency: UNIT_PARALLELISM, signal, onStep, execute }));
+  if (plan.unit.length) {
+    groups.push((async () => {
+      const controller = plan.unit.filter(step => CONTROLLER_UNIT_STEP_IDS.has(step.id));
+      const remainder = plan.unit.filter(step => !CONTROLLER_UNIT_STEP_IDS.has(step.id));
+      if (controller.length) await runParallelPool(controller, { env, concurrency: 1, signal, onStep, execute, stopOnFailure: true });
+      if (remainder.length) await runParallelPool(remainder, { env, concurrency: UNIT_PARALLELISM, signal, onStep, execute });
+    })());
+  }
   if (plan.integration.length) {
     const postgres = plan.integration.filter(step => POSTGRES_STEP_IDS.has(step.id));
-    const loopback = plan.integration.filter(step => !POSTGRES_STEP_IDS.has(step.id) && !LATENCY_STEP_IDS.has(step.id));
+    const wechat = plan.integration.filter(step => WECHAT_STEP_IDS.has(step.id));
+    const loopback = plan.integration.filter(step => !POSTGRES_STEP_IDS.has(step.id) && !WECHAT_STEP_IDS.has(step.id) && !LATENCY_STEP_IDS.has(step.id));
     latency = plan.integration.filter(step => LATENCY_STEP_IDS.has(step.id));
     if (postgres.length) groups.push(runParallelPool(postgres, { env, concurrency: POSTGRES_PARALLELISM, signal, onStep, execute }));
+    if (wechat.length) groups.push(runParallelPool(wechat, { env, concurrency: WECHAT_PARALLELISM, signal, onStep, execute }));
     if (loopback.length) groups.push(runParallelPool(loopback, { env, concurrency: LOOPBACK_PARALLELISM, signal, onStep, execute }));
   }
   const results = await Promise.allSettled(groups);

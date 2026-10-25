@@ -119,6 +119,75 @@ test('parallel runner serializes latency variants after other integration checks
   assert.equal(active.max, 1);
 });
 
+test('parallel runner keeps the long WeChat integration outside the PostgreSQL pool', async () => {
+  const events = [];
+  const step = id => ({ id, command: 'synthetic', args: [], cwd: '.', env: {} });
+  const execute = async current => {
+    events.push(`start:${current.id}`);
+    await delay(current.id === 'wechat-interaction' ? 8 : 2);
+    events.push(`done:${current.id}`);
+  };
+  await runParallelGroups({ builds: [], unit: [], integration: [
+    step('wechat-interaction'), step('synthetic-integration'), step('console-auth-integration'),
+    step('task-notifications-postgres'), step('scheduled-sessions-postgres'),
+  ] }, { env: {}, signal: new AbortController().signal, execute });
+  assert.equal(events.filter(event => event === 'start:wechat-interaction').length, 1);
+  assert(events.indexOf('start:wechat-interaction') < events.indexOf('done:wechat-interaction'));
+  assert(events.indexOf('start:wechat-interaction') < events.indexOf('done:synthetic-integration'));
+  for (const id of ['synthetic-integration', 'console-auth-integration', 'task-notifications-postgres', 'scheduled-sessions-postgres']) {
+    assert(events.indexOf(`start:${id}`) < events.indexOf('done:wechat-interaction'), id);
+  }
+});
+
+test('parallel runner completes controller unit checks before starting the remainder pool', async () => {
+  const events = [], active = { count: 0, max: 0, controllerMax: 0, remainderMax: 0 };
+  const step = id => ({ id, command: 'synthetic', args: [], cwd: '.', env: {} });
+  const execute = async current => {
+    active.count++;
+    active.max = Math.max(active.max, active.count);
+    if (current.id.startsWith('controller-')) active.controllerMax = Math.max(active.controllerMax, active.count);
+    else active.remainderMax = Math.max(active.remainderMax, active.count);
+    events.push(`start:${current.id}`);
+    await delay(2);
+    events.push(`done:${current.id}`);
+    active.count--;
+  };
+  await runParallelGroups({ builds: [], unit: [step('controller-typecheck'), step('controller-tests'), step('gateway-tests'), step('web-tests'), step('daemon-race')], integration: [] }, {
+    env: {}, signal: new AbortController().signal, execute,
+  });
+  assert(events.indexOf('start:controller-tests') > events.indexOf('done:controller-typecheck'));
+  const controllerDone = Math.max(events.indexOf('done:controller-typecheck'), events.indexOf('done:controller-tests'));
+  for (const id of ['gateway-tests', 'web-tests', 'daemon-race']) {
+    assert(events.indexOf(`start:${id}`) > controllerDone, id);
+  }
+  assert.equal(active.controllerMax, 1);
+  assert.equal(active.remainderMax, 3);
+});
+
+test('parallel runner keeps controller unit checks serial and stops before the remainder on failure', async () => {
+  const events = [], active = { count: 0, max: 0 };
+  const step = id => ({ id, command: 'synthetic', args: [], cwd: '.', env: {} });
+  const execute = async current => {
+    active.count++;
+    active.max = Math.max(active.max, active.count);
+    events.push(`start:${current.id}`);
+    await delay(2);
+    active.count--;
+    if (current.id === 'controller-typecheck') throw new Error('controller failed');
+    events.push(`done:${current.id}`);
+  };
+  await assert.rejects(runParallelGroups({ builds: [], unit: [step('controller-typecheck'), step('controller-tests'), step('gateway-tests'), step('web-tests'), step('daemon-race')], integration: [] }, {
+    env: {}, signal: new AbortController().signal, execute,
+  }), error => {
+    assert(error instanceof AggregateError);
+    assert.match(formatVerificationError(error).join('\n'), /controller failed/);
+    assert.equal(events.filter(event => event.startsWith('start:')).filter(event => !event.includes('controller')).length, 0);
+    assert.equal(events.includes('start:controller-tests'), false);
+    assert.equal(active.max, 1);
+    return true;
+  });
+});
+
 test('parallel runner escalates abort cleanup when a child ignores SIGTERM', async () => {
   const controller = new AbortController();
   let started;
