@@ -57,6 +57,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Prepare isolated verification temp root
+        if: matrix.suite == 'integration'
         run: |
           verification_tmp="$RUNNER_TEMP/super-leader-${{ matrix.name }}"
           mkdir -p "$verification_tmp"
