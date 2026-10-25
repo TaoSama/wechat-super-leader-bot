@@ -1,152 +1,53 @@
 # wechat-super-leader-bot
 
-> 微信 Super Leader：用自然语言查询、控制多台机器上已有的 Agent 会话，
-> 在明确授权后安排任务、传递结果，并通过 Web 工作台核对进度与回执。
+微信 Super Leader 连接已有的 Codex 会话，提供查询、授权执行、计划、持续目标和结果回执。
 
-## 架构总览
+## 架构
 
 ```mermaid
 flowchart TB
-  WX["微信"] --> GW["独立 Gateway · TypeScript"]
-  GW --> CA["持久 Codex Agent · 每聊天独立记忆"]
-  CA -->|明确业务工具 · 本轮原文绑定| C
-  GW --> C["Controller / Super Leader · TypeScript"]
-  W["Web 工作台 · React"] -->|HTTPS + Cookie| C
-  C --> M["模型 · 持续目标 / 后台执行 / 独立 Controller 模式"]
-  C --> PG[("PostgreSQL · 命令 / 计划 / 调度 / 成果 / 记忆")]
-  C --> A["统一调度账本"]
-  A --> B["隔离后台会话 · 独立目录 · 24 小时"]
-  A --> Q["成果 Outbox / 每聊天投递队列"]
-  B --> Q
-  Q --> GW
-  D["宿主机 Daemon · Go"] -->|主动 WSS| C
-  D --> O["已有 Codex 桌面 owner / 控制 socket"]
-  D --> T["显式配置的已有 CLI 终端"]
-  D --> R["原生定时任务配置 / 执行记录 · 只读"]
-  A -->|按机器、任务、执行窗口观察| D
+  WX[微信] --> GW[Gateway]
+  GW --> C[Controller]
+  C --> PG[(PostgreSQL)]
+  W[Web 工作台] --> C
+  D[宿主机 Daemon] -->|WSS| C
+  D --> O[已有桌面 owner / CLI 终端]
+  C --> M[模型决策]
 ```
 
-Codex 回复模式由外层 Codex 理解用户意图、选择业务工具并整合查询结果；Controller 不再为这条交互链调用规划、授权分类或回执润色模型。
-Controller 保留确定性的聊天归属、原文绑定、冻结目标与预算、去重、持久化和派发校验；自然语言授权判断由外层 Codex 负责。
-Gateway 独立维护微信登录与同步状态；Codex 回复模式为每个账户和聊天维护独立 Codex 会话与文件记忆。
-查询或控制外部项目时，Agent 通过本轮绑定原始用户消息的工具调用 Controller，由 Controller 校验和派发。
-互不依赖的只读工具可并行；状态变更按依赖有序提交。明确的会话目录和控制台链接请求直接调用对应业务工具。
-持续目标的后续决策、隔离后台执行等独立任务仍可使用模型；独立 Controller 回复模式保留原有行为。
-Daemon 原生运行在 Mac/Linux 宿主机，连接已有会话；用户仍可在原客户端操作这些会话。
+- **Controller**：唯一编排权威，负责鉴权、命令、计划、目标、通知和回执。
+- **Gateway**：负责微信登录、轮询、入站排队、回复投递和防重。
+- **Web**：通过认证 HTTP/SSE 访问 Controller。
+- **Daemon**：主动连接 Controller，使用已存在的桌面 owner 或 CLI 终端。
 
-一种部署方式是在 Linux 服务器上用 Docker 运行 Controller、Web、PostgreSQL 和独立 Gateway；
-Agent 所在宿主机主动连接 WSS，无需开放公网入站端口。桌面控制优先使用已有 owner；未加载会话可通过配置的
-app-server 按原 ID 恢复后发送，不创建替代会话。已有 writer 冲突时明确失败，不抢占、不自动换路。
+业务记忆集中保存在 Controller 的 PostgreSQL `leader_states`，以 `chatId` 为键。
+Gateway 不单独保存业务记忆，而是通过 Controller 使用同一份记录。
+共享范围是同一聊天，不是所有聊天的全局共享；不同聊天隔离。
+Daemon 只执行会话，不维护这份业务记忆。后台任务使用独立 thread 和工作目录。
 
-## 入口与代码布局
+## 能力
 
-| 入口 | 用途 |
-| --- | --- |
-| `https://leader.example.com` | 控制台域名示例，部署时替换为自己的域名，通过微信一次性链接登录 |
-| `http://127.0.0.1:8790` | 独立本机 Controller / Web |
-| `/health` | Controller 存活检查 |
-| `/v1/daemon` | 认证 Daemon WebSocket |
-| `scripts/local.mjs` | 本机初始化、启停、状态查询 |
-| `scripts/verify.mjs` | 合成目标的统一验证入口 |
+- 查询已有会话、历史和状态，并标明来源与时间。
+- 校验聊天、目标、内容和技能后，向原会话发送任务。
+- 持久化计划、持续目标、预算、依赖和完成回执。
+- 会话忙或离线时排队，恢复后按序投递；未发送内容可取消。
+- 保存成果和投递状态，避免重复发送。
 
-```text
-controller/src/ automations/、background/、commands/、http/、leader/、nodes/、notifications/、sessions/、skills/、store/
-daemon/cmd/     super-leader-daemon CLI 入口
-daemon/pkg/     client/、codex/{appserver,desktop,rollout}/、protocol/、service/
-gateway/src/    cli/、controller/、leader/、runtime/、wechat/
-web/src/        api/、auth/、features/{leader,sessions,status}/
-scripts/        local.mjs、verify.mjs、lib/、ops/
-tests/          跨组件集成测试、CLI 与部署测试
-deploy/         Dockerfile、生产 Compose、Nginx 与节点配置工具
-compose.yaml    本机控制平面基础编排
-```
-
-项目说明集中在本 README；运行合同与验证以对应源码和测试为准。
-
-## 使用方式
-
-在微信中可以说：“看看这台机器有哪些会话”“这个会话进展怎么样”“给我控制台链接”。
-具体会话的历史查询只读取已记录内容，并标明来源、获取时间和裁剪，不把元数据冒充输出。
-
-| 能力 | 授权与执行方式 |
-| --- | --- |
-| 单步任务 | 明确下达任务后核对目标、内容和技能，直接发送到原会话，不要求再回复确认 |
-| 固定计划 | 最多 4 步，冻结依赖与目标；精确完成回执才解锁后继 |
-| 结果传递 | 按任务指定的共享来源，后继使用前驱精确完成的已记录结果 |
-| 持续目标 | 明确要求持续推进，且目标、条件、范围和预算清楚时直接开始，根据结果决定下一步 |
-| 有序技能 | 每任务最多 4 个技能，授权入库和派发均核对顺序与版本摘要 |
-| 任务排队 | 已知会话忙碌或机器离线时保存待发送内容；原会话恢复可用后按顺序投递，未发送前可取消 |
-| 进度与结果 | 默认提供模型生成的中途进度，普通聊天每 query、后台计划/目标每任务最多 3 次；结果不超过 3 条时完整分条发送，更长则发送模型摘要和完整附件 |
-| 定时任务 | 自然语言创建单次提醒、cron 会话任务或隔离后台任务，可查询、暂停、恢复和取消；执行记录与通知投递分别保存 |
-| 跨机定时观察 | 只读收集不同机器上的 Codex 原生定时任务结果，延迟时继续检查，按截止时间汇总 |
-| 隔离后台执行 | 独立会话和可写目录完成小任务，默认保留 24 小时，支持原上下文追问与显式延期 |
-| 会话图片 | 明确要求发送后，读取原会话中的图片附件并发到当前微信聊天，一次最多 3 张 |
-
-例如：“让代码审查会话检查这个提交，只读，完成后告诉我结果”会直接派发；目标不明确才追问。
-说“先给我方案，别执行”才只生成预览；预览后 10 分钟内回复“执行”即可，中途查询不会清除预览。
-固定计划授权最多延续 24 小时；取消只停止后继，不终止已运行任务。
-日常回复使用简短列表；Codex 模式的委派确认直接依据持久执行记录生成，排队和受理分别如实说明。
-完成成果保留原任务完整 Markdown，不把处理中消息当结果。
-收到已授权消息、发送进度及最终结果前尝试显示输入中；微信接口异常不会因此阻止正文处理。
-原生轮次及其业务工具结束后，先可靠保存回复，再发送正文、保存回执并提交微信游标；原生进程和 SDK 资源清理在后台继续，并由停机流程统一收尾。
-同一原生线程的下一轮执行需等待前一进程安全结束，防止并发写入线程记录；正文交付和发送回执不等待资源清理。
-明确要求补充当前轮时，只有能核对准确运行轮次且控制通道支持追加才执行，不降级为另开一轮。
-持续目标同时约束次数和时间；失败、结果不明、证据不足或预算耗尽时停止并保留记录。
-每个聊天同时只允许一个未结束的持续目标或固定计划。
-
-图片来源包括原生附件和原会话实际渲染的 Markdown 本地图片，不接受模型给出的任意文件路径或下载地址。
-图片逐一核对会话、文件身份与摘要，仅支持 PNG/JPEG/GIF/WebP，单图最多 8 MiB。
-这依赖原会话附件本身可信，不额外隔离原 Agent 的文件权限；冻结的待发图片保留 24 小时，过期后需重新请求。
-
-Web 提供机器与会话搜索、原来源历史、直接发送、排队取消、计划和目标进度。
-看板还显示定时任务、执行回执与成果投递状态；可以按需读取完整成果，并暂停、恢复或取消定时任务。
-看板仅同步有界预览；展开某条回执时才读取该条完整结果，收起后释放正文，避免大结果拖慢刷新。
-手机底栏切换会话与看板，聊天顶栏保留模型、状态和详情入口；返回列表保留草稿与阅读位置。
-工具以单行摘要展示：手机点开底部详情面板，可拖动或点击扩大、收起；桌面原位展开。消息支持复制，时间统一为 UTC+8。
-向上滚动自动加载更早历史，新消息不会打断阅读；看板优先展示待处理和执行中记录，完成记录可展开。
-状态通过认证 SSE 更新，断流后轮询兜底；历史首屏读取最近一页，切回会话先显示有界内存缓存并后台更新，不是 token 流式输出。
-读取旧消息时保留滚动位置；来源失效后暂停，用户可显式重新读取最新页。
+工具调用必须绑定当前用户原文和准确的 `requestMessageId`。
+状态不明确时保留原记录，禁止改 ID 盲目重发。
 
 ## 控制台登录
 
-1. 在已授权微信聊天中发送“给我控制台链接”。
-2. 打开形如 `https://leader.example.com/#login=<一次性凭证>` 的链接。
-3. 页面立即清除地址栏 fragment/query，兑换 `HttpOnly` Cookie；登录态固定有效 1 小时。
+1. 在已授权微信聊天中请求控制台链接。
+2. 打开一次性链接；页面会清除 fragment 并兑换 `HttpOnly` Cookie。
+3. 登录态有效 1 小时，链接只能兑换一次。
 
-链接有效 1 小时、仅可兑换一次，持有即可登录，请勿转发。
-浏览器不保存管理 Bearer token；Cookie 授予工作台查询、准确会话发送及明确列出的设置操作。
-发送要求同源 Origin、专用 intent header 和有效会话资格，通用管理写接口不接受 Cookie。
+Cookie 只允许读取工作台状态、历史、技能、事件和回执，或向准确会话发送、取消排队内容。
+写请求还需同源 `Origin`、intent header 和会话资格。
 
-## 设置与运行资源
+## 本地开发
 
-在工作台选项中打开「设置」，日常设置分为三组：
-
-- **模型**：分别管理微信助手、Controller 和后台任务的模型与推理强度。目录从对应执行环境读取，刷新不自动切换模型；保存从下一轮生效，已有桌面会话继续使用自身设置。
-- **记忆与偏好**：选择微信聊天后查看、纠正 Task、Memory 和 Preference。回复长短、通知习惯保存在 Preference，也可直接在微信里用自然语言维护。定时条件仍在具体任务中表达。
-- **外观与诊断**：浅色、深色或跟随系统，外观保存在当前浏览器；查看连接、组件版本、模型目录来源与设置请求耗时。
-
-模型组的「高级资源」可查看和编辑实际运行的提示词、技能 Markdown 及文本子文件、已注册工具的 Schema。资源显示作用对象、来源版本、内容修订和生效方式。保存检查当前修订，其他页面或 Agent 修改过的资源会返回冲突，避免静默覆盖。工具名称、真正的执行能力和程序校验不能通过编辑 Schema 凭空添加。
-
-微信主会话资源由 Gateway 管理，Controller 只代理受认证的资源操作，不复制另一份记忆。Gateway 未连接时显示原因，Controller 本地资源仍可查看。模型目录可能来自上游缓存；显示目录不等于已经验证每个模型可推理，也不会把桌面登录身份的目录当作线上 provider 目录。
-
-| 变量 | 用途 |
-| --- | --- |
-| `CONTROLLER_DATA_ROOT` | Controller 持久运行时数据根目录；默认当前目录下 `.runtime/controller-runtime` |
-| `SETTINGS_ROOT` | Controller 设置持久化目录；默认 `<CONTROLLER_DATA_ROOT>/settings`，必须位于该根目录内 |
-| `GATEWAY_SETTINGS_URL` | Controller 使用的固定 Gateway 管理 origin；不接受浏览器传入目标地址 |
-| `GATEWAY_SETTINGS_HOST` / `GATEWAY_SETTINGS_PORT` | 显式启用 Gateway 内网管理监听，使用 Controller Bearer token 认证 |
-| `GATEWAY_SETTINGS_ROOT` | Gateway 设置和技能覆盖存储目录，放在其持久状态卷中 |
-
-新部署设置 `CONTROLLER_DATA_ROOT` 后，`SETTINGS_ROOT`、`BACKGROUND_WORKER_ROOT` 和 `BACKGROUND_ARTIFACT_ROOT` 必须位于该根目录内；未设置新根目录时仍接受旧版显式绝对路径，便于回滚旧 Compose 配置。
-
-生产 Compose 将 Controller 的设置、后台工作区和成果目录放在单一持久卷 `/var/lib/super-leader-runtime` 下，分别使用 `settings/`、`background/workers/` 和 `background/artifacts/` 子目录；Gateway 管理端口 `8791` 仅在容器网络监听，不映射到宿主机。更换容器保留该卷，不能把编辑后的资源只留在镜像层。
-
-接口及生效合同见 [设置契约](docs/settings-contract.md)。
-
-## 本机开发
-
-需要 Node.js >=24、pnpm 11.8.0、`daemon/go.mod` 指定的 Go，以及本地 Docker / Compose。
-先安装三个组件的锁定依赖，并构建前台 Daemon：
+依赖：Node.js `>=24`、pnpm `11.8.0`、Go（以 `daemon/go.mod` 为准）和 Docker/Compose。
 
 ```sh
 pnpm --dir controller install --frozen-lockfile
@@ -155,453 +56,80 @@ pnpm --dir web install --frozen-lockfile
 pnpm --dir gateway build
 (cd daemon && go build -o bin/super-leader-daemon ./cmd/super-leader-daemon)
 node scripts/local.mjs --init
-```
-
-`--init` 只创建不存在的私有配置，默认微信允许名单为空。
-`.runtime/local.json`、`.runtime/daemon-state/` 和微信状态是持久运行数据，不提交、不删除。
-
-自然语言模式使用 Responses API。启动前通过私有进程环境配置：
-
-| 变量 | 用途 |
-| --- | --- |
-| `LEADER_MODE=model` | 启用模型决策；默认 `rules` 仅用于诊断 |
-| `LEADER_MODEL_BASE_URL` | 当前 provider 的 API 基址，包含 `/v1` |
-| `LEADER_MODEL_NAME` | 实际可用模型名 |
-| `LEADER_MODEL_API_KEY` | provider 密钥，不放入仓库或 shell 历史 |
-| `CONSOLE_PUBLIC_URL=http://127.0.0.1:8790` | 本机签发控制台链接所需的公开 origin |
-| `CONTROLLER_HTTPS_PROXY` | 可选的实际出网代理地址 |
-
-```sh
 node scripts/local.mjs --up
 node scripts/local.mjs --daemon
-# 另开终端
 node scripts/local.mjs --check
-node scripts/local.mjs --sessions
 ```
 
-`--up` 构建本机 Controller / Web / PostgreSQL；启动器默认使用独立 `docker-compose`。
-`--daemon` 为前台开发运行；已有用户服务在运行时，通过该服务管理节点。
-`--down` 停止本机容器并保留数据库卷。已连接远端 Controller 的节点使用远端查询入口，
-不要再启动第二个编排权威；`--gateway` 会真实轮询微信，必须先配置并核实允许名单。
-
-## 原生 Daemon
-
-macOS 使用当前登录用户的 LaunchAgent，Linux 使用当前用户的 `systemd --user`。
-稳定二进制位于 `~/.local/share/super-leader/bin/super-leader-daemon`：
+首次启动 Gateway，先建立基线，再开始轮询：
 
 ```sh
-~/.local/share/super-leader/bin/super-leader-daemon --service status
-node scripts/local.mjs --check --controller https://leader.example.com
-node scripts/local.mjs --sessions --controller https://leader.example.com
+node gateway/dist/index.js --establish-baseline
+node gateway/dist/index.js --run
 ```
 
-同一入口支持 `--service install|start|stop|restart|uninstall`。
-安装/更新使用本机架构的新二进制，显式提供本机 node-id、WSS 地址、私有 token-file、
-原 state-dir、实际 socket 与完整技能根目录；不要复制另一台机器的路径或凭证。
-`uninstall` 删除服务定义，保留二进制、token、日志和 journal。
+`.runtime/local.json`、Daemon 状态、微信账号和 Gateway 状态都是私有运行数据，不提交仓库。
+使用 Gateway 前必须配置并核对聊天允许名单。
 
-| 参数 | 作用与边界 |
-| --- | --- |
-| `--sock` | 已有 Codex 控制 socket；可按原 ID 恢复未加载会话，不创建后端 |
-| `--desktop-sock` | 已有桌面 IPC 的状态、模型与历史观测 |
-| `--desktop-send` | 显式开启原桌面 owner 发送，要求 desktop socket |
-| `--codex-home` | 只读发现会话元数据与原生定时任务配置、执行记录；不授予发送权限 |
-| `--terminal-sock` / `--terminal-pane` | 显式指定已有终端和准确 pane |
-| `--terminal-history-root` | 逐提供方授权已记录 CLI 历史目录 |
-| `--terminal-send-mode=non-atomic` | 显式接受已有 PTY 单步输入的非原子边界 |
-| `--probe` | 只读诊断，不连接 Controller 或写 journal |
+Daemon 默认只读观察桌面状态和历史；发送必须显式配置 desktop socket 或准确的 CLI 终端。
+owner 不符、失联或会话未加载时降级为只读，不创建替代会话，也不抢占已有 writer。
 
-桌面观测与发送资格独立；失联、过期或 owner 不符时降级为只读，不自动换路。
-桌面内部协议会随客户端版本变化，升级后需要重新核对。
-Linux 用户服务不自动启用 linger；服务在线不代表原会话可控。
+## 部署
 
-## 部署与微信运行
+基础编排是 `compose.yaml`；生产限制在 `deploy/compose.production.yaml`；Gateway 在
+`deploy/compose.gateway.yaml`，只有选择 `wechat` profile 才启动。Web 构建在 Controller 镜像内。
 
-基础编排为 `compose.yaml`，生产限制为 `deploy/compose.production.yaml`，
-微信独立服务为 `deploy/compose.gateway.yaml`，仅显式选择 `wechat` profile 才启动。
-镜像入口为 `deploy/Dockerfile.controller` 和 `deploy/Dockerfile.gateway`。
-
-将生产配置保存在私有的 `.runtime/controller.env` 中。部署前必须按自己的环境设置
-`CONSOLE_PUBLIC_URL`（控制台公开 HTTPS origin）、`CONTROLLER_URL`（Gateway 可访问的 Controller URL）
-和 `RESULT_PUBLIC_ORIGIN`（成果下载链接公开 HTTPS origin）。文档与 Compose 中的 `example.com` 域名为示例。
-已有部署沿用自己的私有配置。只读检查使用以下命令，避免输出展开后的密钥：
+创建权限为 `0600` 的 `.runtime/controller.env`，填入令牌、数据库密码、公开 HTTPS origin 和状态目录。
+不要把密钥写入仓库、镜像或 shell 历史。
 
 ```sh
 docker compose --env-file .runtime/controller.env \
-  -f compose.yaml -f deploy/compose.production.yaml -f deploy/compose.gateway.yaml \
-  --profile wechat config --quiet
-docker compose --env-file .runtime/controller.env \
-  -f compose.yaml -f deploy/compose.production.yaml -f deploy/compose.gateway.yaml \
-  --profile wechat ps
+  -f compose.yaml -f deploy/compose.production.yaml \
+  -f deploy/compose.gateway.yaml --profile wechat config --quiet
 ```
 
-从旧版 `controller-settings`、`background-workers` 和 `background-artifacts` 卷迁移时，先冻结写入口并排空、停止唯一 Gateway，再停止 Controller；记录实际卷名、Compose 展开配置、镜像摘要和数据库备份。使用临时 root 容器读取旧卷，将旧设置卷根复制到新卷的 `settings/`，将旧工作卷根复制到 `background/workers/`，将旧成果卷根复制到 `background/artifacts/`，保留隐藏文件、锁、快照、权限和修改时间，完成后校验并设置服务使用的 UID/GID `1000:1000`，同时拒绝符号链接。目标卷必须先显式创建三个子目录并核对清单与哈希，不能依赖 Docker 首次挂载时的自动复制；PostgreSQL 数据卷和 Gateway 的微信状态目录继续原地保留。
-
-仓库提供的 `scripts/migrate-controller-runtime-volume.mjs` 在默认 dry-run 模式下生成清单并检查目录关系；只有显式加入 `--execute` 才会写入，`--rollback` 会在清单未改变时移除迁移生成的三个子目录。把旧卷和目标卷挂入临时容器后再运行该脚本，保存清单作为发布证据。
-
-迁移完成后在私有环境中显式设置 `CONTROLLER_RUNTIME_VOLUME`，先用 `config --quiet` 检查 Controller 只有 `/var/lib/super-leader-runtime` 一个持久挂载，再启动 Controller 验证健康检查、设置修订、后台会话与成果目录，最后恢复 Gateway 并核对原有微信 checkpoint、基线和 outbox。旧卷在回滚窗口内只读保留；回滚时停止新栈，恢复旧 Compose、镜像和三卷变量，确认数据库与 Gateway 状态未被新版本不兼容地修改后再启动。现有生产发布流程要求运行时挂载身份前后一致，因此不能用直接替换 Compose 的方式绕过这次卷拓扑迁移。
-
-生产镜像先在开发机或 CI 按目标架构构建并验证，再加载和切换。
-更新前全量核查在途命令、claim、计划和目标，并排空唯一 Gateway、冻结写入口；
-状态页只展示近期记录，不能作为排空依据。沿用原数据库、节点 journal 与微信 checkpoint。
-
-生产 Gateway 默认启用 `GATEWAY_LEADER_MODE=codex`，模型默认为 `gpt-6.1-sol`。
-凭证只通过私有环境提供：`GATEWAY_LEADER_API_KEY`、可选的 `GATEWAY_LEADER_BASE_URL`；
-Compose 未单独配置时沿用 `LEADER_MODEL_API_KEY`、`LEADER_MODEL_BASE_URL`。
-`GATEWAY_LEADER_MODE=controller` 可显式选择原 Controller 回复入口。
-Codex SDK 与原生 CLI 固定在 `0.163.0`；镜像安装时显式选择目标架构的 CLI 包，不能直接复制开发机原生 CLI。
-默认通过原生 app-server 执行轮次并支持追加消息；SDK 注入路径保持相同的回复持久化和异步清理约束。
-按目标宿主机架构构建镜像。例如，目标为 `linux/amd64`、开发机为 ARM 时，显式指定 `--platform linux/amd64`。
-
-Codex 记忆根目录为 `GATEWAY_LEADER_ROOT=/var/lib/super-leader-gateway/leader`，
-位于已有 `WECHAT_STATE_DIR` 持久挂载中。账户和聊天按摘要分目录，每个目录保存
-`task.md`（目标、进度和证据）、`memory.md`（长期事实）、`preference.md`（用户明确偏好），
-以及独立 `.codex` 会话数据、会话 ID 和回复防重日志。每轮注入磁盘中的记忆快照，
-Agent 可通过原生文件工具读取完整内容，并在回复前维护相关文件；续聊恢复原 Codex 会话。
-现存 `profile.md` 在首次打开工作目录时迁移到 `preference.md`，保留原内容；有冲突时合并。
-记忆提供上下文，不能新增执行授权，执行状态仍须查询 Controller 回执。
-未来工具与技能继续使用 Codex 原生发现机制，不另维护静态工具清单。
-
-无头 Codex 显式启用实时网络搜索、Shell、可续接命令、Shell 快照、技能发现、本地图片查看和等待工具，
-并配置无需登录的可选 OpenAI Docs HTTP MCP；其实际可用性取决于服务器网络出口，服务不可用时仍可启动模型并使用实时搜索。
-微信主会话同时启用多 Agent、V2 协作和 Goals，最多两个并发子线程，整轮仍受原有 300 秒预算约束；
-Goals 用于本轮目标管理，`exec` 完成后的自动续轮未作保证。后台 worker 使用相同的搜索与文档能力，继续由 Controller 管理并发、续跑和过期，
-不另启子 Agent 或 Goals。浏览器、Computer use 与桌面自动化在两条路径均显式关闭。
-这些配置不依赖开发机的配置文件、桌面插件、通知程序或本机路径。
-技能发现保留；由于 Codex 私有目录整体隔离，关闭该目录中不可读取的内置技能目录展示。
-两运行镜像包含 Python 3、curl、BeautifulSoup 和 html2text，随镜像只读提供
-`/etc/codex/skills/web-content-fetcher`，由 Codex 原生管理员技能目录发现。
-主聊天和后台 worker 只增加该技能目录的读取权限，不开放本机配置或私有 Codex 目录。
-该技能用于 HTTP/HTTPS 网页正文读取；需要登录、浏览器渲染或遇到验证页时如实说明，
-不将验证页视为文章，不启动浏览器。完整命令及边界见技能目录内的 `SKILL.md`。
-聊天工作目录 `.agents/skills` 的原生发现仍保留。
-
-微信主会话通过 `/etc/codex/skills/super-leader-capabilities` 提供功能介绍。
-询问“你能做什么”“有哪些功能”或某项功能的用法时，Codex 读取该技能和场景资料，
-先展示“分组、功能、你交代什么、机器人负责什么”四列表格，再按同一顺序给出微信指令和处理过程。
-功能按基础功能、任务执行、多会话协作、定时与后台分组；介绍使用短句和正向表述。
-每轮提示均包含技能使用约定，新建和续接的微信 Codex 会话共用此入口，沿用原会话 ID 与记忆。
-
-延期回复按来源读取冻结结果，不重新调用模型或执行控制；发送完成凭证先持久保存，再确认和清理回复记录。
-每个聊天保留最多 128 条待交付或结果不明的记录，另保留最近 64 条已关闭记录，总日志上限 16 MiB。
-待交付记录不会被滚动淘汰；容量不足时先尝试发送旧回复，仍不足则保留入站游标，等待恢复。
-同一个记忆根目录必须由单个 Gateway 进程独占，不支持多进程共享；升级必须先确认旧进程完全退出。
-
-容器以非 root 用户运行，根文件系统只读；仅持久状态目录和 `/tmp` 可写。
-Codex 的文件权限依赖内层 Linux sandbox，宿主需允许非特权 user namespace。
-生产 Compose 使用 `deploy/security/codex-seccomp.json` 和独立 AppArmor profile
-`super-leader-codex`，保留 Docker 默认规则，仅开放 pinned CLI 创建内层 sandbox 所需调用。
-上线前在宿主安装并加载专属策略：
+跨架构构建时使用目标平台，并给镜像写入完整 revision：
 
 ```sh
-install -m0644 deploy/security/codex-apparmor /etc/apparmor.d/super-leader-codex
-apparmor_parser -Kr /etc/apparmor.d/super-leader-codex
-systemctl is-enabled apparmor.service
-systemctl is-active apparmor.service
+docker buildx build --platform linux/amd64 --load \
+  --build-arg VCS_REF=<commit> \
+  -f deploy/Dockerfile.gateway -t super-leader-gateway:<tag> .
 ```
 
-持久安装保证宿主重启后 AppArmor 服务能重新加载该 profile，随后 Docker 才能启动 Gateway。
-不支持 AppArmor 或 user namespace 的主机应先完成等效隔离验证，不能直接关闭 sandbox 或放开容器权限。
-CLI、Docker、内核版本或网络模式变化后需重新验证这些策略；在目标原生架构的合成容器中
-确认三份记忆可写、其他聊天和微信凭据不可读，再切换正式 Gateway。
-首次启用需确认已有状态目录对 UID/GID `1000:1000` 可写。升级保留整个状态目录，
-不要只复制微信 `state.json` 或删除 `.codex` 数据。停止 Gateway 使用 Compose 的
-1200 秒宽限期，让正在处理的消息退出；确认容器已停止后再切换，避免两个轮询器并行。
+Controller 还需通过 `--label org.opencontainers.image.revision=<commit>` 注入 revision。
+发布前检查平台、revision、镜像摘要和非 root smoke；生产只替换 Controller/Gateway 两个镜像字段。
+生产 Gateway 只能运行一个实例，并保留数据库、微信账号和 Gateway 状态卷。
 
-同一微信账号只能有一个 Gateway 轮询。`ALLOWED_CHAT_IDS` 授权操作者，登录凭证不能代替授权。
-新账号首次运行前执行 `--establish-baseline`，读取到原始空页，只记录上下文、去重和游标，
-不回复历史消息；正常重启沿用已有基线，不重新建立。进度、成果和定时通知均为默认产品能力，
-没有单独启停开关；旧 `GATEWAY_NOTIFICATIONS` 不再影响运行，未知投递结果不重发。
+## 验证边界
 
-微信发送采用可调整的本地保守策略，不把经验值当作官方协议上限：
+自动化验证只使用本地 mock、合成数据和隔离容器，检查协议、状态机、幂等、持久化、恢复和发送前后逻辑。
 
-| Gateway 配置 | 默认值 | 含义 |
-| --- | --- | --- |
-| `GATEWAY_MAX_CHARS` | `3800` | 每段 UTF-16 长度，分段不拆开 Unicode 字符 |
-| `GATEWAY_CONTEXT_WINDOW_MS` | `82800000` | 新消息建立的回复窗口，默认 23 小时 |
-| `GATEWAY_SEND_BUDGET` | `10` | 每次有效新入站可用的发送次数；文字分段、图片、文件分别计数，输入中不计数 |
-| `GATEWAY_OUTBOX_LIMIT` | `1000` | 本地持久待发引用容量；正文由 Controller 或 SDK 回复日志保存 |
-| `GATEWAY_POLL_TIMEOUT_MS` | `35000` | 初始长轮询时限；跟随有效服务端建议，HTTP 另留 5 秒余量 |
-
-窗口与额度只由带有效时间和上下文的新消息刷新，重复、乱序和建立基线不会补额度。
-额度用完或窗口过期时暂停发送，仍继续收取新消息；用户再次发消息后，从尚未发送的分段继续，
-不重新执行原任务。重启沿用待发引用和已确认分段，历史状态缺少可信窗口时间时需用户先发一条新消息。
-普通聊天每个 query、后台计划或目标各最多 3 次进度，并为最终回复预留 3 次发送；完整成果默认独立保留 7 天，投递还需满足业务有效期。
-窗口、额度和待发容量可分别调整到应用资源上限 7 天、1000 次、1000 条；调大不保证微信接受。
-零字节 HTTP 回执不等于 JSON `{}`：前者保留为结果未知，禁止盲目重发；接口受理不代表手机已读。
-普通回复先将 Markdown 转成微信文本，再完整分段；代码、链接目标保留，升级前已建立的分段沿用原计划。
-新成果先在 Controller 排版再冻结分段，附件和 Web 全文保留原始 Markdown；旧冻结分段保持原样。
-默认用户展示时间使用北京时间，明确指定的调度时区保持原语义。
-
-## 连续消息与模型进度
-
-普通聊天与长任务都提供 `report_progress({text})` 工具。模型根据已获取的事实自行组织简短进度，
-用来说明已确认的结果、当前等待和下一步；不采用固定文案、不输出内部推理、不把受理说成完成。
-模型认为没有有用进展时保持安静，不为用完次数重复发送。
-
-普通聊天的工具调用立即进入微信发送链路，并返回 `sent / status / used / remaining / limit`。
-每个 query 最多尝试 3 次，调用失败或结果不明仍占用该次额度，不自动重发。
-微信窗口或总发送预算不足时返回不可发送及剩余 0；输入中状态不占正文次数。
-兼容 Controller 回复模式可通过 HTTP 进度流即时报告，每个 query 同样最多 3 次；
-Controller 的 `queued` 只证明提交了传输，微信受理仍以 Gateway 的实际回执为准。
-工具定义说明用途和预算，每次工具结果重新交回模型。普通聊天无需创建计划或目标。
-
-默认 Codex 回复模式持续收取微信消息：入站原文先写入持久 inbox，成功后才推进微信游标。
-同一聊天已有一轮处理时，新消息通过原生 app-server 的 `turn/steer` 追加到精确活动轮次，
-模型结合补充要求继续工作，保持同一 query 的进度额度，最后统一回答一次。
-每条补充保留原始消息身份与原文；需要控制外部会话时，尚未提交的原文按顺序合成一次请求，
-最新修改、限制和撤销优先，Controller 统一核对授权；已提交的操作不能靠后续补充自动撤销。
-活动轮次已结束、原生接口明确未接受补充时，消息进入下一轮；回执不明时保留证据，禁止猜测重发。
-其他聊天可以独立处理。兼容 Controller 回复模式继续按聊天顺序处理消息，并支持进度流。
-恢复沿用 inbox、回复 journal 和已发送分段，不能删除这些状态来重跑任务。
-
-Plan（固定计划）预先冻结最多 4 步、目标会话和依赖；调度器只按冻结计划推进，
-后继必须等前驱精确完成回执，不能仅凭模型声称完成而解锁。
-Goal（持续目标）先冻结目标、完成条件、会话范围和时间/次数预算；每次取得执行证据后，
-再由模型判断继续、完成或受阻，不扩大已授权范围。
-
-Plan/Goal 创建满 30 秒后，独立进度调度器可把已持久保存的等待、排队和精确执行回执交给模型。
-模型调用同名工具提交正文，收到排队状态及剩余额度；同一证据只处理一次，前后至少间隔 60 秒，
-每个计划或目标终身最多 3 条。模型调用在数据库事务外进行；真正入队前原子重验活动状态、
-证据和额度，已结束任务不再发送旧进度。模型失败不会插入模板，也不会阻断任务执行。
-
-## 定时任务与成果通知
-
-可以直接说“明天上午九点提醒我检查部署”“每天九点让这个会话检查服务，有变化再通知我”，
-或“列出我的定时任务”“暂停这个任务”“恢复这个任务”“取消这个任务”。
-定时任务按明确时区保存；同一任务不重叠运行，重启后核查原请求与回执，不重新派发结果未知的执行。
-暂停只阻止后续调度轮次，本轮仍会继续收集结果。取消停止后续调度；对于隔离后台任务，
-还会停止当前 worker 的后续执行与追问。已有源会话不受影响。监控无变化时保持安静，失败和恢复会产生通知。
-
-任务执行不依赖微信窗口。文字、图片、文件、进度和定时通知共用每聊天的发送账本。
-真实新入站刷新窗口与额度；历史基线、重放和状态查询不刷新。
-默认本地策略为 23 小时、每次新入站 10 次发送。进度按里程碑合并，每任务最多 3 次，
-最后 3 次不再用于进度；完成或失败优先于尚未发送的进度。
-
-续期提醒属于核心发送规则：有运行中任务、未来定时任务、待发成果或可恢复的普通/SDK 回复时，
-只在窗口最后 1 小时且有效剩余额度为 **1 或 2 次**时提醒。默认时间范围为
-`22 小时 <= 当前时间 - 最近有效新入站时间 < 23 小时`，不提前提醒。
-有效剩余额度取持久账本余量与当前配置允许的余量中较小者；调低配置不会恢复已消耗额度。
-计算方式为 `已消耗 = max(0, 账本获配额度 - 账本剩余额度)`，
-`有效剩余 = min(账本剩余额度, max(0, 当前配置额度 - 已消耗))`。
-旧账本缺少获配额度时，仅用当前配置上限约束原剩余额度，不凭空补足。
-例如获配 10 次、已用 8 次时剩余 2 次，提醒后剩余 1 次；已用 9 次时提醒后剩余 0 次，其余消息排队。
-
-| 最后 1 小时内的有效剩余额度 | 续期提醒 |
-| --- | --- |
-| `>= 3` | 不提醒 |
-| `1` 或 `2` | 同一窗口提醒一次，提醒本身消耗 1 次，可使用最后一次额度 |
-| `0`，或窗口已过期 | 无法发送，等待有效新入站刷新 |
-
-提醒优先于普通待发回复和成果，不为它们预留额度而跳过提醒；文字分段和媒体发送之间也会复核，
-已提交给微信的请求无法撤回。提醒确认及未知发送记录跨重启保留，未知结果不盲目重发。
-提醒用完额度后，其余内容留在持久队列：普通回复从 Controller 或 SDK 回复日志恢复，成果从投递账本恢复，
-只继续未确认的分段，不再次执行原任务或重新调用模型生成回复。
-窗口过期或额度不足时标记等待用户；用户再次发消息后先处理普通回复，再合并、节流恢复待发成果。
-每次最多合并 8 份、32 MiB，超额成果继续保留在 Web，不截断正文，也不为补发重新执行任务。
-明确未提交的临时下载或上传失败会退避重试；发送结果未知时保留证据并停止自动重发。
-
-完整结果在 3 × 3800 字符内时，优先按原顺序完整发送；更长结果使用 1 条模型摘要和 1 份完整 Markdown 附件。
-默认附件阈值为 50 MiB，超过本地配置时发送临时签名下载链接，链接在实际投递时生成。
-附件下载和文件上传按实际大小分配有界传输时间，控制请求保留短超时；重试共用同一次上传期限。
-提高本地附件阈值也需要配置足够内存；可配置的 512 MiB 上界不代表微信官方支持，也未在默认 512 MiB 容器中验收。
-成果默认保留 7 天，独立于微信回复窗口。业务有效期可更短：过期天气等内容不补发，日报可由最新结果替换。
-成果状态区分准备中、待投递、等待用户、接口受理、结果未知及已被更新替代；接口受理不代表手机已读。
-
-| 变量 | 默认值与用途 |
-| --- | --- |
-| `RESULT_FILE_MAX_BYTES` | `52428800`，Controller 与 Gateway 共用的附件阈值 |
-| `RESULT_RETENTION_HOURS` | `168`，完整成果保留时长 |
-| `TASK_NOTIFICATION_TICK_MS` | `5000`，定时调度与成果 worker 的轮询间隔 |
-| `RESULT_PUBLIC_ORIGIN` | Gateway 使用的成果签名链接公开 origin；生产 Compose 沿用 `CONSOLE_PUBLIC_URL` |
-| `FALLBACK_WEBHOOKS` | 默认空；配置聊天到独立 HTTPS webhook 的 JSON 映射，微信阻塞时可通知备用目的地 |
-
-备用目的地需要显式配置，默认禁用；备用通道同样保存幂等回执，投递未知时不自动重发。
-直接调用 `POST /v1/automations` 创建任务必须提供 1–256 个可见 ASCII 字符的 `Idempotency-Key`；
-同一聊天以相同 key 重试返回原任务，相同 key 改变内容返回 409，状态操作无需创建 key。
-升级时沿用原 PostgreSQL 和 Gateway 状态目录；自动初始化新表与通知转换标记，新成果 sender 与旧通知 sender 互斥。
-新版本写入任务和成果后，应优先向前修复；不要用旧二进制清理或重放新状态。
-
-### 跨机器观察原生 Codex 定时任务
-
-例如：“每天上午十点，检查机器 A 和机器 B 上今天的日报定时任务，等它们执行完汇总给我；
-最晚十一点交付，缺的说明原因。”模型先列出机器与原生任务，让来源绑定到实际发现的 ID。
-各机器 Daemon 需要配置该用户实际的 `--codex-home`，通过认证 WSS 只读返回任务和执行证据。
-它不会向源会话发送催促、重跑任务或修改其定时设置。
-同一份汇总可以绑定多台机器的多个来源，由一个后台会话收集；不同目标分别建立后台任务，
-避免无关上下文混在一起。某个来源失败时先报告该来源，其余来源仍继续观察。
-
-观察以 `nodeId + automationId + 预期执行窗口` 定位本轮，再核对准确的 `sessionId + turnId` 与结果。
-heartbeat 可能复用旧会话，cron 可能每轮新建会话；标题、最近一条回复和 idle 状态均不能证明本轮完成。
-尚未开始、执行中、已完成、已失败和结果未知分别保存。机器离线、记录缺失或无法唯一确定轮次时，
-结果为 unknown，不把它当业务失败，也不拿上一轮结果补齐。
-
-默认按 2、5、10 分钟补查，之后沿用最后一个间隔；没有变化时保持安静。
-观察截止默认 1 小时，可按任务指定，最长 24 小时；已保存明确截止时长的任务沿用原设置。截止时汇总已取得的结果并列出缺项；
-有证据的失败或需要用户操作才单独报告。调度延迟不会触发重跑源任务。
-
-### 后台会话的 24 小时生命周期
-
-例如：“独立开一个后台任务，查一下这些资料，完成后把结论给我。”
-每轮创建独立 Codex thread 和可写工作目录，只传任务、必要输入和用户偏好。
-后台会话可以联网、运行小脚本、写文件；不需要项目知识或长期记忆，也不共享日常聊天的工作文件。
-等待源结果时释放执行进程，后续检查和用户追问通过同一 thread 恢复上下文与文件。
-
-会话从创建时起默认保留 24 小时；任务完成立即交回成果，已完成且未取消的会话在到期前仍可接续。
-可以说“继续刚才那个后台任务，补充一下数据来源”，或“把这个后台会话保留到明晚”。
-普通追问和自动复查不延长保留期，只有明确延期才修改到期时间；每次延期最多保留至请求时刻后 24 小时。
-同一后台会话的执行、复查与追问串行排队；全局默认最多同时执行 2 个后台轮次。
-周期任务每轮新建会话，避免前后轮上下文互相影响。
-
-业务截止时间决定何时交付本轮结论，会话到期时间决定还能否继续追问，两者分别记录。
-到期后停止新轮次，活跃轮次有界收尾；成果可靠接收后清理会话工作区及后台账本中的执行正文，保留最小归属与成果凭据。
-若无法确认子进程已退出，会话进入隔离待处理状态，不继续执行，也不误删仍可能被使用的目录。
-附件先移入独立成果目录，以签名下载链接交付，默认保留 7 天；清理工作区不会删除仍在保留期的成果。
-结果和追问的补充成果进入原有 durable outbox 与每聊天投递队列，聊天忙时排队，通知失败不重新执行任务。
-
-后台任务沿用 Controller 的统一调度器与 PostgreSQL 账本；源定时任务继续由各机器的 Codex 桌面端执行。
-Web 定时任务卡片区分“后台任务”，执行状态与成果投递状态分别查看；追问和延期通过微信提出，或使用管理员 API。
-
-以下管理员 API 使用 Bearer 认证，后台任务接口另核对 `chatId` 允许名单与任务归属；控制台 Cookie 不授予这些接口权限。
-列表和详情仅返回任务预览、阶段、到期时间、检查记录与结果，不返回工作目录或模型输入。
-
-| 接口 | 输入与用途 |
-| --- | --- |
-| `GET /v1/background-tasks?chatId=…` | 查询当前聊天的后台任务 |
-| `GET /v1/background-tasks/:runId?chatId=…` | 查询指定轮次、来源观测和追问结果 |
-| `POST /v1/background-tasks/:runId/follow-up` | JSON：`chatId`、`prompt`、稳定的 `requestId`；保存到同一后台会话串行执行 |
-| `POST /v1/background-tasks/:runId/extend` | JSON：`chatId`、带时区的 ISO `expiresAt`；显式延长会话保留期 |
-| `GET /v1/source-automations?nodeId=…` | 只读列出指定机器的原生定时任务 |
-| `GET /v1/source-automations/:automationId?nodeId=…&expectedAt=…&notAfter=…` | 以毫秒时间戳指定本轮窗口，只读检查准确执行记录 |
-
-追问受理不代表已执行完成；请求结果未知时先查询原 `runId`，重试应保留原 `requestId`。
-
-| 变量 | 默认值与用途 |
-| --- | --- |
-| `BACKGROUND_WORKER_ROOT` | 未设置时关闭后台执行；启用时设置为 `<CONTROLLER_DATA_ROOT>/background/workers` 下的专用绝对目录 |
-| `BACKGROUND_ARTIFACT_ROOT` | 后台附件目录；未设置时使用 `<CONTROLLER_DATA_ROOT>/background/artifacts`，必须与工作目录分离且位于数据根目录内 |
-| `BACKGROUND_CODEX_PATH` | `codex`，后台 Codex CLI 可执行文件路径 |
-| `BACKGROUND_MODEL_NAME` / `BACKGROUND_MODEL_BASE_URL` / `BACKGROUND_MODEL_API_KEY` | 默认复用 Leader 模型配置，可分别覆盖 |
-| `BACKGROUND_TURN_TIMEOUT_MS` | `600000`，单次模型轮次上限，最大 `3600000`；与会话 24 小时保留期独立 |
-| `BACKGROUND_MAX_CONCURRENT` | `2`，全局后台并发数，范围 1–8 |
-| `CONTROLLER_MEMORY_LIMIT` | `1536m`，生产 Compose 的 Controller 容器内存上限；按宿主容量和实测负载配置 |
-
-部署时为 Controller 提供一个持久可写运行时卷，内部按设置、工作区和成果目录隔离，重启后保留同一 thread 和防重回执。
-生产 Compose 默认关闭后台执行；启用时设置 `BACKGROUND_WORKER_ROOT=/var/lib/super-leader-runtime/background/workers`，
-并提供 Leader 模型配置或独立的 `BACKGROUND_MODEL_*` 配置。成果目录位于 `/var/lib/super-leader-runtime/background/artifacts`。
-运行时使用独立 HOME/CODEX_HOME 与工作目录写入权限，不继承日常聊天配置；
-生产 Compose 只挂载 `controller-runtime`，可通过 `CONTROLLER_RUNTIME_VOLUME` 指定已有运行时卷名。
-Controller 使用 UID/GID `1000:1000`、只读根文件系统、默认 1.5 GiB 内存上限、2 CPU、512 PID 上限和 64 MiB `/tmp`，
-镜像内固定安装 Codex CLI `0.163.0`。
-资源上限不是预留容量；小内存宿主应先用 `BACKGROUND_MAX_CONCURRENT=1` 验证实际峰值，
-同时为 Gateway、数据库和其他服务留出余量，再设置 `CONTROLLER_MEMORY_LIMIT`。单个小任务的峰值不代表任意脚本的最大占用。
-
-Linux 宿主机必须允许非特权 user namespace，容器使用
-`deploy/security/codex-seccomp.json` 与 `super-leader-codex` AppArmor profile。
-启动前将 `deploy/security/codex-apparmor` 安装到 `/etc/apparmor.d/super-leader-codex`，
-并执行 `apparmor_parser -Kr /etc/apparmor.d/super-leader-codex` 加载；宿主 AppArmor 服务负责重启后恢复。
-正式切换前在无凭证临时容器中核验策略，并验证真实后台写文件与同一 thread 恢复。
-升级 Codex、Docker、内核或改变容器网络/PID 模式后需要重新验证，不能只靠目录分离证明隔离有效。
-
-## 验证与结果边界
-
-微信消息链路埋点、按消息查看各阶段耗时及观测边界见 [微信消息延迟分析](MESSAGE_LATENCY.md)。
-
-网页正文提取测试需要 Python >=3.9、curl 和两个 Python 库。本机运行单测或完整验证前，在项目虚拟环境安装固定版本；CI 使用临时虚拟环境，生产镜像使用 Debian 对应运行包。
+微信登录、账号状态、收发消息和生产端到端链路只能由用户本人在生产环境手动验证。
+我不能在生产上替你实测微信，也不会把 mock 结果写成微信实测结论。
 
 ```sh
-python3 -m venv .venv
-.venv/bin/python -m pip install -r deploy/skills/web-content-fetcher/requirements.txt
-. .venv/bin/activate
-node --test tests/unit/tooling/web-content-fetcher.test.mjs # 只验证网页提取
+node scripts/verify.mjs --list
+node scripts/verify.mjs --suite unit
+node scripts/verify.mjs --suite integration
+node tests/integration/run.mjs
 ```
 
-统一验证保留 `PATH`，因此激活虚拟环境后会使用其中的 Python，不需要传递额外环境变量。
+完整验证使用本地 Unix Docker socket、临时 PostgreSQL 和合成目标，不触达正式会话。
+`accepted` 只表示接口受理，不表示微信手机已收到或已读。
 
-```sh
-node scripts/verify.mjs                     # 完整验证
-node scripts/verify.mjs --suite unit        # 单测、构建、Go race/vet，无需 Docker
-node scripts/verify.mjs --suite integration # 构建、临时 PostgreSQL 与集成验证
-node scripts/verify.mjs --list              # 查看计划，不运行检查
-```
+## 回执
 
-完整验证使用本地 Unix Docker socket 和 `postgres:16-alpine`，拒绝远端 Docker engine。
-验证清除真实业务配置与 LIVE 开关，使用合成模型、微信和桌面目标；
-不部署或触达正式会话。CI 在 Ubuntu 运行全量、macOS 运行 unit，使用 Node 24。
-
-功能介绍可通过真实 Gateway CLI 与固定版本 Codex 验收：
-
-```sh
-node tests/integration/leader/capabilities-skill.mjs --run
-```
-
-该入口使用隔离聊天与本地微信、Controller 接口，检查新建和续接会话读取技能、四列分组表格与场景顺序。
-加 `--live` 可通过环境中的 `LIVE_MODEL_BASE_URL`、`LIVE_MODEL_API_KEY` 验证实际模型回答；
-容器内加 `--system-skill` 可核对镜像中的管理员技能目录。验证结果保存在 `.runtime/capabilities-*`。
-
-可靠性故障注入另有进程级入口，先按本机开发说明构建 Controller、Gateway 和
-`daemon/bin/super-leader-daemon`，再运行：
-
-```sh
-node tests/integration/reliability/run.mjs --run
-node tests/integration/reliability/run.mjs --run --suite sdk
-node tests/integration/reliability/run.mjs --run --scenario busy-native-admission
-node tests/integration/reliability/run.mjs --help
-```
-
-它启动真实 Gateway、Controller、Go Daemon 和临时 PostgreSQL，每场景使用独立数据库、
-Gateway 状态文件及 Daemon journal；只在自建代理和子进程注入断网、回包丢失与 SIGKILL。
-覆盖离线排队、忙时接收、FIFO、取消、真实时钟过期、持久 claim/回执/成果恢复、
-重复入站及完成回执、通知重放和未知结果禁止盲重发，核对准确 command、turn 与聊天归属。
-Codex 场景通过已安装的运行依赖启动真实原生 app-server，仅将上游模型替换为本地 Responses SSE。
-通过私有旁路审计记录原生进程、二进制 SHA、turn/thread RPC 及 MCP 启动状态，
-核对仅本地 `wechat_control` 启动并 ready；辅助文档 MCP 和遥测在最终配置中禁用。
-真实 `--run` 场景审计 Inbox 与游标的实际文件写入顺序，在游标已提交、原生执行尚未开始时崩溃，
-不重新入队即从磁盘恢复原消息全部字段，并核对源轮询为空、执行一次及成果只投递原聊天一次。
-还覆盖执行中崩溃、完成 journal 后重启续传、原 MCP 请求提交后断流、稳定消息重放、
-不同聊天相同消息 ID 的成果归属，以及发送结果未知时的 journal 隔离和禁止盲重发。
-失败场景返回非零；未运行完成或清理失败不能报告通过。
-匿名原始日志、协议帧、数据库快照和断言写入
-`.runtime/verification/reliability-e2e/{events.jsonl,summary.json}`，可用 `--evidence` 指定目录。
-微信 HTTPS、Codex Unix WebSocket 与模型接口为合成端点；接口 accepted 不证明手机收到或已读，
-也不覆盖真实桌面 owner、断电/磁盘损坏、缺少稳定消息 ID 或超出去重保留期的重放。
-
-真模型任务确认可单独运行 `node tests/live/task-confirmation.mjs --run --postgres`。
-预先通过环境提供 `LIVE_MODEL_BASE_URL`（HTTPS `/v1`）及 `LIVE_MODEL_API_KEY`；脚本不读取凭证文件。
-它使用隔离 Controller、临时 PostgreSQL 和合成执行会话，确认正文由 `gpt-6.1-sol` 生成，
-核对确认前读取本次回执及匹配轮次历史、accepted 不冒充执行、后续查询不重派及北京时间换算。
-它不请求微信或真实桌面会话，匿名结果保存在 `.runtime/verification/task-confirmation-live.json`。
-
-后台容器额外验收使用 `node tests/integration/leader/background-worker-container.mjs --run --native-only`，
-在已构建镜像和已加载安全策略上运行真实 CLI，核对接续、越界拒读及完成/取消后的子进程清理。
-省略 `--native-only` 时从标准输入接收临时模型配置，验证真实模型两轮接续、工作区读写和联网。
-部署前在自己的目标架构和安全策略下运行验收，核对网络、工作区隔离和会话接续。
-
-| 回执 | 能证明什么 |
+| 状态 | 含义 |
 | --- | --- |
-| `admitting` | 请求已保存，正在校验发送条件；尚未投递，也不查询执行回执，超时后不会发送 |
-| `queued` | 尚未投递，等待原会话可用；允许取消，超过有效期不会发送 |
-| `accepted` | 已受理，需要继续核对原请求与准确 turn |
-| 精确完成回执 | 对应原任务已结束，并有该 turn 的已记录结果 |
-| CLI `input-written` | 输入已写入，执行与完成未确认，不能解锁后继或参与目标闭环 |
-| `uncertain` | 结果未知，核查原请求，不改 requestId 重发 |
-| 微信发送 `accepted` | 微信接口受理，不证明手机收到或已读 |
+| `admitting` | 已保存，正在校验；尚未投递 |
+| `queued` | 等待会话恢复；尚未投递 |
+| `accepted` | 已受理，仍需核对准确 turn |
+| `completed` | 对应 turn 已完成并有记录结果 |
+| `input-written` | 输入已写入，执行尚未确认 |
+| `uncertain` | 结果未知，先核查，不改 ID 重发 |
+| 微信发送 `accepted` | 接口受理，不代表手机收到或已读 |
 
-投递超时不会换请求 ID 盲目重发；先核对原命令的持久回执。微信结果不明的分段保留防重记录并隔离原消息，不阻塞后续聊天。
-单任务结果最多 8 MiB UTF-8，超过边界明确报错，不返回伪装完整的节选；通知按有界分片保存和投递。
-涉及新通知格式、分段 checkpoint 或大结果 journal 的升级，产生新数据后优先向前修复，不能直接换回旧版二进制。
+## 许可
 
-持续目标的“完成”是模型依据记录判断条件满足，不等于独立业务验收。
-请在自己的环境逐项验收微信登录链接、真实手机会话控制、跨物理机闭环、CLI 与用户服务。
-原生定时观察还需核对各机器实际的 heartbeat 和 cron 配置、准确轮次及完成结果。
-合成链路验证只覆盖其测试场景；真实机器、微信投递和升级后的兼容性需分别记录验收结果。
-
-## 许可与商业授权
-
-本项目以 **PolyForm Noncommercial License 1.0.0** 公开源码（source-available）。
-本次公开发行中，TaoSama 有权许可的第一方代码及随仓库公开的历史版本均按该许可提供。
-此前已有效授予的其他许可，继续适用于其对应副本和版本。
-非商业使用及其他已许可用途以 [LICENSE](LICENSE) 原文为准。超出该许可范围的商业用途，
-包括企业内部业务使用，须先取得 TaoSama 的单独书面授权。请通过
-[GitHub Issues](https://github.com/TaoSama/wechat-super-leader-bot/issues) 联系商业授权。
-第三方组件保留各自的原始许可、版权和通知；本项目许可仅适用于有权授予许可的第一方内容。
+项目使用 [PolyForm Noncommercial License 1.0.0](LICENSE) 发布。
+商业用途和超出许可范围的使用需要 TaoSama 的书面授权。
