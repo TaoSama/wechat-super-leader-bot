@@ -31,7 +31,8 @@ services:
       NODE_TOKENS: ${NODE_TOKENS:?set NODE_TOKENS}
       ALLOWED_CHAT_IDS: ${ALLOWED_CHAT_IDS:-}
       CONSOLE_PUBLIC_URL: ${CONSOLE_PUBLIC_URL:-}
-      SETTINGS_ROOT: /var/lib/super-leader-settings
+      CONTROLLER_DATA_ROOT: /var/lib/super-leader-runtime
+      SETTINGS_ROOT: /var/lib/super-leader-runtime/settings
       LEADER_MODE: ${LEADER_MODE:-rules}
       LEADER_MODEL_BASE_URL: ${LEADER_MODEL_BASE_URL:-}
       LEADER_MODEL_NAME: ${LEADER_MODEL_NAME:-}
@@ -47,14 +48,14 @@ services:
     ports:
       - "127.0.0.1:${CONTROLLER_PORT:-8790}:8790"
     volumes:
-      - controller-settings:/var/lib/super-leader-settings
+      - controller-runtime:/var/lib/super-leader-runtime
     depends_on:
       postgres:
         condition: service_healthy
     init: true
     restart: unless-stopped
 volumes:
-  controller-settings:
-    name: ${CONTROLLER_SETTINGS_VOLUME:-super-leader-settings}
+  controller-runtime:
+    name: ${CONTROLLER_RUNTIME_VOLUME:-super-leader-runtime}
   controller-db:
     name: ${CONTROLLER_DB_VOLUME:-super-leader-controller-db}

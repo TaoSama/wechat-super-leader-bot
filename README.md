@@ -131,12 +131,15 @@ Web 提供机器与会话搜索、原来源历史、直接发送、排队取消�
 
 | 变量 | 用途 |
 | --- | --- |
-| `SETTINGS_ROOT` | Controller 设置持久化目录；默认当前目录下 `.runtime/controller-settings` |
+| `CONTROLLER_DATA_ROOT` | Controller 持久运行时数据根目录；默认当前目录下 `.runtime/controller-runtime` |
+| `SETTINGS_ROOT` | Controller 设置持久化目录；默认 `<CONTROLLER_DATA_ROOT>/settings`，必须位于该根目录内 |
 | `GATEWAY_SETTINGS_URL` | Controller 使用的固定 Gateway 管理 origin；不接受浏览器传入目标地址 |
 | `GATEWAY_SETTINGS_HOST` / `GATEWAY_SETTINGS_PORT` | 显式启用 Gateway 内网管理监听，使用 Controller Bearer token 认证 |
 | `GATEWAY_SETTINGS_ROOT` | Gateway 设置和技能覆盖存储目录，放在其持久状态卷中 |
 
-生产 Compose 将 Controller 设置挂载到专用卷 `/var/lib/super-leader-settings`；Gateway 管理端口 `8791` 仅在容器网络监听，不映射到宿主机，设置目录位于已有 Gateway 状态卷。更换容器保留这两个存储卷，不能把编辑后的资源只留在镜像层。
+新部署设置 `CONTROLLER_DATA_ROOT` 后，`SETTINGS_ROOT`、`BACKGROUND_WORKER_ROOT` 和 `BACKGROUND_ARTIFACT_ROOT` 必须位于该根目录内；未设置新根目录时仍接受旧版显式绝对路径，便于回滚旧 Compose 配置。
+
+生产 Compose 将 Controller 的设置、后台工作区和成果目录放在单一持久卷 `/var/lib/super-leader-runtime` 下，分别使用 `settings/`、`background/workers/` 和 `background/artifacts/` 子目录；Gateway 管理端口 `8791` 仅在容器网络监听，不映射到宿主机。更换容器保留该卷，不能把编辑后的资源只留在镜像层。
 
 接口及生效合同见 [设置契约](docs/settings-contract.md)。
 
@@ -231,6 +234,12 @@ docker compose --env-file .runtime/controller.env \
   -f compose.yaml -f deploy/compose.production.yaml -f deploy/compose.gateway.yaml \
   --profile wechat ps
 ```
+
+从旧版 `controller-settings`、`background-workers` 和 `background-artifacts` 卷迁移时，先冻结写入口并排空、停止唯一 Gateway，再停止 Controller；记录实际卷名、Compose 展开配置、镜像摘要和数据库备份。使用临时 root 容器读取旧卷，将旧设置卷根复制到新卷的 `settings/`，将旧工作卷根复制到 `background/workers/`，将旧成果卷根复制到 `background/artifacts/`，保留隐藏文件、锁、快照、权限和修改时间，完成后校验并设置服务使用的 UID/GID `1000:1000`，同时拒绝符号链接。目标卷必须先显式创建三个子目录并核对清单与哈希，不能依赖 Docker 首次挂载时的自动复制；PostgreSQL 数据卷和 Gateway 的微信状态目录继续原地保留。
+
+仓库提供的 `scripts/migrate-controller-runtime-volume.mjs` 在默认 dry-run 模式下生成清单并检查目录关系；只有显式加入 `--execute` 才会写入，`--rollback` 会在清单未改变时移除迁移生成的三个子目录。把旧卷和目标卷挂入临时容器后再运行该脚本，保存清单作为发布证据。
+
+迁移完成后在私有环境中显式设置 `CONTROLLER_RUNTIME_VOLUME`，先用 `config --quiet` 检查 Controller 只有 `/var/lib/super-leader-runtime` 一个持久挂载，再启动 Controller 验证健康检查、设置修订、后台会话与成果目录，最后恢复 Gateway 并核对原有微信 checkpoint、基线和 outbox。旧卷在回滚窗口内只读保留；回滚时停止新栈，恢复旧 Compose、镜像和三卷变量，确认数据库与 Gateway 状态未被新版本不兼容地修改后再启动。现有生产发布流程要求运行时挂载身份前后一致，因此不能用直接替换 Compose 的方式绕过这次卷拓扑迁移。
 
 生产镜像先在开发机或 CI 按目标架构构建并验证，再加载和切换。
 更新前全量核查在途命令、claim、计划和目标，并排空唯一 Gateway、冻结写入口；
@@ -469,20 +478,19 @@ Web 定时任务卡片区分“后台任务”，执行状态与成果投递状�
 
 | 变量 | 默认值与用途 |
 | --- | --- |
-| `BACKGROUND_WORKER_ROOT` | 未设置时关闭后台执行；设置为后台会话专用的绝对目录 |
-| `BACKGROUND_ARTIFACT_ROOT` | 后台附件专用绝对目录；必须与工作目录分离，不能互相嵌套 |
+| `BACKGROUND_WORKER_ROOT` | 未设置时关闭后台执行；启用时设置为 `<CONTROLLER_DATA_ROOT>/background/workers` 下的专用绝对目录 |
+| `BACKGROUND_ARTIFACT_ROOT` | 后台附件目录；未设置时使用 `<CONTROLLER_DATA_ROOT>/background/artifacts`，必须与工作目录分离且位于数据根目录内 |
 | `BACKGROUND_CODEX_PATH` | `codex`，后台 Codex CLI 可执行文件路径 |
 | `BACKGROUND_MODEL_NAME` / `BACKGROUND_MODEL_BASE_URL` / `BACKGROUND_MODEL_API_KEY` | 默认复用 Leader 模型配置，可分别覆盖 |
 | `BACKGROUND_TURN_TIMEOUT_MS` | `600000`，单次模型轮次上限，最大 `3600000`；与会话 24 小时保留期独立 |
 | `BACKGROUND_MAX_CONCURRENT` | `2`，全局后台并发数，范围 1–8 |
 | `CONTROLLER_MEMORY_LIMIT` | `1536m`，生产 Compose 的 Controller 容器内存上限；按宿主容量和实测负载配置 |
 
-部署时为工作目录和成果目录分别提供持久可写卷，Controller 重启后保留同一 thread 和防重回执。
-生产 Compose 默认关闭后台执行；启用时设置 `BACKGROUND_WORKER_ROOT=/var/lib/super-leader-background`，
-并提供 Leader 模型配置或独立的 `BACKGROUND_MODEL_*` 配置。成果卷位于 `/var/lib/super-leader-artifacts`。
+部署时为 Controller 提供一个持久可写运行时卷，内部按设置、工作区和成果目录隔离，重启后保留同一 thread 和防重回执。
+生产 Compose 默认关闭后台执行；启用时设置 `BACKGROUND_WORKER_ROOT=/var/lib/super-leader-runtime/background/workers`，
+并提供 Leader 模型配置或独立的 `BACKGROUND_MODEL_*` 配置。成果目录位于 `/var/lib/super-leader-runtime/background/artifacts`。
 运行时使用独立 HOME/CODEX_HOME 与工作目录写入权限，不继承日常聊天配置；
-生产 Compose 已分别挂载 `background-workers` 和 `background-artifacts`，可通过
-`BACKGROUND_WORKER_VOLUME` / `BACKGROUND_ARTIFACT_VOLUME` 指定现有卷名。
+生产 Compose 只挂载 `controller-runtime`，可通过 `CONTROLLER_RUNTIME_VOLUME` 指定已有运行时卷名。
 Controller 使用 UID/GID `1000:1000`、只读根文件系统、默认 1.5 GiB 内存上限、2 CPU、512 PID 上限和 64 MiB `/tmp`，
 镜像内固定安装 Codex CLI `0.163.0`。
 资源上限不是预留容量；小内存宿主应先用 `BACKGROUND_MAX_CONCURRENT=1` 验证实际峰值，

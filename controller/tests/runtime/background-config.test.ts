@@ -21,4 +21,16 @@ describe("background execution configuration", () => {
     expect(loadBackgroundConfig({ ...env, BACKGROUND_MODEL_NAME: "background-model" }, provider)?.model).toBe("background-model");
     expect(provider.model).toBe("test-model");
   });
+  it("derives isolated worker and artifact directories under the controller data root", () => {
+    const configured = loadBackgroundConfig({ BACKGROUND_WORKER_ROOT: "/data/controller-runtime/background/workers" }, provider,
+      "/data/controller-runtime");
+    expect(configured).toMatchObject({
+      root: "/data/controller-runtime/background/workers",
+      artifactRoot: "/data/controller-runtime/background/artifacts",
+    });
+  });
+  it("rejects background roots outside the controller data root", () => {
+    expect(() => loadBackgroundConfig({ ...env, BACKGROUND_WORKER_ROOT: "/data/other/workers" }, provider,
+      "/data/controller-runtime")).toThrow(/inside CONTROLLER_DATA_ROOT/);
+  });
 });

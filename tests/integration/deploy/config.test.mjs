@@ -104,6 +104,8 @@ test('small-host memory and worker concurrency overrides preserve the sandbox', 
 
 test('production uses the explicitly configured console origin', () => {
   assert.equal(production.services.controller.environment.CONSOLE_PUBLIC_URL, 'https://leader.example.com');
+  assert.equal(production.services.controller.environment.CONTROLLER_DATA_ROOT, '/var/lib/super-leader-runtime');
+  assert.equal(production.services.controller.environment.SETTINGS_ROOT, '/var/lib/super-leader-runtime/settings');
 });
 
 test('only loopback controller is published; PostgreSQL remains private', () => {
@@ -126,12 +128,12 @@ test('Nginx keeps WSS upgrades and HTTP requests on the same protected endpoint'
 });
 
 
-test('background workers use separate durable stores and a bounded sandbox container', () => {
+test('background workers use isolated paths inside one durable runtime store and a bounded sandbox container', () => {
   const controller = production.services.controller;
   assert.equal(controller.user, '1000:1000');
   assert.equal(controller.init, true);
   assert.equal(controller.environment.BACKGROUND_WORKER_ROOT, '');
-  assert.equal(controller.environment.BACKGROUND_ARTIFACT_ROOT, '/var/lib/super-leader-artifacts');
+  assert.equal(controller.environment.BACKGROUND_ARTIFACT_ROOT, '');
   assert.equal(controller.environment.BACKGROUND_MAX_CONCURRENT, '2');
   assert.equal(controller.mem_limit, '1610612736');
   assert.equal(controller.pids_limit, 512);
@@ -139,19 +141,15 @@ test('background workers use separate durable stores and a bounded sandbox conta
   assert.equal(controller.stop_grace_period, '30s');
   assert.deepEqual(controller.security_opt, ['no-new-privileges:true',
     'seccomp:./deploy/security/codex-seccomp.json', 'apparmor:super-leader-codex']);
-  const stores = controller.volumes.filter(volume => volume.type === 'volume' && [
-    '/var/lib/super-leader-artifacts', '/var/lib/super-leader-background',
-  ].includes(volume.target));
-  assert.equal(stores.length, 2);
-  assert.deepEqual(stores.map(volume => volume.target).sort(), [
-    '/var/lib/super-leader-artifacts', '/var/lib/super-leader-background']);
-  assert.equal(new Set(stores.map(volume => volume.source)).size, 2);
-  const settings = controller.volumes.find(volume => volume.target === '/var/lib/super-leader-settings');
-  assert.equal(settings?.type, 'volume');
-  assert.equal(settings?.source, 'controller-settings');
-  assert.equal(production.volumes[settings.source]?.name, 'super-leader-settings');
+  assert.equal(controller.volumes.length, 1);
+  assert.equal(controller.volumes[0].type, 'volume');
+  assert.equal(controller.volumes[0].source, 'controller-runtime');
+  assert.equal(controller.volumes[0].target, '/var/lib/super-leader-runtime');
+  assert.equal(production.volumes['controller-runtime']?.name, 'super-leader-runtime');
+  assert.deepEqual(Object.keys(production.volumes).sort(), ['controller-db', 'controller-runtime']);
   const dockerfile = readFileSync(new URL('../../../deploy/Dockerfile.controller', import.meta.url), 'utf8');
   assert.match(dockerfile, /@openai\/codex@0\.163\.0/);
   assert.match(dockerfile, /ca-certificates/);
-  assert.match(dockerfile, /chown node:node \/var\/lib\/super-leader-background \/var\/lib\/super-leader-artifacts/);
+  assert.match(dockerfile, /mkdir -p \/var\/lib\/super-leader-runtime\/settings \/var\/lib\/super-leader-runtime\/background\/workers \/var\/lib\/super-leader-runtime\/background\/artifacts/);
+  assert.match(dockerfile, /chown -R node:node \/var\/lib\/super-leader-runtime/);
 });

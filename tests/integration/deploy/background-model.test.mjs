@@ -8,7 +8,7 @@ const backgroundModel = {
   BACKGROUND_MODEL_BASE_URL: 'https://background.invalid/v1',
   BACKGROUND_MODEL_API_KEY: 'synthetic-background-key',
 };
-const workerRoot = '/var/lib/super-leader-background';
+const workerRoot = '/var/lib/super-leader-runtime/background/workers';
 
 function renderControllerEnv(overrides = {}) {
   const config = JSON.parse(execCompose([
@@ -41,6 +41,7 @@ test('rules mode passes the complete independent background provider into the co
   const environment = renderControllerEnv({ BACKGROUND_WORKER_ROOT: workerRoot, ...backgroundModel });
   assert.equal(environment.LEADER_MODE, 'rules');
   assert.equal(environment.BACKGROUND_WORKER_ROOT, workerRoot);
+  assert.equal(environment.BACKGROUND_ARTIFACT_ROOT, '');
   for (const [name, value] of Object.entries(backgroundModel)) assert.equal(environment[name], value);
   assert.equal(environment.LEADER_MODEL_NAME, '');
   assert.equal(environment.LEADER_MODEL_BASE_URL, '');
