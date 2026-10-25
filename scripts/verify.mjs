@@ -8,6 +8,15 @@ export const PROJECT_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const SUITES = ['all', 'unit', 'integration'];
 const NODE_MIN_MAJOR = 24;
 const TOOL_PROBE_MS = 10_000;
+const BUILD_STEP_IDS = new Set(['controller-build', 'gateway-build', 'web-build']);
+const POSTGRES_STEP_IDS = new Set([
+  'synthetic-integration', 'console-auth-integration', 'wechat-interaction',
+  'task-notifications-postgres', 'scheduled-sessions-postgres',
+]);
+const UNIT_PARALLELISM = 4;
+const POSTGRES_PARALLELISM = 2;
+const LOOPBACK_PARALLELISM = 4;
+const ABORT_KILL_GRACE_MS = 1_000;
 const INHERITED_ENV = [
   'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'CI',
   'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
@@ -91,23 +100,127 @@ export async function runSteps(steps, { env, execute = executeStep, signal, onSt
   signal?.throwIfAborted();
 }
 
-function executeStep(step, env) {
+export function parallelVerificationPlan(suite = 'all', { skipNativeProgress = false } = {}) {
+  if (!SUITES.includes(suite)) throw new Error('Unknown suite; use all, unit or integration');
+  const unit = verificationPlan('unit', { skipNativeProgress });
+  const integration = verificationPlan('integration', { skipNativeProgress });
+  const all = [...unit, ...integration];
+  const builds = all.filter(step => BUILD_STEP_IDS.has(step.id)).filter((step, index, steps) =>
+    steps.findIndex(candidate => candidate.id === step.id) === index);
+  const unitSteps = unit.filter(step => !BUILD_STEP_IDS.has(step.id));
+  const integrationSteps = integration.filter(step => !BUILD_STEP_IDS.has(step.id));
+  return {
+    builds: suite === 'integration' || suite === 'unit' || suite === 'all' ? builds : [],
+    unit: suite === 'integration' ? [] : unitSteps,
+    integration: suite === 'unit' ? [] : integrationSteps,
+  };
+}
+
+function spawnStep(step, env, children) {
+  const child = spawn(step.command, step.args, {
+    cwd: join(PROJECT_ROOT, step.cwd), env: { ...env, ...step.env }, stdio: 'inherit', shell: false,
+    detached: process.platform !== 'win32',
+  });
+  children?.add(child);
+  child.once('exit', () => children?.delete(child));
+  child.once('error', () => children?.delete(child));
+  return child;
+}
+
+function executeStep(step, env, { children } = {}) {
   return new Promise((resolveStep, reject) => {
-    const child = spawn(step.command, step.args, {
-      cwd: join(PROJECT_ROOT, step.cwd), env, stdio: 'inherit', shell: false, detached: process.platform !== 'win32',
-    });
+    const child = spawnStep(step, env, children);
     child.once('error', () => reject(new Error(`${step.id}: cannot start required tool`)));
     child.once('exit', (code, signal) => code === 0 ? resolveStep() :
       reject(new Error(`${step.id}: failed (${signal ?? `exit ${code}`})`)));
   });
 }
 
+function stopChild(child, signal = 'SIGTERM') {
+  try {
+    if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, signal);
+    else child.kill(signal);
+  } catch (error) {
+    if (error.code !== 'ESRCH') return error;
+  }
+  return undefined;
+}
+
+export function formatVerificationError(error, prefix = '') {
+  const message = error instanceof Error ? error.message : String(error);
+  const lines = [`${prefix}${message}`];
+  if (error instanceof AggregateError) {
+    for (const nested of error.errors) lines.push(...formatVerificationError(nested, `${prefix}  `));
+  }
+  return lines;
+}
+
+export async function runParallelPool(steps, { env, concurrency, signal, onStep = () => {}, execute = executeStep }) {
+  const children = new Set();
+  const failures = [];
+  let next = 0;
+  let killTimer;
+  const worker = async () => {
+    while (!signal?.aborted) {
+      const step = steps[next++];
+      if (!step) return;
+      onStep(step);
+      try { await execute(step, env, { children }); }
+      catch (error) { failures.push(error); }
+    }
+  };
+  const abort = () => {
+    for (const child of children) {
+      const error = stopChild(child);
+      if (error) failures.push(new Error(`Failed to stop ${child.pid ?? 'unknown'} verification process`, { cause: error }));
+    }
+    killTimer = setTimeout(() => {
+      for (const child of children) {
+        const error = stopChild(child, 'SIGKILL');
+        if (error) failures.push(new Error(`Failed to force-stop ${child.pid ?? 'unknown'} verification process`, { cause: error }));
+      }
+    }, ABORT_KILL_GRACE_MS);
+    killTimer.unref?.();
+  };
+  signal?.addEventListener('abort', abort, { once: true });
+  try {
+    await Promise.all(Array.from({ length: Math.min(concurrency, steps.length) }, worker));
+  } finally {
+    signal?.removeEventListener('abort', abort);
+    if (killTimer) clearTimeout(killTimer);
+    if (signal?.aborted) {
+      for (const child of children) {
+        const error = stopChild(child, 'SIGKILL');
+        if (error) failures.push(new Error(`Failed to force-stop ${child.pid ?? 'unknown'} verification process`, { cause: error }));
+      }
+    }
+  }
+  if (failures.length) throw new AggregateError(failures, `${failures.length} parallel verification step(s) failed`);
+}
+
+export async function runParallelGroups(plan, { env, signal, onStep = () => {}, execute = executeStep }) {
+  await runParallelPool(plan.builds, { env, concurrency: plan.builds.length, signal, onStep, execute });
+  const groups = [];
+  if (plan.unit.length) groups.push(runParallelPool(plan.unit, { env, concurrency: UNIT_PARALLELISM, signal, onStep, execute }));
+  if (plan.integration.length) {
+    const postgres = plan.integration.filter(step => POSTGRES_STEP_IDS.has(step.id));
+    const loopback = plan.integration.filter(step => !POSTGRES_STEP_IDS.has(step.id));
+    if (postgres.length) groups.push(runParallelPool(postgres, { env, concurrency: POSTGRES_PARALLELISM, signal, onStep, execute }));
+    if (loopback.length) groups.push(runParallelPool(loopback, { env, concurrency: LOOPBACK_PARALLELISM, signal, onStep, execute }));
+  }
+  const results = await Promise.allSettled(groups);
+  signal?.throwIfAborted();
+  const failures = results.filter(result => result.status === 'rejected').map(result => result.reason);
+  if (failures.length) throw new AggregateError(failures, 'Parallel verification failed');
+}
+
 export async function main(args = process.argv.slice(2)) {
   const { values } = parseArgs({ args, options: {
-    help: { type: 'boolean', short: 'h' }, list: { type: 'boolean' }, suite: { type: 'string', default: 'all' },
+    help: { type: 'boolean', short: 'h' }, list: { type: 'boolean' }, parallel: { type: 'boolean' },
+    suite: { type: 'string', default: 'all' },
   } });
   if (values.help) {
-    console.log('Usage: node scripts/verify.mjs [--suite all|unit|integration] [--list]\nRequires Node >=24, pnpm, Go from daemon/go.mod and installed frozen JS dependencies.\nall/integration also require local Docker and Compose. No dependency install, deployment, real model, WeChat or desktop session tests.\n--list prints commands only, without reading credentials or contacting Docker. Interrupt requests wait for the current check to finish its cleanup.');
+    console.log('Usage: node scripts/verify.mjs [--suite all|unit|integration] [--parallel] [--list]\nRequires Node >=24, pnpm, Go from daemon/go.mod and installed frozen JS dependencies.\nall/integration also require local Docker and Compose. No dependency install, deployment, real model, WeChat or desktop session tests.\n--parallel runs independent build and verification steps in bounded pools; --list prints commands only, without reading credentials or contacting Docker. Interrupt requests wait for the current check to finish its cleanup.');
     return;
   }
   const skipNativeProgress = process.env.SUPER_LEADER_SKIP_NATIVE_PROGRESS === '1';
@@ -132,7 +245,9 @@ export async function main(args = process.argv.slice(2)) {
   process.on('SIGINT', requestStop);
   process.on('SIGTERM', requestStop);
   try {
-    await runSteps(steps, { env, signal: stop.signal, onStep: step => console.log(`[verify] ${step.id}`) });
+    const onStep = step => console.log(`[verify] ${step.id}`);
+    if (values.parallel) await runParallelGroups(parallelVerificationPlan(values.suite, { skipNativeProgress }), { env, signal: stop.signal, onStep });
+    else await runSteps(steps, { env, signal: stop.signal, onStep });
     console.log(`[verify] PASS ${steps.length} checks (${values.suite}); synthetic fixtures only, no production acceptance claimed.`);
   } finally {
     process.removeListener('SIGINT', requestStop);
@@ -141,5 +256,5 @@ export async function main(args = process.argv.slice(2)) {
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
-  await main().catch(error => { console.error(error.message); process.exitCode = 1; });
+  await main().catch(error => { console.error(formatVerificationError(error).join('\n')); process.exitCode = 1; });
 }
