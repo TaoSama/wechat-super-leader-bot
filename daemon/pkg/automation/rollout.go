@@ -111,7 +111,7 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 	}
 	turns := map[string]*rolloutTurn{}
 	candidates := map[string]bool{}
-	supported, missingIdentity := false, false
+	supported, missingIdentity, invalidHeartbeat := false, false, false
 	invalidRecords := []int{}
 	recordIndex := 0
 	for scanner.Scan() {
@@ -158,6 +158,7 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 				}
 				envelope, err := parseHeartbeatEnvelope(text)
 				if err != nil {
+					invalidHeartbeat = true
 					markTurnInvalid(turns, id)
 					continue
 				}
@@ -166,6 +167,7 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 				}
 				at, err := time.Parse(time.RFC3339Nano, envelope.CurrentTime)
 				if err != nil {
+					invalidHeartbeat = true
 					markTurnInvalid(turns, id)
 					continue
 				}
@@ -241,6 +243,9 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 	}
 	if len(candidates) > 1 {
 		return unknown("multiple scheduled turns match this run window"), nil
+	}
+	if invalidHeartbeat && len(candidates) == 0 {
+		return unknown("rollout contains malformed heartbeat records"), nil
 	}
 	if len(candidates) == 0 {
 		if truncated {

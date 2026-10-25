@@ -120,6 +120,21 @@ func TestHeartbeatAllowsUnescapedInstructionText(t *testing.T) {
 	}
 }
 
+func TestMalformedHeartbeatDoesNotBecomeWaiting(t *testing.T) {
+	text := fixtureRecord("event_msg", map[string]any{"type": "task_started", "turn_id": "run",
+		"turn_attribution": map[string]string{"turn_trigger": "automation_heartbeat_scheduled"}})
+	text += fixtureRecord("response_item", map[string]any{
+		"type": "message", "role": "user",
+		"content": []any{map[string]any{"type": "input_text", "text": "<heartbeat><automation_id>target</automation_id><current_time_iso>not-a-time</current_time_iso>"}},
+		"internal_chat_message_metadata_passthrough": map[string]any{"turn_id": "run"},
+	})
+	text += fixtureFinal("run", "must not be trusted") + fixtureComplete("run")
+	evidence := inspectFixture(t, text, true)
+	if evidence.Status != "unknown" || !strings.Contains(evidence.Reason, "malformed heartbeat") {
+		t.Fatalf("malformed heartbeat was treated as waiting: %+v", evidence)
+	}
+}
+
 func TestScheduledResultRequiresCompletionAndFinal(t *testing.T) {
 	for _, test := range []struct{ name, tail, status string }{
 		{"final without completion", fixtureFinal("run", "working"), "running"},
