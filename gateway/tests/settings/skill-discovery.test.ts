@@ -94,7 +94,8 @@ test("locked native CLI discovers edited frozen skills, disables original paths,
   const localSkill = path.join(chat, ".agents", "skills", "local-probe", "SKILL.md");
   fs.mkdirSync(path.dirname(localSkill), { recursive: true });
   fs.writeFileSync(localSkill, "---\nname: local-workspace-probe\ndescription: Workspace local probe\n---\nExisting local skill\n");
-  const permissions = `permissions.probe={filesystem={":minimal"="read",${JSON.stringify(home)}="read",${JSON.stringify(chat)}="write",${JSON.stringify(path.join(chat, ".agents"))}="deny",${JSON.stringify(codexHome)}="deny"},network={enabled=false}}`;
+  const runtimeRoot = path.dirname(path.dirname(path.dirname(path.dirname(executable))));
+  const permissions = `permissions.probe={filesystem={":minimal"="read",${JSON.stringify(runtimeRoot)}="read",${JSON.stringify(home)}="read",${JSON.stringify(chat)}="write",${JSON.stringify(path.join(chat, ".agents"))}="deny",${JSON.stringify(codexHome)}="deny"},network={enabled=false}}`;
   const launch = async (disabled: string[]) => {
     const config = `[${disabled.map(file => `{path=${JSON.stringify(file)},enabled=false}`).join(",")}]`;
     const probe = new NativeProbe(spawn(executable, ["app-server", "-c", "skills.bundled.enabled=false", "-c", "default_permissions=\"probe\"", "-c", permissions,
