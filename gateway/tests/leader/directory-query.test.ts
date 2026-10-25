@@ -138,7 +138,7 @@ test("directory journal survives restart, replays once and retains conflict and 
   assert.equal(Object.values(workspace.getReplyJournal())[0].delivery, "accepted");
 });
 
-test("directory failures keep started journal and never fall back to native or retry Controller on replay", async t => {
+test("directory failures keep failed journal and never fall back to native or retry Controller on replay", async t => {
   const root = fixture(t);
   const options = { root, model: "synthetic", sdkFactory: neverNative() };
   let calls = 0;
@@ -148,7 +148,28 @@ test("directory failures keep started journal and never fall back to native or r
   assert.deepEqual(await new CodexReplyEngine(options).reply("account", request, controller), failed);
   assert.equal(calls, 1);
   const workspace = await new WorkspaceStore(root).forChat("account", request.chatId);
-  assert.equal(Object.values(workspace.getReplyJournal())[0].stage, "started");
+  assert.equal(Object.values(workspace.getReplyJournal())[0].stage, "failed");
+});
+
+test("console issuance failures remain pinned because the one-shot outcome is unknown", async t => {
+  const root = fixture(t);
+  const options = { root, model: "synthetic", sdkFactory: neverNative() };
+  const consoleRequest = { ...request, messageId: "console-failure", text: "给我控制端链接" };
+  let calls = 0;
+  const controller = directToolController(async actual => {
+    calls++;
+    assert.equal(actual.name, "get_console_link");
+    throw new Error("console provider disconnected after dispatch");
+  }, ["get_console_link"]);
+  const engine = new CodexReplyEngine(options);
+  const failed = await engine.reply("account", consoleRequest, controller);
+  assert.match(failed.text, /执行结果待核实/);
+  assert.deepEqual(await engine.reply("account", consoleRequest, controller), failed);
+  const workspace = await new WorkspaceStore(root).forChat("account", request.chatId);
+  const entry = Object.values(workspace.getReplyJournal())[0];
+  assert.equal(entry.stage, "started");
+  assert.equal(calls, 1);
+  assert.deepEqual(await engine.getReply("account", request.chatId, consoleRequest.messageId, {}), failed);
 });
 
 test("unexpected directory console credential follows existing recovery provenance and never enters journal", async t => {

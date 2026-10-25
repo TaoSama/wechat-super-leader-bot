@@ -62,6 +62,7 @@ export class ControlMcp {
   private readonly progressTool: ProgressTool;
   private pending = 0;
   private failed = false;
+  private uncertainMutation = false;
   private invalidAuthority = false;
   private authorityCorrection = false;
   private assetMessageId?: string;
@@ -108,6 +109,8 @@ export class ControlMcp {
     return [...this.responses.values()].findLast(entry => entry.value.reply && hasConsoleCredential(entry.value.reply.text))?.value.reply?.text;
   }
   public get authoritativeText(): boolean { return [...this.responses.values()].some(entry => entry.value.reply !== undefined); }
+  /** A non-read-only Controller call failed after dispatch and its outcome is unknown. */
+  public get hasUncertainMutation(): boolean { return this.uncertainMutation; }
   public get result(): ControllerMessageResponse | undefined {
     if (!this.wasCalled || this.pending || this.failed || this.invalidAuthority) return;
     const replies = [...this.responses.values()].flatMap(entry => entry.value.reply ? [entry.value.reply] : []);
@@ -247,7 +250,10 @@ export class ControlMcp {
         return result;
       }).catch(error => {
         if (error instanceof ControllerToolRejectedError) this.rejections.add(key);
-        else this.failed = true;
+        else {
+          this.failed = true;
+          if (!tool.annotations.readOnlyHint) this.uncertainMutation = true;
+        }
         throw error;
       }).finally(() => {
         this.pending--;

@@ -327,7 +327,7 @@ test("custom agent instructions, including customized old templates and large fi
   }
 });
 
-test("reply journal persists started and completed outcomes across reconstruction", async (t) => {
+test("reply journal persists started, failed and completed outcomes across reconstruction", async (t) => {
   const { root, store } = fixture(t);
   const workspace = await store.forChat("account", "chat");
   assert.deepEqual(workspace.getReplyJournal(), {});
@@ -336,6 +336,10 @@ test("reply journal persists started and completed outcomes across reconstructio
   workspace.setReplyJournal({ [key]: { inputHash, stage: "started" } });
   const reloaded = await new WorkspaceStore(root).forChat("account", "chat");
   assert.deepEqual(reloaded.getReplyJournal(), { [key]: { inputHash, stage: "started" } });
+  const failed = { [key]: { inputHash, stage: "failed" as const, delivery: "pending" as const,
+    reply: { text: "执行失败，结果待核实" } } };
+  reloaded.setReplyJournal(failed);
+  assert.deepEqual(workspace.getReplyJournal(), failed);
   const completed = { [key]: { inputHash, stage: "completed" as const, reply: {
     text: "已核实", commandId: "command-1", images: [{
       id: "image-1", mime: "image/png" as const, size: 10, sha256: "a".repeat(64),
@@ -356,6 +360,7 @@ test("reply journal rejects corrupt states, oversized replies and unvalidated im
     [], { badKey: { inputHash, stage: "started" } },
     { [key]: { inputHash: "invalid", stage: "started" } },
     { [key]: { inputHash, stage: "completed" } },
+    { [key]: { inputHash, stage: "failed" } },
     { [key]: { inputHash, stage: "completed", reply: { text: "x".repeat(16001) } } },
     { [key]: { inputHash, stage: "completed", reply: { text: "x", images: [{ url: "https://unsafe" }] } } },
     { [key]: { inputHash, stage: "started", unexpected: "secret" } },
@@ -365,6 +370,8 @@ test("reply journal rejects corrupt states, oversized replies and unvalidated im
     { [key]: { inputHash, stage: "started", delivery: 1 } },
     { [key]: { inputHash, stage: "started", provenance: "invalid" } },
     { [key]: { inputHash, stage: "started", provenance: "controller-console" } },
+    { [key]: { inputHash, stage: "failed", provenance: "controller-console", reply: { text: "cannot be a console receipt" } } },
+    { [key]: { inputHash, stage: "failed", steering: { rootMessageId: "root", threadId: "thread", turnId: "turn", status: "submitting" }, reply: { text: "invalid steering" } } },
     { [key]: { inputHash, stage: "completed", provenance: "controller-console", reply: { text: "placeholder", commandId: "secret" } } },
     { [key]: { inputHash, stage: "completed", provenance: "controller-console", reply: { text: "placeholder", images: [] } } },
     { [key]: { inputHash, stage: "started", consoleText: "#login=[REDACTED]", reply: { text: "#login=[REDACTED]" } } },

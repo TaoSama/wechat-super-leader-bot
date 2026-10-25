@@ -47,7 +47,7 @@ function options(root: string, sdkFactory: NonNullable<CodexReplyEngineOptions["
   return { root, model: "synthetic-model", codexPath: process.execPath, sdkFactory };
 }
 
-function seeded(stage: "started" | "completed", delivery: ReplyJournal[string]["delivery"], text = "seeded reply"): ReplyJournal[string] {
+function seeded(stage: "started" | "failed" | "completed", delivery: ReplyJournal[string]["delivery"], text = "seeded reply"): ReplyJournal[string] {
   return { inputHash: INPUT_HASH, stage, ...(delivery ? { delivery } : {}), reply: { text } };
 }
 
@@ -94,6 +94,44 @@ test("128 pinned replies apply backpressure before SDK execution and accepted re
   assert.equal(persisted[messageKey("new-work")].delivery, "pending");
   assert.equal(Object.keys(persisted).length, MAX_PINNED_REPLY_ENTRIES + 1);
 });
+
+test("failed pending replies recover their frozen text and remain pinned under backpressure", async t => {
+  const { root, store } = fixture(t);
+  const workspace = await store.forChat(ACCOUNT, CHAT);
+  const journal: ReplyJournal = Object.fromEntries(Array.from({ length: MAX_PINNED_REPLY_ENTRIES }, (_, index) => [
+    messageKey(`failed-${index}`), seeded("failed", "pending", index === 0 ? "确定失败的固定回复" : "其他失败回复"),
+  ]));
+  workspace.setReplyJournal(journal);
+  const sdk = fakeSdk();
+  const engine = new CodexReplyEngine(options(root, sdk.sdkFactory));
+
+  assert.deepEqual(await engine.getReply(ACCOUNT, CHAT, "failed-0", noController), { text: "确定失败的固定回复" });
+  await assert.rejects(engine.reply(ACCOUNT, { chatId: CHAT, messageId: "new-work", text: "新的任务" }, noController),
+    ReplyEngineBackpressureError);
+  assert.equal(sdk.calls(), 0, "failed pending entries must reserve capacity before SDK execution");
+  assert.deepEqual(workspace.getReplyJournal(), journal);
+});
+
+for (const delivery of ["accepted", "expired"] as const) {
+  test(`failed ${delivery} replies are closed and can be pruned`, async t => {
+    const { root, store } = fixture(t);
+    const workspace = await store.forChat(ACCOUNT, CHAT);
+    const journal: ReplyJournal = Object.fromEntries(Array.from({ length: MAX_CLOSED_REPLY_ENTRIES }, (_, index) => [
+      messageKey(index === 0 ? `failed-${delivery}` : `closed-${index}`),
+      seeded("failed", index === 0 ? delivery : "accepted", index === 0 ? "terminal failure" : "closed reply"),
+    ]));
+    journal[messageKey("closing-now")] = seeded("completed", "pending");
+    workspace.setReplyJournal(journal);
+    const engine = new CodexReplyEngine(options(root, fakeSdk().sdkFactory));
+
+    await engine.ackReply(ACCOUNT, CHAT, "closing-now", "accepted");
+    const persisted = workspace.getReplyJournal();
+    assert.equal(persisted[messageKey(`failed-${delivery}`)], undefined,
+      `failed ${delivery} entries should be evictable once terminal`);
+    assert.equal(persisted[messageKey("closing-now")].delivery, "accepted");
+    assert.equal(Object.keys(persisted).length, MAX_CLOSED_REPLY_ENTRIES);
+  });
+}
 
 test("closing a 65th reply evicts only the oldest closed entry and preserves started and uncertain work", async t => {
   const { root, store } = fixture(t);

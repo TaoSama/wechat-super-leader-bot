@@ -83,7 +83,7 @@ test("SDK lifecycle distinguishes turn completion, stream exhaustion, MCP close 
 });
 
 for (const failure of ["throw", "missing-completion", "no-events"] as const) {
-  test(`SDK ${failure} emits honest timing coverage, cleans MCP and preserves uncertain journal`, async t => {
+  test(`SDK ${failure} emits honest timing coverage, cleans MCP and persists failed journal`, async t => {
     const { engine, events, trace } = setup(t, async function* () {
       if (failure === "no-events") return;
       yield { type: "thread.started", thread_id: "native-thread" };
@@ -97,7 +97,7 @@ for (const failure of ["throw", "missing-completion", "no-events"] as const) {
     assert.equal(finish.streamDrainMs, undefined);
     assert.equal(finish.firstEventObserved, failure !== "no-events");
     stage(events, "codex.mcp.close.end");
-    assert.equal(stage(events, "codex.journal.outcome.save.end").status, "started");
+    assert.equal(stage(events, "codex.journal.outcome.save.end").status, "failed");
     assert.doesNotMatch(JSON.stringify(events), /stderr-secret|secret.example|unverified-secret/);
   });
 }
