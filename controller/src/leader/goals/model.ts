@@ -14,20 +14,21 @@ completed 只证明动作执行完毕，不证明整个目标达成。只有每�
 若目标已证实完成应 complete，不用完预算凑步骤。不知道如何继续、需要新增授权/用户信息、结果不明或无法在预算内满足条件时 blocked，并用简短中文说明缺少什么。不以重复相同无进展任务消耗预算。
 reason 是简短中文结论及依据，不要输出隐含推理过程、凭证或无关会话正文。complete 是模型依据已记录结果作出的条件判断，不冒充独立业务验收。`;
 
-/** This model has no execution tools; the scheduler validates and persists every decision. */
-export function createGoalDecider(model: LeaderModel): (input: GoalDecisionInput, signal: AbortSignal) => Promise<GoalDecision> {
-  const tool: ModelTool = { type: "function", function: {
+export const GOAL_DECISION_TOOL: ModelTool = { type: "function", function: {
     name: DECISION_TOOL,
     description: "仅返回持续目标的一次规划判断，不执行任何动作。next为范围内一个任务；complete逐项提供条件证据；blocked说明所缺信息。所有索引均为一基。",
     parameters: z.toJSONSchema(GoalDecisionSchema) as Record<string, unknown>,
-  } };
+} };
+
+/** This model has no execution tools; the scheduler validates and persists every decision. */
+export function createGoalDecider(model: LeaderModel): (input: GoalDecisionInput, signal: AbortSignal) => Promise<GoalDecision> {
   return async (input, signal) => {
     signal.throwIfAborted();
     const reply = await model.complete([
       { role: "system", content: GOAL_DECISION_PROMPT },
       { role: "user", content: JSON.stringify({ confirmedAuthorization: input.authorization }) },
       { role: "user", content: JSON.stringify({ kind: "untrusted_goal_observations", ...input }) },
-    ], [tool], signal);
+    ], [GOAL_DECISION_TOOL], signal);
     signal.throwIfAborted();
     if (reply.toolCalls.length !== 1 || reply.toolCalls[0].function.name !== DECISION_TOOL) {
       throw new Error("Goal model must return exactly one decision tool call");

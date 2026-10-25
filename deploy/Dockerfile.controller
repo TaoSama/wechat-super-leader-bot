@@ -24,15 +24,17 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 FROM node:24-bookworm-slim
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.revision=$VCS_REF
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 curl python3-bs4 python3-html2text \
     && rm -rf /var/lib/apt/lists/*
 # Install on the target platform so Codex's native sandbox matches the deployed CPU.
 RUN npm install --global @openai/codex@0.163.0 \
-    && mkdir -p /var/lib/super-leader-background /var/lib/super-leader-artifacts \
-    && chown node:node /var/lib/super-leader-background /var/lib/super-leader-artifacts
+    && mkdir -p /var/lib/super-leader-background /var/lib/super-leader-artifacts /var/lib/super-leader-settings \
+    && chown node:node /var/lib/super-leader-background /var/lib/super-leader-artifacts /var/lib/super-leader-settings
 # Production dependencies copied across architectures must remain platform-independent.
-ENV NODE_ENV=production WEB_DIST_DIR=/app/web SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV NODE_ENV=production WEB_DIST_DIR=/app/web SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt SOURCE_REVISION=$VCS_REF
 WORKDIR /app
 COPY --from=runtime-certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=controller-build --chown=node:node /work/controller/package.json ./package.json

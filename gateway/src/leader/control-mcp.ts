@@ -9,7 +9,8 @@ import { ControllerToolRejectedError, type ControllerTool, type ControllerToolLi
 import { validateImageAttachments, type ImageAttachment } from "../wechat/media-delivery.js";
 import type { ControllerMessageRequest, ControllerMessageResponse } from "../types.js";
 import { currentTrace, runWithTrace, traceEvent, traceSpan } from "../runtime/telemetry.js";
-import { MAX_PROGRESS_CHARS, QueryProgress, type ProgressSink } from "./progress.js";
+import { QueryProgress, type ProgressSink } from "./progress.js";
+import { DEFAULT_PROGRESS_TOOL, parseProgressTool, validateProgressArguments, type ProgressTool } from "../settings/progress-tool.js";
 
 const BODY_LIMIT = 1024 * 1024;
 const MAX_CONTROLLER_REQUEST_CHARS = 16000;
@@ -40,11 +41,6 @@ interface Batch {
 class StaleAuthorityError extends ControllerToolRejectedError { constructor() { super(409); } }
 class ReplyAssetSourceError extends ControllerToolRejectedError { constructor() { super(409); } }
 interface ResponseEntry { value: ControllerToolResult; messageId: string }
-const PROGRESS_TOOL = { name: PROGRESS_TOOL_NAME,
-  description: "在处理耗时较长、已有值得告知的真实进展或需要说明等待原因时，向微信用户发送一条中间进度。简短、具体、有证据，不凑数、不把派发说成完成；每个根 query 最多3次，追加消息不重置额度。返回sent/status/used/remaining/limit；失败或未知不重发，继续完成工作并给最终回复。",
-  inputSchema: { type: "object" as const, properties: { text: { type: "string", minLength: 1, maxLength: MAX_PROGRESS_CHARS } },
-    required: ["text"], additionalProperties: false } };
-
 /** Business authority belongs to frozen, accepted originals, never to model rewrites. */
 export class ControlMcp {
   public readonly token = randomBytes(32).toString("hex");
@@ -63,6 +59,7 @@ export class ControlMcp {
   private readGeneration = 0;
   private readonly appendHolds = new Set<Promise<void>>();
   private readonly progress: QueryProgress;
+  private readonly progressTool: ProgressTool;
   private pending = 0;
   private failed = false;
   private invalidAuthority = false;
@@ -81,10 +78,11 @@ export class ControlMcp {
   });
 
   constructor(private readonly request: ControllerMessageRequest, private readonly controller: DirectToolClient,
-    options: { progress?: ProgressSink } = {}) {
+    options: { progress?: ProgressSink; progressTool?: ProgressTool } = {}) {
     this.request = Object.freeze({ ...request });
     this.requests.push({ request: this.request, submitted: false });
     this.progress = new QueryProgress(this.request, options.progress);
+    this.progressTool = parseProgressTool(JSON.stringify(options.progressTool ?? DEFAULT_PROGRESS_TOOL));
     this.server.requestTimeout = 320000;
     this.server.headersTimeout = 10000;
   }
@@ -190,14 +188,13 @@ export class ControlMcp {
     const session = new Server({ name: "wechat-current-request", version: "1.0.0" }, { capabilities: { tools: {} } });
     session.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...this.tools.map(tool => ({ ...structuredClone(tool),
       inputSchema: { ...structuredClone(tool.inputSchema), properties: { ...structuredClone(tool.inputSchema.properties),
-        requestMessageId: { type: "string", description: "本次工具参数所依据的真实当前 messageId。初轮可省略；追加后必须用返回的最新ID重新核对完整原文并选择参数。" } } } })), PROGRESS_TOOL] }));
+        requestMessageId: { type: "string", description: "本次工具参数所依据的真实当前 messageId。初轮可省略；追加后必须用返回的最新ID重新核对完整原文并选择参数。" } } } })), structuredClone(this.progressTool)] }));
     session.setRequestHandler(CallToolRequestSchema, input => this.callTool(input.params.name, input.params.arguments));
     return session;
   }
   private async callTool(name: string, wrapper?: Record<string, unknown>) {
     if (name === PROGRESS_TOOL_NAME) {
-      if (this.shuttingDown || !wrapper || Object.keys(wrapper).length !== 1 || typeof wrapper.text !== "string" ||
-          !wrapper.text.trim() || wrapper.text.length > MAX_PROGRESS_CHARS) throw new McpError(ErrorCode.InvalidParams, "Progress requires a non-empty text within the limit");
+      if (this.shuttingDown || !validateProgressArguments(this.progressTool, wrapper)) throw new McpError(ErrorCode.InvalidParams, "Progress arguments do not match the active tool schema");
       return { content: [{ type: "text" as const, text: JSON.stringify(await this.progress.report(wrapper.text)) }] };
     }
     const tool = this.tools.find(tool => tool.name === name);

@@ -1,4 +1,5 @@
 import dotenv from "dotenv";
+import path from "node:path";
 import { loadBackgroundConfig, type BackgroundConfig } from "./background-config.js";
 
 const TOKEN_CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/;
@@ -22,6 +23,26 @@ export interface Config {
   consolePublicUrl?: string;
   taskNotifications?: { fileMaxBytes: number; retentionMs: number; tickMs: number; fallbackEndpointsJson?: string };
   background?: BackgroundConfig;
+  settingsRoot?: string;
+  gatewaySettingsUrl?: string;
+}
+
+export function validateGatewaySettingsUrl(raw: string | undefined): string | undefined {
+  if (raw === undefined || !raw.trim()) return undefined;
+  try {
+    const url = new URL(raw);
+    if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.search || url.hash ||
+        !["", "/"].includes(url.pathname) || /[\\\u0000-\u0020\u007f]/.test(raw)) throw new Error();
+    return url.origin;
+  } catch { throw new Error("Invalid GATEWAY_SETTINGS_URL: expected an HTTP(S) origin without credentials"); }
+}
+
+function settingsRoot(raw: string | undefined): string {
+  if (!raw?.trim()) return path.resolve(".runtime/controller-settings");
+  if (!path.isAbsolute(raw) || path.resolve(raw) === path.parse(raw).root) {
+    throw new Error("SETTINGS_ROOT must be a dedicated absolute directory");
+  }
+  return path.resolve(raw);
 }
 
 function parseStrictInt(value: string | undefined, name: string, min: number, max: number, defaultValue: number): number {
@@ -181,6 +202,8 @@ export function loadConfig(): Config {
     webDistDir: process.env.WEB_DIST_DIR,
     leader,
     consolePublicUrl,
+    settingsRoot: settingsRoot(process.env.SETTINGS_ROOT),
+    gatewaySettingsUrl: validateGatewaySettingsUrl(process.env.GATEWAY_SETTINGS_URL),
     background: loadBackgroundConfig(process.env, leader),
     taskNotifications: {
       fileMaxBytes: parseStrictInt(process.env.RESULT_FILE_MAX_BYTES, "RESULT_FILE_MAX_BYTES", 1, 512 * 1024 * 1024, 50 * 1024 * 1024),

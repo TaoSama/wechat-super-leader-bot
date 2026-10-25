@@ -16,6 +16,7 @@ export interface HttpLeaderModelOptions {
   baseUrl: string;
   apiKey: string;
   model: string;
+  reasoningEffort?: string;
   timeoutMs?: number;
   maxResponseBytes?: number;
   fetchImpl?: typeof fetch;
@@ -113,6 +114,7 @@ export class HttpLeaderModel implements LeaderModel {
   private endpoint: string;
   private apiKey: string;
   private model: string;
+  private reasoningEffort?: string;
   private timeoutMs: number;
   private maxResponseBytes: number;
   private fetchImpl: typeof fetch;
@@ -131,6 +133,8 @@ export class HttpLeaderModel implements LeaderModel {
     this.endpoint = normalizeEndpoint(options.baseUrl);
     this.apiKey = options.apiKey.trim();
     this.model = options.model.trim();
+    if (options.reasoningEffort !== undefined && !/^[a-z_]{1,32}$/.test(options.reasoningEffort)) throw new Error("Invalid reasoning effort");
+    this.reasoningEffort = options.reasoningEffort;
     this.timeoutMs = validateBoundedInt(
       options.timeoutMs,
       DEFAULT_MODEL_TIMEOUT_MS,
@@ -197,7 +201,7 @@ export class HttpLeaderModel implements LeaderModel {
       ? AbortSignal.any([signal, timeoutController.signal])
       : timeoutController.signal;
 
-    const payload = responsePayload(this.model, messages, tools);
+    const payload = responsePayload(this.model, messages, tools, this.reasoningEffort);
 
     const bodyString = JSON.stringify(payload);
     const retryTransport = async (failure: ModelTransportFailure, attempt: number): Promise<void> => {

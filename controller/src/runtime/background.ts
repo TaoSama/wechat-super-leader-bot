@@ -6,6 +6,7 @@ import type { AutomationRepository, AutomationRunner, Schedule } from "../automa
 import type { NodeHub } from "../nodes/hub.js";
 import type { Config } from "./config.js";
 import { BackgroundArtifacts, BACKGROUND_ARTIFACT_RETENTION_MS } from "./background-artifacts.js";
+import type { LocalSettingsService } from "../settings/local-service.js";
 
 const ARTIFACT_MAINTENANCE_INTERVAL_MS = 60_000;
 
@@ -18,10 +19,14 @@ export class BackgroundExecution {
   private stopping = false;
   constructor(private readonly config: Config, private readonly schedules: AutomationRepository,
     hub: NodeHub, private readonly pool?: pg.Pool,
-    private readonly now: () => number = Date.now, private readonly changed: () => void = () => {}) {
+    private readonly now: () => number = Date.now, private readonly changed: () => void = () => {}, settings?: LocalSettingsService) {
     if (!config.background) throw new Error("Background execution is disabled");
     const repository = pool ? new PostgresBackgroundRepository(pool) : new MemoryBackgroundRepository();
     this.runtime = new CodexWorkerRuntime({ ...config.background,
+      ...(settings ? { runtimeSettings: () => {
+        const view = settings.capture();
+        return { ...view.model("background", config.background!.model), systemPrompt: view.prompt("background-worker") };
+      } } : {}),
       onError: () => console.warn("Background execution requires reconciliation; durable receipt retained") });
     this.artifacts = new BackgroundArtifacts({ root: config.background.artifactRoot,
       publicUrl: config.consolePublicUrl ?? `http://localhost:${config.port}`,

@@ -1,6 +1,7 @@
 import { REPORT_PROGRESS_TOOL, progressText, type QueryProgressReporter } from "../notifications/model-progress.js";
 import { DirectToolExecutor } from "./direct-executor.js";
 import { traceEvent, traceSpan } from "../runtime/telemetry.js";
+import type { LocalSettingsService } from "../settings/local-service.js";
 import { isConsoleLinkQuery, parseSessionDirectoryQuery } from "@super-leader/wechat-text";
 import { createHash, randomUUID } from "node:crypto";
 import { formatDisplayTime } from "../display-time.js";
@@ -88,10 +89,10 @@ export class LeaderOrchestrator {
   constructor(private store: IStore, private hub: Hub, private commands: Pick<CommandService, "submit">,
     private model: LeaderModel, private now: () => number = Date.now, private consoleLinkIssuer?: ConsoleLinkIssuer,
     executions?: ExecutionScheduler, goals?: GoalScheduler, private automations?: AutomationService,
-    private background?: BackgroundToolService, directOptions: { isAllowed?: (chatId: string) => boolean; goalsAvailable?: boolean } = {}) {
+    private background?: BackgroundToolService, private readonly directOptions: { settings?: LocalSettingsService; isAllowed?: (chatId: string) => boolean; goalsAvailable?: boolean } = {}) {
     this.executions = executions ?? new ExecutionScheduler(store, commands, { now });
     this.goals = new GoalConversation(store, hub, goals ?? new GoalScheduler(store, commands, createGoalDecider(model), { now }), now);
-    this.direct = new DirectToolExecutor({ store, hub, now, automations, background,
+    this.direct = new DirectToolExecutor({ store, hub, now, automations, background, settings: directOptions.settings,
       isAllowed: directOptions.isAllowed ?? (() => true), goalsAvailable: directOptions.goalsAvailable ?? true,
       goals: this.goals, executions: this.executions,
       save: (chatId, revision, data) => this.save(chatId, revision, data),
@@ -109,7 +110,8 @@ export class LeaderOrchestrator {
       return Promise.reject(new CommandError(409, "该聊天上一条请求仍在处理中，请稍后再试"));
     }
     if (this.active.size >= 64) return Promise.reject(new CommandError(503, "Leader 当前繁忙"));
-    const promise = this.run(chatId, messageId, text, inputHash, progress);
+    const run = () => this.run(chatId, messageId, text, inputHash, progress);
+    const promise = this.directOptions.settings ? this.directOptions.settings.withRuntime(run) : run();
     this.active.set(chatId, { messageId, inputHash, promise });
     const release = () => { this.active.delete(chatId); };
     promise.then(release, release);

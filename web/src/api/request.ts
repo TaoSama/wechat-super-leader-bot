@@ -2,7 +2,7 @@ import { ApiAuthError, ApiHttpError, historyHttpError } from "./errors";
 
 const REQUEST_TIMEOUT_MS = 20_000;
 
-export async function sessionRequest(url: string, init: RequestInit, historyErrors = false, format: "json" | "text" = "json"): Promise<unknown> {
+export async function sessionRequest(url: string, init: RequestInit, historyErrors = false, format: "json" | "text" = "json", forbiddenIsAuthError = true): Promise<unknown> {
   const controller = new AbortController();
   const abort = () => controller.abort();
   const timer = window.setTimeout(abort, REQUEST_TIMEOUT_MS);
@@ -10,7 +10,7 @@ export async function sessionRequest(url: string, init: RequestInit, historyErro
   init.signal?.addEventListener("abort", abort, { once: true });
   try {
     const response = await fetch(url, { ...init, credentials: "same-origin", signal: controller.signal });
-    if (response.status === 401 || response.status === 403) {
+    if (response.status === 401 || (forbiddenIsAuthError && response.status === 403)) {
       throw new ApiAuthError(response.status, "会话登录已失效，请重新获取微信登录链接");
     }
     if (!response.ok) {

@@ -1,4 +1,8 @@
 services:
+  controller:
+    environment:
+      GATEWAY_SETTINGS_URL: http://gateway:8791
+      NO_PROXY: localhost,127.0.0.1,postgres,gateway
   gateway:
     profiles: [wechat]
     build:
@@ -37,6 +41,9 @@ services:
       GATEWAY_POLL_TIMEOUT_MS: ${GATEWAY_POLL_TIMEOUT_MS:-35000}
       GATEWAY_LEADER_MODE: ${GATEWAY_LEADER_MODE:-codex}
       GATEWAY_LEADER_ROOT: /var/lib/super-leader-gateway/leader
+      GATEWAY_SETTINGS_HOST: 0.0.0.0
+      GATEWAY_SETTINGS_PORT: "8791"
+      GATEWAY_SETTINGS_ROOT: /var/lib/super-leader-gateway/settings
       GATEWAY_LEADER_MODEL: ${GATEWAY_LEADER_MODEL:-gpt-6.1-sol}
       GATEWAY_LEADER_BASE_URL: ${GATEWAY_LEADER_BASE_URL:-${LEADER_MODEL_BASE_URL:-}}
       GATEWAY_LEADER_API_KEY: ${GATEWAY_LEADER_API_KEY:-${LEADER_MODEL_API_KEY:-}}

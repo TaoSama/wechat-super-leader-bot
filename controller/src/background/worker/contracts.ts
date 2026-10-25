@@ -54,6 +54,8 @@ export interface WorkerRuntime {
 }
 
 export interface WorkerExecutionRequest {
+  model?: string;
+  reasoningEffort?: string | null;
   workspace: string;
   home: string;
   schemaPath: string;
@@ -72,6 +74,7 @@ export interface WorkerRuntimeOptions {
   root: string;
   artifactRoot: string;
   model: string;
+  runtimeSettings?: () => { model: string; reasoningEffort: string | null; systemPrompt: string };
   apiKey?: string;
   baseUrl?: string;
   codexPath?: string;

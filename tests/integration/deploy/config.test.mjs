@@ -139,11 +139,17 @@ test('background workers use separate durable stores and a bounded sandbox conta
   assert.equal(controller.stop_grace_period, '30s');
   assert.deepEqual(controller.security_opt, ['no-new-privileges:true',
     'seccomp:./deploy/security/codex-seccomp.json', 'apparmor:super-leader-codex']);
-  const stores = controller.volumes.filter(volume => volume.type === 'volume');
+  const stores = controller.volumes.filter(volume => volume.type === 'volume' && [
+    '/var/lib/super-leader-artifacts', '/var/lib/super-leader-background',
+  ].includes(volume.target));
   assert.equal(stores.length, 2);
   assert.deepEqual(stores.map(volume => volume.target).sort(), [
     '/var/lib/super-leader-artifacts', '/var/lib/super-leader-background']);
   assert.equal(new Set(stores.map(volume => volume.source)).size, 2);
+  const settings = controller.volumes.find(volume => volume.target === '/var/lib/super-leader-settings');
+  assert.equal(settings?.type, 'volume');
+  assert.equal(settings?.source, 'controller-settings');
+  assert.equal(production.volumes[settings.source]?.name, 'super-leader-settings');
   const dockerfile = readFileSync(new URL('../../../deploy/Dockerfile.controller', import.meta.url), 'utf8');
   assert.match(dockerfile, /@openai\/codex@0\.163\.0/);
   assert.match(dockerfile, /ca-certificates/);

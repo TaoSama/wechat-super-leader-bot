@@ -4,6 +4,7 @@ import { PostMessageRequestSchema } from "../types.js";
 
 const ReplyQuerySchema = PostMessageRequestSchema.pick({ chatId: true }).strict();
 const ReplyParamsSchema = PostMessageRequestSchema.pick({ messageId: true }).strict();
+const INTERNAL_SETTINGS_MESSAGE_PREFIX = "direct_settings_";
 
 /** Mount below the management-authenticated /v1 router. */
 export function createMessageReplyRouter(
@@ -21,6 +22,10 @@ export function createMessageReplyRouter(
     const { chatId } = query.data;
     if (!allowedChatIds().has(chatId)) {
       res.status(403).json({ code: "CHAT_NOT_ALLOWED" });
+      return;
+    }
+    if (params.data.messageId.startsWith(INTERNAL_SETTINGS_MESSAGE_PREFIX)) {
+      res.status(404).json({ error: "Message reply not found" });
       return;
     }
     const message = await store.getMessage(chatId, params.data.messageId);

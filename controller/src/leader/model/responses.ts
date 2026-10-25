@@ -1,6 +1,6 @@
 import type { ModelMessage, ModelTool } from './contracts.js';
 
-export function responsePayload(model: string, messages: ModelMessage[], tools: ModelTool[]) {
+export function responsePayload(model: string, messages: ModelMessage[], tools: ModelTool[], reasoningEffort?: string) {
   const input: Record<string, unknown>[] = [];
   for (const message of messages) {
     if (message.role === 'assistant' && message.responseOutput) {
@@ -16,6 +16,7 @@ export function responsePayload(model: string, messages: ModelMessage[], tools: 
     }
   }
   return { model, input, store: false, include: ['reasoning.encrypted_content'],
+    ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
     tools: tools.map(tool => ({ type: 'function', ...tool.function, strict: false })) };
 }
 

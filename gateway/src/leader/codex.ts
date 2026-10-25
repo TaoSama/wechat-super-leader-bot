@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { realpathSync } from "node:fs";
+import { RuntimeResourceError, disabledWorkspaceSkills } from "../settings/resources.js";
+import type { GatewaySettings } from "../settings/service.js";
 import { createRequire } from "node:module";
 import { type CodexOptions, type ThreadOptions, type ThreadEvent, type TurnOptions } from "@openai/codex-sdk";
 import type { ControllerClient } from "../controller/client.js";
@@ -51,6 +53,7 @@ export interface CodexReplyEngineOptions {
   cleanupTimeoutMs?: number;
   sdkFactory?: (options: CodexOptions) => CodexClient;
   appServerFactory?: typeof startAppServerTurn;
+  settings?: GatewaySettings;
 }
 
 interface ActiveQuery {
@@ -82,10 +85,11 @@ function runtimeReadPath(codexPath?: string): string {
   return path.dirname(codexRequire.resolve(`@openai/codex-${platform}-${process.arch}/package.json`));
 }
 
-function permissionOverrides(workspace: LeaderWorkspace, codexPath?: string): string[] {
+function permissionOverrides(workspace: LeaderWorkspace, codexPath?: string, skillsRoot?: string): string[] {
   const filesystem = [
     [":minimal", "read"],
     [HEADLESS_SKILLS_ROOT, "read"],
+    ...(skillsRoot ? [[skillsRoot, "read"], [path.join(workspace.workspacePath, ".agents"), "deny"]] : []),
     [workspace.workspacePath, "write"],
     [workspace.codexHome, "deny"],
     [path.join(workspace.workspacePath, ".replies.json"), "deny"],
@@ -157,6 +161,16 @@ export class CodexReplyEngine implements GatewayReplyEngine {
     // WorkspaceStore rejects symlink paths; normalized absolute paths identify
     // the same supported root even when callers use relative paths or dot segments.
     this.lockScope = path.resolve(options.root);
+  }
+
+  public async settingsWorkspace(accountId: string, chatId: string): Promise<LeaderWorkspace | undefined> {
+    return this.store.findChat(accountId, chatId);
+  }
+
+  public async withSettingsChat<T>(accountId: string, chatId: string, operation: () => Promise<T>): Promise<T> {
+    const key = hash(JSON.stringify([this.lockScope, accountId, chatId]));
+    if (CHAT_LOCKS.has(key)) throw new RuntimeResourceError(409, "chat_busy", "This chat is running; edit memory after it finishes");
+    return this.withChatLock(accountId, chatId, () => operation());
   }
 
   public get requestBudgetMs(): number {
@@ -469,7 +483,8 @@ export class CodexReplyEngine implements GatewayReplyEngine {
     controller: ControllerToolClient,
     onCompleted: (result: NativeOutcome) => Promise<void>, releaseExecution: () => void,
     query: ActiveQuery, options: ReplyEngineTurnOptions): Promise<NativeOutcome> {
-    const control = new ControlMcp(request, controller, options);
+    const frozen = this.options.settings?.freeze();
+    const control = new ControlMcp(request, controller, { ...options, ...(frozen ? { progressTool: frozen.progressTool } : {}) });
     const abort = new AbortController();
     this.nativeAborts.add(abort);
     let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
@@ -506,11 +521,12 @@ export class CodexReplyEngine implements GatewayReplyEngine {
     try {
       await traceSpan("codex.mcp.start", () => control.start());
       started = true;
-      const env: Record<string, string> = { HOME: workspace.workspacePath, CODEX_HOME: workspace.codexHome,
+      const env: Record<string, string> = { HOME: frozen?.home ?? workspace.workspacePath, CODEX_HOME: workspace.codexHome,
         [CONTROL_TOKEN_ENV]: control.token };
       for (const name of ENV_ALLOWLIST) if (process.env[name] !== undefined) env[name] = process.env[name]!;
       const config: NonNullable<CodexOptions["config"]> = {
         ...HEADLESS_CODEX_CONFIG,
+        ...(frozen ? { skills: { ...HEADLESS_CODEX_CONFIG.skills, config: [...frozen.disabledSkills, ...disabledWorkspaceSkills(workspace.workspacePath)] } } : {}),
         default_permissions: "wechat_memory",
         shell_environment_policy: { exclude: ["CODEX_API_KEY", "OPENAI_API_KEY", CONTROL_TOKEN_ENV] },
         mcp_servers: { ...HEADLESS_CODEX_CONFIG.mcp_servers,
@@ -528,9 +544,10 @@ export class CodexReplyEngine implements GatewayReplyEngine {
       const settings: CodexOptions = {
         env, config, apiKey: this.options.apiKey, baseUrl: this.options.baseUrl,
         codexPathOverride: this.options.codexPath,
-        configOverrides: permissionOverrides(workspace, this.options.codexPath),
+        configOverrides: permissionOverrides(workspace, this.options.codexPath, frozen?.home),
       };
-      const threadOptions: ThreadOptions = { model: this.options.model, workingDirectory: workspace.workspacePath,
+      const threadOptions: ThreadOptions = { model: frozen?.model ?? this.options.model,
+        ...(frozen?.reasoningEffort ? { modelReasoningEffort: frozen.reasoningEffort } : {}), workingDirectory: workspace.workspacePath,
         approvalPolicy: "never", skipGitRepoCheck: true, webSearchMode: "live" };
       const threadId = workspace.getThreadId();
       traceEvent("codex.thread.selected", { recovery: threadId !== undefined,
@@ -541,7 +558,7 @@ export class CodexReplyEngine implements GatewayReplyEngine {
       if (this.options.sdkFactory) {
         const client = this.options.sdkFactory(settings);
         const thread = threadId ? client.resumeThread(threadId, threadOptions) : client.startThread(threadOptions);
-        events = (await traceSpan("codex.run_streamed", () => thread.runStreamed(prompt(memory, request, control.instructions), {
+        events = (await traceSpan("codex.run_streamed", () => thread.runStreamed(prompt(memory, request, control.instructions, frozen?.systemPrompt), {
           signal: abort.signal,
           onLifecycleEvent: event => {
             nativeEvents?.observeProcess(event);
@@ -554,7 +571,7 @@ export class CodexReplyEngine implements GatewayReplyEngine {
         query.resolveReady(false);
       } else {
         native = await traceSpan("codex.run_streamed", () => (this.options.appServerFactory ?? startAppServerTurn)(
-          settings, threadOptions, threadId, prompt(memory, request, control.instructions), abort.signal,
+          settings, threadOptions, threadId, prompt(memory, request, control.instructions, frozen?.systemPrompt), abort.signal,
           startedThreadId => traceSpan("codex.thread.save", async () => { workspace.setThreadId(startedThreadId); })));
         await traceSpan("codex.thread.save", async () => workspace.setThreadId(native!.threadId));
         query.workspace = workspace;
@@ -623,7 +640,7 @@ export class CodexReplyEngine implements GatewayReplyEngine {
             traceEvent("codex.mcp.close.failed");
           }
         }
-      } finally { this.nativeAborts.delete(abort); }
+      } finally { this.nativeAborts.delete(abort); frozen?.dispose(); }
     }
     const nativeComplete = completed && !failed && !aborted && !query.uncertain && Boolean(text.trim());
     if (!nativeComplete) {

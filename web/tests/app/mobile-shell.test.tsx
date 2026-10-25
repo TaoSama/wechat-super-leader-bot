@@ -96,3 +96,20 @@ it("定时任务独立展示，切换导航保留操作回执，看板中成果�
   expect(screen.getByText("已暂停")).toBeVisible();
   expect(screen.getByRole("button", { name: "恢复" })).toBeEnabled();
 });
+
+it("设置从工作台选项进入，业务导航仍为三项，往返保留会话草稿", async () => {
+  const { container } = render(<App />);
+  const row = await screen.findByTestId("session-row-local-shell-session");
+  fireEvent.click(row);
+  await screen.findByText("会话消息");
+  fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "设置往返保留草稿" } });
+  fireEvent.click(screen.getByRole("button", { name: "返回会话列表" }));
+  fireEvent.click(screen.getByRole("button", { name: "工作台选项" }));
+  fireEvent.click(screen.getByRole("button", { name: "设置" }));
+  expect(container.querySelector(".app-shell")).toHaveAttribute("data-view", "settings");
+  expect(within(screen.getByRole("navigation", { name: "主导航" })).getAllByRole("button")).toHaveLength(3);
+  expect(screen.getByRole("navigation", { name: "设置分类" })).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "返回" }));
+  fireEvent.click(row);
+  await waitFor(() => expect(screen.getByLabelText("发送给当前会话")).toHaveValue("设置往返保留草稿"));
+}, 30000);

@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
-import { createRequire } from "node:module";
 import * as path from "node:path";
+import { resolveCodexExecutable } from "./executable.js";
 import type { CodexOptions, ThreadEvent, ThreadItem, ThreadOptions, Usage } from "@openai/codex-sdk";
 
 const RPC_TIMEOUT_MS = 30_000;
@@ -42,24 +42,6 @@ function toml(value: unknown): string {
   throw new Error("Invalid Codex configuration value");
 }
 
-function binary(options: CodexOptions): { executable: string; pathDirectory?: string } {
-  if (options.codexPathOverride) return { executable: options.codexPathOverride };
-  const platform = process.platform === "android" ? "linux" : process.platform;
-  const architecture = process.arch === "arm64" ? "aarch64" : process.arch === "x64" ? "x86_64" : undefined;
-  const suffixes: Record<string, string | undefined> = { linux: "unknown-linux-musl", darwin: "apple-darwin", win32: "pc-windows-msvc" };
-  const suffix = suffixes[platform];
-  if (!architecture || !suffix) throw new Error("Unsupported Codex app-server platform");
-  const sdkRequire = createRequire(import.meta.resolve("@openai/codex-sdk"));
-  const codexRequire = createRequire(sdkRequire.resolve("@openai/codex/package.json"));
-  const packageRoot = path.dirname(codexRequire.resolve(`@openai/codex-${platform}-${process.arch}/package.json`));
-  const nativeRoot = path.join(packageRoot, "vendor", `${architecture}-${suffix}`);
-  const executableName = platform === "win32" ? "codex.exe" : "codex";
-  for (const [binDirectory, pathDirectory] of [["bin", "codex-path"], ["codex", "path"]]) {
-    const executable = path.join(nativeRoot, binDirectory, executableName);
-    if (existsSync(executable)) return { executable, pathDirectory: path.join(nativeRoot, pathDirectory) };
-  }
-  throw new Error("Codex app-server binary is unavailable");
-}
 
 class EventQueue {
   private readonly values: ThreadEvent[] = [];
@@ -258,7 +240,7 @@ export async function startAppServerTurn(options: CodexOptions, threadOptions: T
   threadId: string | undefined, input: string, signal: AbortSignal,
   onThreadStarted?: ThreadStartedHandler): Promise<AppServerTurn> {
   if (signal.aborted) throw new Error("Codex app-server turn aborted");
-  const native = binary(options);
+  const native = resolveCodexExecutable(options.codexPathOverride);
   const config = { ...options.config,
     ...(threadOptions.modelReasoningEffort ? { model_reasoning_effort: threadOptions.modelReasoningEffort } : {}),
     ...(threadOptions.webSearchMode ? { web_search: threadOptions.webSearchMode } : {}),

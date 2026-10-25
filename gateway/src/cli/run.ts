@@ -7,6 +7,9 @@ import { WeChatGateway, NotificationDiagnosticError } from "../gateway.js";
 import { checkGatewayHealth, HealthTracker, resolveHealthPath, sanitizeErrorType } from "../runtime/health.js";
 import { getHelpText, parseGatewayCli } from "./options.js";
 import type { GatewayReplyEngine } from "../leader/contracts.js";
+import * as path from "node:path";
+import { GatewaySettings } from "../settings/service.js";
+import { startSettingsServer } from "../settings/server.js";
 
 export const NOTIFICATION_DIAGNOSTIC_EXIT_CODE = 2;
 const MAX_CODEX_ACCOUNT_ID_BYTES = 4096;
@@ -81,12 +84,25 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
   });
 
   let replyEngine: GatewayReplyEngine | undefined;
+  let settings: GatewaySettings | undefined;
+  let settingsListener: Awaited<ReturnType<typeof startSettingsServer>> | undefined;
   if (opts.leaderMode === "codex" && opts.mode !== "establish-baseline") {
     if (!env.GATEWAY_LEADER_API_KEY?.trim()) throw new Error("Missing GATEWAY_LEADER_API_KEY for Codex reply engine");
     const { CodexReplyEngine } = await import("../leader/codex.js");
-    replyEngine = new CodexReplyEngine({ root: opts.leaderRoot, model: opts.leaderModel,
+    let codexEngine!: InstanceType<typeof CodexReplyEngine>;
+    if (env.GATEWAY_SETTINGS_HOST || env.GATEWAY_SETTINGS_PORT) {
+      if (!env.GATEWAY_SETTINGS_HOST || !env.GATEWAY_SETTINGS_PORT || !/^\d+$/.test(env.GATEWAY_SETTINGS_PORT) ||
+          Number(env.GATEWAY_SETTINGS_PORT) < 1 || Number(env.GATEWAY_SETTINGS_PORT) > 65535) throw new Error("Invalid Gateway settings listener configuration");
+      settings = new GatewaySettings({ root: env.GATEWAY_SETTINGS_ROOT || path.join(path.dirname(stateManager.statePath), "settings"),
+        model: opts.leaderModel, apiKey: env.GATEWAY_LEADER_API_KEY, baseUrl: env.GATEWAY_LEADER_BASE_URL || undefined,
+        codexPath: env.GATEWAY_CODEX_PATH || undefined, chatIds: () => Object.keys(stateManager.contextTokens),
+        workspace: chatId => codexEngine.settingsWorkspace(accountId!, chatId),
+        withChat: (chatId, operation) => codexEngine.withSettingsChat(accountId!, chatId, operation) });
+    }
+    codexEngine = new CodexReplyEngine({ root: opts.leaderRoot, model: opts.leaderModel, settings,
       baseUrl: env.GATEWAY_LEADER_BASE_URL || undefined, apiKey: env.GATEWAY_LEADER_API_KEY,
       codexPath: env.GATEWAY_CODEX_PATH || undefined });
+    replyEngine = codexEngine;
   }
   const healthTracker = new HealthTracker(resolvedHealthPath);
   const gateway = new WeChatGateway({
@@ -114,6 +130,9 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
     return 0;
   }
 
+  if (settings) settingsListener = await startSettingsServer({ settings, host: env.GATEWAY_SETTINGS_HOST!,
+    port: Number(env.GATEWAY_SETTINGS_PORT), token: opts.controllerToken });
+
   if (opts.mode === "poll-once") {
     try {
       const res = await gateway.pollOnce();
@@ -128,7 +147,7 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
       return 0;
     } finally {
       gateway.stop();
-      await replyEngine?.stop?.();
+      try { await replyEngine?.stop?.(); } finally { await settingsListener?.close(); }
     }
   }
 
@@ -152,7 +171,7 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
     process.removeListener("SIGINT", handleSignal);
     process.removeListener("SIGTERM", handleSignal);
     try { await replyEngine?.stop?.(); }
-    finally { healthTracker.recordStop(); }
+    finally { try { await settingsListener?.close(); } finally { healthTracker.recordStop(); } }
   }
   return 0;
 }

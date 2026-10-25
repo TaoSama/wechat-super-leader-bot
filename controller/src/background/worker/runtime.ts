@@ -236,8 +236,10 @@ export class CodexWorkerRuntime implements WorkerRuntime {
         return;
       }
       timer = setTimeout(() => abort.abort(), timeoutMs);
+      const settings = this.options.runtimeSettings?.();
       const text = await this.executor.execute({ workspace: path.join(dir, "workspace"), home: path.join(dir, "home"),
-        schemaPath: path.join(dir, "output-schema.json"), prompt: workerPrompt(input), threadId: receipt.threadId,
+        schemaPath: path.join(dir, "output-schema.json"), prompt: workerPrompt(input, settings?.systemPrompt), threadId: receipt.threadId,
+        ...(settings ? { model: settings.model, reasoningEffort: settings.reasoningEffort } : {}),
         signal: abort.signal,
         onThread: async threadId => { this.store.setThread(dir, threadId); receipt.threadId = threadId; this.store.save(dir, receipt); },
         onProcess: async pid => {

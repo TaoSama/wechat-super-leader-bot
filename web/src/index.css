@@ -1,6 +1,7 @@
 @import "./styles/appearance.css";
 @import "./styles/base.css";
 @import "./styles/shell.css";
+@import "./styles/settings.css";
 @import "./styles/sessions.css";
 @import "./styles/history.css";
 @import "./styles/leader.css";

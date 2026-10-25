@@ -15,6 +15,7 @@ import { NotificationResultCollector } from "../notifications/result-collector.j
 import { createAutomationRunner } from "./automation-runner.js";
 import { BackgroundExecution } from "./background.js";
 import { consoleDelivery } from "../console/deliveries.js";
+import type { LocalSettingsService } from "../settings/local-service.js";
 
 const DEFAULT_TICK_MS = 5_000;
 const SUMMARY_RETRY_MS = 60_000;
@@ -43,7 +44,7 @@ export class TaskNotifications {
   private readonly publicationRetries = new Map<string, number>();
 
   constructor(private readonly config: Config, private readonly store: IStore, hub: NodeHub, commands: CommandService,
-    model: LeaderModel | undefined, private readonly now: () => number, private readonly changed: () => void) {
+    model: LeaderModel | undefined, private readonly now: () => number, private readonly changed: () => void, settings?: LocalSettingsService) {
     this.pool = config.persistenceMode === "postgres" ? new pg.Pool({ connectionString: config.databaseUrl, max: 3 }) : undefined;
     const schedules = this.pool ? new PostgresAutomationRepository(this.pool) : new MemoryAutomationRepository();
     const deliveries = this.pool ? new PostgresDeliveryRepository(this.pool) : new MemoryDeliveryRepository(now);
@@ -61,7 +62,7 @@ export class TaskNotifications {
       fileMaxBytes: config.taskNotifications?.fileMaxBytes, retentionMs: config.taskNotifications?.retentionMs,
     });
     this.backgroundExecution = config.background
-      ? new BackgroundExecution(config, schedules, hub, this.pool, now, changed) : undefined;
+      ? new BackgroundExecution(config, schedules, hub, this.pool, now, changed, settings) : undefined;
     const sessionRunner = createAutomationRunner(store, commands, chatId => config.allowedChatIds.has(chatId), async schedule =>
       (await schedules.get(schedule.id, schedule.chatId))?.status === "active");
     this.automations = new AutomationService({ repository: schedules, now,
