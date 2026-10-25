@@ -9,6 +9,7 @@ const overlay = readFileSync(new URL('../../../deploy/compose.release.yaml', imp
 test('production CD deploys one main push with protected, immutable inputs', () => {
   assert.match(workflow, /push:\s*\n\s*branches: \[main\]/);
   assert.doesNotMatch(workflow, /pull_request:/);
+  assert.match(workflow, /build-and-deploy:\s*\n\s+name:[\s\S]*?\n\s+if: \$\{\{ github\.ref ===? 'refs\/heads\/main' \}\}/);
   assert.match(workflow, /group: deploy-production/);
   assert.match(workflow, /environment:\s*\n\s+name: production/);
   assert.match(workflow, /permissions:\s*\n\s+contents: read/);
@@ -19,7 +20,12 @@ test('production CD deploys one main push with protected, immutable inputs', () 
   assert.match(workflow, /--output "type=docker,dest=\$archive"/);
   assert.match(workflow, /build_image controller[\s\S]*&[\s\S]*build_image gateway[\s\S]*&/);
   assert.match(workflow, /sha256sum controller\.tar gateway\.tar/);
-  assert.match(workflow, /compose\.yaml compose\.production\.yaml compose\.gateway\.yaml codex-seccomp\.json/);
+  assert.match(workflow, /compose\.yaml compose\.release\.yaml compose\.production\.yaml compose\.gateway\.yaml codex-seccomp\.json/);
+  assert.match(workflow, /cp scripts\/deploy\/remote-release\.sh "\$release_root\/remote-release\.sh"/);
+  assert.match(workflow, /"\$release_root\/compose\.release\.yaml" "\$release_root\/compose\.yaml"/);
+  assert.match(workflow, /scp_opts=\(\-i "\$key_file" \-P "\$deploy_port"/);
+  assert.match(workflow, /scp -q "\$\{scp_opts\[@\]\}"/);
+  assert.doesNotMatch(workflow, /scp -q "\$\{ssh_opts\[@\]\}"/);
   assert.match(workflow, /--compose-base/);
   assert.match(workflow, /--seccomp-policy/);
   assert.match(workflow, /StrictHostKeyChecking=yes/);
