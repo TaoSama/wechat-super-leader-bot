@@ -189,7 +189,7 @@ test("conflicting message is replied without tools and later messages in the pol
   assert.equal(sent.length, 2);
 });
 
-test("failed turns retain early thread ID and started journal, sanitize stderr and refuse automatic replay", async t => {
+test("failed turns retain early thread ID and failed journal, sanitize stderr and refuse automatic replay", async t => {
   const root = fixture(t);
   let calls = 0;
   const sdkFactory = fakeFactory(async function* () {
@@ -207,7 +207,7 @@ test("failed turns retain early thread ID and started journal, sanitize stderr a
   assert.equal(calls, 1);
   const workspace = await new WorkspaceStore(root).forChat("account", "chat");
   assert.equal(workspace.getThreadId(), "recoverable-thread");
-  assert.equal(Object.values(workspace.getReplyJournal())[0].stage, "started");
+  assert.equal(Object.values(workspace.getReplyJournal())[0].stage, "failed");
 });
 
 test("Controller tool preserves attachments, command ID and original credential links outside generated prose", async t => {

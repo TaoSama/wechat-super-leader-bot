@@ -132,6 +132,28 @@ test("legacy unknown started work recovers the same frozen explanation without n
   assert.equal(factories, 0);
 });
 
+test("failed terminal journals recover their frozen reply and remain terminal after receipt", async t => {
+  const root = fixture(t);
+  const workspace = await new WorkspaceStore(root).forChat("account", "chat");
+  const frozen = { text: "这次处理没有正常完成，执行结果待核实。" };
+  workspace.setReplyJournal({ [hash("message")]: {
+    inputHash: hash(request.text), stage: "failed", delivery: "pending", reply: frozen,
+  } });
+  let factories = 0;
+  const engine = new CodexReplyEngine({ root, model: "test", sdkFactory: () => {
+    factories++;
+    throw new Error("Failed work must not restart");
+  } });
+  assert.deepEqual(await engine.getReply("account", "chat", "message", noRecovery), frozen);
+  assert.deepEqual(await engine.reply("account", request, noController), frozen);
+  await engine.ackReply("account", "chat", "message", "accepted");
+  const entry = workspace.getReplyJournal()[hash("message")];
+  assert.equal(entry.stage, "failed");
+  assert.equal(entry.delivery, "accepted");
+  assert.deepEqual(entry.reply, frozen);
+  assert.equal(factories, 0);
+});
+
 test("two engine instances sharing a normalized root preserve overlapping replies and receipts", async t => {
   const root = fixture(t);
   let release!: () => void;

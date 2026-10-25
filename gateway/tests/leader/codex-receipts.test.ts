@@ -215,7 +215,7 @@ test("query-only results cannot turn failed native analysis into an empty comple
   const reply = await engine.reply("account", request, directToolController(async () => ({ result: { active: 3 } })));
   assert.match(reply.text, /执行结果待核实/);
   const workspace = await new WorkspaceStore(root).forChat("account", "chat");
-  assert.equal(workspace.getReplyJournal()[key].stage, "started");
+  assert.equal(workspace.getReplyJournal()[key].stage, "failed");
 });
 
 test("an early durable Controller receipt keeps its accepted ACK after native close failure", async t => {

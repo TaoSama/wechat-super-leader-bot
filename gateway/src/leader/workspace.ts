@@ -10,7 +10,7 @@ export type MemorySnapshot = Record<MemoryFile, { content: string; truncated: bo
 export const MEMORY_SNAPSHOT_BYTES = 24 * 1024;
 export type ReplyJournal = Record<string, {
   inputHash: string;
-  stage: "started" | "completed";
+  stage: "started" | "failed" | "completed";
   reply?: ControllerMessageResponse;
   delivery?: "pending" | "accepted" | "uncertain" | "expired";
   provenance?: "codex" | "controller-console";
@@ -116,7 +116,7 @@ function validateReplyJournal(value: unknown): ReplyJournal {
     if (!/^[a-f0-9]{64}$/.test(key) || !object(entry) ||
         Object.keys(entry).some(name => !["inputHash", "stage", "reply", "delivery", "provenance", "steering", "controllerMessageId", "consoleText"].includes(name)) ||
         typeof entry.inputHash !== "string" || !/^[a-f0-9]{64}$/.test(entry.inputHash) ||
-        (entry.stage !== "started" && entry.stage !== "completed") ||
+        (entry.stage !== "started" && entry.stage !== "failed" && entry.stage !== "completed") ||
         (entry.delivery !== undefined && !["pending", "accepted", "uncertain", "expired"].includes(entry.delivery as string)) ||
         (entry.provenance !== undefined && !["codex", "controller-console"].includes(entry.provenance as string)) ||
         (entry.provenance === "controller-console" && entry.stage !== "completed") ||
@@ -141,7 +141,7 @@ function validateReplyJournal(value: unknown): ReplyJournal {
     } else if (++closed > MAX_CLOSED_REPLY_ENTRIES) return invalid();
     const reply = entry.reply;
     if (reply === undefined) {
-      if (entry.stage === "completed") return invalid();
+      if (entry.stage === "completed" || entry.stage === "failed") return invalid();
     } else if (!object(reply) || Object.keys(reply).some(name =>
         !(entry.provenance === "controller-console" && entry.consoleText === undefined ? ["text"] : ["text", "commandId", "images", "imageSourceMessageId"]).includes(name)) ||
         typeof reply.text !== "string" || reply.text.length > MAX_REPLY_CHARS ||

@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import { type CodexOptions, type ThreadOptions, type ThreadEvent, type TurnOptions } from "@openai/codex-sdk";
 import type { ControllerClient } from "../controller/client.js";
 import type { ControllerMessageRequest, ControllerMessageResponse } from "../types.js";
+import { ControllerToolRejectedError } from "../controller/direct-tools.js";
 import { WorkspaceStore, MAX_REPLY_CHARS, MAX_REPLY_JOURNAL_ENTRIES, MAX_PINNED_REPLY_ENTRIES,
   MAX_CLOSED_REPLY_ENTRIES, MAX_REPLY_JOURNAL_BYTES, MAX_REPLY_ENTRY_BYTES,
   type ReplyJournal, type LeaderWorkspace } from "./workspace.js";
@@ -107,7 +108,7 @@ function permissionOverrides(workspace: LeaderWorkspace, codexPath?: string, ski
 /** Each chat owns its Codex home, native thread, memory, and durable reply journal. */
 interface NativeOutcome {
   reply: ControllerMessageResponse;
-  stage: "started" | "completed";
+  stage: "started" | "failed" | "completed";
   provenance?: "controller-console";
   consoleText?: string;
   controllerMessageId?: string;
@@ -443,6 +444,10 @@ export class CodexReplyEngine implements GatewayReplyEngine {
     });
     const directoryQuery = parseSessionDirectoryQuery(request.text);
     const consoleQuery = isConsoleLinkQuery(request.text);
+    // A console-link request has a one-shot issuance side effect. Once the
+    // Controller call is dispatched, an ordinary transport/provider failure
+    // cannot prove that no link was issued, so recovery must stay pinned.
+    let consoleCallDispatched = false;
     try {
       if (directoryQuery || consoleQuery) {
         query.resolveReady(false);
@@ -451,6 +456,7 @@ export class CodexReplyEngine implements GatewayReplyEngine {
         const reply = await traceSpan(directoryQuery ? "codex.directory.controller" : "codex.console.controller", async () => {
           const listed = await controller.listTools(request);
           if (!listed.tools.some(tool => tool.name === name)) throw new ReplyEngineUnavailableError();
+          if (consoleQuery) consoleCallDispatched = true;
           const called = await controller.callTool({ ...request, name, arguments: args,
             callId: hash(JSON.stringify([request.messageId, name, args])) });
           if (!called.reply) throw new ReplyEngineUnavailableError();
@@ -465,9 +471,10 @@ export class CodexReplyEngine implements GatewayReplyEngine {
         traceEvent("codex.reply.ready", { status: result.stage, cleanupPending: true });
         publish(result.reply);
       }, release, query, options);
-    } catch {
+    } catch (error) {
       traceEvent(directoryQuery ? "codex.directory.failed" : consoleQuery ? "codex.console.failed" : "codex.native.failed");
-      outcome = { reply: { text: FAILED_REPLY }, stage: "started" };
+      outcome = { reply: { text: FAILED_REPLY },
+        stage: consoleCallDispatched && !(error instanceof ControllerToolRejectedError) ? "started" : "failed" };
     }
     if (publicationError) throw publicationError.cause;
     // An exit/cleanup failure cannot revoke or overwrite an already delivered,
@@ -647,6 +654,7 @@ export class CodexReplyEngine implements GatewayReplyEngine {
       traceEvent("codex.native.incomplete", { turnCompletedObserved: completed, failed, aborted,
         emptyReply: !text.trim() });
     }
-    return result(nativeComplete) ?? { reply: { text: FAILED_REPLY }, stage: "started" };
+    return result(nativeComplete) ?? { reply: { text: FAILED_REPLY },
+      stage: !query.uncertain && !control.hasUncertainMutation ? "failed" : "started" };
   }
 }
