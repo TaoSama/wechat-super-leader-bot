@@ -13,6 +13,7 @@ const POSTGRES_STEP_IDS = new Set([
   'synthetic-integration', 'console-auth-integration', 'wechat-interaction',
   'task-notifications-postgres', 'scheduled-sessions-postgres',
 ]);
+const LATENCY_STEP_IDS = new Set(['message-latency', 'direct-directory-latency', 'direct-console-latency']);
 // The JS suites already fan out hundreds of workers; keep their outer pool serial to avoid CPU starvation and timing-sensitive flakes.
 const UNIT_PARALLELISM = 1;
 const POSTGRES_PARALLELISM = 2;
@@ -203,16 +204,21 @@ export async function runParallelPool(steps, { env, concurrency, signal, onStep 
 export async function runParallelGroups(plan, { env, signal, onStep = () => {}, execute = executeStep }) {
   await runParallelPool(plan.builds, { env, concurrency: plan.builds.length, signal, onStep, execute });
   const groups = [];
+  let latency = [];
   if (plan.unit.length) groups.push(runParallelPool(plan.unit, { env, concurrency: UNIT_PARALLELISM, signal, onStep, execute }));
   if (plan.integration.length) {
     const postgres = plan.integration.filter(step => POSTGRES_STEP_IDS.has(step.id));
-    const loopback = plan.integration.filter(step => !POSTGRES_STEP_IDS.has(step.id));
+    const loopback = plan.integration.filter(step => !POSTGRES_STEP_IDS.has(step.id) && !LATENCY_STEP_IDS.has(step.id));
+    latency = plan.integration.filter(step => LATENCY_STEP_IDS.has(step.id));
     if (postgres.length) groups.push(runParallelPool(postgres, { env, concurrency: POSTGRES_PARALLELISM, signal, onStep, execute }));
     if (loopback.length) groups.push(runParallelPool(loopback, { env, concurrency: LOOPBACK_PARALLELISM, signal, onStep, execute }));
   }
   const results = await Promise.allSettled(groups);
+  const latencyResults = latency.length
+    ? await Promise.allSettled([runParallelPool(latency, { env, concurrency: 1, signal, onStep, execute })])
+    : [];
   signal?.throwIfAborted();
-  const failures = results.filter(result => result.status === 'rejected').map(result => result.reason);
+  const failures = [...results, ...latencyResults].filter(result => result.status === 'rejected').map(result => result.reason);
   if (failures.length) throw new AggregateError(failures, 'Parallel verification failed');
 }
 

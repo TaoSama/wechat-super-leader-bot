@@ -100,6 +100,25 @@ test('parallel runner completes all builds before collecting every group failure
   });
 });
 
+test('parallel runner serializes latency variants after other integration checks', async () => {
+  const events = [], active = { count: 0, max: 0 };
+  const step = id => ({ id, command: 'synthetic', args: [], cwd: '.', env: {} });
+  const execute = async current => {
+    active.count++;
+    active.max = Math.max(active.max, active.count);
+    events.push(`start:${current.id}`);
+    await delay(2);
+    events.push(`done:${current.id}`);
+    active.count--;
+  };
+  await runParallelGroups({ builds: [], unit: [], integration: [step('other-integration'), step('message-latency'),
+    step('direct-directory-latency'), step('direct-console-latency')] }, { env: {}, signal: new AbortController().signal, execute });
+  assert(events.indexOf('start:message-latency') > events.indexOf('done:other-integration'));
+  assert(events.indexOf('start:direct-directory-latency') > events.indexOf('done:message-latency'));
+  assert(events.indexOf('start:direct-console-latency') > events.indexOf('done:direct-directory-latency'));
+  assert.equal(active.max, 1);
+});
+
 test('parallel runner escalates abort cleanup when a child ignores SIGTERM', async () => {
   const controller = new AbortController();
   let started;
