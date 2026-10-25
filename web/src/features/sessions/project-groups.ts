@@ -41,13 +41,27 @@ function updatedAt(session: ScopedSession): number {
 /** Workspace identity includes the full path and machine, even when names match. */
 export function groupSessionProjects(sessions: readonly ScopedSession[]): SessionProjectGroup[] {
   const normalized = sessions.map(session => ({ session, path: normalizedPath(session.cwd), worktreeName: worktreeProjectName(normalizedPath(session.cwd)) }));
-  const worktreeNames = new Set(normalized.flatMap(item => item.worktreeName ? [item.worktreeName] : []));
+  const worktreeNames = new Set(normalized.flatMap(item => item.worktreeName ? [JSON.stringify([item.session.nodeId, item.worktreeName])] : []));
+  const mainPathsByProject = new Map<string, Set<string>>();
+  for (const { session, path, worktreeName } of normalized) {
+    if (worktreeName !== null) continue;
+    const basename = path === "/" ? path : path ? projectName(path) : "未关联 Project";
+    const key = JSON.stringify([session.nodeId, basename]);
+    const paths = mainPathsByProject.get(key) ?? new Set<string>();
+    paths.add(path);
+    mainPathsByProject.set(key, paths);
+  }
   const groups = new Map<string, SessionProjectGroup>();
   for (const { session, path, worktreeName } of normalized) {
     const basename = path === "/" ? path : path ? projectName(path) : "未关联 Project";
     // A managed worktree is another checkout of the same repository. Its cwd
     // is an implementation detail and must not create a second project card.
-    const canonicalName = worktreeName ?? (worktreeNames.has(basename) ? basename : null);
+    const projectKey = JSON.stringify([session.nodeId, worktreeName ?? basename]);
+    const mainPaths = mainPathsByProject.get(projectKey);
+    const ambiguousMain = mainPaths !== undefined && mainPaths.size > 1;
+    // A worktree path does not identify which same-named main checkout it came
+    // from. Keep it isolated when that association would otherwise be guesswork.
+    const canonicalName = ambiguousMain ? null : worktreeName ?? (worktreeNames.has(projectKey) ? basename : null);
     const key = canonicalName ? JSON.stringify([session.nodeId, "project", canonicalName]) : JSON.stringify([session.nodeId, path]);
     const group = groups.get(key) ?? {
       key,
