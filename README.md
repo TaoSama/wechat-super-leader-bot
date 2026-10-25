@@ -98,6 +98,8 @@ docker buildx build --platform linux/amd64 --load \
 
 Controller 还需通过 `--label org.opencontainers.image.revision=<commit>` 注入 revision。
 发布前检查平台、revision、镜像摘要和非 root smoke；生产只替换 Controller/Gateway 两个镜像字段。
+合并到 `main` 后的生产 CD、VPS 前置条件、Environment Secrets/Variables 和回滚边界见
+[`docs/production-deployment.md`](docs/production-deployment.md)。
 生产 Gateway 只能运行一个实例，并保留数据库、微信账号和 Gateway 状态卷。
 
 ## 验证边界

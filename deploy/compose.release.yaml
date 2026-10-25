@@ -1,0 +1,7 @@
+# The release workflow supplies immutable image names for the existing Compose
+# services. Runtime volumes, limits and health checks stay in the base overlays.
+services:
+  controller:
+    image: ${CONTROLLER_IMAGE:?set CONTROLLER_IMAGE}
+  gateway:
+    image: ${GATEWAY_IMAGE:?set GATEWAY_IMAGE}
