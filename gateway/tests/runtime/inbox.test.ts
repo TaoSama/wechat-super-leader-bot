@@ -32,6 +32,18 @@ test("inbound messages recover exact text, metadata and poll insertion order acr
   assert.deepEqual(reload().list().map(item => item.deliveryKey), ["10", "1", "2"]);
 });
 
+test("separate gateway inbox instances merge durable writes instead of overwriting each other", t => {
+  const { path, reload, account } = fixture(t);
+  const first = new FileInboundInbox(path, () => account.fingerprint, 10);
+  const second = new FileInboundInbox(path, () => account.fingerprint, 10);
+  first.put(inbound("first"));
+  second.put(inbound("second"));
+  assert.deepEqual(reload().list().map(item => item.deliveryKey), ["first", "second"]);
+  first.remove("first");
+  second.remove("second");
+  assert.deepEqual(reload().list(), []);
+});
+
 test("retained messages accept exact retries at capacity and reject changed content or metadata", t => {
   const { inbox, reload } = fixture(t, 1);
   const original = inbound("same-key");
