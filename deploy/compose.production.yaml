@@ -11,16 +11,17 @@ services:
   controller:
     environment:
       CONSOLE_PUBLIC_URL: ${CONSOLE_PUBLIC_URL:-https://leader.example.com}
+      CONTROLLER_DATA_ROOT: /var/lib/super-leader-runtime
+      SETTINGS_ROOT: /var/lib/super-leader-runtime/settings
       BACKGROUND_WORKER_ROOT: ${BACKGROUND_WORKER_ROOT:-}
-      BACKGROUND_ARTIFACT_ROOT: /var/lib/super-leader-artifacts
+      BACKGROUND_ARTIFACT_ROOT: ${BACKGROUND_ARTIFACT_ROOT:-}
       BACKGROUND_MODEL_NAME: ${BACKGROUND_MODEL_NAME:-}
       BACKGROUND_MODEL_BASE_URL: ${BACKGROUND_MODEL_BASE_URL:-}
       BACKGROUND_MODEL_API_KEY: ${BACKGROUND_MODEL_API_KEY:-}
       BACKGROUND_MAX_CONCURRENT: ${BACKGROUND_MAX_CONCURRENT:-2}
       BACKGROUND_TURN_TIMEOUT_MS: ${BACKGROUND_TURN_TIMEOUT_MS:-600000}
     volumes:
-      - background-workers:/var/lib/super-leader-background
-      - background-artifacts:/var/lib/super-leader-artifacts
+      - controller-runtime:/var/lib/super-leader-runtime
     user: "1000:1000"
     init: true
     mem_limit: ${CONTROLLER_MEMORY_LIMIT:-1536m}
@@ -46,7 +47,5 @@ services:
         max-size: 10m
         max-file: "3"
 volumes:
-  background-workers:
-    name: ${BACKGROUND_WORKER_VOLUME:-super-leader-background-workers}
-  background-artifacts:
-    name: ${BACKGROUND_ARTIFACT_VOLUME:-super-leader-background-artifacts}
+  controller-runtime:
+    name: ${CONTROLLER_RUNTIME_VOLUME:-super-leader-runtime}

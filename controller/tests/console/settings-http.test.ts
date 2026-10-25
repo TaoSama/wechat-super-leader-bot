@@ -136,11 +136,21 @@ describe("Gateway settings transport", () => {
     const prior = process.env;
     try {
       process.env = {CONTROLLER_TOKEN:"test-token",PERSISTENCE_MODE:"memory",SUPER_LEADER_NO_DOTENV:"1"};
-      expect(loadConfig().settingsRoot).toBe(path.resolve(".runtime/controller-settings"));
+      expect(loadConfig().settingsRoot).toBe(path.resolve(".runtime/controller-runtime/settings"));
+      process.env.CONTROLLER_DATA_ROOT = "/data/controller-runtime";
+      expect(loadConfig().settingsRoot).toBe("/data/controller-runtime/settings");
+      process.env.CONTROLLER_DATA_ROOT = "/";
+      expect(() => loadConfig()).toThrow("CONTROLLER_DATA_ROOT must be a dedicated absolute directory");
+      process.env.CONTROLLER_DATA_ROOT = "/data/controller-runtime";
       process.env.SETTINGS_ROOT = "relative/settings";
       expect(()=>loadConfig()).toThrow("SETTINGS_ROOT must be a dedicated absolute directory");
       process.env.SETTINGS_ROOT = "/";
       expect(()=>loadConfig()).toThrow("SETTINGS_ROOT must be a dedicated absolute directory");
+      process.env.SETTINGS_ROOT = "/data/settings";
+      expect(()=>loadConfig()).toThrow("SETTINGS_ROOT must be inside CONTROLLER_DATA_ROOT");
+      process.env.SETTINGS_ROOT = "/data/controller-runtime/custom-settings";
+      expect(loadConfig().settingsRoot).toBe("/data/controller-runtime/custom-settings");
+      delete process.env.CONTROLLER_DATA_ROOT;
       process.env.SETTINGS_ROOT = "/data/settings";
       expect(loadConfig().settingsRoot).toBe("/data/settings");
     } finally { process.env = prior; }

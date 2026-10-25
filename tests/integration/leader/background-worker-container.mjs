@@ -16,8 +16,9 @@ const { values } = parseArgs({ options: { run: { type: 'boolean' }, help: { type
 const FIXTURE_TIMEOUT_MS = 180_000;
 const DETACHED_DELAY_MS = 5_000;
 const RETENTION_OBSERVATION_MS = 6_000;
-const WORKER_ROOT = '/var/lib/super-leader-background';
-const ARTIFACT_ROOT = '/var/lib/super-leader-artifacts';
+const RUNTIME_ROOT = '/var/lib/super-leader-runtime';
+const WORKER_ROOT = `${RUNTIME_ROOT}/background/workers`;
+const ARTIFACT_ROOT = `${RUNTIME_ROOT}/background/artifacts`;
 const RESOURCE_SAMPLE_MS = 100;
 const IDLE_OBSERVATION_MS = 5_000;
 const memoryMiB = Number(values['memory-mib']), concurrency = Number(values.concurrency);
@@ -48,7 +49,7 @@ async function verifyContainer() {
   const env = localDockerEnvironment(verificationEnvironment());
   const id = randomUUID();
   const name = `background-worker-probe-${id}`;
-  const workers = `${name}-workers`, artifacts = `${name}-artifacts`;
+  const runtime = `${name}-runtime`;
   const script = fileURLToPath(import.meta.url);
   const policy = fileURLToPath(new URL('../../../deploy/security/codex-seccomp.json', import.meta.url));
   const provider = values['native-only'] ? null : await readInput();
@@ -61,8 +62,7 @@ async function verifyContainer() {
       '--security-opt', 'apparmor=super-leader-codex', '--user', '1000:1000', '--memory', `${memoryMiB}m`,
       '--memory-swap', `${memoryMiB}m`, '--cpus', '2',
       '--pids-limit', '512', '--tmpfs', '/tmp:size=64m,mode=1777',
-      '--mount', `type=volume,src=${workers},dst=${WORKER_ROOT}`,
-      '--mount', `type=volume,src=${artifacts},dst=${ARTIFACT_ROOT}`,
+      '--mount', `type=volume,src=${runtime},dst=${RUNTIME_ROOT}`,
       '--mount', `type=bind,src=${script},dst=/probe/background-worker-container.mjs,readonly`,
       '--entrypoint', 'node', '-i', values.image, '/probe/background-worker-container.mjs', '--container-fixture',
       '--memory-mib', String(memoryMiB), '--concurrency', String(concurrency),
@@ -84,7 +84,7 @@ async function verifyContainer() {
       catch (error) { if (!absent || !String(error.stderr).includes(absent)) throw new Error('Fixture cleanup failed'); }
     };
     cleanup(['rm', '-f', name], 'No such container');
-    cleanup(['volume', 'rm', workers, artifacts]);
+    cleanup(['volume', 'rm', runtime]);
   }
 }
 

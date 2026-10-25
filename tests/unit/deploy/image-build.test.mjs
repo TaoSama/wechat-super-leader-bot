@@ -4,7 +4,7 @@ import test from 'node:test';
 
 const BASE_IMAGE = 'node:24-bookworm-slim';
 const NATIVE_TOOLCHAIN = `FROM --platform=$BUILDPLATFORM ${BASE_IMAGE} AS toolchain`;
-const CONTROLLER_RUNTIME_INSTALL = 'RUN npm install --global @openai/codex@0.163.0 && mkdir -p /var/lib/super-leader-background /var/lib/super-leader-artifacts /var/lib/super-leader-settings && chown node:node /var/lib/super-leader-background /var/lib/super-leader-artifacts /var/lib/super-leader-settings';
+const CONTROLLER_RUNTIME_INSTALL = 'RUN npm install --global @openai/codex@0.163.0 && mkdir -p /var/lib/super-leader-runtime/settings /var/lib/super-leader-runtime/background/workers /var/lib/super-leader-runtime/background/artifacts && chown -R node:node /var/lib/super-leader-runtime';
 const SKILL_RUNTIME_INSTALL = 'RUN apt-get update && apt-get install -y --no-install-recommends python3 curl python3-bs4 python3-html2text && rm -rf /var/lib/apt/lists/*';
 const SKILL_RUNTIME_PERMISSIONS = 'RUN chmod -R go-w /etc/codex/skills';
 const controllerDockerfile = readFileSync(new URL('../../../deploy/Dockerfile.controller', import.meta.url), 'utf8');
@@ -118,7 +118,7 @@ test('image contracts reject emulated toolchains, unpruned dependencies and leak
   assert.throws(() => assertImageContract(controllerDockerfile.replace('/web/dist ./web', '/web/node_modules ./web'), 'controller'));
   assert.throws(() => assertImageContract(controllerDockerfile.replace('FROM toolchain AS web-build', `FROM ${BASE_IMAGE} AS web-build`), 'controller'));
   assert.throws(() => assertImageContract(controllerDockerfile.replace('@openai/codex@0.163.0', '@openai/codex@latest'), 'controller'));
-  assert.throws(() => assertImageContract(controllerDockerfile.replace('chown node:node /var/lib/super-leader-background', 'chmod 777 /var/lib/super-leader-background'), 'controller'));
+  assert.throws(() => assertImageContract(controllerDockerfile.replace('chown -R node:node /var/lib/super-leader-runtime', 'chmod 777 /var/lib/super-leader-runtime'), 'controller'));
   assert.throws(() => assertImageContract(controllerDockerfile.replace('FROM toolchain AS runtime-certificates', `FROM ${BASE_IMAGE} AS runtime-certificates`), 'controller'));
   assert.throws(() => assertImageContract(controllerDockerfile.replace('ca-certificates \\', 'ca-certificates curl \\'), 'controller'));
   assert.throws(() => assertImageContract(gatewayDockerfile.replace('--chown=node:node /runtime/etc/super-leader', '/runtime/etc/super-leader'), 'gateway'));

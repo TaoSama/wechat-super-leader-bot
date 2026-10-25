@@ -25,7 +25,7 @@ export class LocalSettingsStorage {
   readonly root: string;
   private readonly file: string;
   constructor(root?: string) {
-    this.root = path.resolve(root ?? ".runtime/controller-settings");
+    this.root = path.resolve(root ?? ".runtime/controller-runtime/settings");
     this.file = path.join(this.root, FILE_NAME);
   }
   read(): LocalSettingsData {

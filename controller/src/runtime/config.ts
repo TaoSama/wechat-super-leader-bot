@@ -37,12 +37,30 @@ export function validateGatewaySettingsUrl(raw: string | undefined): string | un
   } catch { throw new Error("Invalid GATEWAY_SETTINGS_URL: expected an HTTP(S) origin without credentials"); }
 }
 
-function settingsRoot(raw: string | undefined): string {
-  if (!raw?.trim()) return path.resolve(".runtime/controller-settings");
-  if (!path.isAbsolute(raw) || path.resolve(raw) === path.parse(raw).root) {
-    throw new Error("SETTINGS_ROOT must be a dedicated absolute directory");
+function dedicatedRoot(raw: string, name: string): string {
+  const resolved = path.resolve(raw);
+  if (!path.isAbsolute(raw) || resolved === path.parse(resolved).root) {
+    throw new Error(`${name} must be a dedicated absolute directory`);
   }
-  return path.resolve(raw);
+  return resolved;
+}
+
+function runtimeRoot(raw: string | undefined): string {
+  return dedicatedRoot(raw?.trim() || path.resolve(".runtime/controller-runtime"), "CONTROLLER_DATA_ROOT");
+}
+
+function underRuntimeRoot(root: string, candidate: string, name: string): string {
+  const resolved = dedicatedRoot(candidate, name);
+  if (!resolved.startsWith(`${root}${path.sep}`)) {
+    throw new Error(`${name} must be inside CONTROLLER_DATA_ROOT`);
+  }
+  return resolved;
+}
+
+function settingsRoot(raw: string | undefined, root: string, enforceRoot: boolean): string {
+  const configured = raw?.trim();
+  if (!configured) return path.join(root, "settings");
+  return enforceRoot ? underRuntimeRoot(root, configured, "SETTINGS_ROOT") : dedicatedRoot(configured, "SETTINGS_ROOT");
 }
 
 function parseStrictInt(value: string | undefined, name: string, min: number, max: number, defaultValue: number): number {
@@ -188,6 +206,8 @@ export function loadConfig(): Config {
   }
 
   const consolePublicUrl = validateConsolePublicUrl(process.env.CONSOLE_PUBLIC_URL);
+  const configuredDataRoot = process.env.CONTROLLER_DATA_ROOT?.trim();
+  const persistentRoot = runtimeRoot(configuredDataRoot);
 
   return {
     port,
@@ -202,9 +222,9 @@ export function loadConfig(): Config {
     webDistDir: process.env.WEB_DIST_DIR,
     leader,
     consolePublicUrl,
-    settingsRoot: settingsRoot(process.env.SETTINGS_ROOT),
+    settingsRoot: settingsRoot(process.env.SETTINGS_ROOT, persistentRoot, Boolean(configuredDataRoot)),
     gatewaySettingsUrl: validateGatewaySettingsUrl(process.env.GATEWAY_SETTINGS_URL),
-    background: loadBackgroundConfig(process.env, leader),
+    background: loadBackgroundConfig(process.env, leader, configuredDataRoot ? persistentRoot : undefined),
     taskNotifications: {
       fileMaxBytes: parseStrictInt(process.env.RESULT_FILE_MAX_BYTES, "RESULT_FILE_MAX_BYTES", 1, 512 * 1024 * 1024, 50 * 1024 * 1024),
       retentionMs: parseStrictInt(process.env.RESULT_RETENTION_HOURS, "RESULT_RETENTION_HOURS", 1, 8760, 168) * 60 * 60_000,

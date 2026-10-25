@@ -31,8 +31,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 # Install on the target platform so Codex's native sandbox matches the deployed CPU.
 RUN npm install --global @openai/codex@0.163.0 \
-    && mkdir -p /var/lib/super-leader-background /var/lib/super-leader-artifacts /var/lib/super-leader-settings \
-    && chown node:node /var/lib/super-leader-background /var/lib/super-leader-artifacts /var/lib/super-leader-settings
+    && mkdir -p /var/lib/super-leader-runtime/settings /var/lib/super-leader-runtime/background/workers /var/lib/super-leader-runtime/background/artifacts \
+    && chown -R node:node /var/lib/super-leader-runtime
 # Production dependencies copied across architectures must remain platform-independent.
 ENV NODE_ENV=production WEB_DIST_DIR=/app/web SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt SOURCE_REVISION=$VCS_REF
 WORKDIR /app

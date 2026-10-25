@@ -88,7 +88,7 @@ export async function verifyBackgroundMonitoring() {
   const token = randomBytes(24).toString('hex');
   const nodeTokens = Object.fromEntries(NODES.map(node => [node, randomBytes(24).toString('hex')]));
   const directory = await mkdtemp(path.join(tmpdir(), 'leader-monitor-e2e-'));
-  const workerRoot = path.join(directory, 'workers');
+  const workerRoot = path.join(directory, 'background', 'workers');
   const fakeCodex = path.join(directory, 'fixture-codex.mjs');
   let child, base, clockNow, clockReal, heartbeatTimer;
   const sockets = new Map(), states = new Map(NODES.map(node => [node, 'running']));
@@ -106,7 +106,9 @@ export async function verifyBackgroundMonitoring() {
       env: { ...verificationEnvironment(), PERSISTENCE_MODE: 'memory', CONTROLLER_TOKEN: token,
         NODE_TOKENS: JSON.stringify(Object.fromEntries(NODES.map(node => [node, nodeTokens[node]]))),
         ALLOWED_CHAT_IDS: CHAT, LEADER_MODE: 'rules', TASK_NOTIFICATION_TICK_MS: '100',
-        BACKGROUND_WORKER_ROOT: workerRoot, BACKGROUND_ARTIFACT_ROOT: path.join(directory, 'artifacts'),
+        CONTROLLER_DATA_ROOT: directory,
+        BACKGROUND_WORKER_ROOT: workerRoot,
+        BACKGROUND_ARTIFACT_ROOT: path.join(directory, 'background', 'artifacts'),
         BACKGROUND_CODEX_PATH: fakeCodex, BACKGROUND_MODEL_NAME: 'fixture-background-model',
         BACKGROUND_MODEL_BASE_URL: 'https://fixture.invalid/v1', BACKGROUND_MODEL_API_KEY: 'synthetic-provider-key',
         BACKGROUND_TURN_TIMEOUT_MS: '10000' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
