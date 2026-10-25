@@ -6,6 +6,7 @@ import { readdirSync } from 'node:fs';
 
 export const PROJECT_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const SUITES = ['all', 'unit', 'integration'];
+const UNIT_GROUPS = ['all', 'core', 'daemon'];
 const NODE_MIN_MAJOR = 24;
 const TOOL_PROBE_MS = 10_000;
 const BUILD_STEP_IDS = new Set(['controller-build', 'gateway-build', 'web-build']);
@@ -108,18 +109,23 @@ export async function runSteps(steps, { env, execute = executeStep, signal, onSt
   signal?.throwIfAborted();
 }
 
-export function parallelVerificationPlan(suite = 'all', { skipNativeProgress = false } = {}) {
+export function parallelVerificationPlan(suite = 'all', { skipNativeProgress = false, unitGroup = 'all' } = {}) {
   if (!SUITES.includes(suite)) throw new Error('Unknown suite; use all, unit or integration');
+  if (!UNIT_GROUPS.includes(unitGroup)) throw new Error('Unknown unit group; use all, core or daemon');
+  if (unitGroup !== 'all' && suite !== 'unit') throw new Error('Unit groups require --suite unit');
   const unit = verificationPlan('unit', { skipNativeProgress });
   const integration = verificationPlan('integration', { skipNativeProgress });
   const all = [...unit, ...integration];
   const builds = all.filter(step => BUILD_STEP_IDS.has(step.id)).filter((step, index, steps) =>
     steps.findIndex(candidate => candidate.id === step.id) === index);
   const unitSteps = unit.filter(step => !BUILD_STEP_IDS.has(step.id));
+  const daemonSteps = unitSteps.filter(step => SERIAL_UNIT_STEP_IDS.has(step.id));
+  const coreSteps = unitSteps.filter(step => !SERIAL_UNIT_STEP_IDS.has(step.id));
+  const selectedUnitSteps = unitGroup === 'daemon' ? daemonSteps : unitGroup === 'core' ? coreSteps : unitSteps;
   const integrationSteps = integration.filter(step => !BUILD_STEP_IDS.has(step.id));
   return {
-    builds: suite === 'integration' || suite === 'unit' || suite === 'all' ? builds : [],
-    unit: suite === 'integration' ? [] : unitSteps,
+    builds: unitGroup === 'daemon' ? [] : suite === 'integration' || suite === 'unit' || suite === 'all' ? builds : [],
+    unit: suite === 'integration' ? [] : selectedUnitSteps,
     integration: suite === 'unit' ? [] : integrationSteps,
   };
 }
@@ -248,13 +254,20 @@ export async function main(args = process.argv.slice(2)) {
   const { values } = parseArgs({ args, options: {
     help: { type: 'boolean', short: 'h' }, list: { type: 'boolean' }, parallel: { type: 'boolean' },
     suite: { type: 'string', default: 'all' },
+    'unit-group': { type: 'string', default: 'all' },
   } });
   if (values.help) {
-    console.log('Usage: node scripts/verify.mjs [--suite all|unit|integration] [--parallel] [--list]\nRequires Node >=24, pnpm, Go from daemon/go.mod and installed frozen JS dependencies.\nall/integration also require local Docker and Compose. No dependency install, deployment, real model, WeChat or desktop session tests.\n--parallel runs independent build and verification steps in bounded pools; --list prints commands only, without reading credentials or contacting Docker. Interrupt requests wait for the current check to finish its cleanup.');
+    console.log('Usage: node scripts/verify.mjs [--suite all|unit|integration] [--unit-group all|core|daemon] [--parallel] [--list]\nRequires Node >=24, pnpm, Go from daemon/go.mod and installed frozen JS dependencies.\nall/integration also require local Docker and Compose. No dependency install, deployment, real model, WeChat or desktop session tests.\n--unit-group core|daemon selects a unit subset for split CI jobs.\n--parallel runs independent build and verification steps in bounded pools; --list prints commands only, without reading credentials or contacting Docker. Interrupt requests wait for the current check to finish its cleanup.');
     return;
   }
   const skipNativeProgress = process.env.SUPER_LEADER_SKIP_NATIVE_PROGRESS === '1';
-  const steps = verificationPlan(values.suite, { skipNativeProgress });
+  const unitGroup = values['unit-group'];
+  if (!UNIT_GROUPS.includes(unitGroup)) throw new Error('Unknown unit group; use all, core or daemon');
+  if (unitGroup !== 'all' && values.suite !== 'unit') throw new Error('Unit groups require --suite unit');
+  const selectedPlan = parallelVerificationPlan(values.suite, { skipNativeProgress, unitGroup });
+  const steps = unitGroup === 'all'
+    ? verificationPlan(values.suite, { skipNativeProgress })
+    : [...selectedPlan.builds, ...selectedPlan.unit, ...selectedPlan.integration];
   if (values.list) {
     console.log(JSON.stringify(steps, null, 2));
     return;
@@ -276,9 +289,9 @@ export async function main(args = process.argv.slice(2)) {
   process.on('SIGTERM', requestStop);
   try {
     const onStep = step => console.log(`[verify] ${step.id}`);
-    if (values.parallel) await runParallelGroups(parallelVerificationPlan(values.suite, { skipNativeProgress }), { env, signal: stop.signal, onStep });
+    if (values.parallel) await runParallelGroups(selectedPlan, { env, signal: stop.signal, onStep });
     else await runSteps(steps, { env, signal: stop.signal, onStep });
-    console.log(`[verify] PASS ${steps.length} checks (${values.suite}); synthetic fixtures only, no production acceptance claimed.`);
+    console.log(`[verify] PASS ${steps.length} checks (${values.suite}${unitGroup === 'all' ? '' : `/${unitGroup}`}); synthetic fixtures only, no production acceptance claimed.`);
   } finally {
     process.removeListener('SIGINT', requestStop);
     process.removeListener('SIGTERM', requestStop);

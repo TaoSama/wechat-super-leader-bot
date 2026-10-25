@@ -73,6 +73,19 @@ test('parallel plan preserves every serial check while sharing component builds'
   assert.deepEqual(parallelVerificationPlan('integration').unit, []);
 });
 
+test('unit groups split daemon checks without dropping any unit coverage', () => {
+  const all = parallelVerificationPlan('unit');
+  const core = parallelVerificationPlan('unit', { unitGroup: 'core' });
+  const daemon = parallelVerificationPlan('unit', { unitGroup: 'daemon' });
+  const allIds = new Set([...all.builds, ...all.unit].map(step => step.id));
+  const splitIds = new Set([...core.builds, ...core.unit, ...daemon.builds, ...daemon.unit].map(step => step.id));
+  assert.deepEqual(splitIds, allIds);
+  assert.equal(daemon.builds.length, 0);
+  assert.deepEqual(daemon.unit.map(step => step.id), ['daemon-race', 'terminal-delivery-sample']);
+  assert(core.unit.every(step => !['daemon-race', 'terminal-delivery-sample'].includes(step.id)));
+  assert.throws(() => parallelVerificationPlan('integration', { unitGroup: 'daemon' }), /Unit groups require/);
+});
+
 test('parallel runner completes all builds before collecting every group failure', async () => {
   const events = [];
   const step = id => ({ id, command: 'synthetic', args: [], cwd: '.', env: {} });
@@ -233,7 +246,7 @@ test('CLI help and list do not require external tools or read application state'
     const result = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', env: { PATH: '/nonexistent' } });
     assert.equal(result.status, 0, result.stderr);
   }
-  for (const args of [['--live'], ['--suite', 'wrong'], ['unexpected']]) {
+  for (const args of [['--live'], ['--suite', 'wrong'], ['--unit-group', 'wrong'], ['--unit-group', 'daemon', '--suite', 'integration'], ['unexpected']]) {
     assert.notEqual(spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', env: { PATH: '/nonexistent' } }).status, 0);
   }
 });
