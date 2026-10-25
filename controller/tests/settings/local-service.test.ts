@@ -194,6 +194,14 @@ if [ "$1" = '--version' ]; then printf '%s\\n' 'codex-cli 0.163.0'; else printf 
     expect(() => f.service.capture()).toThrow(/格式无效/);
     expect(() => f.service.restoreTurn({ version: "previous-deployment", data: {} })).toThrow(/版本已变化/);
   });
+
+  it("falls back to the base tool when a persisted schema is no longer compatible", () => {
+    const f = fixture(), base = LEADER_TOOLS.find(item => item.function.name === "remember")!;
+    fs.writeFileSync(path.join(f.root, "runtime-settings.json"), JSON.stringify({ format: 1, models: {}, resources: {
+      ["controller.tool.remember"]: "{\"name\":\"remember\",\"description\":\"bad\",\"parameters\":{}}",
+    }}));
+    expect(f.service.capture().tool(base)).toEqual(base);
+  });
 });
 
 describe("direct runtime consumer", () => {

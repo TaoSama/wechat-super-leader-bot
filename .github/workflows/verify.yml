@@ -38,6 +38,15 @@ jobs:
         with:
           go-version-file: daemon/go.mod
           cache-dependency-path: daemon/go.sum
+      - name: Configure Codex bubblewrap AppArmor profile
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends apparmor-profiles apparmor-utils bubblewrap
+          sudo install -m 0644 /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/bwrap-userns-restrict
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          bwrap --version
+          bwrap --unshare-user --unshare-net --ro-bind / / --proc /proc --dev /dev /bin/true
       - name: Install fixed package manager
         run: npm install --global pnpm@11.8.0
       - name: Install locked dependencies

@@ -77,8 +77,9 @@ export class LocalSettingsStorage {
         catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       }
     } finally {
-      try { fs.unlinkSync(temporary); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-      lock.release();
+      try {
+        try { fs.unlinkSync(temporary); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      } finally { lock.release(); }
     }
   }
 
@@ -117,8 +118,9 @@ export class LocalSettingsStorage {
       const directory = fs.openSync(this.root, "r");
       try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
     } finally {
-      try { fs.unlinkSync(temp); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-      lock.release();
+      try {
+        try { fs.unlinkSync(temp); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      } finally { lock.release(); }
     }
   }
 }

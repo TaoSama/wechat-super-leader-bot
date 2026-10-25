@@ -34,7 +34,9 @@ export class LocalRuntimeSettings {
   }
   tool(base: ModelTool): ModelTool {
     const content = this.data.resources[`controller.tool.${base.function.name}`];
-    return content === undefined ? structuredClone(base) : parseCompatibleTool(base, content);
+    if (content === undefined) return structuredClone(base);
+    try { return parseCompatibleTool(base, content); }
+    catch { return structuredClone(base); }
   }
   hasEditedConstraints(base: ModelTool): boolean {
     return JSON.stringify(base.function.parameters) !== JSON.stringify(this.tool(base).function.parameters);

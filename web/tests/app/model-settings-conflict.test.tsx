@@ -41,3 +41,13 @@ it("干净的模型表单接纳外部新设置，编辑中的选择保留", asyn
   expect(screen.getByRole("combobox", { name: "微信助手模型" })).toHaveTextContent("A");
   expect(screen.getByRole("button", { name: "读取最新设置" })).toBeInTheDocument();
 }, 30000);
+it("不可编辑的模型作用域不读取或刷新目录", async () => {
+  const fetchImpl = vi.fn(async () => response(catalog));
+  vi.stubGlobal("fetch", fetchImpl);
+  render(<ModelSettings scope={{ ...scope, editable: false }} onAuthFailure={vi.fn()} />);
+  expect(await screen.findByText("当前执行环境仅支持查看。")).toBeInTheDocument();
+  const refresh = screen.getByRole("button", { name: "刷新目录" });
+  expect(refresh).toBeDisabled();
+  fireEvent.click(refresh);
+  expect(fetchImpl).not.toHaveBeenCalled();
+});

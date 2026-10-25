@@ -208,7 +208,16 @@ export class GatewaySettings {
     const progressTool = parseProgressTool(this.resources.read("prompt/progress_tool").content);
     const home = path.join(path.dirname(this.root), "settings-snapshots", randomUUID());
     const skillsRoot = path.join(home, ".agents", "skills");
-    const skillMetadata = this.resources.snapshotSkills(skillsRoot);
+    let skillMetadata: ResourceMetadata[];
+    try { skillMetadata = this.resources.snapshotSkills(skillsRoot); }
+    catch (error) {
+      try { fs.rmSync(home, { recursive: true, force: true }); }
+      catch (cleanupError) {
+        if (error instanceof Error) error.cause = cleanupError;
+        else throw new AggregateError([error, cleanupError], "Failed to clean settings snapshot after freeze failure");
+      }
+      throw error;
+    }
     const disabledSkills = skillMetadata.filter(resource => path.basename(resource.path) === "SKILL.md")
       .map(resource => ({ path: path.join(this.options.skillsRoot ?? HEADLESS_SKILLS_ROOT, resource.id.slice(6)), enabled: false }));
     return { ...selected, systemPrompt, progressTool, home, skillsRoot, disabledSkills,
