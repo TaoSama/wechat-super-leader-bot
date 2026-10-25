@@ -105,6 +105,21 @@ func TestHeartbeatWithoutNativeStartEvidenceRemainsUnknown(t *testing.T) {
 	}
 }
 
+func TestHeartbeatAllowsUnescapedInstructionText(t *testing.T) {
+	text := fixtureRecord("event_msg", map[string]any{"type": "task_started", "turn_id": "run",
+		"turn_attribution": map[string]string{"turn_trigger": "automation_heartbeat_scheduled"}})
+	text += fixtureRecord("response_item", map[string]any{
+		"type": "message", "role": "user",
+		"content": []any{map[string]any{"type": "input_text", "text": "<heartbeat>\n  <automation_id>target</automation_id>\n  <current_time_iso>" + fixtureTime + "</current_time_iso>\n  <instructions>keep rows where price &lt; 500; reject values <500 and use >= 0</instructions>\n</heartbeat>"}},
+		"internal_chat_message_metadata_passthrough": map[string]any{"turn_id": "run"},
+	})
+	text += fixtureFinal("run", "result") + fixtureComplete("run")
+	evidence := inspectFixture(t, text, true)
+	if evidence.Status != "completed" || evidence.TurnID != "run" || evidence.Text != "result" {
+		t.Fatalf("valid heartbeat with opaque instructions was rejected: %+v", evidence)
+	}
+}
+
 func TestScheduledResultRequiresCompletionAndFinal(t *testing.T) {
 	for _, test := range []struct{ name, tail, status string }{
 		{"final without completion", fixtureFinal("run", "working"), "running"},
@@ -138,6 +153,29 @@ func TestMissingTurnAndUnsupportedSchemaAreUnknown(t *testing.T) {
 		if evidence := inspectFixture(t, text, true); evidence.Status != "unknown" {
 			t.Fatalf("unsupported evidence accepted: %+v", evidence)
 		}
+	}
+}
+
+func TestMalformedRecordsOutsideExactTurnDoNotMaskCompletion(t *testing.T) {
+	text := "invalid json\n" + fixtureHeartbeat("run", "target", fixtureTime) + fixtureFinal("run", "result") + fixtureComplete("run") + "still invalid\n"
+	evidence := inspectFixture(t, text, true)
+	if evidence.Status != "completed" || evidence.TurnID != "run" || evidence.Text != "result" {
+		t.Fatalf("unrelated malformed records masked exact completion: %+v", evidence)
+	}
+}
+
+func TestMalformedRecordInsideExactTurnRemainsUnknown(t *testing.T) {
+	text := fixtureHeartbeat("run", "target", fixtureTime) + "invalid json\n" + fixtureFinal("run", "result") + fixtureComplete("run")
+	evidence := inspectFixture(t, text, true)
+	if evidence.Status != "unknown" || !strings.Contains(evidence.Reason, "scheduled turn") {
+		t.Fatalf("malformed scheduled turn was accepted: %+v", evidence)
+	}
+}
+
+func TestRolloutItemTextAcceptsObjectContent(t *testing.T) {
+	evidence, err := rolloutItemText(json.RawMessage(`{"type":"Text","text":"object result"}`))
+	if err != nil || evidence != "object result" {
+		t.Fatalf("object AgentMessage content not decoded: text=%q err=%v", evidence, err)
 	}
 }
 
