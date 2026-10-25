@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
@@ -59,16 +59,18 @@ type rolloutPayload struct {
 }
 
 type rolloutTurn struct {
-	complete bool
-	aborted  bool
-	final    string
-	trigger  string
+	complete    bool
+	aborted     bool
+	final       string
+	trigger     string
+	firstRecord int
+	lastRecord  int
+	invalid     bool
 }
 
 type heartbeatEnvelope struct {
-	XMLName      xml.Name `xml:"heartbeat"`
-	AutomationID string   `xml:"automation_id"`
-	CurrentTime  string   `xml:"current_time_iso"`
+	AutomationID string `xml:"automation_id"`
+	CurrentTime  string `xml:"current_time_iso"`
 }
 
 func inspectRollout(ctx context.Context, home, path, sessionID, automationID string, expectedAt, notAfter int64, heartbeat bool) (evidence Evidence, retErr error) {
@@ -109,14 +111,17 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 	}
 	turns := map[string]*rolloutTurn{}
 	candidates := map[string]bool{}
-	supported, invalid, missingIdentity := false, false, false
+	supported, missingIdentity := false, false
+	invalidRecords := []int{}
+	recordIndex := 0
 	for scanner.Scan() {
+		recordIndex++
 		if err := ctx.Err(); err != nil {
 			return Evidence{}, err
 		}
 		var rec rolloutRecord
 		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
-			invalid = true
+			invalidRecords = append(invalidRecords, recordIndex)
 			continue
 		}
 		p := rec.Payload
@@ -140,7 +145,10 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 			if len(turns) >= rolloutTurnLimit {
 				return Evidence{}, ErrTooLarge
 			}
-			turns[id] = &rolloutTurn{}
+			turns[id] = &rolloutTurn{firstRecord: recordIndex, lastRecord: recordIndex}
+		}
+		if id != "" {
+			turns[id].lastRecord = recordIndex
 		}
 		if heartbeat && rec.Type == "response_item" && p.Type == "message" && p.Role == "user" {
 			for _, content := range p.Content {
@@ -148,9 +156,9 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 				if !strings.HasPrefix(text, "<heartbeat>") {
 					continue
 				}
-				var envelope heartbeatEnvelope
-				if err := xml.Unmarshal([]byte(text), &envelope); err != nil {
-					invalid = true
+				envelope, err := parseHeartbeatEnvelope(text)
+				if err != nil {
+					markTurnInvalid(turns, id)
 					continue
 				}
 				if envelope.AutomationID != automationID {
@@ -158,7 +166,7 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 				}
 				at, err := time.Parse(time.RFC3339Nano, envelope.CurrentTime)
 				if err != nil {
-					invalid = true
+					markTurnInvalid(turns, id)
 					continue
 				}
 				if !inRolloutWindow(at.UnixMilli(), expectedAt, notAfter) {
@@ -174,7 +182,7 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 		if !heartbeat && rec.Type == "event_msg" && p.Type == "task_started" && cronTrigger(p.Attribution.Trigger) {
 			at, err := time.Parse(time.RFC3339Nano, rec.Timestamp)
 			if err != nil {
-				invalid = true
+				markTurnInvalid(turns, id)
 				continue
 			}
 			if inRolloutWindow(at.UnixMilli(), expectedAt, notAfter) {
@@ -207,7 +215,7 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 				if p.Item.Type == "AgentMessage" && isFinalPhase(p.Item.Phase) {
 					text, err := rolloutItemText(p.Item.Content)
 					if err != nil {
-						invalid = true
+						turn.invalid = true
 					} else {
 						turn.final = text
 					}
@@ -227,9 +235,6 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 			return Evidence{}, ErrTooLarge
 		}
 		return Evidence{}, fmt.Errorf("read rollout: %w", err)
-	}
-	if invalid {
-		return unknown("rollout contains malformed or unsupported records"), nil
 	}
 	if missingIdentity {
 		return unknown("matching scheduled message has no exact turn ID"), nil
@@ -251,6 +256,9 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 		result := Evidence{Status: "running", TurnID: id, Sources: []string{"rollout:" + sessionID + "#turn=" + id}}
 		if turn == nil {
 			return unknown("matching turn state is unavailable"), nil
+		}
+		if turn.invalid || invalidRecordWithin(turn, invalidRecords) {
+			return unknown("rollout contains malformed records for the scheduled turn"), nil
 		}
 		if heartbeat && turn.trigger != "automation_heartbeat_scheduled" {
 			result.Status = "unknown"
@@ -287,10 +295,79 @@ func cronTrigger(trigger string) bool {
 	return trigger == "automation_cron_scheduled" || trigger == "automation_scheduled"
 }
 
+// parseHeartbeatEnvelope reads the identity fields from the native heartbeat
+// wrapper. The instructions element is model-authored text and may contain
+// literal '<' or '&' characters, so parsing the complete message as XML would
+// reject valid heartbeats. The wrapper and its identity fields remain strict;
+// the opaque instructions tail is deliberately not interpreted.
+func parseHeartbeatEnvelope(text string) (heartbeatEnvelope, error) {
+	var envelope heartbeatEnvelope
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, "<heartbeat>") {
+		return envelope, errors.New("heartbeat root missing")
+	}
+	text = strings.TrimPrefix(text, "<heartbeat>")
+	var err error
+	if envelope.AutomationID, text, err = readHeartbeatField(text, "automation_id"); err != nil {
+		return heartbeatEnvelope{}, err
+	}
+	if envelope.CurrentTime, text, err = readHeartbeatField(text, "current_time_iso"); err != nil {
+		return heartbeatEnvelope{}, err
+	}
+	if envelope.AutomationID == "" || envelope.CurrentTime == "" {
+		return heartbeatEnvelope{}, errors.New("heartbeat identity fields empty")
+	}
+	return envelope, nil
+}
+
+func readHeartbeatField(text, name string) (value, rest string, err error) {
+	text = strings.TrimLeftFunc(text, unicode.IsSpace)
+	open, close := "<"+name+">", "</"+name+">"
+	if !strings.HasPrefix(text, open) {
+		return "", text, fmt.Errorf("heartbeat field %s missing", name)
+	}
+	text = strings.TrimPrefix(text, open)
+	end := strings.Index(text, close)
+	if end < 0 {
+		return "", text, fmt.Errorf("heartbeat field %s unterminated", name)
+	}
+	value = strings.TrimSpace(text[:end])
+	if strings.ContainsAny(value, "<>&") {
+		return "", text, fmt.Errorf("heartbeat field %s malformed", name)
+	}
+	return value, text[end+len(close):], nil
+}
+
+func markTurnInvalid(turns map[string]*rolloutTurn, id string) {
+	if id != "" {
+		if turn := turns[id]; turn != nil {
+			turn.invalid = true
+		}
+	}
+}
+
+func invalidRecordWithin(turn *rolloutTurn, records []int) bool {
+	if turn.firstRecord == 0 || turn.lastRecord < turn.firstRecord {
+		return true
+	}
+	for _, record := range records {
+		if record >= turn.firstRecord && record <= turn.lastRecord {
+			return true
+		}
+	}
+	return false
+}
+
 func rolloutItemText(raw json.RawMessage) (string, error) {
 	var text string
 	if err := json.Unmarshal(raw, &text); err == nil {
 		return text, nil
+	}
+	var part struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &part); err == nil && part.Text != "" {
+		return part.Text, nil
 	}
 	var parts []struct {
 		Text string `json:"text"`
