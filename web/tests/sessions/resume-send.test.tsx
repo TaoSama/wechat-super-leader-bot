@@ -69,8 +69,8 @@ describe("resume composer semantics", () => {
     fireEvent.click(row);
     fireEvent.change(screen.getByLabelText("发送给当前会话"), { target: { value: "继续" } });
     await act(async () => {});
-    expect(screen.queryByText("未加载")).toBeNull();
-    expect(document.querySelector(".detail-title .session-status-dot")).toHaveAccessibleName("状态未知");
+    expect(screen.getByText("未加载")).toBeVisible();
+    expect(document.querySelector(".detail-title .session-status-dot")).toHaveAccessibleName("未加载");
     fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
     expect(screen.getByText("会话需要时会自动恢复，发送前检查是否正在使用。")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "关闭会话详情" }));

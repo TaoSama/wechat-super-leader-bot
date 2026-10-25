@@ -1,12 +1,11 @@
 import { SessionHistory, HistoryItem, CommandRecord } from "../types";
-import { isHistoryContext, isSessionHistorySource } from "../features/sessions/history-contract";
+import { isHistoryContext, isSessionHistorySource, MAX_HISTORY_DURATION_MS } from "../features/sessions/history-contract";
 import { normalizeSession, normalizeCommand } from "./normalizers";
 import { sessionRequest } from "./request";
 
 const HISTORY_LIMIT = 20;
 const MAX_TURN_STATUSES = 2048;
 const MAX_TURN_ID_BYTES = 128;
-const MAX_HISTORY_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
 const TURN_STATUSES = new Set(["inProgress", "completed", "failed", "interrupted"]);
 
 function sessionPath(nodeId: string, sessionId: string): string {

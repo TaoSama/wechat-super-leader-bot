@@ -32,8 +32,8 @@ describe("执行时间线", () => {
   });
 
   it("进行中的工具显示当前阶段，失败轮次显示可核对的失败原因", () => {
-    const active = item({ id: "active-tool", kind: "tool", type: "commandExecution", title: "go test ./...", text: "running", status: "inProgress", turnStatus: "inProgress", timestamp: time(10) });
-    render(<ExecutionTimeline items={[active]} source="control-socket" now={13_000} />);
+    const active = item({ id: "active-tool", kind: "tool", type: "commandExecution", title: "go test ./...", text: "running", status: "inProgress", turnStatus: "inProgress", timestamp: time(10), durationMs: 1000 });
+    render(<ExecutionTimeline items={[active]} source="control-socket" now={12_000} />);
     expect(screen.getByText("当前阶段：工具调用：命令（运行中）")).toBeVisible();
     expect(screen.getByText("耗时：3 秒")).toBeVisible();
 
@@ -51,7 +51,11 @@ describe("执行时间线", () => {
     expect(formatExecutionDuration(0)).toBe("<1 秒");
     expect(formatExecutionDuration(90_000)).toBe("1.5 分钟");
     const row = item({ id: "unknown", kind: "assistant", type: "agentMessage", text: "没有时间", turnStatus: "completed" });
-    render(<ExecutionTimeline items={[row]} source="terminal-transcript" />);
+    const timestampOnly = item({ id: "timestamp-only", kind: "assistant", type: "agentMessage", text: "只有时间戳", turnStatus: "completed", timestamp: time(42) });
+    const { rerender } = render(<ExecutionTimeline items={[row]} source="terminal-transcript" />);
     expect(within(screen.getByTestId("execution-timeline")).getByText("耗时：未报告")).toBeVisible();
+    rerender(<ExecutionTimeline items={[timestampOnly]} source="terminal-transcript" />);
+    expect(within(screen.getByTestId("execution-timeline")).getByText("耗时：未报告")).toBeVisible();
+    expect(within(screen.getByTestId("execution-timeline")).queryByText("耗时：<1 秒")).toBeNull();
   });
 });

@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionWorkspace } from "../../src/features/sessions/components/SessionWorkspace";
+import { sessionStatusLabel } from "../../src/features/sessions/components/SessionStatus";
 import { selectExecutionObservation } from "../../src/features/sessions/session-observation";
 import { selectModelObservation } from "../../src/features/sessions/model-observation";
 import { sessionSendBlockReason } from "../../src/features/sessions/send-availability";
@@ -16,6 +17,13 @@ const nodes = [{ nodeId: "fixture", connected: true, sessionCount: 1, lastHeartb
 describe("terminal observation workspace", () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(now); });
   afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+  it.each([["done", "已完成"], ["error", "错误"], ["awaiting_input", "等待输入"], ["notLoaded", "未加载"]] as const)(
+    "exposes an explicit detail label for %s", (status, label) => {
+      expect(sessionStatusLabel(status)).toBe(label);
+    });
+  it.each(["constructor", "__proto__"])("does not treat inherited properties as status labels: %s", status => {
+    expect(sessionStatusLabel(status)).toBeNull();
+  });
   it.each([{ ...terminal }, { ...terminal, provider: "codex-app" }, { ...terminal, id: "foreign" }])(
     "never grants send from forged native or desktop metadata %#", value => {
       const forged: ScopedSession = { ...value, status: "idle", loaded: true, capabilities: ["read", "send"], model: "not-evidence",
