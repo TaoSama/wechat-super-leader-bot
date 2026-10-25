@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import type { HistoryItem, HistorySource } from "../../types";
 import { historyTurns, type HistoryTurn } from "./history-turns";
+import { MAX_HISTORY_DURATION_MS } from "./history-contract";
 import { presentTool, presentToolState } from "./components/tool-presentation";
 import { ToolMessage } from "./components/ToolMessage";
 
@@ -23,7 +24,6 @@ const STATUS_LABELS: Record<NonNullable<HistoryTurn["status"]>, string> = {
   failed: "失败",
   interrupted: "已中断",
 };
-const MAX_TIMELINE_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
 
 function timestampMs(item: HistoryItem): number | undefined {
   if (!item.timestamp) return undefined;
@@ -33,7 +33,7 @@ function timestampMs(item: HistoryItem): number | undefined {
 
 function trustedDurationMs(item: HistoryItem): number | undefined {
   const duration = item.durationMs;
-  return duration !== undefined && Number.isSafeInteger(duration) && duration > 0 && duration <= MAX_TIMELINE_DURATION_MS
+  return duration !== undefined && Number.isSafeInteger(duration) && duration >= 0 && duration <= MAX_HISTORY_DURATION_MS
     ? duration : undefined;
 }
 
@@ -61,7 +61,7 @@ function turnDuration(turn: HistoryTurn, now: number): number | undefined {
   const start = Math.min(...starts);
   const end = turn.status === "inProgress" ? Math.max(...ends, now) : Math.max(...ends);
   const duration = end - start;
-  return duration >= 0 && duration <= MAX_TIMELINE_DURATION_MS ? duration : undefined;
+  return duration >= 0 && duration <= MAX_HISTORY_DURATION_MS ? duration : undefined;
 }
 
 function currentStage(turn: HistoryTurn): string {

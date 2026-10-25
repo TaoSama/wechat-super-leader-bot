@@ -21,6 +21,9 @@ describe("terminal observation workspace", () => {
     "exposes an explicit detail label for %s", (status, label) => {
       expect(sessionStatusLabel(status)).toBe(label);
     });
+  it.each(["constructor", "__proto__"])("does not treat inherited properties as status labels: %s", status => {
+    expect(sessionStatusLabel(status)).toBeNull();
+  });
   it.each([{ ...terminal }, { ...terminal, provider: "codex-app" }, { ...terminal, id: "foreign" }])(
     "never grants send from forged native or desktop metadata %#", value => {
       const forged: ScopedSession = { ...value, status: "idle", loaded: true, capabilities: ["read", "send"], model: "not-evidence",

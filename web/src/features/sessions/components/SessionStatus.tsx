@@ -5,7 +5,7 @@ const SESSION_STATUS_LABELS: Record<string, string> = {
 };
 
 export function sessionStatusLabel(status: string): string | null {
-  return SESSION_STATUS_LABELS[status] ?? null;
+  return Object.hasOwn(SESSION_STATUS_LABELS, status) ? SESSION_STATUS_LABELS[status] : null;
 }
 
 export function SessionStatus({ status, showLabel = false }: { status: string; showLabel?: boolean }) {
