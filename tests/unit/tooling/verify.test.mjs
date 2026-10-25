@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { verificationEnvironment, verificationPlan, localDockerEnvironment, runSteps } from '../../../scripts/verify.mjs';
+import { verificationEnvironment, verificationPlan, parallelVerificationPlan, formatVerificationError, runParallelGroups, runParallelPool,
+  localDockerEnvironment, runSteps } from '../../../scripts/verify.mjs';
 
 const cli = fileURLToPath(new URL('../../../scripts/verify.mjs', import.meta.url));
 
@@ -49,12 +51,107 @@ test('plans build prerequisites once, include all components, and never invoke l
   }
   const unit = verificationPlan('unit');
   assert(unit.find(step => step.id === 'cli-and-tool-tests').args.includes('tests/unit/deploy/image-build.test.mjs'));
+  assert.deepEqual(unit.find(step => step.id === 'controller-tests').args.slice(-3), ['vitest', 'run', '--no-file-parallelism']);
+  assert.deepEqual(unit.find(step => step.id === 'web-tests').args.slice(-3), ['vitest', 'run', '--no-file-parallelism']);
   assert(unit.some(step => step.id === 'daemon-race' && step.args.includes('-count=1')));
   assert.deepEqual(unit.find(step => step.id === 'terminal-delivery-sample'), {
     id: 'terminal-delivery-sample', command: 'go', args: ['run', '-race', './examples/terminal-delivery', '--run'], cwd: 'daemon', env: {},
   });
   assert.deepEqual(unit.find(step => step.id === 'daemon-linux-build').env, { GOOS: 'linux', GOARCH: 'amd64', CGO_ENABLED: '0' });
   assert.throws(() => verificationPlan('production'), /Unknown suite/);
+});
+
+test('parallel plan preserves every serial check while sharing component builds', () => {
+  const serial = verificationPlan('all', { skipNativeProgress: true });
+  const parallel = parallelVerificationPlan('all', { skipNativeProgress: true });
+  const parallelIds = [...parallel.builds, ...parallel.unit, ...parallel.integration].map(step => step.id);
+  assert.deepEqual(new Set(parallelIds), new Set(serial.map(step => step.id)));
+  assert.equal(parallel.builds.length, 3);
+  assert.equal(parallel.unit.some(step => step.id === 'controller-build'), false);
+  assert.equal(parallel.integration.some(step => step.id === 'native-progress-steering'), false);
+  assert.deepEqual(parallelVerificationPlan('unit').integration, []);
+  assert.deepEqual(parallelVerificationPlan('integration').unit, []);
+});
+
+test('parallel runner completes all builds before collecting every group failure', async () => {
+  const events = [];
+  const step = id => ({ id, command: 'synthetic', args: [], cwd: '.', env: {} });
+  const execute = async current => {
+    events.push(`start:${current.id}`);
+    await delay(2);
+    events.push(`done:${current.id}`);
+    if (current.id.startsWith('fail-')) throw new Error(current.id);
+  };
+  await assert.rejects(runParallelGroups({
+    builds: [step('build-a'), step('build-b')],
+    unit: [step('fail-unit-a'), step('fail-unit-b'), step('unit-ok')],
+    integration: [],
+  }, { env: {}, signal: new AbortController().signal, execute }), error => {
+    assert(error instanceof AggregateError);
+    const formatted = formatVerificationError(error).join('\n');
+    assert.match(formatted, /fail-unit-a/);
+    assert.match(formatted, /fail-unit-b/);
+    assert(events.indexOf('start:fail-unit-a') > events.indexOf('done:build-a'));
+    assert(events.indexOf('start:fail-unit-a') > events.indexOf('done:build-b'));
+    assert(events.includes('done:fail-unit-a'));
+    assert(events.includes('done:fail-unit-b'));
+    assert(events.includes('done:unit-ok'));
+    return true;
+  });
+});
+
+test('parallel runner serializes latency variants after other integration checks', async () => {
+  const events = [], active = { count: 0, max: 0 };
+  const step = id => ({ id, command: 'synthetic', args: [], cwd: '.', env: {} });
+  const execute = async current => {
+    active.count++;
+    active.max = Math.max(active.max, active.count);
+    events.push(`start:${current.id}`);
+    await delay(2);
+    events.push(`done:${current.id}`);
+    active.count--;
+  };
+  await runParallelGroups({ builds: [], unit: [], integration: [step('other-integration'), step('message-latency'),
+    step('direct-directory-latency'), step('direct-console-latency')] }, { env: {}, signal: new AbortController().signal, execute });
+  assert(events.indexOf('start:message-latency') > events.indexOf('done:other-integration'));
+  assert(events.indexOf('start:direct-directory-latency') > events.indexOf('done:message-latency'));
+  assert(events.indexOf('start:direct-console-latency') > events.indexOf('done:direct-directory-latency'));
+  assert.equal(active.max, 1);
+});
+
+test('parallel runner escalates abort cleanup when a child ignores SIGTERM', async () => {
+  const controller = new AbortController();
+  let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  const running = runParallelPool([{
+    id: 'term-ignoring', command: process.execPath,
+    args: ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 10_000)"], cwd: '.', env: {},
+  }], { env: {}, concurrency: 1, signal: controller.signal, onStep: started });
+  await ready;
+  await delay(100);
+  controller.abort(new Error('synthetic stop'));
+  await assert.rejects(running, error => {
+    assert(error instanceof AggregateError);
+    assert.match(formatVerificationError(error).join('\n'), /term-ignoring: failed \(SIGKILL\)/);
+    return true;
+  });
+});
+
+test('parallel runner terminates active child processes on abort and never reports success', async () => {
+  const controller = new AbortController();
+  let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  const running = runParallelPool([{
+    id: 'long-running', command: process.execPath, args: ['-e', 'setInterval(() => {}, 10_000)'], cwd: '.', env: {},
+  }], { env: {}, concurrency: 1, signal: controller.signal, onStep: started });
+  await ready;
+  await delay(100);
+  controller.abort(new Error('synthetic stop'));
+  await assert.rejects(running, error => {
+    assert(error instanceof AggregateError);
+    assert.match(error.errors[0].message, /failed \(SIGTERM\)|failed \(SIGKILL\)/);
+    return true;
+  });
 });
 
 test('CLI help and list do not require external tools or read application state', () => {
