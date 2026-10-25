@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
 import { chmod, chown, copyFile, lstat, mkdir, readFile, readdir, rm, rename, rmdir, utimes, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
@@ -16,6 +16,25 @@ function requiredPath(raw, name) {
     throw new Error(`${name} must be a non-root absolute path`);
   }
   return resolve(raw);
+}
+
+async function assertSafePath(pathname, name) {
+  const normalized = requiredPath(pathname, name);
+  const segments = normalized.slice(1).split(sep);
+  let current = sep;
+  for (let index = 0; index < segments.length; index += 1) {
+    current = join(current, segments[index]);
+    let stat;
+    try { stat = await lstat(current); }
+    catch (error) {
+      if (error.code === 'ENOENT') return;
+      throw error;
+    }
+    if (stat.isSymbolicLink()) {
+      throw new Error(`${name} path contains an unsafe symbolic link: ${current}`);
+    }
+  }
+  return normalized;
 }
 
 function safeChild(root, child, name) {
@@ -66,16 +85,16 @@ export async function treeManifest(root) {
 async function copyTree(source, destination, owner) {
   const sourceStat = await lstat(source);
   await mkdir(destination, { recursive: true, mode: sourceStat.mode & 0o7777 });
-  await chmod(destination, sourceStat.mode & 0o7777);
   await chown(destination, owner.uid, owner.gid);
+  await chmod(destination, sourceStat.mode & 0o7777);
   for (const name of (await readdir(source)).sort()) {
     const sourcePath = join(source, name), destinationPath = join(destination, name), stat = await lstat(sourcePath);
     if (stat.isSymbolicLink()) throw new Error(`Symbol links are not supported: ${sourcePath}`);
     if (stat.isDirectory()) await copyTree(sourcePath, destinationPath, owner);
     else if (stat.isFile()) {
       await copyFile(sourcePath, destinationPath);
-      await chmod(destinationPath, stat.mode & 0o7777);
       await chown(destinationPath, owner.uid, owner.gid);
+      await chmod(destinationPath, stat.mode & 0o7777);
     } else throw new Error(`Only regular files and directories are supported: ${sourcePath}`);
     await utimes(destinationPath, stat.atime, stat.mtime);
   }
@@ -109,6 +128,8 @@ export async function planMigration({ sources, target, owner = OWNER, execute = 
   if (![normalizedOwner.uid, normalizedOwner.gid].every(value => Number.isInteger(value) && value >= 0)) throw new Error('uid and gid must be non-negative integers');
   const sourcePaths = Object.fromEntries(Object.entries(COMPONENTS).map(([name, child]) => [name, requiredPath(sources[name], `source-${name}`)]));
   assertDisjoint([targetRoot, ...Object.values(sourcePaths)]);
+  await assertSafePath(targetRoot, 'target');
+  for (const [name, source] of Object.entries(sourcePaths)) await assertSafePath(source, `source-${name}`);
   const manifests = {};
   for (const [name, source] of Object.entries(sourcePaths)) manifests[name] = await treeManifest(source);
   await assertTarget(targetRoot);
@@ -118,12 +139,16 @@ export async function planMigration({ sources, target, owner = OWNER, execute = 
   await mkdir(targetRoot, { recursive: true, mode: 0o700 });
   await chmod(targetRoot, 0o700);
   await chown(targetRoot, normalizedOwner.uid, normalizedOwner.gid);
+  await assertSafePath(targetRoot, 'target');
   await assertTarget(targetRoot);
-  const staging = join(dirname(targetRoot), `.${targetRoot.split(sep).pop()}-migration-${process.pid}-${Date.now()}`);
+  const staging = join(targetRoot, `.migration-${process.pid}-${Date.now()}`);
   const moved = [];
   try {
     await mkdir(staging, { recursive: true, mode: 0o700 });
-    for (const [name, source] of Object.entries(sourcePaths)) await copyTree(source, join(staging, COMPONENTS[name]), normalizedOwner);
+    for (const [name, source] of Object.entries(sourcePaths)) {
+      await assertSafePath(source, `source-${name}`);
+      await copyTree(source, join(staging, COMPONENTS[name]), normalizedOwner);
+    }
     const after = {};
     for (const [name] of Object.entries(COMPONENTS)) {
       after[name] = await treeManifest(join(staging, COMPONENTS[name]));
@@ -133,7 +158,10 @@ export async function planMigration({ sources, target, owner = OWNER, execute = 
     }
     for (const name of Object.keys(COMPONENTS)) {
       const destination = join(targetRoot, COMPONENTS[name]);
-      await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+      const parent = dirname(destination);
+      await mkdir(parent, { recursive: true, mode: 0o700 });
+      await chmod(parent, 0o700);
+      await chown(parent, normalizedOwner.uid, normalizedOwner.gid);
       await rename(join(staging, COMPONENTS[name]), destination);
       moved.push(destination);
     }
@@ -149,13 +177,23 @@ export async function planMigration({ sources, target, owner = OWNER, execute = 
 
 async function rollback({ target, manifest, execute }) {
   const targetRoot = requiredPath(target, 'target');
-  const saved = JSON.parse(await readFile(requiredPath(manifest, 'manifest'), 'utf8'));
+  await assertSafePath(targetRoot, 'target');
+  const manifestPath = requiredPath(manifest, 'manifest');
+  await assertSafePath(manifestPath, 'manifest');
+  const saved = JSON.parse(await readFile(manifestPath, 'utf8'));
   if (!saved.after || saved.target !== targetRoot) throw new Error('Manifest does not describe this target');
   const current = {};
   for (const [name, child] of Object.entries(COMPONENTS)) current[name] = await treeManifest(safeChild(targetRoot, child, name));
   for (const name of Object.keys(COMPONENTS)) if (current[name].sha256 !== saved.after[name].sha256) throw new Error(`Target changed since migration: ${name}`);
   if (!execute) return { version: 1, mode: 'dry-run-rollback', target: targetRoot, components: Object.keys(COMPONENTS) };
-  for (const child of Object.values(COMPONENTS)) await rm(safeChild(targetRoot, child, child), { recursive: true, force: false });
+  await assertSafePath(targetRoot, 'target');
+  for (const child of Object.values(COMPONENTS)) {
+    await assertSafePath(targetRoot, 'target');
+    const destination = safeChild(targetRoot, child, child);
+    await assertSafePath(destination, child);
+    await rm(destination, { recursive: true, force: false });
+  }
+  await assertSafePath(targetRoot, 'target');
   try { await rmdir(join(targetRoot, 'background')); }
   catch (error) { if (!['ENOTEMPTY', 'ENOENT'].includes(error.code)) throw error; }
   return { version: 1, mode: 'rollback', target: targetRoot, components: Object.keys(COMPONENTS) };
@@ -181,11 +219,42 @@ async function main() {
   if (!values.target || !values['source-settings'] || !values['source-workers'] || !values['source-artifacts']) {
     throw new Error('--target, --source-settings, --source-workers and --source-artifacts are required');
   }
-  const report = await planMigration({ target: values.target, execute: values.execute === true, owner: { uid: values.uid, gid: values.gid }, sources: {
-    settings: values['source-settings'], workers: values['source-workers'], artifacts: values['source-artifacts'],
-  } });
-  if (values.manifest) await writeFile(requiredPath(values.manifest, 'manifest'), `${JSON.stringify(report, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
-  console.log(JSON.stringify(report, null, 2));
+  const execute = values.execute === true;
+  const targetPath = requiredPath(values.target, 'target');
+  const sourcePaths = [values['source-settings'], values['source-workers'], values['source-artifacts']]
+    .map((value, index) => requiredPath(value, `source-${Object.keys(COMPONENTS)[index]}`));
+  const manifestPath = values.manifest ? requiredPath(values.manifest, 'manifest') : undefined;
+  if (manifestPath && sourcePaths.some(source => manifestPath === source || manifestPath.startsWith(`${source}${sep}`))) {
+    throw new Error('Manifest must be outside all source directories');
+  }
+  const manifestInsideTarget = manifestPath && (manifestPath === targetPath || manifestPath.startsWith(`${targetPath}${sep}`));
+  const reservedManifest = manifestPath && execute && !manifestInsideTarget ? `${manifestPath}.${randomUUID()}.tmp` : undefined;
+  try {
+    if (manifestPath) await assertSafePath(manifestPath, 'manifest');
+    if (manifestPath && !execute) {
+      try { await lstat(manifestPath); throw new Error(`Manifest already exists: ${manifestPath}`); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    if (reservedManifest) await writeFile(reservedManifest, '', { flag: 'wx', mode: 0o600 });
+    const report = await planMigration({ target: values.target, execute, owner: { uid: values.uid, gid: values.gid }, sources: {
+      settings: values['source-settings'], workers: values['source-workers'], artifacts: values['source-artifacts'],
+    } });
+    if (manifestPath) {
+      const output = `${JSON.stringify(report, null, 2)}\n`;
+      if (reservedManifest) {
+        await writeFile(reservedManifest, output);
+        await rename(reservedManifest, manifestPath);
+      } else {
+        const temporary = `${manifestPath}.${randomUUID()}.tmp`;
+        try { await writeFile(temporary, output, { flag: 'wx', mode: 0o600 }); await rename(temporary, manifestPath); }
+        catch (error) { await rm(temporary, { force: true }); throw error; }
+      }
+    }
+    console.log(JSON.stringify(report, null, 2));
+  } catch (error) {
+    if (reservedManifest) await rm(reservedManifest, { force: true });
+    throw error;
+  }
 }
 
 if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(new URL(import.meta.url))) {
