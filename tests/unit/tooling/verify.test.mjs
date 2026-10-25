@@ -86,6 +86,20 @@ test('unit groups split daemon checks without dropping any unit coverage', () =>
   assert.throws(() => parallelVerificationPlan('integration', { unitGroup: 'daemon' }), /Unit groups require/);
 });
 
+test('integration groups isolate the real WeChat progress policy without dropping coverage', () => {
+  const all = parallelVerificationPlan('integration', { skipNativeProgress: true });
+  const core = parallelVerificationPlan('integration', { skipNativeProgress: true, integrationGroup: 'core' });
+  const progress = parallelVerificationPlan('integration', { skipNativeProgress: true, integrationGroup: 'progress' });
+  const allIds = new Set([...all.builds, ...all.integration].map(step => step.id));
+  const splitIds = new Set([...core.builds, ...core.integration, ...progress.builds, ...progress.integration].map(step => step.id));
+  assert.deepEqual(splitIds, allIds);
+  assert.deepEqual(progress.integration.map(step => step.id), ['wechat-interaction']);
+  assert(core.integration.length > 1);
+  assert(core.integration.every(step => step.id !== 'wechat-interaction'));
+  assert.throws(() => parallelVerificationPlan('unit', { integrationGroup: 'progress' }), /Integration groups require/);
+  assert.throws(() => parallelVerificationPlan('integration', { integrationGroup: 'wrong' }), /Unknown integration group/);
+});
+
 test('parallel runner completes all builds before collecting every group failure', async () => {
   const events = [];
   const step = id => ({ id, command: 'synthetic', args: [], cwd: '.', env: {} });
@@ -246,7 +260,8 @@ test('CLI help and list do not require external tools or read application state'
     const result = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', env: { PATH: '/nonexistent' } });
     assert.equal(result.status, 0, result.stderr);
   }
-  for (const args of [['--live'], ['--suite', 'wrong'], ['--unit-group', 'wrong'], ['--unit-group', 'daemon', '--suite', 'integration'], ['unexpected']]) {
+  for (const args of [['--live'], ['--suite', 'wrong'], ['--unit-group', 'wrong'], ['--unit-group', 'daemon', '--suite', 'integration'],
+    ['--integration-group', 'wrong'], ['--integration-group', 'progress', '--suite', 'unit'], ['unexpected']]) {
     assert.notEqual(spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', env: { PATH: '/nonexistent' } }).status, 0);
   }
 });
