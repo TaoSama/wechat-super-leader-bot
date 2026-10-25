@@ -17,7 +17,7 @@ const POSTGRES_STEP_IDS = new Set([
 const WECHAT_STEP_IDS = new Set(['wechat-interaction']);
 const LATENCY_STEP_IDS = new Set(['message-latency', 'direct-directory-latency', 'direct-console-latency']);
 // Controller tests share timing-sensitive fixtures; keep them serial before the other unit workers.
-const UNIT_PARALLELISM = 3;
+const UNIT_PARALLELISM = 2;
 const POSTGRES_PARALLELISM = 2;
 const WECHAT_PARALLELISM = 1;
 const LOOPBACK_PARALLELISM = 4;

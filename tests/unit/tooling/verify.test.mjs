@@ -161,7 +161,7 @@ test('parallel runner completes controller unit checks before starting the remai
     assert(events.indexOf(`start:${id}`) > controllerDone, id);
   }
   assert.equal(active.controllerMax, 1);
-  assert.equal(active.remainderMax, 3);
+  assert.equal(active.remainderMax, 2);
 });
 
 test('parallel runner keeps controller unit checks serial and stops before the remainder on failure', async () => {
