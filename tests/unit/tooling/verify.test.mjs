@@ -10,6 +10,7 @@ const cli = fileURLToPath(new URL('../../../scripts/verify.mjs', import.meta.url
 
 test('verification preserves required tools but drops live gates, credentials and process injection', () => {
   const env = verificationEnvironment({ PATH: '/tools', HOME: '/fixture', TMPDIR: '/temp', HTTPS_PROXY: 'http://proxy',
+    SUPER_LEADER_SKIP_NATIVE_SKILL_DISCOVERY: '1',
     LIVE_DESKTOP_SEND: 'fixture-only', LIVE_CODEX_SESSION: 'real', CODEX_APP_SERVER_SOCKET: '/real',
     SUPER_LEADER_JOURNAL_CRASH_TEST: '1', SUPER_LEADER_JOURNAL_TEST_DIR: '/real',
     CONTROLLER_TOKEN: 'secret', LEADER_MODEL_API_KEY: 'secret', WECHAT_CREDENTIALS_PATH: '/real',
@@ -19,6 +20,7 @@ test('verification preserves required tools but drops live gates, credentials an
   assert.equal(env.PATH, '/tools');
   assert.equal(env.HOME, '/fixture');
   assert.equal(env.HTTPS_PROXY, 'http://proxy');
+  assert.equal(env.SUPER_LEADER_SKIP_NATIVE_SKILL_DISCOVERY, '1');
   assert.equal(env.GOENV, 'off');
   assert.equal(env.SUPER_LEADER_NO_DOTENV, '1');
   assert.notEqual(env.GOOS, 'windows');
@@ -73,6 +75,40 @@ test('parallel plan preserves every serial check while sharing component builds'
   assert.deepEqual(parallelVerificationPlan('integration').unit, []);
 });
 
+test('unit groups split daemon checks without dropping any unit coverage', () => {
+  const all = parallelVerificationPlan('unit');
+  const core = parallelVerificationPlan('unit', { unitGroup: 'core' });
+  const daemon = parallelVerificationPlan('unit', { unitGroup: 'daemon' });
+  const allIds = new Set([...all.builds, ...all.unit].map(step => step.id));
+  const splitIds = new Set([...core.builds, ...core.unit, ...daemon.builds, ...daemon.unit].map(step => step.id));
+  assert.deepEqual(splitIds, allIds);
+  assert.equal(daemon.builds.length, 0);
+  assert.deepEqual(daemon.unit.map(step => step.id), ['daemon-race', 'terminal-delivery-sample']);
+  assert(core.unit.every(step => !['daemon-race', 'terminal-delivery-sample'].includes(step.id)));
+  assert.throws(() => parallelVerificationPlan('integration', { unitGroup: 'daemon' }), /Unit groups require/);
+});
+
+test('integration groups isolate the real WeChat progress policy without dropping coverage', () => {
+  const all = parallelVerificationPlan('integration', { skipNativeProgress: true });
+  const core = parallelVerificationPlan('integration', { skipNativeProgress: true, integrationGroup: 'core' });
+  const progress = parallelVerificationPlan('integration', { skipNativeProgress: true, integrationGroup: 'progress' });
+  const allIds = new Set([...all.builds, ...all.integration].map(step => step.id));
+  const splitIds = new Set([...core.builds, ...core.integration, ...progress.builds, ...progress.integration].map(step => step.id));
+  assert.deepEqual(splitIds, allIds);
+  assert.deepEqual(progress.integration.map(step => step.id), ['wechat-interaction']);
+  assert(core.integration.length > 1);
+  assert(core.integration.every(step => step.id !== 'wechat-interaction'));
+  assert.throws(() => parallelVerificationPlan('unit', { integrationGroup: 'progress' }), /Integration groups require/);
+  assert.throws(() => parallelVerificationPlan('integration', { integrationGroup: 'wrong' }), /Unknown integration group/);
+});
+
+test('integration core keeps the AppArmor-dependent native skill discovery check', () => {
+  const unit = verificationPlan('unit');
+  const integration = verificationPlan('integration', { skipNativeProgress: true });
+  assert.equal(unit.some(step => step.id === 'gateway-native-skill-tests'), false);
+  assert.equal(integration.filter(step => step.id === 'gateway-native-skill-tests').length, 1);
+});
+
 test('parallel runner completes all builds before collecting every group failure', async () => {
   const events = [];
   const step = id => ({ id, command: 'synthetic', args: [], cwd: '.', env: {} });
@@ -119,6 +155,80 @@ test('parallel runner serializes latency variants after other integration checks
   assert.equal(active.max, 1);
 });
 
+test('parallel runner keeps the long WeChat integration outside the PostgreSQL pool', async () => {
+  const events = [];
+  const step = id => ({ id, command: 'synthetic', args: [], cwd: '.', env: {} });
+  const execute = async current => {
+    events.push(`start:${current.id}`);
+    await delay(current.id === 'wechat-interaction' ? 8 : 2);
+    events.push(`done:${current.id}`);
+  };
+  await runParallelGroups({ builds: [], unit: [], integration: [
+    step('wechat-interaction'), step('synthetic-integration'), step('console-auth-integration'),
+    step('task-notifications-postgres'), step('scheduled-sessions-postgres'),
+  ] }, { env: {}, signal: new AbortController().signal, execute });
+  assert.equal(events.filter(event => event === 'start:wechat-interaction').length, 1);
+  assert(events.indexOf('start:wechat-interaction') < events.indexOf('done:wechat-interaction'));
+  assert(events.indexOf('start:wechat-interaction') < events.indexOf('done:synthetic-integration'));
+  for (const id of ['synthetic-integration', 'console-auth-integration', 'task-notifications-postgres', 'scheduled-sessions-postgres']) {
+    assert(events.indexOf(`start:${id}`) < events.indexOf('done:wechat-interaction'), id);
+  }
+});
+
+test('parallel runner completes controller unit checks before starting the remainder pool', async () => {
+  const events = [], active = { count: 0, controllerMax: 0, webMax: 0, remainderMax: 0, serialMax: 0 };
+  const step = id => ({ id, command: 'synthetic', args: [], cwd: '.', env: {} });
+  const execute = async current => {
+    active.count++;
+    if (current.id.startsWith('controller-')) active.controllerMax = Math.max(active.controllerMax, active.count);
+    else if (current.id === 'web-tests') active.webMax = Math.max(active.webMax, active.count);
+    else if (current.id === 'daemon-race' || current.id === 'terminal-delivery-sample') active.serialMax = Math.max(active.serialMax, active.count);
+    else active.remainderMax = Math.max(active.remainderMax, active.count);
+    events.push(`start:${current.id}`);
+    await delay(2);
+    events.push(`done:${current.id}`);
+    active.count--;
+  };
+  await runParallelGroups({ builds: [], unit: [step('controller-typecheck'), step('controller-tests'), step('gateway-tests'), step('cli-and-tool-tests'), step('web-tests'), step('daemon-race'), step('terminal-delivery-sample')], integration: [] }, {
+    env: {}, signal: new AbortController().signal, execute,
+  });
+  assert(events.indexOf('start:controller-tests') > events.indexOf('done:controller-typecheck'));
+  const controllerDone = Math.max(events.indexOf('done:controller-typecheck'), events.indexOf('done:controller-tests'));
+  assert(events.indexOf('start:web-tests') > controllerDone);
+  const webDone = events.indexOf('done:web-tests');
+  for (const id of ['gateway-tests', 'cli-and-tool-tests']) assert(events.indexOf(`start:${id}`) > webDone, id);
+  const remainderDone = Math.max(events.indexOf('done:gateway-tests'), events.indexOf('done:cli-and-tool-tests'));
+  for (const id of ['daemon-race', 'terminal-delivery-sample']) assert(events.indexOf(`start:${id}`) > remainderDone, id);
+  assert.equal(active.controllerMax, 1);
+  assert.equal(active.webMax, 1);
+  assert.equal(active.remainderMax, 2);
+  assert.equal(active.serialMax, 1);
+});
+
+test('parallel runner keeps controller unit checks serial and stops before the remainder on failure', async () => {
+  const events = [], active = { count: 0, max: 0 };
+  const step = id => ({ id, command: 'synthetic', args: [], cwd: '.', env: {} });
+  const execute = async current => {
+    active.count++;
+    active.max = Math.max(active.max, active.count);
+    events.push(`start:${current.id}`);
+    await delay(2);
+    active.count--;
+    if (current.id === 'controller-typecheck') throw new Error('controller failed');
+    events.push(`done:${current.id}`);
+  };
+  await assert.rejects(runParallelGroups({ builds: [], unit: [step('controller-typecheck'), step('controller-tests'), step('gateway-tests'), step('web-tests'), step('daemon-race')], integration: [] }, {
+    env: {}, signal: new AbortController().signal, execute,
+  }), error => {
+    assert(error instanceof AggregateError);
+    assert.match(formatVerificationError(error).join('\n'), /controller failed/);
+    assert.equal(events.filter(event => event.startsWith('start:')).filter(event => !event.includes('controller')).length, 0);
+    assert.equal(events.includes('start:controller-tests'), false);
+    assert.equal(active.max, 1);
+    return true;
+  });
+});
+
 test('parallel runner escalates abort cleanup when a child ignores SIGTERM', async () => {
   const controller = new AbortController();
   let started;
@@ -159,7 +269,8 @@ test('CLI help and list do not require external tools or read application state'
     const result = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', env: { PATH: '/nonexistent' } });
     assert.equal(result.status, 0, result.stderr);
   }
-  for (const args of [['--live'], ['--suite', 'wrong'], ['unexpected']]) {
+  for (const args of [['--live'], ['--suite', 'wrong'], ['--unit-group', 'wrong'], ['--unit-group', 'daemon', '--suite', 'integration'],
+    ['--integration-group', 'wrong'], ['--integration-group', 'progress', '--suite', 'unit'], ['unexpected']]) {
     assert.notEqual(spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', env: { PATH: '/nonexistent' } }).status, 0);
   }
 });

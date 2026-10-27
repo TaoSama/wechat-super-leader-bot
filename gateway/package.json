@@ -6,6 +6,7 @@
   "scripts": {
     "build": "node ../scripts/clean-build.mjs --component gateway && tsc -p tsconfig.json",
     "test": "node ../scripts/clean-build.mjs --component gateway --tests && tsc -p tsconfig.test.json && node --test dist-test/tests/**/*.test.js",
+    "test:native-skill": "node ../scripts/clean-build.mjs --component gateway --tests && tsc -p tsconfig.test.json && node --test dist-test/tests/settings/skill-discovery.test.js",
     "start": "node dist/index.js"
   },
   "keywords": [],

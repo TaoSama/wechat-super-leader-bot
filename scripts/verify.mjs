@@ -6,24 +6,31 @@ import { readdirSync } from 'node:fs';
 
 export const PROJECT_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const SUITES = ['all', 'unit', 'integration'];
+const UNIT_GROUPS = ['all', 'core', 'daemon'];
+const INTEGRATION_GROUPS = ['all', 'core', 'progress'];
 const NODE_MIN_MAJOR = 24;
 const TOOL_PROBE_MS = 10_000;
 const BUILD_STEP_IDS = new Set(['controller-build', 'gateway-build', 'web-build']);
+const CONTROLLER_UNIT_STEP_IDS = new Set(['controller-typecheck', 'controller-tests']);
+const WEB_UNIT_STEP_IDS = new Set(['web-tests']);
+const SERIAL_UNIT_STEP_IDS = new Set(['daemon-race', 'terminal-delivery-sample']);
 const POSTGRES_STEP_IDS = new Set([
-  'synthetic-integration', 'console-auth-integration', 'wechat-interaction',
+  'synthetic-integration', 'console-auth-integration',
   'task-notifications-postgres', 'scheduled-sessions-postgres',
 ]);
+const WECHAT_STEP_IDS = new Set(['wechat-interaction']);
 const LATENCY_STEP_IDS = new Set(['message-latency', 'direct-directory-latency', 'direct-console-latency']);
-// The JS suites already fan out hundreds of workers; keep their outer pool serial to avoid CPU starvation and timing-sensitive flakes.
-const UNIT_PARALLELISM = 1;
+// Controller tests share timing-sensitive fixtures; keep them serial before the other unit workers.
+const UNIT_PARALLELISM = 2;
 const POSTGRES_PARALLELISM = 2;
+const WECHAT_PARALLELISM = 1;
 const LOOPBACK_PARALLELISM = 4;
 const ABORT_KILL_GRACE_MS = 1_000;
 const INHERITED_ENV = [
   'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'CI',
   'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
   'GOPATH', 'GOCACHE', 'GOMODCACHE', 'GOPROXY', 'GOSUMDB', 'GOTOOLCHAIN',
-  'DOCKER_CONFIG', 'DOCKER_HOST', 'DOCKER_CONTEXT',
+  'DOCKER_CONFIG', 'DOCKER_HOST', 'DOCKER_CONTEXT', 'SUPER_LEADER_SKIP_NATIVE_SKILL_DISCOVERY',
 ];
 
 function unitTestFiles(directory = 'tests/unit') {
@@ -59,6 +66,7 @@ export function verificationPlan(suite = 'all', { skipNativeProgress = false } =
   const integration = [
     step('compose-tests', process.execPath, ['--test', 'tests/integration/deploy/config.test.mjs', 'tests/integration/deploy/gateway.test.mjs',
       'tests/integration/deploy/background-model.test.mjs']),
+    step('gateway-native-skill-tests', 'pnpm', ['--dir', 'gateway', 'run', 'test:native-skill']),
     step('synthetic-integration', process.execPath, ['tests/integration/run.mjs']),
     step('console-auth-integration', process.execPath, ['tests/integration/console-auth.mjs', '--run']),
     step('wechat-interaction', process.execPath, ['tests/integration/leader/wechat-interaction.mjs', '--run']),
@@ -103,19 +111,31 @@ export async function runSteps(steps, { env, execute = executeStep, signal, onSt
   signal?.throwIfAborted();
 }
 
-export function parallelVerificationPlan(suite = 'all', { skipNativeProgress = false } = {}) {
+export function parallelVerificationPlan(suite = 'all', { skipNativeProgress = false, unitGroup = 'all', integrationGroup = 'all' } = {}) {
   if (!SUITES.includes(suite)) throw new Error('Unknown suite; use all, unit or integration');
+  if (!UNIT_GROUPS.includes(unitGroup)) throw new Error('Unknown unit group; use all, core or daemon');
+  if (!INTEGRATION_GROUPS.includes(integrationGroup)) throw new Error('Unknown integration group; use all, core or progress');
+  if (unitGroup !== 'all' && suite !== 'unit') throw new Error('Unit groups require --suite unit');
+  if (integrationGroup !== 'all' && suite !== 'integration') throw new Error('Integration groups require --suite integration');
   const unit = verificationPlan('unit', { skipNativeProgress });
   const integration = verificationPlan('integration', { skipNativeProgress });
   const all = [...unit, ...integration];
   const builds = all.filter(step => BUILD_STEP_IDS.has(step.id)).filter((step, index, steps) =>
     steps.findIndex(candidate => candidate.id === step.id) === index);
   const unitSteps = unit.filter(step => !BUILD_STEP_IDS.has(step.id));
+  const daemonSteps = unitSteps.filter(step => SERIAL_UNIT_STEP_IDS.has(step.id));
+  const coreSteps = unitSteps.filter(step => !SERIAL_UNIT_STEP_IDS.has(step.id));
+  const selectedUnitSteps = unitGroup === 'daemon' ? daemonSteps : unitGroup === 'core' ? coreSteps : unitSteps;
   const integrationSteps = integration.filter(step => !BUILD_STEP_IDS.has(step.id));
+  const selectedIntegrationSteps = integrationGroup === 'progress'
+    ? integrationSteps.filter(step => WECHAT_STEP_IDS.has(step.id))
+    : integrationGroup === 'core'
+      ? integrationSteps.filter(step => !WECHAT_STEP_IDS.has(step.id))
+      : integrationSteps;
   return {
-    builds: suite === 'integration' || suite === 'unit' || suite === 'all' ? builds : [],
-    unit: suite === 'integration' ? [] : unitSteps,
-    integration: suite === 'unit' ? [] : integrationSteps,
+    builds: unitGroup === 'daemon' ? [] : suite === 'integration' || suite === 'unit' || suite === 'all' ? builds : [],
+    unit: suite === 'integration' ? [] : selectedUnitSteps,
+    integration: suite === 'unit' ? [] : selectedIntegrationSteps,
   };
 }
 
@@ -158,7 +178,7 @@ export function formatVerificationError(error, prefix = '') {
   return lines;
 }
 
-export async function runParallelPool(steps, { env, concurrency, signal, onStep = () => {}, execute = executeStep }) {
+export async function runParallelPool(steps, { env, concurrency, signal, onStep = () => {}, execute = executeStep, stopOnFailure = false }) {
   const children = new Set();
   const failures = [];
   let next = 0;
@@ -169,7 +189,10 @@ export async function runParallelPool(steps, { env, concurrency, signal, onStep 
       if (!step) return;
       onStep(step);
       try { await execute(step, env, { children }); }
-      catch (error) { failures.push(error); }
+      catch (error) {
+        failures.push(error);
+        if (stopOnFailure) return;
+      }
     }
   };
   const abort = () => {
@@ -205,12 +228,26 @@ export async function runParallelGroups(plan, { env, signal, onStep = () => {}, 
   await runParallelPool(plan.builds, { env, concurrency: plan.builds.length, signal, onStep, execute });
   const groups = [];
   let latency = [];
-  if (plan.unit.length) groups.push(runParallelPool(plan.unit, { env, concurrency: UNIT_PARALLELISM, signal, onStep, execute }));
+  if (plan.unit.length) {
+    groups.push((async () => {
+      const controller = plan.unit.filter(step => CONTROLLER_UNIT_STEP_IDS.has(step.id));
+      const web = plan.unit.filter(step => WEB_UNIT_STEP_IDS.has(step.id));
+      const serial = plan.unit.filter(step => SERIAL_UNIT_STEP_IDS.has(step.id));
+      const remainder = plan.unit.filter(step => !CONTROLLER_UNIT_STEP_IDS.has(step.id) &&
+        !WEB_UNIT_STEP_IDS.has(step.id) && !SERIAL_UNIT_STEP_IDS.has(step.id));
+      if (controller.length) await runParallelPool(controller, { env, concurrency: 1, signal, onStep, execute, stopOnFailure: true });
+      if (web.length) await runParallelPool(web, { env, concurrency: 1, signal, onStep, execute, stopOnFailure: true });
+      if (remainder.length) await runParallelPool(remainder, { env, concurrency: UNIT_PARALLELISM, signal, onStep, execute });
+      if (serial.length) await runParallelPool(serial, { env, concurrency: 1, signal, onStep, execute, stopOnFailure: true });
+    })());
+  }
   if (plan.integration.length) {
     const postgres = plan.integration.filter(step => POSTGRES_STEP_IDS.has(step.id));
-    const loopback = plan.integration.filter(step => !POSTGRES_STEP_IDS.has(step.id) && !LATENCY_STEP_IDS.has(step.id));
+    const wechat = plan.integration.filter(step => WECHAT_STEP_IDS.has(step.id));
+    const loopback = plan.integration.filter(step => !POSTGRES_STEP_IDS.has(step.id) && !WECHAT_STEP_IDS.has(step.id) && !LATENCY_STEP_IDS.has(step.id));
     latency = plan.integration.filter(step => LATENCY_STEP_IDS.has(step.id));
     if (postgres.length) groups.push(runParallelPool(postgres, { env, concurrency: POSTGRES_PARALLELISM, signal, onStep, execute }));
+    if (wechat.length) groups.push(runParallelPool(wechat, { env, concurrency: WECHAT_PARALLELISM, signal, onStep, execute }));
     if (loopback.length) groups.push(runParallelPool(loopback, { env, concurrency: LOOPBACK_PARALLELISM, signal, onStep, execute }));
   }
   const results = await Promise.allSettled(groups);
@@ -226,13 +263,24 @@ export async function main(args = process.argv.slice(2)) {
   const { values } = parseArgs({ args, options: {
     help: { type: 'boolean', short: 'h' }, list: { type: 'boolean' }, parallel: { type: 'boolean' },
     suite: { type: 'string', default: 'all' },
+    'unit-group': { type: 'string', default: 'all' },
+    'integration-group': { type: 'string', default: 'all' },
   } });
   if (values.help) {
-    console.log('Usage: node scripts/verify.mjs [--suite all|unit|integration] [--parallel] [--list]\nRequires Node >=24, pnpm, Go from daemon/go.mod and installed frozen JS dependencies.\nall/integration also require local Docker and Compose. No dependency install, deployment, real model, WeChat or desktop session tests.\n--parallel runs independent build and verification steps in bounded pools; --list prints commands only, without reading credentials or contacting Docker. Interrupt requests wait for the current check to finish its cleanup.');
+    console.log('Usage: node scripts/verify.mjs [--suite all|unit|integration] [--unit-group all|core|daemon] [--integration-group all|core|progress] [--parallel] [--list]\nRequires Node >=24, pnpm, Go from daemon/go.mod and installed frozen JS dependencies.\nall/integration also require local Docker and Compose. No dependency install, deployment, real model, WeChat or desktop session tests.\n--unit-group core|daemon selects a unit subset for split CI jobs.\n--integration-group core|progress selects integration checks; progress contains the real WeChat progress policy path, while core contains the remaining integration checks.\n--parallel runs independent build and verification steps in bounded pools; --list prints commands only, without reading credentials or contacting Docker. Interrupt requests wait for the current check to finish its cleanup.');
     return;
   }
   const skipNativeProgress = process.env.SUPER_LEADER_SKIP_NATIVE_PROGRESS === '1';
-  const steps = verificationPlan(values.suite, { skipNativeProgress });
+  const unitGroup = values['unit-group'];
+  const integrationGroup = values['integration-group'];
+  if (!UNIT_GROUPS.includes(unitGroup)) throw new Error('Unknown unit group; use all, core or daemon');
+  if (!INTEGRATION_GROUPS.includes(integrationGroup)) throw new Error('Unknown integration group; use all, core or progress');
+  if (unitGroup !== 'all' && values.suite !== 'unit') throw new Error('Unit groups require --suite unit');
+  if (integrationGroup !== 'all' && values.suite !== 'integration') throw new Error('Integration groups require --suite integration');
+  const selectedPlan = parallelVerificationPlan(values.suite, { skipNativeProgress, unitGroup, integrationGroup });
+  const steps = unitGroup === 'all' && integrationGroup === 'all'
+    ? verificationPlan(values.suite, { skipNativeProgress })
+    : [...selectedPlan.builds, ...selectedPlan.unit, ...selectedPlan.integration];
   if (values.list) {
     console.log(JSON.stringify(steps, null, 2));
     return;
@@ -254,9 +302,10 @@ export async function main(args = process.argv.slice(2)) {
   process.on('SIGTERM', requestStop);
   try {
     const onStep = step => console.log(`[verify] ${step.id}`);
-    if (values.parallel) await runParallelGroups(parallelVerificationPlan(values.suite, { skipNativeProgress }), { env, signal: stop.signal, onStep });
+    if (values.parallel) await runParallelGroups(selectedPlan, { env, signal: stop.signal, onStep });
     else await runSteps(steps, { env, signal: stop.signal, onStep });
-    console.log(`[verify] PASS ${steps.length} checks (${values.suite}); synthetic fixtures only, no production acceptance claimed.`);
+    const groups = [unitGroup === 'all' ? '' : `/${unitGroup}`, integrationGroup === 'all' ? '' : `/${integrationGroup}`].join('');
+    console.log(`[verify] PASS ${steps.length} checks (${values.suite}${groups}); synthetic fixtures only, no production acceptance claimed.`);
   } finally {
     process.removeListener('SIGINT', requestStop);
     process.removeListener('SIGTERM', requestStop);

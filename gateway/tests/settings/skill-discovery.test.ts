@@ -68,7 +68,12 @@ class NativeProbe {
   }
 }
 
-test("locked native CLI discovers edited frozen skills, disables original paths, and reads snapshot child files without auth", { timeout: 30_000 }, async t => {
+test("locked native CLI discovers edited frozen skills, disables original paths, and reads snapshot child files without auth", {
+  timeout: 30_000,
+  skip: process.env.SUPER_LEADER_SKIP_NATIVE_SKILL_DISCOVERY === "1"
+    ? "Ubuntu unit jobs run without the AppArmor sandbox setup"
+    : false,
+}, async t => {
   const executable = binary();
   if (!executable) { t.skip("Native Codex binary unavailable on this platform"); return; }
   assert.match(execFileSync(executable, ["--version"], { encoding: "utf8", env: { PATH: process.env.PATH } }), /^codex-cli 0\.163\.0\s/);

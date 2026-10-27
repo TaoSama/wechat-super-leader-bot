@@ -78,9 +78,19 @@ async function stall(client: WebSocket, peer: WebSocket): Promise<number> {
   throw new Error("Unable to create TCP backpressure within the fixture byte budget");
 }
 
+/** Hold command callbacks after establishing a live socket so deadline tests do not depend on OS buffer timing. */
+function holdCommandWrites(peer: WebSocket): void {
+  const send = peer.send.bind(peer);
+  vi.spyOn(peer, "send").mockImplementation((data, ...args) => {
+    if (typeof data === "string" && data.includes('"type":"command"')) return;
+    return send(data, ...args);
+  });
+}
+
 it("expires a stalled write despite live heartbeats and never retries its uncertain side effects", async () => {
   const f = await fixture(), slow = await f.connect("slow");
   await stall(slow.client, slow.peer);
+  holdCommandWrites(slow.peer);
   const before = f.hub.getNodeStatusList()[0].lastHeartbeat;
   slow.client.send(JSON.stringify({ type: "heartbeat", sessions: [session()], skills: [] }));
   await vi.waitFor(() => expect(f.hub.getNodeStatusList()[0].lastHeartbeat).not.toBe(before), WAIT_OPTIONS);
@@ -107,6 +117,7 @@ it("expires a stalled write despite live heartbeats and never retries its uncert
 it("bounds a stalled write even when the command has a distant expiry", async () => {
   const f = await fixture(), slow = await f.connect("slow");
   await stall(slow.client, slow.peer);
+  holdCommandWrites(slow.peer);
   const started = Date.now();
   expect(await f.hub.sendCommand(command())).toMatchObject({ delivered: false, error: "Command write deadline exceeded" });
   expect(Date.now() - started).toBeGreaterThanOrEqual(COMMAND_WRITE_TIMEOUT_MS - 20);
