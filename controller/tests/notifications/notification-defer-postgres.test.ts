@@ -1,18 +1,19 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPostgresFixture } from "../../../tests/support/control-plane-fixture.mjs";
+import { createReliabilityPostgresFixture } from "../../../tests/support/reliability-postgres.mjs";
 import { createExecution } from "../../src/leader/plans/execution.js";
 import { NOTIFICATION_ATTEMPT_MS } from "../../src/notifications/contracts.js";
 import { ConflictError } from "../../src/store/interface.js";
 import { PostgresStore } from "../../src/store/postgres.js";
 
 const NOW = 1_700_000_000_000;
-const HOOK_TIMEOUT_MS = 60_000;
+const HOOK_TIMEOUT_MS = 180_000;
 const CHAT_ID = "deferred-notification-test";
 
 describe.skipIf(process.env.RUN_POSTGRES_INTEGRATION !== "1")("notification defer in isolated PostgreSQL", () => {
-  const fixture = createPostgresFixture();
+  const fixtureEvents: string[] = [];
+  const fixture = createReliabilityPostgresFixture({ env: process.env, evidence: (event: string) => { fixtureEvents.push(event); } });
   const stores: PostgresStore[] = [];
   let pool: pg.Pool;
   beforeAll(async () => {
@@ -23,8 +24,9 @@ describe.skipIf(process.env.RUN_POSTGRES_INTEGRATION !== "1")("notification defe
   }, HOOK_TIMEOUT_MS);
   afterAll(async () => {
     const cleanup = await Promise.allSettled([...stores.map(store => store.close()), ...(pool ? [pool.end()] : [])]);
-    fixture.stop();
+    await fixture.stop();
     for (const result of cleanup) if (result.status === "rejected") throw result.reason;
+    expect(fixtureEvents.at(-1)).toBe("database-container-removed");
   }, HOOK_TIMEOUT_MS);
 
   async function claimed() {

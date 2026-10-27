@@ -8,8 +8,9 @@ import { createGoal, goalRequestId } from "../../src/leader/goals/goal.js";
 import { proposal, lease, commit, nextDecision } from "../fixtures/goals.js";
 import { ModelProgressRunner } from "../../src/notifications/model-progress.js";
 import { PROGRESS_OUTPUT_LIMIT } from "../../src/notifications/progress.js";
-import { claimNotificationRecord, receiptNotificationRecord, normalizeNotification, LEGACY_NOTIFICATION_ATTEMPT_MS,
-  type NotificationSource, type StoredNotification } from "../../src/notifications/contracts.js";
+import { createTerminalNotification, claimNotificationRecord, receiptNotificationRecord, normalizeNotification, LEGACY_NOTIFICATION_ATTEMPT_MS,
+  type NotificationSource } from "../../src/notifications/contracts.js";
+import { initExecutionTables } from "../../src/store/execution-postgres.js";
 import type { LeaderModel } from "../../src/leader/model/contracts.js";
 import type { CommandRecord } from "../../src/types.js";
 
@@ -22,7 +23,8 @@ if (databaseUrl) {
 const NOW = 1_800_000_000_000;
 const FIRST = NOW + 30_000;
 const TIMEOUT_MS = 30_000;
-async function inSchema(run: (store: PostgresStore, pool: pg.Pool, reopen: () => Promise<PostgresStore>) => Promise<void>) {
+async function inSchema(run: (store: PostgresStore, pool: pg.Pool, reopen: () => Promise<PostgresStore>) => Promise<void>,
+  prepareSchema?: (pool: pg.Pool) => Promise<void>) {
   const schema = `model_progress_${randomUUID().replaceAll("-", "")}`;
   const admin = new pg.Pool({ connectionString: databaseUrl });
   const scoped = new URL(databaseUrl!); scoped.searchParams.set("options", `-c search_path=${schema}`);
@@ -33,6 +35,7 @@ async function inSchema(run: (store: PostgresStore, pool: pg.Pool, reopen: () =>
   };
   try {
     await admin.query(`CREATE SCHEMA ${schema}`);
+    await prepareSchema?.(pool);
     await run(await reopen(), pool, reopen);
   } finally {
     await Promise.all(stores.map(store => store.close()));
@@ -171,34 +174,22 @@ it.skipIf(!databaseUrl)("uses real PostgreSQL bounded Unicode completion evidenc
 }, TIMEOUT_MS);
 
 it.skipIf(!databaseUrl)("migrates real legacy notification statuses without changing text or permanent attempts and preserves current progress on repeated startup", async () => {
-  await inSchema(async (store, pool, reopen) => {
-    const legacyRows: { id: string; data: Record<string, unknown>; notification: StoredNotification }[] = [];
-    for (const status of ["pending", "claimed", "accepted", "uncertain"] as const) {
-      const record = initial();
-      await store.createExecutionIfAbsent(record);
-      await store.compareAndSetExecution({ ...record, revision: 2, status: "failed" }, 1, NOW);
-      const row = (await pool.query("SELECT data FROM leader_notifications WHERE id=$1", [record.id])).rows[0];
-      let notification = normalizeNotification(row.data);
-      notification.text = `完整保留历史正文：${status}。`;
-      if (status !== "pending") {
-        notification = claimNotificationRecord(notification, randomUUID(), ["synthetic-chat"], NOW + 1);
-        notification.attemptExpiresAt = NOW + 1 + LEGACY_NOTIFICATION_ATTEMPT_MS;
-      }
-      if (status === "accepted" || status === "uncertain")
-        notification = receiptNotificationRecord(notification, notification.attemptId!, status, NOW + 2);
-      const { source, ...fields } = notification;
-      legacyRows.push({ id: record.id, data: { ...fields, executionId: source.id }, notification });
+  const legacyRows = (["pending", "claimed", "accepted", "uncertain"] as const).map(status => {
+    const record = { ...initial(), revision: 2, status: "failed" as const };
+    let notification = createTerminalNotification(record, NOW)!;
+    notification.text = `完整保留历史正文：${status}。`;
+    if (status !== "pending") {
+      notification = claimNotificationRecord(notification, randomUUID(), ["synthetic-chat"], NOW + 1);
+      notification.attemptExpiresAt = NOW + 1 + LEGACY_NOTIFICATION_ATTEMPT_MS;
     }
-    await pool.query("DROP TABLE leader_notifications");
-    await pool.query(`CREATE TABLE leader_notifications (
-      id VARCHAR(36) COLLATE "C" PRIMARY KEY, execution_id VARCHAR(36) COLLATE "C" NOT NULL UNIQUE REFERENCES leader_executions(id),
-      chat_id VARCHAR(64) NOT NULL, kind VARCHAR(16) NOT NULL, status VARCHAR(16) NOT NULL,
-      created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL, data JSONB NOT NULL)`);
-    for (const previous of legacyRows) await pool.query(`INSERT INTO leader_notifications
-      (id,execution_id,chat_id,kind,status,created_at,expires_at,data) VALUES ($1,$1,$2,$3,$4,$5,$6,$7::jsonb)`,
-    [previous.id, previous.notification.chatId, previous.notification.kind, previous.notification.status,
-      previous.notification.createdAt, previous.notification.expiresAt, JSON.stringify(previous.data)]);
-    const migrated = await reopen();
+    if (status === "accepted" || status === "uncertain")
+      notification = receiptNotificationRecord(notification, notification.attemptId!, status, NOW + 2);
+    const { source, ...fields } = notification;
+    return { id: record.id, record, data: { ...fields, executionId: source.id }, notification };
+  });
+  await inSchema(async (migrated, pool, reopen) => {
+    expect((await pool.query("SELECT version FROM controller_schema_migrations ORDER BY version")).rows)
+      .toEqual([{ version: 1 }, { version: 2 }]);
     for (const previous of legacyRows) {
       const persisted = (await pool.query("SELECT * FROM leader_notifications WHERE id=$1", [previous.id])).rows[0];
       expect(persisted.data).toEqual(previous.notification);
@@ -216,5 +207,23 @@ it.skipIf(!databaseUrl)("migrates real legacy notification statuses without chan
     expect((await pool.query("SELECT * FROM leader_notifications ORDER BY id")).rows).toEqual(before);
     expect((await restarted.getNotification(progress.id, FIRST))!.text).toBe(progress.text);
     expect(await restarted.enqueueProgressNotification(source, FIRST + 60_000, { eventKey: context.eventKey, text: "重启重复发送" })).toBeNull();
+  }, async pool => {
+    const client = await pool.connect();
+    try { await initExecutionTables(client); }
+    finally { client.release(); }
+    await pool.query(`CREATE TABLE leader_notifications (
+      id VARCHAR(36) COLLATE "C" PRIMARY KEY, execution_id VARCHAR(36) COLLATE "C" NOT NULL UNIQUE REFERENCES leader_executions(id),
+      chat_id VARCHAR(64) NOT NULL, kind VARCHAR(16) NOT NULL, status VARCHAR(16) NOT NULL,
+      created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL, data JSONB NOT NULL)`);
+    for (const previous of legacyRows) {
+      const record = previous.record;
+      await pool.query(`INSERT INTO leader_executions (id,chat_id,revision,status,data,created_at)
+        VALUES ($1,$2,$3,$4,$5::jsonb,$6)`, [record.id, record.chatId, record.revision, record.status, JSON.stringify(record), record.createdAt]);
+      await pool.query(`INSERT INTO leader_notifications
+        (id,execution_id,chat_id,kind,status,created_at,expires_at,data) VALUES ($1,$1,$2,$3,$4,$5,$6,$7::jsonb)`,
+      [previous.id, previous.notification.chatId, previous.notification.kind, previous.notification.status,
+        previous.notification.createdAt, previous.notification.expiresAt, JSON.stringify(previous.data)]);
+    }
+    expect((await pool.query("SELECT to_regclass('controller_schema_migrations') AS ledger")).rows[0].ledger).toBeNull();
   });
 }, TIMEOUT_MS);

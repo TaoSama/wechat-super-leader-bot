@@ -9,6 +9,8 @@ const CLAIM_MS = 60_000;
 export async function verifyNotificationMigration({ databaseUrl, Pool, PostgresStore, pool }) {
   const { createExecution } = await import('../../../controller/dist/leader/plans/execution.js');
   const { createGoal } = await import('../../../controller/dist/leader/goals/goal.js');
+  const { initExecutionTables } = await import('../../../controller/dist/store/execution-postgres.js');
+  const { initGoalTables } = await import('../../../controller/dist/store/goal-postgres.js');
   const schema = 'notification_migration_' + randomUUID().replaceAll('-', '');
   assert.match(schema, /^notification_migration_[a-f0-9]{32}$/);
   const scoped = new URL(databaseUrl);
@@ -17,12 +19,10 @@ export async function verifyNotificationMigration({ databaseUrl, Pool, PostgresS
   let created = false;
   await withTestCleanup(async () => {
     await pool.query(`CREATE SCHEMA ${schema}`); created = true;
-    await store.init();
     assert.equal((await fixture.query('SELECT current_schema() AS name')).rows[0].name, schema);
-    await fixture.query('DROP TABLE leader_notifications');
-    // Re-run the baseline migration against the legacy table. The version ledger
-    // is created by the initial setup above and would otherwise skip migration 1.
-    await fixture.query('DROP TABLE controller_schema_migrations');
+    const client = await fixture.connect();
+    try { await initExecutionTables(client); await initGoalTables(client); }
+    finally { client.release(); }
     await fixture.query(`CREATE TABLE leader_notifications (
       id VARCHAR(36) COLLATE "C" PRIMARY KEY,
       execution_id VARCHAR(36) COLLATE "C" NOT NULL UNIQUE REFERENCES leader_executions(id),
@@ -55,16 +55,21 @@ export async function verifyNotificationMigration({ databaseUrl, Pool, PostgresS
     const rows = () => fixture.query('SELECT to_jsonb(t) AS value FROM leader_notifications t ORDER BY id').then(result => result.rows.map(row => row.value));
     const columns = () => fixture.query("SELECT column_name,is_nullable FROM information_schema.columns WHERE table_schema=$1 AND table_name='leader_notifications' ORDER BY ordinal_position", [schema]).then(result => result.rows);
     const legacyRows = await rows();
+    const ledger = () => fixture.query("SELECT to_regclass('controller_schema_migrations') AS name").then(result => result.rows[0].name);
+    assert.equal(await ledger(), null, 'Legacy data must predate the schema migration ledger');
     // The bad row sorts last, so rollback must undo preceding successful conversions too.
     const badOriginal = expected.find(item => item.id === legacyRows.at(-1).id);
     const corrupt = { ...badOriginal, unexpected: 'must-reject-not-discard' };
     await fixture.query('UPDATE leader_notifications SET data=$2::jsonb WHERE id=$1', [corrupt.id, JSON.stringify(corrupt)]);
     const invalidRows = await rows(), oldColumns = await columns();
     await assert.rejects(store.init(), undefined, 'Unknown legacy data silently accepted');
+    assert.equal(await ledger(), null, 'Failed migration persisted its schema ledger');
     assert.deepEqual(await rows(), invalidRows, 'Failed migration partially rewrote data');
     assert.deepEqual(await columns(), oldColumns, 'Failed migration partially changed DDL');
     await fixture.query('UPDATE leader_notifications SET data=$2::jsonb WHERE id=$1', [badOriginal.id, JSON.stringify(badOriginal)]);
     await store.init();
+    assert.deepEqual((await fixture.query('SELECT version FROM controller_schema_migrations ORDER BY version')).rows,
+      [{ version: 1 }, { version: 2 }]);
     const migrated = await rows();
     assert.equal(migrated.length, expected.length, 'Migration backfilled or lost events');
     for (const before of expected) {

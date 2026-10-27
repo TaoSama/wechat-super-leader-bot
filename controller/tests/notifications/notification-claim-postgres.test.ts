@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPostgresFixture } from "../../../tests/support/control-plane-fixture.mjs";
+import { createReliabilityPostgresFixture } from "../../../tests/support/reliability-postgres.mjs";
 import { createExecution } from "../../src/leader/plans/execution.js";
 import { createGoal } from "../../src/leader/goals/goal.js";
 import { claimNotificationRecord, normalizeNotification, receiptNotificationRecord, terminalNotificationPartEligible,
@@ -11,7 +11,7 @@ import { initNotificationTables, insertTerminalNotification, pgClaimNotification
   pgRecordNotificationReceipt } from "../../src/store/notification-postgres.js";
 
 const NOW = 1_700_000_000_000;
-const HOOK_TIMEOUT_MS = 60_000;
+const HOOK_TIMEOUT_MS = 180_000;
 const CHAT_ID = "terminal-claim-metadata-test";
 const PART_COUNT = 3;
 const PART_TEXT_BYTES = 64 * 1024;
@@ -39,7 +39,8 @@ function withStatus(notification: StoredNotification, status: StoredNotification
 }
 
 describe.skipIf(process.env.RUN_POSTGRES_INTEGRATION !== "1")("terminal claim metadata in isolated PostgreSQL", () => {
-  const fixture = createPostgresFixture();
+  const fixtureEvents: string[] = [];
+  const fixture = createReliabilityPostgresFixture({ env: process.env, evidence: (event: string) => { fixtureEvents.push(event); } });
   let pool: pg.Pool;
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: await fixture.start() });
@@ -56,7 +57,8 @@ describe.skipIf(process.env.RUN_POSTGRES_INTEGRATION !== "1")("terminal claim me
     finally { client.release(); }
   }, HOOK_TIMEOUT_MS);
   afterAll(async () => {
-    try { await pool?.end(); } finally { fixture.stop(); }
+    try { await pool?.end(); } finally { await fixture.stop(); }
+    expect(fixtureEvents.at(-1)).toBe("database-container-removed");
   }, HOOK_TIMEOUT_MS);
 
   async function parts(type: SourceType): Promise<StoredNotification[]> {
