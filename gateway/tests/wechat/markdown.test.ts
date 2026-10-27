@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { markdownToWeChat, TRUNCATION_NOTICE, DEFAULT_MESSAGE_MAX_CHARS } from "../../src/wechat/markdown.js";
+import { markdownToWeChat, sanitizeWeChatCitations, TRUNCATION_NOTICE, DEFAULT_MESSAGE_MAX_CHARS } from "../../src/wechat/markdown.js";
 import { splitWeChatReply } from "../../src/wechat/client.js";
 
 test("default reply chunks use a 3800 UTF-16-unit budget and preserve full source", () => {
@@ -22,6 +22,31 @@ test("markdownToWeChat strips headers, bullets, and converts links with layout",
   const source = "# 标题\n\n**重点** 与 `代码`\n- 一项\n[文档](https://example.com)";
   const expected = "标题\n\n重点 与 代码\n• 一项\n文档 (https://example.com)";
   assert.equal(markdownToWeChat(source), expected);
+});
+
+test("sanitizes complete single and adjacent citation tokens while preserving surrounding text", () => {
+  const first = "\uE200cite\uE202turn6search1\uE201";
+  const second = "\uE200cite\uE202turn6search3\uE201";
+  const result = sanitizeWeChatCitations(`北京今天${first}以晴为主${second}。`);
+  assert.deepEqual(result, {
+    text: "北京今天以晴为主。",
+    removedTokenCount: 2,
+    removedChars: first.length + second.length,
+  });
+  assert.deepEqual(sanitizeWeChatCitations("普通文本"), {
+    text: "普通文本", removedTokenCount: 0, removedChars: 0,
+  });
+});
+
+test("does not remove citation-looking text from code, links, URLs, or malformed tokens", () => {
+  const token = "\uE200cite\uE202turn6search1\uE201";
+  const malformed = "\uE200cite\uE202turn6search1";
+  const source = `\`${token}\` [链接](https://example.test/${token}) https://example.test/${token} ${malformed}`;
+  const result = sanitizeWeChatCitations(source);
+  assert.equal(result.text, source);
+  assert.equal(result.removedTokenCount, 0);
+  assert.equal(result.removedChars, 0);
+  assert.equal(sanitizeWeChatCitations(`前${token}后`).text, "前后");
 });
 
 test("preserves technical identifiers and inline code", () => {
