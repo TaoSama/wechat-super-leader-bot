@@ -66,6 +66,7 @@ export function verificationPlan(suite = 'all', { skipNativeProgress = false } =
   const integration = [
     step('compose-tests', process.execPath, ['--test', 'tests/integration/deploy/config.test.mjs', 'tests/integration/deploy/gateway.test.mjs',
       'tests/integration/deploy/background-model.test.mjs']),
+    step('gateway-native-skill-tests', 'pnpm', ['--dir', 'gateway', 'run', 'test:native-skill']),
     step('synthetic-integration', process.execPath, ['tests/integration/run.mjs']),
     step('console-auth-integration', process.execPath, ['tests/integration/console-auth.mjs', '--run']),
     step('wechat-interaction', process.execPath, ['tests/integration/leader/wechat-interaction.mjs', '--run']),

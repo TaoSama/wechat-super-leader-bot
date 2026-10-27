@@ -109,6 +109,7 @@ jobs:
       - name: Verify with synthetic fixtures
         env:
           SUPER_LEADER_SKIP_NATIVE_PROGRESS: ${{ matrix.os == 'ubuntu-24.04' && matrix.suite == 'integration' && '1' || '' }}
+          SUPER_LEADER_SKIP_NATIVE_SKILL_DISCOVERY: ${{ matrix.os == 'ubuntu-24.04' && matrix.suite == 'unit' && '1' || '' }}
         run: node scripts/verify.mjs --suite ${{ matrix.suite }} --unit-group ${{ matrix.unit_group }} --integration-group ${{ matrix.integration_group }} --parallel
       - name: Verify native app-server steering
         if: matrix.os == 'macos-14' && matrix.unit_group == 'core'

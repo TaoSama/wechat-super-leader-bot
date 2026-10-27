@@ -100,6 +100,13 @@ test('integration groups isolate the real WeChat progress policy without droppin
   assert.throws(() => parallelVerificationPlan('integration', { integrationGroup: 'wrong' }), /Unknown integration group/);
 });
 
+test('integration core keeps the AppArmor-dependent native skill discovery check', () => {
+  const unit = verificationPlan('unit');
+  const integration = verificationPlan('integration', { skipNativeProgress: true });
+  assert.equal(unit.some(step => step.id === 'gateway-native-skill-tests'), false);
+  assert.equal(integration.filter(step => step.id === 'gateway-native-skill-tests').length, 1);
+});
+
 test('parallel runner completes all builds before collecting every group failure', async () => {
   const events = [];
   const step = id => ({ id, command: 'synthetic', args: [], cwd: '.', env: {} });
