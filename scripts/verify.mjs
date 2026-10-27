@@ -30,7 +30,7 @@ const INHERITED_ENV = [
   'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'CI',
   'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
   'GOPATH', 'GOCACHE', 'GOMODCACHE', 'GOPROXY', 'GOSUMDB', 'GOTOOLCHAIN',
-  'DOCKER_CONFIG', 'DOCKER_HOST', 'DOCKER_CONTEXT',
+  'DOCKER_CONFIG', 'DOCKER_HOST', 'DOCKER_CONTEXT', 'SUPER_LEADER_SKIP_NATIVE_SKILL_DISCOVERY',
 ];
 
 function unitTestFiles(directory = 'tests/unit') {

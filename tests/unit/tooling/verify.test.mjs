@@ -10,6 +10,7 @@ const cli = fileURLToPath(new URL('../../../scripts/verify.mjs', import.meta.url
 
 test('verification preserves required tools but drops live gates, credentials and process injection', () => {
   const env = verificationEnvironment({ PATH: '/tools', HOME: '/fixture', TMPDIR: '/temp', HTTPS_PROXY: 'http://proxy',
+    SUPER_LEADER_SKIP_NATIVE_SKILL_DISCOVERY: '1',
     LIVE_DESKTOP_SEND: 'fixture-only', LIVE_CODEX_SESSION: 'real', CODEX_APP_SERVER_SOCKET: '/real',
     SUPER_LEADER_JOURNAL_CRASH_TEST: '1', SUPER_LEADER_JOURNAL_TEST_DIR: '/real',
     CONTROLLER_TOKEN: 'secret', LEADER_MODEL_API_KEY: 'secret', WECHAT_CREDENTIALS_PATH: '/real',
@@ -19,6 +20,7 @@ test('verification preserves required tools but drops live gates, credentials an
   assert.equal(env.PATH, '/tools');
   assert.equal(env.HOME, '/fixture');
   assert.equal(env.HTTPS_PROXY, 'http://proxy');
+  assert.equal(env.SUPER_LEADER_SKIP_NATIVE_SKILL_DISCOVERY, '1');
   assert.equal(env.GOENV, 'off');
   assert.equal(env.SUPER_LEADER_NO_DOTENV, '1');
   assert.notEqual(env.GOOS, 'windows');
