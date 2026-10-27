@@ -223,7 +223,9 @@ test("upgrading a partially acknowledged raw Markdown plan preserves its origina
   f.state.beginReplyChunk(key, 0);
   f.state.confirmReplyChunk(key, 0);
   const resumed = new StateManager(f.credentials, f.statePath, f.state.policy);
-  await f.client(resumed).sendMarkdownReply("chat", original, { deliveryKey: key, maxCharsPerChunk: budget });
+  await f.client(resumed).sendMarkdownReply("chat", original, {
+    deliveryKey: key, maxCharsPerChunk: budget, verbatim: true,
+  });
   assert.deepEqual(f.sent, chunks.slice(1));
   assert.equal(resumed.getReplySentChunks(key), chunks.length);
   await f.client(resumed).sendMarkdownReply("chat", original, { deliveryKey: key, maxCharsPerChunk: budget });

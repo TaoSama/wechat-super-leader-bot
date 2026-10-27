@@ -434,12 +434,12 @@ export class ILinkClient {
     const requestedVerbatim = options?.verbatim === true;
     let legacyRendered: string | undefined;
     let legacyRenderedDigest: string | undefined;
-    if (existing && !requestedVerbatim) {
+    if (existing) {
       legacyRendered = markdownToWeChat(rawMarkdown, Number.MAX_SAFE_INTEGER, false);
       legacyRenderedDigest = hash([...identity, "wechat-plain-v1", legacyRendered]);
     }
     const historicalRawPlan = existing?.digest === legacyDigest;
-    const historicalFormattedPlan = Boolean(existing && !requestedVerbatim && existing.digest === legacyRenderedDigest);
+    const historicalFormattedPlan = Boolean(existing && existing.digest === legacyRenderedDigest);
     const historicalPlan = historicalRawPlan || historicalFormattedPlan;
     const sanitized = historicalPlan ? { text: rawMarkdown, removedTokenCount: 0, removedChars: 0 }
       : sanitizeWeChatCitations(rawMarkdown);
