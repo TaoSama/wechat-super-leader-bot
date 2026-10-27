@@ -6,14 +6,16 @@ import { publicCommand } from "../commands/public.js";
 import { NodeHub } from "../nodes/hub.js";
 import { HistoryError } from "../sessions/history.js";
 import { TERMINAL_SESSION_ID_PATTERN } from "../sessions/terminal.js";
-import { DeliveryModeSchema, PostCommandRequestSchema, TurnIdSchema, type CommandAuthority } from "../types.js";
+import { DeliveryModeSchema, PostCommandRequestSchema, SessionHistorySchema, TurnIdSchema, type CommandAuthority } from "../types.js";
+import { GatewaySettingsClient, SettingsHttpError } from "../settings/gateway-client.js";
+import { makeWechatSession, normalizeHistoryContext, WECHAT_NODE_ID, wechatSessionId } from "../sessions/wechat-history.js";
 
 const TargetSchema = z.object({
   nodeId: PostCommandRequestSchema.shape.nodeId,
   sessionId: z.string().min(1).max(64).refine(value => /^[A-Za-z0-9_-]+$/.test(value) || TERMINAL_SESSION_ID_PATTERN.test(value)),
 });
 const HistoryQuerySchema = z.object({
-  source: z.literal("control-socket").optional(),
+  source: z.enum(["control-socket", "wechat-codex"]).optional(),
   cursor: z.string().min(1).max(4096).optional(),
   historyContext: z.string().uuid().optional(),
   limit: z.string().regex(/^(?:[1-9]|[1-4][0-9]|50)$/).transform(Number).optional(),
@@ -29,11 +31,20 @@ function webRequestId(requestId: string): string {
   return "web_" + createHash("sha256").update(JSON.stringify(["session-message", requestId])).digest("hex");
 }
 
-export function createSessionRouter(hub: NodeHub, commands: CommandService): Router {
+interface SessionRouterOptions {
+  gateway?: GatewaySettingsClient;
+  allowedChats?: () => ReadonlySet<string>;
+}
+
+export function createSessionRouter(hub: NodeHub, commands: CommandService, options: SessionRouterOptions = {}): Router {
   const router = Router();
   router.get("/:nodeId/:sessionId/messages/:requestId", async (req, res) => {
     const target = TargetSchema.safeParse(req.params), requestId = RequestIdSchema.safeParse(req.params.requestId);
     if (!target.success || !requestId.success) { res.status(400).json({error:"Invalid command recovery request"}); return; }
+    if (target.data.nodeId === WECHAT_NODE_ID) {
+      res.status(403).json({ code: "session_read_only", error: "WeChat Codex history is read-only" });
+      return;
+    }
     const authority = res.locals.commandAuthority as CommandAuthority | undefined;
     if (!authority) { res.status(403).json({error:"Command recovery authority is unavailable"}); return; }
     const command = await commands.getByRequestId(webRequestId(requestId.data),authority);
@@ -47,6 +58,51 @@ export function createSessionRouter(hub: NodeHub, commands: CommandService): Rou
     const query = HistoryQuerySchema.safeParse(req.query);
     if (!target.success || !query.success) {
       res.status(400).json({ error: "Invalid session history request" });
+      return;
+    }
+    if (target.data.nodeId === WECHAT_NODE_ID) {
+      if (!options.gateway || !options.allowedChats || query.data.source === "control-socket") {
+        res.status(400).json({ code: "history_invalid_request", error: "Invalid WeChat session history request" });
+        return;
+      }
+      try {
+        const chats = (await options.gateway.listWechatChats()).filter(chat => options.allowedChats!().has(chat.chatId));
+        const chat = chats.find(item => wechatSessionId(item.chatId) === target.data.sessionId);
+        if (!chat) {
+          res.status(404).json({ code: "history_session_not_found", error: "Session not found" });
+          return;
+        }
+        const history = await options.gateway.readWechatHistory(chat.chatId, {
+          cursor: query.data.cursor,
+          limit: query.data.limit,
+          historyContext: query.data.historyContext,
+        });
+        const session = makeWechatSession(chat);
+        const historyContext = normalizeHistoryContext(history.historyContext, history.threadId);
+        if (query.data.historyContext && query.data.historyContext !== historyContext) {
+          res.status(409).json({ code: "history_context_expired", error: "History context expired" });
+          return;
+        }
+        const projected = SessionHistorySchema.safeParse({ session, historyContext, source: "wechat-codex",
+          items: history.items, nextCursor: history.nextCursor, fetchedAt: history.fetchedAt,
+          truncated: history.truncated, ...(history.turnStatuses ? { turnStatuses: history.turnStatuses } : {}) });
+        if (!projected.success) {
+          res.status(502).json({ code: "history_invalid_response", error: "Invalid history response" });
+          return;
+        }
+        res.json(projected.data);
+      } catch (error) {
+        if (error instanceof SettingsHttpError) {
+          const status = [400, 401, 403, 404, 409, 413, 429, 502, 503, 504].includes(error.statusCode) ? error.statusCode : 503;
+          res.status(status).json({ code: error.code, error: error.message });
+          return;
+        }
+        throw error;
+      }
+      return;
+    }
+    if (query.data.source === "wechat-codex") {
+      res.status(400).json({ code: "history_invalid_request", error: "Invalid session history source" });
       return;
     }
     const abort = new AbortController();
@@ -79,6 +135,10 @@ export function createSessionRouter(hub: NodeHub, commands: CommandService): Rou
     const body = MessageSchema.safeParse(req.body);
     if (!req.is("application/json") || !target.success || !body.success) {
       res.status(400).json({ error: "Invalid session message request" });
+      return;
+    }
+    if (target.data.nodeId === WECHAT_NODE_ID) {
+      res.status(403).json({ code: "session_read_only", error: "WeChat Codex history is read-only" });
       return;
     }
     const requestId = webRequestId(body.data.requestId);

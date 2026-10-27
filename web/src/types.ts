@@ -73,7 +73,7 @@ export interface ScopedSession {
   loaded?: boolean;
   desktopObservation?: DesktopObservation;
   sendAvailability?: SendAvailability;
-  historySource?: "terminal-transcript";
+  historySource?: "terminal-transcript" | "wechat-codex";
 }
 
 export interface HistoryItem {
@@ -90,7 +90,7 @@ export interface HistoryItem {
   truncated?: boolean;
 }
 
-export type HistorySource = "control-socket" | "codex-desktop" | "terminal-transcript";
+export type HistorySource = "control-socket" | "codex-desktop" | "terminal-transcript" | "wechat-codex";
 
 export interface SessionHistory {
   session: ScopedSession;

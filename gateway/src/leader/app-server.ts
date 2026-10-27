@@ -235,25 +235,80 @@ class Connection {
   }
 }
 
+export interface AppServerHistoryPage {
+  readonly threadId: string;
+  readonly items: ObjectValue[];
+  readonly nextCursor: string | null;
+}
+
+function appServerEnvironment(options: CodexOptions): { executable: string; args: string[]; env: Record<string, string> } {
+  const args = ["app-server", "--listen", "stdio://"];
+  for (const [key, value] of Object.entries(options.config ?? {})) args.push("-c", `${key}=${toml(value)}`);
+  for (const override of options.configOverrides ?? []) args.push("-c", override);
+  const env = Object.fromEntries(Object.entries(options.env ?? {}).filter(([key]) => ENV_ALLOWLIST.has(key)));
+  if (options.apiKey) env.CODEX_API_KEY = options.apiKey;
+  if (options.baseUrl) env.OPENAI_BASE_URL = options.baseUrl;
+  const native = resolveCodexExecutable(options.codexPathOverride);
+  if (native.pathDirectory && existsSync(native.pathDirectory)) env.PATH = `${native.pathDirectory}${path.delimiter}${env.PATH ?? ""}`;
+  return { executable: native.executable, args, env };
+}
+
+async function createAppServerConnection(options: CodexOptions, signal: AbortSignal): Promise<Connection> {
+  const { executable, args, env } = appServerEnvironment(options);
+  const connection = new Connection(spawn(executable, args, { env, stdio: "pipe" }), signal);
+  try {
+    await connection.rpc("initialize", { clientInfo: { name: "wechat_gateway_history", version: "1.0.0" },
+      capabilities: { experimentalApi: true } });
+    connection.send({ method: "initialized" });
+    return connection;
+  } catch (error) {
+    await connection.close();
+    throw error;
+  }
+}
+
+/** Read a persisted thread without resuming it or starting a turn. */
+export async function readAppServerThreadHistory(options: CodexOptions, threadId: string,
+  page: { cursor?: string; limit: number }, signal: AbortSignal): Promise<AppServerHistoryPage> {
+  if (!threadId || !/^[A-Za-z0-9._:-]{1,256}$/.test(threadId)) throw new Error("Invalid Codex thread ID");
+  if (!Number.isSafeInteger(page.limit) || page.limit < 1 || page.limit > 50) throw new Error("Invalid history limit");
+  if (page.cursor !== undefined && (page.cursor.length > 4096 || !page.cursor.trim())) throw new Error("Invalid history cursor");
+  if (signal.aborted) throw new Error("Codex app-server history read aborted");
+  const connection = await createAppServerConnection(options, signal);
+  try {
+    const params = { threadId, sortDirection: "desc", limit: page.limit,
+      ...(page.cursor ? { cursor: page.cursor } : {}) };
+    const [threadResult, pageResult] = await Promise.all([
+      connection.rpc("thread/read", { threadId, includeTurns: false }),
+      connection.rpc("thread/items/list", params),
+    ]);
+    const thread = object(threadResult);
+    if (string(object(thread.thread).id) !== threadId) throw new Error("Codex app-server returned an unexpected thread");
+    const result = object(pageResult);
+    if (!Array.isArray(result.data) || result.data.length > page.limit) throw new Error("Codex app-server returned an oversized history page");
+    const values = result.data.map(object).filter(item => !!string(object(item.item).id));
+    const nextCursor = result.nextCursor === null || result.nextCursor === undefined ? null : string(result.nextCursor);
+    if (result.nextCursor !== null && result.nextCursor !== undefined && (!nextCursor || nextCursor.length > 4096)) {
+      throw new Error("Codex app-server returned an invalid history cursor");
+    }
+    return { threadId, items: values.reverse(), nextCursor: nextCursor || null };
+  } finally {
+    await connection.close();
+  }
+}
+
 /** One isolated native process owns one query, including all its steered input. */
 export async function startAppServerTurn(options: CodexOptions, threadOptions: ThreadOptions,
   threadId: string | undefined, input: string, signal: AbortSignal,
   onThreadStarted?: ThreadStartedHandler): Promise<AppServerTurn> {
   if (signal.aborted) throw new Error("Codex app-server turn aborted");
-  const native = resolveCodexExecutable(options.codexPathOverride);
   const config = { ...options.config,
     ...(threadOptions.modelReasoningEffort ? { model_reasoning_effort: threadOptions.modelReasoningEffort } : {}),
     ...(threadOptions.webSearchMode ? { web_search: threadOptions.webSearchMode } : {}),
     ...(threadOptions.webSearchEnabled !== undefined && !threadOptions.webSearchMode
       ? { web_search: threadOptions.webSearchEnabled ? "live" : "disabled" } : {}) };
-  const args = ["app-server", "--listen", "stdio://"];
-  for (const [key, value] of Object.entries(config)) args.push("-c", `${key}=${toml(value)}`);
-  for (const override of options.configOverrides ?? []) args.push("-c", override);
-  const env = Object.fromEntries(Object.entries(options.env ?? {}).filter(([key]) => ENV_ALLOWLIST.has(key)));
-  if (options.apiKey) env.CODEX_API_KEY = options.apiKey;
-  if (options.baseUrl) env.OPENAI_BASE_URL = options.baseUrl;
-  if (native.pathDirectory && existsSync(native.pathDirectory)) env.PATH = `${native.pathDirectory}${path.delimiter}${env.PATH ?? ""}`;
-  const connection = new Connection(spawn(native.executable, args, { env, stdio: "pipe" }), signal);
+  const { executable, args, env } = appServerEnvironment({ ...options, config });
+  const connection = new Connection(spawn(executable, args, { env, stdio: "pipe" }), signal);
   try {
     await connection.rpc("initialize", { clientInfo: { name: "wechat_gateway", version: "1.0.0" },
       capabilities: { experimentalApi: true } });

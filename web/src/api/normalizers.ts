@@ -56,6 +56,7 @@ export function normalizeSession(raw: unknown): ScopedSession | null {
   if (typeof obj.id !== "string" || obj.id.trim() === "") return null;
   if (typeof obj.nodeId !== "string" || obj.nodeId.trim() === "") return null;
   const provider = typeof obj.provider === "string" && obj.provider ? obj.provider : "codex-app";
+  const capabilities = normalizeActionCapabilities(obj.capabilities);
 
   // Malformed desktop evidence must not become "absent" and bypass its veto.
   const normalizedDesktop = normalizeDesktopObservation(obj.desktopObservation);
@@ -73,7 +74,7 @@ export function normalizeSession(raw: unknown): ScopedSession | null {
       typeof obj.status === "string" && obj.status.trim() !== ""
         ? obj.status
         : "unknown",
-    capabilities: normalizeActionCapabilities(obj.capabilities),
+    capabilities,
     observedAt: typeof obj.observedAt === "string" ? obj.observedAt : "",
     model: typeof obj.model === "string" ? obj.model : undefined,
     modelProvider: typeof obj.modelProvider === "string" ? obj.modelProvider : undefined,
@@ -85,7 +86,9 @@ export function normalizeSession(raw: unknown): ScopedSession | null {
     sendAvailability: normalizeSendAvailability(obj.desktopObservation !== undefined && !normalizedDesktop &&
       Array.isArray(obj.capabilities) && obj.capabilities.includes("resume-send") ? null : obj.sendAvailability),
     ...(obj.historySource === "terminal-transcript" && isTerminalHistoryTarget({ id: obj.id, provider })
-      ? { historySource: "terminal-transcript" as const } : {}),
+      ? { historySource: "terminal-transcript" as const } :
+      obj.historySource === "wechat-codex" && provider === "wechat-codex" && capabilities.length === 1 && capabilities[0] === "read"
+        ? { historySource: "wechat-codex" as const } : {}),
   };
 }
 

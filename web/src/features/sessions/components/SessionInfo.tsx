@@ -6,6 +6,7 @@ import { modelSourceLabel, type selectModelObservation } from "../model-observat
 import type { useSessionHistory } from "../useSessionHistory";
 import { SessionDetails } from "./SessionDetails";
 import { ExecutionTimeline } from "../execution-timeline";
+import { hasWechatHistorySource } from "../history-contract";
 
 interface Props {
   session: ScopedSession;
@@ -20,6 +21,7 @@ interface Props {
 }
 
 export function SessionInfo({ session, model, connected, terminal, now, blockReason, showHistory, history, onClose }: Props) {
+  const wechatHistory = hasWechatHistorySource(session);
   const metadata = [
     ["标题", session.title || "未命名会话"],
     ["机器", `${session.nodeId} · ${connected ? "在线" : "离线"}`],
@@ -34,8 +36,8 @@ export function SessionInfo({ session, model, connected, terminal, now, blockRea
   ];
   return <SessionDetails onClose={onClose}>
     <dl className="session-metadata">{metadata.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
-    <section className="session-info-section"><h3>发送说明</h3>
-      <p>消息会发往当前会话，保留原来的模型与设置。发送状态确认前，请勿重复发送。</p>
+    <section className="session-info-section"><h3>{wechatHistory ? "读取说明" : "发送说明"}</h3>
+      {wechatHistory ? <p>主微信 Codex 对话仅提供历史读取，控制台不会发送消息。</p> : <p>消息会发往当前会话，保留原来的模型与设置。发送状态确认前，请勿重复发送。</p>}
       {!terminal && (canResumeSession(session, now) || session.sendAvailability) && <p>{canResumeSession(session, now) ? "会话需要时会自动恢复，发送前检查是否正在使用。" : blockReason || "通过原会话发送，保留会话设置。"}</p>}
       {terminal && session.sendAvailability?.route === "terminal-pane" && <p>原终端输入 · 非原子：CLI 退出、同类进程替换或人工输入可能与投递竞态。输入已写入，执行未确认；不是任务完成，勿自动重发。</p>}
       <p>草稿只保留在当前页面，关闭页面后不会保存。</p>
