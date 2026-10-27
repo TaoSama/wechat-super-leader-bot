@@ -14,9 +14,15 @@ export function hasTerminalHistorySource(session: Pick<ScopedSession, "id" | "pr
   return session.historySource === "terminal-transcript" && isTerminalHistoryTarget(session);
 }
 
+export function hasWechatHistorySource(session: Pick<ScopedSession, "id" | "nodeId" | "provider" | "historySource" | "capabilities">): boolean {
+  return session.historySource === "wechat-codex" && session.provider === "wechat-codex" && session.nodeId === "wechat" &&
+    session.capabilities.length === 1 && session.capabilities[0] === "read";
+}
+
 export function isSessionHistorySource(source: unknown, session: ScopedSession): source is HistorySource {
-  return source === "terminal-transcript" ? hasTerminalHistorySource(session)
-    : !isTerminalSession(session) && (source === "control-socket" || source === "codex-desktop");
+  if (source === "terminal-transcript") return hasTerminalHistorySource(session);
+  if (source === "wechat-codex") return hasWechatHistorySource(session);
+  return !isTerminalSession(session) && (source === "control-socket" || source === "codex-desktop");
 }
 
 export function terminalHistoryBlockReason(session: ScopedSession, now = Date.now()): string | null {

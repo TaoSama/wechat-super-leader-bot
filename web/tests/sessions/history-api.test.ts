@@ -34,6 +34,17 @@ describe("history API contract", () => {
     fetch.mockResolvedValue(response(PAGE));
     await expect(fetchSessionHistory("node", "session", undefined, undefined, undefined, "control-socket")).rejects.toThrow("所选读取来源不匹配");
   });
+  it("accepts the synthetic main WeChat Codex history source and forwards it", async () => {
+    const fetch = vi.fn().mockResolvedValue(response({
+      ...PAGE,
+      session: { id: "main", nodeId: "wechat", provider: "wechat-codex", historySource: "wechat-codex", capabilities: ["read"], observedAt: "2026-10-11T10:00:00Z" },
+      source: "wechat-codex",
+    }));
+    vi.stubGlobal("fetch", fetch);
+    const page = await fetchSessionHistory("wechat", "main", undefined, undefined, undefined, "wechat-codex");
+    expect(page.source).toBe("wechat-codex");
+    expect(fetch.mock.calls[0][0]).toContain("source=wechat-codex");
+  });
   it("keeps initial reads context-free and includes context on latest/pagination requests", async () => {
     const fetch = vi.fn().mockResolvedValue(response(PAGE));
     vi.stubGlobal("fetch", fetch);

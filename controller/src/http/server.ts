@@ -45,6 +45,7 @@ import { createBackgroundRouter, createSourceAutomationRouter } from "../backgro
 import { LocalSettingsService } from "../settings/local-service.js";
 import { GatewaySettingsClient } from "../settings/gateway-client.js";
 import { createSettingsRouter } from "../settings/routes.js";
+import { makeWechatSession, WECHAT_NODE_ID } from "../sessions/wechat-history.js";
 
 function makeMessageRequestId(chatId: string, messageId: string): string {
   // Use sha256 of JSON tuple to guarantee zero collision even if chatId or messageId contains delimiter characters
@@ -72,6 +73,7 @@ export class ControllerServer {
   private progress?: ModelProgressRunner;
   private stopping = false;
   private settings: LocalSettingsService;
+  private gatewaySettings: GatewaySettingsClient;
 
   // Chat context cache: chatId -> { nodeId, sessionId }
   private chatContexts = new Map<string, { nodeId: string; sessionId: string }>();
@@ -86,6 +88,7 @@ export class ControllerServer {
     this.consoleAuth = new ConsoleAuthService(store, config.consolePublicUrl, config.controllerToken, now,
       token => this.statusEvents?.revoke(token));
     this.settings = new LocalSettingsService({ root: config.settingsRoot, leader: config.leader, background: config.background, now });
+    this.gatewaySettings = new GatewaySettingsClient(config.gatewaySettingsUrl, config.controllerToken);
     const initialModel = model ?? (config.leader ? this.settings.wrapHttpModel(config.leader) : undefined);
     const leaderModel = initialModel ? this.settings.wrapModel(initialModel) : undefined;
     this.taskNotifications = new TaskNotifications(config, store, this.hub, this.commands, leaderModel, now, () => this.statusEvents?.changed(), this.settings);
@@ -196,10 +199,20 @@ export class ControllerServer {
     await this.store.markExpiredActiveCommandsUncertain();
     const nodes = this.hub.getNodeStatusList();
     const sessions = await this.hub.getAllSessions();
+    let wechatSessions = [] as Array<ReturnType<typeof makeWechatSession> & { nodeId: string }>;
+    let wechatNode;
+    try {
+      const chats = (await this.gatewaySettings.listWechatChats(3_000)).filter(chat => this.config.allowedChatIds.has(chat.chatId));
+      wechatSessions = chats.map(chat => ({ ...makeWechatSession(chat, new Date(this.now())), nodeId: WECHAT_NODE_ID }));
+      wechatNode = { nodeId: WECHAT_NODE_ID, connected: true, lastHeartbeat: new Date(this.now()).toISOString(), sessionCount: wechatSessions.length };
+    } catch (error) {
+      // Gateway is a separate process; daemon status remains useful when it is unavailable.
+      if (!(error instanceof Error)) console.error("Wechat status unavailable");
+    }
     const commands = await this.store.listRecentCommandSummaries(50);
     const executions = await readConsoleExecutions(this.store, [...this.config.allowedChatIds], this.now(), true);
     const goals = await readConsoleGoals(this.store, [...this.config.allowedChatIds], this.now(), true);
-    return { nodes, sessions, commands, executions, goals, ...await this.taskNotifications.snapshot(), skills: this.hub.getAllSkills(),
+    return { nodes: wechatNode ? [...nodes, wechatNode] : nodes, sessions: [...sessions, ...wechatSessions], commands, executions, goals, ...await this.taskNotifications.snapshot(), skills: this.hub.getAllSkills(),
       leaderMode: this.leader ? "model" : "rules", leaderModel: this.config.leader?.model };
   }
 
@@ -244,7 +257,7 @@ export class ControllerServer {
     const apiRouter = express.Router();
     apiRouter.use(this.authMiddleware.bind(this));
     apiRouter.use("/settings", createSettingsRouter({ local: this.settings,
-      gateway: new GatewaySettingsClient(this.config.gatewaySettingsUrl, this.config.controllerToken),
+      gateway: this.gatewaySettings,
       allowedChats: () => this.config.allowedChatIds,
       diagnostics: () => {
         const nodes = new Map(this.hub.getNodeStatusList().map(node => [node.nodeId, node]));
@@ -262,7 +275,10 @@ export class ControllerServer {
       allowed: () => this.config.allowedChatIds, now: this.now,
       authority: async (req, chatId) => ({ chatId, currentMessageId: String(req.headers["idempotency-key"] || crypto.randomUUID()), explicitCurrentTurnAuthorization: true }),
     }));
-    apiRouter.use("/sessions", createSessionRouter(this.hub, this.commands));
+    apiRouter.use("/sessions", createSessionRouter(this.hub, this.commands, {
+      gateway: this.gatewaySettings,
+      allowedChats: () => this.config.allowedChatIds,
+    }));
     apiRouter.get("/chats/notification-interest", async (_req: Request, res: Response) => {
       res.json({ chatIds: [...this.config.allowedChatIds], interested: await this.taskNotifications.notificationInterest() });
     });

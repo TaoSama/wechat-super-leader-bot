@@ -96,3 +96,21 @@ test("management HTTP requires Bearer auth and returns real document revisions",
   assert.equal((await response.json() as { chats: { chatId: string }[] }).chats[0].chatId, "chat");
   assert.equal((await fetch(`${base}/settings/models/refresh`, { method: "POST", headers, body: '{"scope":"other"}' })).status, 400);
 });
+
+test("leader history is authenticated, bounded, and supports an authorized chat before its first turn", async t => {
+  const f = await fixture(t);
+  const listener = await startSettingsServer({ settings: f.settings, host: "127.0.0.1", port: 0, token: "fixture-controller-token" });
+  t.after(() => listener.close());
+  const base = `http://127.0.0.1:${(listener.address as { port: number }).port}`;
+  const headers = { Authorization: "Bearer fixture-controller-token" };
+  const response = await fetch(`${base}/settings/leader-history?chatId=chat&limit=20`, { headers });
+  assert.equal(response.status, 200);
+  const payload = await response.json() as Record<string, unknown>;
+  assert.equal(payload.threadId, "");
+  assert.deepEqual(payload.items, []);
+  assert.equal(payload.nextCursor, null);
+  assert.equal(payload.truncated, false);
+  assert.equal(typeof payload.fetchedAt, "string");
+  assert.equal((await fetch(`${base}/settings/leader-history?chatId=chat&unknown=x`, { headers })).status, 400);
+  assert.equal((await fetch(`${base}/settings/leader-history?chatId=chat&cursor=opaque`, { headers })).status, 400);
+});

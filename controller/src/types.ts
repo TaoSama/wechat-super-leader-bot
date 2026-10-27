@@ -107,8 +107,11 @@ export const SessionSchema = z.object({
   loaded: z.boolean().optional(),
   desktopObservation: DesktopObservationSchema.optional(),
   sendAvailability: SendAvailabilitySchema.optional(),
-  historySource: z.literal("terminal-transcript").optional(),
-}).refine(session => session.historySource === undefined || isTerminalHistoryTarget(session), "Invalid terminal history target");
+  historySource: z.enum(["terminal-transcript", "wechat-codex"]).optional(),
+}).refine(session => session.historySource !== "terminal-transcript" || isTerminalHistoryTarget(session), "Invalid terminal history target")
+  .refine(session => session.historySource !== "wechat-codex" ||
+    session.provider === "wechat-codex" && session.capabilities.length === 1 && session.capabilities[0] === "read",
+    "Invalid WeChat history target");
 export type Session = z.infer<typeof SessionSchema>;
 
 export const HISTORY_DEFAULT_LIMIT = 30;
@@ -135,7 +138,7 @@ export const HistoryItemSchema = z.object({
 });
 export type HistoryItem = z.infer<typeof HistoryItemSchema>;
 
-export const HistorySourceSchema = z.enum(["control-socket", "codex-desktop", "terminal-transcript"]);
+export const HistorySourceSchema = z.enum(["control-socket", "codex-desktop", "terminal-transcript", "wechat-codex"]);
 export const SessionHistorySchema = z.object({
   session: SessionSchema,
   historyContext: z.string().uuid(),
@@ -146,7 +149,10 @@ export const SessionHistorySchema = z.object({
   truncated: z.boolean(),
   turnStatuses: z.record(TurnIdSchema, HistoryTurnStatusSchema)
     .refine(value => Object.keys(value).length <= HISTORY_MAX_TURN_STATUSES, "Too many history turn statuses").optional(),
-}).refine(history => history.source === "terminal-transcript"
+}).refine(history => history.source === "wechat-codex"
+  ? history.session.historySource === "wechat-codex" && history.session.provider === "wechat-codex" &&
+    history.session.capabilities.length === 1 && history.session.capabilities[0] === "read"
+  : history.source === "terminal-transcript"
   ? isTerminalHistoryTarget(history.session) && history.session.historySource === "terminal-transcript" &&
     history.items.every(item => (item.kind === "user" || item.kind === "assistant") &&
       (item.type === "transcript_message" || item.type === "transcript_chunk"))
@@ -220,7 +226,7 @@ export const HistoryReadOptionsSchema = z.object({
   historyContext: z.string().uuid().optional(),
   limit: z.number().int().min(1).max(HISTORY_MAX_LIMIT).default(HISTORY_DEFAULT_LIMIT),
 }).strict().refine(value => !value.cursor || !!value.historyContext, "History cursor requires context");
-export interface HistoryReadOptions { cursor?: string; limit?: number; historyContext?: string; source?: "control-socket" }
+export interface HistoryReadOptions { cursor?: string; limit?: number; historyContext?: string; source?: "control-socket" | "wechat-codex" }
 
 export const ControllerReadHistoryMessageSchema = z.object({
   type: z.literal("read_history"),

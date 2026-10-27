@@ -10,6 +10,7 @@ import { MemoryStore } from "../../src/store/memory.js";
 import { GatewaySettingsClient } from "../../src/settings/gateway-client.js";
 import { validateGatewaySettingsUrl } from "../../src/runtime/config.js";
 import { loadConfig } from "../../src/runtime/config.js";
+import { wechatSessionId } from "../../src/sessions/wechat-history.js";
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
@@ -20,6 +21,8 @@ async function fixture() {
   upstream.use((req, _res, next) => { requests.push({path:req.originalUrl,authorization:req.headers.authorization,body:req.body}); next(); });
   upstream.get("/settings", (_req, res) => res.json({ scopes: [{id:"wechat",model:"test-wechat",revision:"rev-1"}],
     chats:[{chatId:"chat-1",label:"微信"},{chatId:"chat-other",label:"other"}], diagnostics:[] }));
+  upstream.get("/settings/leader-history", (_req, res) => res.json({ threadId:"", items:[], nextCursor:null,
+    fetchedAt:new Date().toISOString(), truncated:false }));
   upstream.get("/settings/resources", (req, res) => res.json({ resources: [
     {id:"gateway.system-prompt",kind:"prompt",title:"SP"}, ...(req.query.chatId ? [{id:"gateway.memory",kind:"memory"}] : [])] }));
   upstream.get("/settings/resources/gateway.system-prompt", (_req, res) => res.json({id:"gateway.system-prompt",content:"SP",revision:"a"}));
@@ -96,6 +99,22 @@ describe("console settings", () => {
     const resources = await fetch(`${f.base}/v1/settings/resources`,{headers:{Cookie:f.cookie}}).then(res=>res.json()) as any;
     expect(resources.resources.some((resource:any)=>resource.id.startsWith("controller."))).toBe(true);
     expect((await fetch(`${f.base}/v1/settings/models?scope=wechat`,{headers:{Cookie:f.cookie}})).status).toBe(503);
+  });
+
+  it("exposes the authorized main WeChat task as a read-only synthetic session with empty history", async () => {
+    const f = await fixture();
+    const status = await fetch(`${f.base}/v1/status`, {headers:{Cookie:f.cookie}}).then(res => res.json()) as any;
+    expect(status.nodes).toContainEqual(expect.objectContaining({nodeId:"wechat", connected:true, sessionCount:1}));
+    expect(status.sessions).toContainEqual(expect.objectContaining({nodeId:"wechat", provider:"wechat-codex", historySource:"wechat-codex", capabilities:["read"]}));
+    const sessionId = wechatSessionId("chat-1");
+    const history = await fetch(`${f.base}/v1/sessions/wechat/${sessionId}/history`, {headers:{Cookie:f.cookie}});
+    expect(history.status).toBe(200);
+    expect(await history.json()).toMatchObject({source:"wechat-codex", session:{id:sessionId, provider:"wechat-codex"}, items:[]});
+    const post = await fetch(`${f.base}/v1/sessions/wechat/${sessionId}/messages`, {method:"POST", headers:{Cookie:f.cookie,Origin:"http://localhost:8790","Content-Type":"application/json","X-Super-Leader-Intent":"session-message"}, body:JSON.stringify({prompt:"不要发送",requestId:"read-only"})});
+    expect(post.status).toBe(403);
+    const recovery = await fetch(`${f.base}/v1/sessions/wechat/${sessionId}/messages/request`, {headers:{Cookie:f.cookie}});
+    expect(recovery.status).toBe(403);
+    expect(f.requests.some(request => request.path.startsWith("/settings/leader-history"))).toBe(true);
   });
 });
 

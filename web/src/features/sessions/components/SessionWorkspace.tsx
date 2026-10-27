@@ -10,7 +10,7 @@ import { MAX_DESKTOP_OBSERVATION_AGE_MS, selectExecutionObservation } from "../s
 import { MAX_SEND_AVAILABILITY_AGE_MS } from "../send-availability";
 import { selectModelObservation } from "../model-observation";
 import { isTerminalSession, MAX_TERMINAL_OBSERVATION_AGE_MS } from "../terminal-session";
-import { hasTerminalHistorySource } from "../history-contract";
+import { hasTerminalHistorySource, hasWechatHistorySource } from "../history-contract";
 import { useSessionNavigation } from "../useSessionNavigation";
 import { SessionSidebar } from "./SessionSidebar";
 import { SessionHistory } from "./SessionHistory";
@@ -36,9 +36,10 @@ export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = t
   const observationNow = Date.now();
   const selected = data.sessions.find(session => sessionKey(session) === selectedKey) ?? null;
   const selectedTerminal = !!selected && isTerminalSession(selected);
+  const selectedWechat = !!selected && hasWechatHistorySource(selected);
   const selectedObservation = selected ? selectExecutionObservation(selected, observationNow) : null;
   const selectedModel = selected ? selectModelObservation(selected, observationNow) : null;
-  const connected = nodes.some(node => node.nodeId === selected?.nodeId && node.connected);
+  const connected = selectedWechat ? true : nodes.some(node => node.nodeId === selected?.nodeId && node.connected);
   const history = useSessionHistory(selected, connected && active && detailVisible, onAuthFailure);
   const showHistory = !selectedTerminal || !!selected && hasTerminalHistorySource(selected) || !!history.history;
   const messages = useSessionMessages(selected, onAuthFailure);
@@ -115,7 +116,7 @@ export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = t
         <SessionHistory session={selected} terminal={selectedTerminal} showHistory={showHistory} history={history} scroll={scroll} />
         <div className="session-bottom-slot">
           {showHistory && scroll.newContent && <div className="latest-message-slot"><button type="button" className="new-message-button" onClick={scroll.jumpLatest}><ArrowDown size={16} aria-hidden="true" />有新消息 · 跳到最新</button></div>}
-          <SessionComposer key={selectedKey} session={selected} model={selectedModel!} messages={messages} terminal={selectedTerminal} mobile={mobile} connected={connected} busy={["active", "busy", "running"].includes(selectedObservation!.executionStatus)} blockReason={blockReason} pending={pending} onSend={send} onRecover={() => void messages.submit(true)} />
+          {selectedWechat ? <p className="composer-readonly" role="status">主微信 Codex 对话 · 只读历史</p> : <SessionComposer key={selectedKey} session={selected} model={selectedModel!} messages={messages} terminal={selectedTerminal} mobile={mobile} connected={connected} busy={["active", "busy", "running"].includes(selectedObservation!.executionStatus)} blockReason={blockReason} pending={pending} onSend={send} onRecover={() => void messages.submit(true)} />}
         </div>
         {detailsOpen && <SessionInfo session={selected} model={selectedModel!} connected={connected} terminal={selectedTerminal} now={observationNow} blockReason={blockReason} showHistory={showHistory} history={history} onClose={() => setDetailsOpen(false)} />}
       </>}

@@ -1,4 +1,7 @@
 import { readBoundedStream } from "../leader/model/transport.js";
+import { z } from "zod";
+import { HISTORY_MAX_CURSOR_LENGTH, HISTORY_MAX_LIMIT, HISTORY_MAX_TEXT_LENGTH, HistoryItemSchema, type HistoryItem } from "../types.js";
+import type { GatewayWechatChat } from "../sessions/wechat-history.js";
 
 const REQUEST_TIMEOUT_MS = 20_000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -36,5 +39,54 @@ export class GatewaySettingsClient {
       if (error instanceof SettingsHttpError) throw error;
       throw new SettingsHttpError(503, "微信助手设置服务暂不可用，请稍后重试", "GATEWAY_SETTINGS_UNAVAILABLE");
     }
+  }
+
+  async listWechatChats(timeoutMs = REQUEST_TIMEOUT_MS): Promise<GatewayWechatChat[]> {
+    const result = await this.request("/settings", "GET", undefined, timeoutMs);
+    const parsed = z.object({ chats: z.array(z.object({
+      chatId: z.string().min(1).max(64),
+      label: z.string().max(256).optional(),
+      threadId: z.string().min(1).max(256).optional(),
+    }).passthrough()).max(64) }).passthrough().safeParse(result);
+    if (!parsed.success) throw new SettingsHttpError(503, "微信助手会话目录无效", "GATEWAY_SETTINGS_INVALID");
+    return parsed.data.chats;
+  }
+
+  async readWechatHistory(chatId: string, options: { cursor?: string; limit?: number; historyContext?: string }, timeoutMs = REQUEST_TIMEOUT_MS): Promise<{
+    threadId: string;
+    historyContext?: string;
+    items: HistoryItem[];
+    nextCursor: string | null;
+    fetchedAt: string;
+    truncated: boolean;
+    turnStatuses?: Record<string, "inProgress" | "completed" | "failed" | "interrupted">;
+  }> {
+    const limit = options.limit ?? 30;
+    if (!Number.isInteger(limit) || limit < 1 || limit > HISTORY_MAX_LIMIT ||
+        (options.cursor !== undefined && (options.cursor.length < 1 || options.cursor.length > HISTORY_MAX_CURSOR_LENGTH)) ||
+        (options.cursor !== undefined && !options.historyContext)) {
+      throw new SettingsHttpError(400, "历史查询参数无效", "history_invalid_request");
+    }
+    const search = new URLSearchParams({ chatId, limit: String(limit) });
+    if (options.cursor) search.set("cursor", options.cursor);
+    if (options.historyContext) search.set("historyContext", options.historyContext);
+    const result = await this.request(`/settings/leader-history?${search.toString()}`, "GET", undefined, timeoutMs);
+    const parsed = z.object({
+      // An authorized chat may not have started its first Codex turn yet.
+      // Gateway represents that state with an empty thread ID and an empty page.
+      threadId: z.string().max(256),
+      historyContext: z.string().uuid().optional(),
+      items: z.array(HistoryItemSchema).max(HISTORY_MAX_LIMIT),
+      nextCursor: z.string().min(1).max(HISTORY_MAX_CURSOR_LENGTH).nullable(),
+      fetchedAt: z.string().datetime({ offset: true }),
+      truncated: z.boolean(),
+      turnStatuses: z.record(z.string(), z.enum(["inProgress", "completed", "failed", "interrupted"])).optional(),
+    }).strict().safeParse(result);
+    if (!parsed.success) throw new SettingsHttpError(503, "微信助手历史响应无效", "history_invalid_response");
+    if (parsed.data.items.some(item => item.text.length > HISTORY_MAX_TEXT_LENGTH ||
+        Buffer.byteLength(item.id, "utf8") > 256 || Buffer.byteLength(item.turnId, "utf8") > 128)) {
+      throw new SettingsHttpError(503, "微信助手历史响应过大", "history_too_large");
+    }
+    return parsed.data;
   }
 }

@@ -29,7 +29,7 @@ interface HistoryState {
   pollingPaused: boolean;
   contextExpired: boolean;
   windowNotice: string | null;
-  requestedSource?: "control-socket";
+  requestedSource?: "control-socket" | "wechat-codex";
   sizeBlocked?: boolean;
 }
 interface Gap { beforeId: string; cursor: string | null; previousIds: Set<string>; seen: Set<string> }
@@ -52,7 +52,7 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
   const cacheRef = useRef(new HistoryCache<CachedHistory>());
   const requestRef = useRef<(older?: boolean, reset?: boolean, beforeId?: string) => Promise<boolean>>(async () => false);
   const lifecycleRef = useRef<() => void>(() => undefined);
-  const sourceRef = useRef<(source?: "control-socket") => Promise<boolean>>(async () => false);
+  const sourceRef = useRef<(source?: "control-socket" | "wechat-codex") => Promise<boolean>>(async () => false);
   const authRef = useRef(onAuthFailure);
   const connectedRef = useRef(connected);
   const sessionRef = useRef(session);
@@ -84,7 +84,7 @@ export function useSessionHistory(session: ScopedSession | null, connected: bool
     let contextExpired = false;
     let needsReset = false;
     let recoveringContext = false;
-    let requestedSource: "control-socket" | undefined;
+    let requestedSource: "control-socket" | "wechat-codex" | undefined;
     let sizeBlocked = false;
     const queue: Job[] = [];
     const readingLatest = () => readingLatestRef.current.owner === owner && readingLatestRef.current.latest;

@@ -12,9 +12,9 @@ function sessionPath(nodeId: string, sessionId: string): string {
   return `/v1/sessions/${encodeURIComponent(nodeId)}/${encodeURIComponent(sessionId)}`;
 }
 
-export async function fetchSessionHistory(nodeId: string, sessionId: string, cursor?: string, signal?: AbortSignal, historyContext?: string, source?: "control-socket"): Promise<SessionHistory> {
+export async function fetchSessionHistory(nodeId: string, sessionId: string, cursor?: string, signal?: AbortSignal, historyContext?: string, source?: "control-socket" | "wechat-codex"): Promise<SessionHistory> {
   if (historyContext !== undefined && !isHistoryContext(historyContext) || cursor && !historyContext) throw new Error("历史读取参数无效");
-  if (source !== undefined && source !== "control-socket") throw new Error("历史读取参数无效");
+  if (source !== undefined && source !== "control-socket" && source !== "wechat-codex") throw new Error("历史读取参数无效");
   const query = new URLSearchParams({ limit: String(HISTORY_LIMIT) });
   if (source) query.set("source", source);
   if (cursor) query.set("cursor", cursor);

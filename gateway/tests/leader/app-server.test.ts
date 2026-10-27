@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test, type TestContext } from "node:test";
-import { AppServerRejectedError, startAppServerTurn } from "../../src/leader/app-server.js";
+import { AppServerRejectedError, readAppServerThreadHistory, startAppServerTurn } from "../../src/leader/app-server.js";
 
 type FixtureMode = "normal" | "reject" | "lost" | "lateAck" | "failed" | "interrupted" | "turn-fail" | "invalid" | "oversized" | "timeout" | "crash";
 async function fixture(context: TestContext, mode: FixtureMode = "normal") {
@@ -112,6 +112,29 @@ test("native protocol initializes, preserves permission profiles, steers the cur
   assert(events.some(event => "item" in event && event.item.type === "file_change" && event.item.changes[0].kind === "update"));
   assertExited(launch.pid);
   await turn.close();
+});
+
+test("history reads use read-only RPCs and return chronological pages", async context => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "wechat-app-history-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const executable = path.join(root, "codex");
+  await writeFile(executable, `#!${process.execPath}
+const readline = require('node:readline');
+const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  const message = JSON.parse(line);
+  if (message.method === 'initialize') send({ id: message.id, result: {} });
+  if (message.method === 'thread/read') send({ id: message.id, result: { thread: { id: message.params.threadId } } });
+  if (message.method === 'thread/items/list') send({ id: message.id, result: { data: [
+    { turnId: 'turn-1', turnStatus: 'completed', item: { id: 'new', type: 'agentMessage', text: 'new' } },
+    { turnId: 'turn-1', turnStatus: 'completed', item: { id: 'old', type: 'userMessage', content: [{ type: 'text', text: 'old' }] } }
+  ], nextCursor: 'next' } });
+});
+setInterval(() => {}, 1000);
+`, { mode: 0o700 });
+  const page = await readAppServerThreadHistory({ codexPathOverride: executable }, "thread-1", { limit: 2 }, new AbortController().signal);
+  assert.deepEqual(page.items.map(item => (item.item as { id: string }).id), ["old", "new"]);
+  assert.equal(page.nextCursor, "next");
 });
 
 test("resume and protocol steer refusals stay distinct from uncertain transport failure", async context => {

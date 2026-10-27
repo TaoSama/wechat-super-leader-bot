@@ -9,10 +9,17 @@ import { RuntimeResources, RuntimeResourceError, type ResourceMetadata } from ".
 import { GatewayModelCatalog } from "./models.js";
 import { writePrivateJsonSync } from "../runtime/state.js";
 import type { LeaderWorkspace, MemoryFile } from "../leader/workspace.js";
+import { AppServerRejectedError, readAppServerThreadHistory } from "../leader/app-server.js";
+import { projectHistoryItems } from "../leader/history.js";
+import type { CodexOptions } from "@openai/codex-sdk";
 
 const EFFECT = "下一轮生效；正在执行的轮次保留启动时的设置";
 const MEMORY_FILES = ["task.md", "memory.md", "preference.md", "AGENTS.md"] as const;
 const EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh", "max", "ultra", "persistent"]);
+const HISTORY_DEFAULT_LIMIT = 30;
+const HISTORY_MAX_LIMIT = 50;
+const HISTORY_MAX_CURSOR = 4096;
+const HISTORY_CONTEXT_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const ENVELOPE = `微信主会话的实际运行输入由下列资源按轮组合：
 1. 可编辑的微信主会话 SP 静态主体。
@@ -115,7 +122,8 @@ export class GatewaySettings {
     const chats = [];
     for (const chatId of this.options.chatIds()) {
       const workspace = await this.options.workspace(chatId);
-      if (workspace) chats.push({ chatId, label: chatId, threadId: workspace.getThreadId() });
+      const threadId = workspace?.getThreadId();
+      chats.push({ chatId, label: "主微信对话", ...(threadId ? { threadId } : {}) });
     }
     const catalog = await this.models();
     return { scopes: [this.modelScope()], chats, diagnostics: [
@@ -124,6 +132,42 @@ export class GatewaySettings {
       { id: "gateway-model-version", label: "Codex 目录版本", value: catalog.version, status: catalog.version === "unknown" ? "warning" : "ok" },
       { id: "gateway-model-catalog", label: "模型目录更新时间", value: catalog.fetchedAt || "尚未刷新（与微信助手使用相同认证）", status: catalog.stale ? "warning" : "ok" },
     ] };
+  }
+  async history(chatId: string | undefined, cursor?: string, limit = HISTORY_DEFAULT_LIMIT, historyContext?: string) {
+    if (!chatId || !this.options.chatIds().includes(chatId)) throw new RuntimeResourceError(403, "chat_required", "Choose an authorized WeChat chat");
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > HISTORY_MAX_LIMIT) {
+      throw new RuntimeResourceError(400, "invalid_history_limit", "History limit must be between 1 and 50");
+    }
+    if (cursor !== undefined && (!cursor.trim() || cursor.length > HISTORY_MAX_CURSOR)) {
+      throw new RuntimeResourceError(400, "invalid_history_cursor", "History cursor is invalid");
+    }
+    if (historyContext !== undefined && !HISTORY_CONTEXT_PATTERN.test(historyContext) ||
+        cursor !== undefined && historyContext === undefined) {
+      throw new RuntimeResourceError(400, "invalid_history_context", "History cursor requires a valid context");
+    }
+    const fetchedAt = new Date().toISOString();
+    const workspace = await this.options.workspace(chatId);
+    const threadId = workspace?.getThreadId();
+    if (!workspace || !threadId) return { threadId: "", items: [], nextCursor: null, fetchedAt, truncated: false };
+    const options: CodexOptions = {
+      env: { HOME: workspace.workspacePath, CODEX_HOME: workspace.codexHome, ...(process.env.PATH ? { PATH: process.env.PATH } : {}) },
+      apiKey: this.options.apiKey,
+      baseUrl: this.options.baseUrl,
+      codexPathOverride: this.options.codexPath,
+      config: { ...HEADLESS_CODEX_CONFIG,
+        ...(this.options.baseUrl ? { model_provider: "leader_openai",
+          model_providers: { leader_openai: { name: "Leader OpenAI-compatible API", base_url: this.options.baseUrl,
+            env_key: "CODEX_API_KEY", wire_api: "responses", supports_standalone_web_search: true } } } : {}) },
+    };
+    try {
+      const page = await readAppServerThreadHistory(options, threadId, { cursor, limit }, new AbortController().signal);
+      return { threadId: page.threadId, items: projectHistoryItems(page.items), nextCursor: page.nextCursor, fetchedAt, truncated: false };
+    } catch (error) {
+      if (cursor !== undefined && error instanceof AppServerRejectedError) {
+        throw new RuntimeResourceError(409, "history_context_expired", "History context expired; reload the latest page");
+      }
+      throw new RuntimeResourceError(503, "history_unavailable", error instanceof Error ? "Codex history is temporarily unavailable" : "Codex history is unavailable");
+    }
   }
   private metadata(resource: ResourceMetadata): SettingResource {
     return { id: `gateway.${Buffer.from(resource.id).toString("base64url")}`, kind: resource.id === "prompt/progress_tool" ? "tool" : resource.kind,
