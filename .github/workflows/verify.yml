@@ -86,7 +86,7 @@ jobs:
           cache: pip
           cache-dependency-path: deploy/skills/web-content-fetcher/requirements.txt
       - name: Configure Codex bubblewrap AppArmor profile
-        if: matrix.os == 'ubuntu-24.04' && matrix.suite == 'integration'
+        if: matrix.os == 'ubuntu-24.04' && matrix.unit_group != 'daemon' && (matrix.suite == 'unit' || matrix.integration_group == 'core')
         run: |
           sudo apt-get update
           sudo env NEEDRESTART_MODE=l apt-get install --yes --no-install-recommends apparmor-profiles apparmor-utils bubblewrap

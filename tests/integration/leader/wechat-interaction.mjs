@@ -54,9 +54,10 @@ const { values } = parseArgs({ options: { help: { type: 'boolean', short: 'h' },
 if (values.help || !values.run) {
   console.log('Usage: node tests/integration/leader/wechat-interaction.mjs --run [--budget-only]\nRequires built Controller/Gateway, Node >=24, OpenSSL and local Docker with postgres:16-alpine. Starts real processes against disposable PostgreSQL, local model HTTP, local WeChat HTTPS and a synthetic Daemon WebSocket. Never reads live credentials or sessions.');
 } else {
-  const runs = [main()];
-  if (!values['budget-only']) runs.push(main({ budgetOnly: true }));
-  await Promise.all(runs).catch(error => { console.error(error.stack); process.exitCode = 1; });
+  await (async () => {
+    await main();
+    if (!values['budget-only']) await main({ budgetOnly: true });
+  })().catch(error => { console.error(error.stack); process.exitCode = 1; });
 }
 
 async function listen(server) {
