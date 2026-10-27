@@ -20,6 +20,7 @@ const FIELD_NAMES = new Set([
   "clockSkew", "chars", "chunkIndex", "chunkCount", "acknowledgedChunks", "attempt", "httpStatus",
   "source", "receiptStatus", "recovery", "firstEventMs", "firstAgentMessageMs", "streamDrainMs",
   "eventCount", "itemCount", "reason", "model", "purpose", "toolCalls", "inputChars", "outputChars",
+  "removedTokenCount", "removedChars",
   "nativeTurnIdAvailable", "ttftAvailable", "usageAvailable", "pendingItems", "coverage", "commandId",
   "cacheWriteInputTokens", "reasoningOutputTokens", "queued", "isTool", "startObserved",
   "turnCompletedObserved", "firstEventObserved", "untrackedItemStarts", "cliExitTimeAvailable",

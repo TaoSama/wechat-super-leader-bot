@@ -105,7 +105,7 @@ function prose(value) {
   value = value.replace(/\n{3,}/g, "\n\n");
   return value;
 }
-function protectCodeBlocks(text, token, inline) {
+function protectCodeBlocks(text, token, inline, preserveDelimiters = false) {
   const opening = /^ {0,3}(`{3,}|~{3,})([^\r\n]*)(?:\r?\n|$)/gm;
   const parts = [];
   let previous = 0;
@@ -117,7 +117,9 @@ function protectCodeBlocks(text, token, inline) {
     const closing = new RegExp("^ {0,3}" + delimiter[0] + "{" + delimiter.length + ",}[ \\t]*(?=\\r?$)", "gm");
     closing.lastIndex = contentStart;
     const end = closing.exec(text);
-    parts.push(inline(text.slice(previous, match.index)), token(text.slice(contentStart, end?.index ?? text.length)));
+    parts.push(inline(text.slice(previous, match.index)), token(preserveDelimiters
+      ? text.slice(match.index, end ? closing.lastIndex : text.length)
+      : text.slice(contentStart, end?.index ?? text.length)));
     previous = end ? closing.lastIndex : text.length;
     opening.lastIndex = previous;
     if (!end) break;
@@ -171,7 +173,7 @@ function scanCodeSpans(text) {
   }
   return spans.reverse();
 }
-function protectInline(text, pattern, token) {
+function protectInline(text, pattern, token, expandMatch = true, preserveSyntax = false) {
   const links = scanLinks(text);
   const codeSpans = scanCodeSpans(text);
   const parts = [];
@@ -203,16 +205,19 @@ function protectInline(text, pattern, token) {
       const label = prose(text.slice(link.opening + 1, link.labelEnd));
       const destination = text.slice(link.labelEnd + 2, link.end - 1);
       const displayed = link.start < link.opening ? label : label + " (" + destination + ")";
-      parts.push(text.slice(cursor, link.start), token(displayed));
+      parts.push(text.slice(cursor, link.start), token(preserveSyntax ? text.slice(link.start, link.end) : displayed));
       cursor = link.end;
     } else if (codeFirst) {
-      parts.push(text.slice(cursor, code.start), token(text.slice(code.contentStart, code.contentEnd)));
+      parts.push(text.slice(cursor, code.start), token(preserveSyntax ? text.slice(code.start, code.end) :
+        text.slice(code.contentStart, code.contentEnd)));
       cursor = code.end;
     } else if (match) {
       let end = pattern.lastIndex;
-      // Only expand the winning URL/path. Expanding a destination hidden inside a link
-      // before choosing that link would repeatedly read an entire adjacent-link suffix.
-      while (end < text.length && !/[\s<>`]/u.test(text[end])) end++;
+      const matched = text.slice(match.index, end);
+      const shouldExpand = typeof expandMatch === "function" ? expandMatch(matched) : expandMatch;
+      // URL/path matches extend to their complete token. Exact-match callers keep the
+      // regular expression boundary so adjacent prose remains available for scanning.
+      while (shouldExpand && end < text.length && !/[\s<>`]/u.test(text[end])) end++;
       parts.push(text.slice(cursor, match.index), token(text.slice(match.index, end)));
       cursor = end;
     } else break;
@@ -225,7 +230,32 @@ function protectInline(text, pattern, token) {
   parts.push(text.slice(cursor));
   return parts.join("");
 }
-function markdownToWeChat(text, maxChars = DEFAULT_MESSAGE_MAX_CHARS) {
+const CITATION_TOKEN = /\uE200cite(?:\uE202[A-Za-z0-9._:-]+)+\uE201/gu;
+const CITATION_SAFE_URL = /https?:\/\/(?=[^\s<>`])/gu;
+function sanitizeWeChatCitations(text) {
+  const opaque = [];
+  let tokenPrefix = "\uE000wechat-citation:";
+  while (text.includes(tokenPrefix)) tokenPrefix += ":";
+  const token = (value) => {
+    const index = opaque.push(value) - 1;
+    return `${tokenPrefix}${index}\uE001`;
+  };
+  const inline = (value) => protectInline(value, CITATION_SAFE_URL, token, true, true);
+  const protectedText = protectCodeBlocks(text, token, inline, true);
+  let removedTokenCount = 0;
+  let removedChars = 0;
+  const sanitized = protectedText.replace(CITATION_TOKEN, whole => {
+    removedTokenCount++;
+    removedChars += whole.length;
+    return "";
+  });
+  const restored = sanitized.replace(
+    new RegExp(tokenPrefix + "(\\d+)\\uE001", "g"),
+    (_whole, index) => opaque[Number(index)]
+  );
+  return { text: restored, removedTokenCount, removedChars };
+}
+function markdownToWeChat(text, maxChars = DEFAULT_MESSAGE_MAX_CHARS, sanitizeCitations = true) {
   if (!Number.isSafeInteger(maxChars) || maxChars < 0) {
     throw new RangeError("maxChars must be a nonnegative safe integer");
   }
@@ -238,7 +268,8 @@ function markdownToWeChat(text, maxChars = DEFAULT_MESSAGE_MAX_CHARS) {
     return `${tokenPrefix}${index}\uE001`;
   };
   const inline = (value) => protectInline(value, pattern, token);
-  const protectedText = protectCodeBlocks(text, token, inline);
+  const source = sanitizeCitations ? sanitizeWeChatCitations(text).text : text;
+  const protectedText = protectCodeBlocks(source, token, inline);
   const formatted = prose(protectedText).trim();
   const rendered = formatted.replace(
     new RegExp(tokenPrefix + "(\\d+)\uE001", "g"),
@@ -259,6 +290,7 @@ export {
   TRUNCATION_NOTICE,
   isConsoleLinkQuery,
   markdownToWeChat,
+  sanitizeWeChatCitations,
   parseSessionDirectoryQuery,
   unicodeSafeBoundary
 };

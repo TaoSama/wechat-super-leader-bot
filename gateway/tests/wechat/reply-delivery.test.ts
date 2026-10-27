@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { StateManager } from "../../src/runtime/state.js";
 import { ILinkClient, splitWeChatReply } from "../../src/wechat/client.js";
 import { ILinkSendReceiptError } from "../../src/wechat/send-receipt.js";
+import { createMessageTrace, runWithTrace } from "../../src/runtime/telemetry.js";
 
 const MULTIPART_TEST_SEND_BUDGET = 1000;
 
@@ -173,6 +174,22 @@ test("typing failure leaves formatted body delivery available", async t => {
   assert.deepEqual(f.sent, ["原文"]);
 });
 
+test("outbound text removes citation tokens before a verbatim send and records only counts", async t => {
+  const f = fixture(t);
+  const token = "\uE200cite\uE202turn6search1\uE202turn6search3\uE201";
+  const events: Record<string, unknown>[] = [];
+  const trace = createMessageTrace("chat", "citation-message", event => events.push(event));
+  await runWithTrace(trace, () => f.client().sendMarkdownReply("chat", `北京今天${token}以晴为主。`, {
+    deliveryKey: "citation", verbatim: true,
+  }));
+  assert.deepEqual(f.sent, ["北京今天以晴为主。"]);
+  const sanitized = events.find(event => event.stage === "wechat.reply.sanitized");
+  assert.deepEqual(sanitized && {
+    removedTokenCount: sanitized.removedTokenCount, removedChars: sanitized.removedChars,
+  }, { removedTokenCount: 1, removedChars: token.length });
+  assert.ok(!JSON.stringify(events).includes(token));
+});
+
 for (const endpoint of ["getconfig", "sendtyping"]) {
   test(`formatted body delivery completes while ${endpoint} remains unresolved`, async t => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
@@ -206,7 +223,9 @@ test("upgrading a partially acknowledged raw Markdown plan preserves its origina
   f.state.beginReplyChunk(key, 0);
   f.state.confirmReplyChunk(key, 0);
   const resumed = new StateManager(f.credentials, f.statePath, f.state.policy);
-  await f.client(resumed).sendMarkdownReply("chat", original, { deliveryKey: key, maxCharsPerChunk: budget });
+  await f.client(resumed).sendMarkdownReply("chat", original, {
+    deliveryKey: key, maxCharsPerChunk: budget, verbatim: true,
+  });
   assert.deepEqual(f.sent, chunks.slice(1));
   assert.equal(resumed.getReplySentChunks(key), chunks.length);
   await f.client(resumed).sendMarkdownReply("chat", original, { deliveryKey: key, maxCharsPerChunk: budget });
@@ -232,6 +251,23 @@ test("an unknown old Markdown send remains quarantined through the renderer upgr
   const resumed = new StateManager(f.credentials, f.statePath, f.state.policy);
   await assert.rejects(f.client(resumed).sendMarkdownReply("chat", original, { deliveryKey: key }), /uncertain/);
   assert.equal(f.sent.length, 0);
+});
+
+test("an old formatted plan with citation text resumes its frozen chunks unchanged", async t => {
+  const f = fixture(t);
+  const token = "\uE200cite\uE202turn6search1\uE201";
+  const original = `前${token}后`, budget = 4, key = "legacy-citation";
+  const chunks = splitWeChatReply(original, budget);
+  const digest = createHash("sha256").update(JSON.stringify([
+    f.state.getLoginFingerprint(), "chat", budget, original,
+    "wechat-plain-v1", original,
+  ])).digest("hex");
+  f.state.prepareReplyDelivery(key, digest, chunks.length);
+  f.state.beginReplyChunk(key, 0);
+  f.state.confirmReplyChunk(key, 0);
+  const resumed = new StateManager(f.credentials, f.statePath);
+  await f.client(resumed).sendMarkdownReply("chat", original, { deliveryKey: key, maxCharsPerChunk: budget });
+  assert.deepEqual(f.sent, chunks.slice(1));
 });
 
 test("multipart timeout bounds an uncooperative send and persists its unknown outcome", async t => {
