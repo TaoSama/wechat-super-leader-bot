@@ -208,16 +208,14 @@ function protectInline(text, pattern, token, expandMatch = true, preserveSyntax 
       parts.push(text.slice(cursor, link.start), token(preserveSyntax ? text.slice(link.start, link.end) : displayed));
       cursor = link.end;
     } else if (codeFirst) {
-      parts.push(text.slice(cursor, code.start), token(preserveSyntax ? text.slice(code.start, code.end) :
-        text.slice(code.contentStart, code.contentEnd)));
+      parts.push(text.slice(cursor, code.start), token(preserveSyntax
+        ? text.slice(code.start, code.end) : text.slice(code.contentStart, code.contentEnd)));
       cursor = code.end;
     } else if (match) {
       let end = pattern.lastIndex;
-      const matched = text.slice(match.index, end);
-      const shouldExpand = typeof expandMatch === "function" ? expandMatch(matched) : expandMatch;
-      // URL/path matches extend to their complete token. Exact-match callers keep the
-      // regular expression boundary so adjacent prose remains available for scanning.
-      while (shouldExpand && end < text.length && !/[\s<>`]/u.test(text[end])) end++;
+      // Only expand the winning URL/path. Expanding a destination hidden inside a link
+      // before choosing that link would repeatedly read an entire adjacent-link suffix.
+      while (expandMatch && end < text.length && !/[\s<>`]/u.test(text[end])) end++;
       parts.push(text.slice(cursor, match.index), token(text.slice(match.index, end)));
       cursor = end;
     } else break;
@@ -230,9 +228,9 @@ function protectInline(text, pattern, token, expandMatch = true, preserveSyntax 
   parts.push(text.slice(cursor));
   return parts.join("");
 }
-const CITATION_TOKEN = /\uE200cite(?:\uE202[A-Za-z0-9._:-]+)+\uE201/gu;
-const CITATION_SAFE_URL = /https?:\/\/(?=[^\s<>`])/gu;
-function sanitizeWeChatCitations(text) {
+const LEGACY_CITATION_TOKEN = /\uE200cite(?:\uE202[A-Za-z0-9._:-]+)+\uE201/gu;
+const LEGACY_CITATION_SAFE_URL = /https?:\/\/(?=[^\s<>`])/gu;
+function legacyWeChatCitationBody(text) {
   const opaque = [];
   let tokenPrefix = "\uE000wechat-citation:";
   while (text.includes(tokenPrefix)) tokenPrefix += ":";
@@ -240,22 +238,15 @@ function sanitizeWeChatCitations(text) {
     const index = opaque.push(value) - 1;
     return `${tokenPrefix}${index}\uE001`;
   };
-  const inline = (value) => protectInline(value, CITATION_SAFE_URL, token, true, true);
+  const inline = (value) => protectInline(value, LEGACY_CITATION_SAFE_URL, token, true, true);
   const protectedText = protectCodeBlocks(text, token, inline, true);
-  let removedTokenCount = 0;
-  let removedChars = 0;
-  const sanitized = protectedText.replace(CITATION_TOKEN, whole => {
-    removedTokenCount++;
-    removedChars += whole.length;
-    return "";
-  });
-  const restored = sanitized.replace(
+  const sanitized = protectedText.replace(LEGACY_CITATION_TOKEN, "");
+  return sanitized.replace(
     new RegExp(tokenPrefix + "(\\d+)\\uE001", "g"),
     (_whole, index) => opaque[Number(index)]
   );
-  return { text: restored, removedTokenCount, removedChars };
 }
-function markdownToWeChat(text, maxChars = DEFAULT_MESSAGE_MAX_CHARS, sanitizeCitations = true) {
+function markdownToWeChat(text, maxChars = DEFAULT_MESSAGE_MAX_CHARS) {
   if (!Number.isSafeInteger(maxChars) || maxChars < 0) {
     throw new RangeError("maxChars must be a nonnegative safe integer");
   }
@@ -268,8 +259,7 @@ function markdownToWeChat(text, maxChars = DEFAULT_MESSAGE_MAX_CHARS, sanitizeCi
     return `${tokenPrefix}${index}\uE001`;
   };
   const inline = (value) => protectInline(value, pattern, token);
-  const source = sanitizeCitations ? sanitizeWeChatCitations(text).text : text;
-  const protectedText = protectCodeBlocks(source, token, inline);
+  const protectedText = protectCodeBlocks(text, token, inline);
   const formatted = prose(protectedText).trim();
   const rendered = formatted.replace(
     new RegExp(tokenPrefix + "(\\d+)\uE001", "g"),
@@ -287,10 +277,10 @@ function markdownToWeChat(text, maxChars = DEFAULT_MESSAGE_MAX_CHARS, sanitizeCi
 }
 export {
   DEFAULT_MESSAGE_MAX_CHARS,
+  legacyWeChatCitationBody,
   TRUNCATION_NOTICE,
   isConsoleLinkQuery,
   markdownToWeChat,
-  sanitizeWeChatCitations,
   parseSessionDirectoryQuery,
   unicodeSafeBoundary
 };

@@ -27,6 +27,8 @@ test("prompt preserves current Beijing time, snapshot bounds and the immutable u
   assert.match(output, /不能改写或扩展授权/);
   assert.match(output, /普通问答和记忆维护直接处理/);
   assert.match(output, /来源没有时区时，标注时区未知，不猜测/);
+  assert.match(output, /不要输出内部 citation 控制标记或工具引用占位符/);
+  assert.match(output, /保留正常 Markdown 结构、Markdown 链接的显示文本和完整 URL/);
 });
 
 test("prompt keeps console credentials outside both model context envelopes", () => {

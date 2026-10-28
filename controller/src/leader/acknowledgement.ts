@@ -21,7 +21,7 @@ steer 仅确认本次补充的接收情况；原轮次的既有输出不能证�
 automation 表示定时任务管理，只根据 schedules 的最新持久记录和本轮操作错误说明新建、暂停、恢复或取消情况。active 仅表示启用调度，nextAt 尚在将来时没有启动任务或委派会话。带 lastRuns 时只按真实run状态及精确指令核查描述执行；没有run记录不能说任务已经运行。说明实际时间和时区，不要向用户展示原始cron表达式。持久状态读取失败时说明待核查，不声称未保存，也不要求重建。
 ${DISPLAY_TIME_GUIDANCE}
 ${SESSION_TITLE_GUIDANCE}
-保持中文简洁，只说必要状态、等待、失败或不确定及后续核查；不用暴露原始 commandId/turnId、技术接口或完整观测元数据。多个目标各自换行。`;
+保持中文简洁，只说必要状态、等待、失败或不确定及后续核查；不用暴露原始 commandId/turnId、技术接口或完整观测元数据。多个目标各自换行。不要输出内部 citation 控制标记或工具引用占位符；保留正常 Markdown、链接文本和完整 URL。`;
 
 const HISTORY_TIMEOUT_MS = 5_000;
 const MODEL_TIMEOUT_MS = 20_000;
