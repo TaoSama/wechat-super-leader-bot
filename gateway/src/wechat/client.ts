@@ -437,24 +437,34 @@ export class ILinkClient {
     // Existing raw or formatted plans must finish with exactly their original chunks, even after an upgrade.
     const existing = this.stateManager.replyDeliveries[deliveryKey];
     const requestedVerbatim = options?.verbatim === true;
-    const legacyRendered = existing ? markdownToWeChat(rawMarkdown, Number.MAX_SAFE_INTEGER) : undefined;
-    const legacyFormattedDigest = legacyRendered === undefined ? undefined
-      : hash([...identity, "wechat-plain-v1", legacyRendered]);
-    const historicalRawPlan = existing?.digest === legacyDigest;
-    const historicalFormattedPlan = Boolean(existing && existing.digest === legacyFormattedDigest);
-    const legacyVerbatimRendered = existing ? legacyVerbatimBody(rawMarkdown) : undefined;
-    const rawVerbatimDigest = existing ? hash([...identity, "wechat-verbatim-v2", rawMarkdown]) : undefined;
-    const legacyVerbatimDigest = legacyVerbatimRendered === undefined ? undefined
-      : hash([...identity, "wechat-verbatim-v2", legacyVerbatimRendered]);
-    const historicalRawVerbatimPlan = Boolean(existing && existing.digest === rawVerbatimDigest);
-    const historicalLegacyVerbatimPlan = Boolean(existing && existing.digest === legacyVerbatimDigest);
-    const historicalPlan = historicalRawPlan || historicalFormattedPlan || historicalRawVerbatimPlan || historicalLegacyVerbatimPlan;
-    const verbatim = requestedVerbatim || historicalRawPlan || historicalRawVerbatimPlan;
-    const rendered = historicalRawPlan ? rawMarkdown : historicalFormattedPlan ? legacyRendered!
-      : historicalRawVerbatimPlan ? rawMarkdown : historicalLegacyVerbatimPlan ? legacyVerbatimRendered! : verbatim ? rawMarkdown
-        : markdownToWeChat(rawMarkdown, Number.MAX_SAFE_INTEGER);
-    const digest = historicalPlan ? existing!.digest
-      : hash([...identity, verbatim ? "wechat-verbatim-v2" : "wechat-plain-v1", rendered]);
+    const existingDigest = existing?.digest;
+    let rendered: string;
+    let digest: string;
+    if (existingDigest === legacyDigest) {
+      rendered = rawMarkdown;
+      digest = existingDigest;
+    } else if (existingDigest !== undefined && existingDigest === hash([...identity, "wechat-verbatim-v2", rawMarkdown])) {
+      rendered = rawMarkdown;
+      digest = existingDigest;
+    } else if (existingDigest !== undefined) {
+      const legacyRendered = markdownToWeChat(rawMarkdown, Number.MAX_SAFE_INTEGER);
+      if (existingDigest === hash([...identity, "wechat-plain-v1", legacyRendered])) {
+        rendered = legacyRendered;
+        digest = existingDigest;
+      } else {
+        const legacyVerbatimRendered = legacyVerbatimBody(rawMarkdown);
+        if (existingDigest === hash([...identity, "wechat-verbatim-v2", legacyVerbatimRendered])) {
+          rendered = legacyVerbatimRendered;
+          digest = existingDigest;
+        } else {
+          rendered = requestedVerbatim ? rawMarkdown : legacyRendered;
+          digest = hash([...identity, requestedVerbatim ? "wechat-verbatim-v2" : "wechat-plain-v1", rendered]);
+        }
+      }
+    } else {
+      rendered = requestedVerbatim ? rawMarkdown : markdownToWeChat(rawMarkdown, Number.MAX_SAFE_INTEGER);
+      digest = hash([...identity, requestedVerbatim ? "wechat-verbatim-v2" : "wechat-plain-v1", rendered]);
+    }
     // Render the complete body before splitting so delimiters cannot straddle new chunks.
     const chunks = splitWeChatReply(rendered, maxChars);
     if (chunks.length === 0) return 0;
