@@ -3,7 +3,7 @@ import { traceEvent, traceSpan } from "../runtime/telemetry.js";
 import * as crypto from "node:crypto";
 import { InboundWeChatMessage } from "../types.js";
 import { StateManager } from "../runtime/state.js";
-import { DEFAULT_MESSAGE_MAX_CHARS, markdownToWeChat, sanitizeWeChatCitations, unicodeSafeBoundary } from "./markdown.js";
+import { DEFAULT_MESSAGE_MAX_CHARS, markdownToWeChat, unicodeSafeBoundary } from "./markdown.js";
 import { DEFAULT_POLL_TIMEOUT_MS, MAX_POLL_TIMEOUT_MS, POLL_NETWORK_MARGIN_MS, MAX_POLL_ATTEMPTS, SEND_REQUEST_TIMEOUT_MS, REPLY_TIMEOUT_MS, NOTIFICATION_REPLY_TIMEOUT_MS } from "../runtime/budgets.js";
 import { ILinkSendReceiptError, parseILinkJson, validateSendReceipt } from "./send-receipt.js";
 import { TypingIndicator } from "./typing.js";
@@ -14,6 +14,11 @@ import { deliverFileReply, type FileReplyOptions } from "./file-delivery.js";
 import { beforeAbort } from "../runtime/abort.js";
 import { CHANNEL_VERSION } from "./protocol.js";
 export { CHANNEL_VERSION } from "./protocol.js";
+
+// Only used to reconstruct deliveries written by the short-lived citation-sanitizing
+// release. New deliveries always use the caller's original text.
+const LEGACY_VERBATIM_CITATION = /\uE200cite(?:\uE202[A-Za-z0-9._:-]+)+\uE201/gu;
+const legacyVerbatimBody = (text: string) => text.replace(LEGACY_VERBATIM_CITATION, "");
 
 export const DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com";
 export const MESSAGE_TYPE_INBOUND_TEXT = 1;
@@ -432,25 +437,22 @@ export class ILinkClient {
     // Existing raw or formatted plans must finish with exactly their original chunks, even after an upgrade.
     const existing = this.stateManager.replyDeliveries[deliveryKey];
     const requestedVerbatim = options?.verbatim === true;
-    let legacyRendered: string | undefined;
-    let legacyRenderedDigest: string | undefined;
-    if (existing) {
-      legacyRendered = markdownToWeChat(rawMarkdown, Number.MAX_SAFE_INTEGER, false);
-      legacyRenderedDigest = hash([...identity, "wechat-plain-v1", legacyRendered]);
-    }
+    const legacyRendered = existing ? markdownToWeChat(rawMarkdown, Number.MAX_SAFE_INTEGER) : undefined;
+    const legacyFormattedDigest = legacyRendered === undefined ? undefined
+      : hash([...identity, "wechat-plain-v1", legacyRendered]);
     const historicalRawPlan = existing?.digest === legacyDigest;
-    const historicalFormattedPlan = Boolean(existing && existing.digest === legacyRenderedDigest);
-    const historicalPlan = historicalRawPlan || historicalFormattedPlan;
-    const sanitized = historicalPlan ? { text: rawMarkdown, removedTokenCount: 0, removedChars: 0 }
-      : sanitizeWeChatCitations(rawMarkdown);
-    if (sanitized.removedTokenCount > 0) {
-      traceEvent("wechat.reply.sanitized", {
-        removedTokenCount: sanitized.removedTokenCount, removedChars: sanitized.removedChars,
-      });
-    }
-    const verbatim = requestedVerbatim || historicalRawPlan;
+    const historicalFormattedPlan = Boolean(existing && existing.digest === legacyFormattedDigest);
+    const legacyVerbatimRendered = existing ? legacyVerbatimBody(rawMarkdown) : undefined;
+    const rawVerbatimDigest = existing ? hash([...identity, "wechat-verbatim-v2", rawMarkdown]) : undefined;
+    const legacyVerbatimDigest = legacyVerbatimRendered === undefined ? undefined
+      : hash([...identity, "wechat-verbatim-v2", legacyVerbatimRendered]);
+    const historicalRawVerbatimPlan = Boolean(existing && existing.digest === rawVerbatimDigest);
+    const historicalLegacyVerbatimPlan = Boolean(existing && existing.digest === legacyVerbatimDigest);
+    const historicalPlan = historicalRawPlan || historicalFormattedPlan || historicalRawVerbatimPlan || historicalLegacyVerbatimPlan;
+    const verbatim = requestedVerbatim || historicalRawPlan || historicalRawVerbatimPlan;
     const rendered = historicalRawPlan ? rawMarkdown : historicalFormattedPlan ? legacyRendered!
-      : verbatim ? sanitized.text : markdownToWeChat(sanitized.text, Number.MAX_SAFE_INTEGER, false);
+      : historicalRawVerbatimPlan ? rawMarkdown : historicalLegacyVerbatimPlan ? legacyVerbatimRendered! : verbatim ? rawMarkdown
+        : markdownToWeChat(rawMarkdown, Number.MAX_SAFE_INTEGER);
     const digest = historicalPlan ? existing!.digest
       : hash([...identity, verbatim ? "wechat-verbatim-v2" : "wechat-plain-v1", rendered]);
     // Render the complete body before splitting so delimiters cannot straddle new chunks.
