@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { markdownToWeChat, TRUNCATION_NOTICE, DEFAULT_MESSAGE_MAX_CHARS } from "../../src/wechat/markdown.js";
+import { legacyWeChatCitationBody, markdownToWeChat, TRUNCATION_NOTICE, DEFAULT_MESSAGE_MAX_CHARS } from "../../src/wechat/markdown.js";
 import { splitWeChatReply } from "../../src/wechat/client.js";
 
 test("default reply chunks use a 3800 UTF-16-unit budget and preserve full source", () => {
@@ -28,6 +28,13 @@ test("markdownToWeChat keeps citation-looking text while rendering Markdown and 
   const token = "\uE200cite\uE202turn6search1\uE201";
   const source = `正文 ${token} [文档](https://example.com/docs) https://example.com/raw`;
   assert.equal(markdownToWeChat(source), `正文 ${token} 文档 (https://example.com/docs) https://example.com/raw`);
+});
+
+test("legacy citation reconstruction only removes ordinary tokens", () => {
+  const token = "\uE200cite\uE202turn6search1\uE201";
+  const source = `前${token}后 \`代码 ${token}\` [文档 ${token}](https://example.com/${token}) https://example.com/raw-${token}`;
+  assert.equal(legacyWeChatCitationBody(source),
+    `前后 \`代码 ${token}\` [文档 ${token}](https://example.com/${token}) https://example.com/raw-${token}`);
 });
 
 test("preserves technical identifiers and inline code", () => {

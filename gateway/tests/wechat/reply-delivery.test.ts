@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { StateManager } from "../../src/runtime/state.js";
 import { ILinkClient, splitWeChatReply } from "../../src/wechat/client.js";
 import { ILinkSendReceiptError } from "../../src/wechat/send-receipt.js";
+import { markdownToWeChat } from "../../src/wechat/markdown.js";
 
 const MULTIPART_TEST_SEND_BUDGET = 1000;
 
@@ -251,10 +252,32 @@ test("an old formatted plan with citation-looking text resumes its frozen chunks
   assert.deepEqual(f.sent, chunks.slice(1));
 });
 
+test("an old sanitized formatted plan restores ordinary citations while protecting code and links", async t => {
+  const f = fixture(t);
+  const token = "\uE200cite\uE202turn6search1\uE201";
+  const original = `前${token}后 \`代码 ${token}\` [文档 ${token}](https://example.com/${token}) https://example.com/raw-${token}`;
+  const legacyBody = `前后 \`代码 ${token}\` [文档 ${token}](https://example.com/${token}) https://example.com/raw-${token}`;
+  const legacyRendered = markdownToWeChat(legacyBody, Number.MAX_SAFE_INTEGER);
+  const budget = 16, key = "legacy-sanitized-formatted";
+  const chunks = splitWeChatReply(legacyRendered, budget);
+  const digest = createHash("sha256").update(JSON.stringify([
+    f.state.getLoginFingerprint(), "chat", budget, original,
+    "wechat-plain-v1", legacyRendered,
+  ])).digest("hex");
+  f.state.prepareReplyDelivery(key, digest, chunks.length);
+  f.state.beginReplyChunk(key, 0);
+  f.state.confirmReplyChunk(key, 0);
+  const resumed = new StateManager(f.credentials, f.statePath);
+  await f.client(resumed).sendMarkdownReply("chat", original, { deliveryKey: key, maxCharsPerChunk: budget });
+  assert.deepEqual(f.sent, chunks.slice(1));
+});
+
 test("a legacy verbatim plan resumes its sanitized chunks without changing new deliveries", async t => {
   const f = fixture(t);
   const token = "\uE200cite\uE202turn6search1\uE201";
-  const original = `前${token}后`, legacyBody = "前后", budget = 1, key = "legacy-verbatim";
+  const original = `前${token}后 \`代码 ${token}\` [文档 ${token}](https://example.com/${token}) https://example.com/raw-${token}`;
+  const legacyBody = `前后 \`代码 ${token}\` [文档 ${token}](https://example.com/${token}) https://example.com/raw-${token}`;
+  const budget = 16, key = "legacy-verbatim";
   const chunks = splitWeChatReply(legacyBody, budget);
   const digest = createHash("sha256").update(JSON.stringify([
     f.state.getLoginFingerprint(), "chat", budget, original,
