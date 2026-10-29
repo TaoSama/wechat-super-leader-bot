@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test, type TestContext } from "node:test";
 import { AppServerRejectedError, readAppServerThreadHistory, startAppServerTurn } from "../../src/leader/app-server.js";
+import { createMessageTrace, runWithTrace } from "../../src/runtime/telemetry.js";
 
 type FixtureMode = "normal" | "reject" | "lost" | "lateAck" | "failed" | "interrupted" | "turn-fail" | "invalid" | "oversized" | "timeout" | "crash";
 async function fixture(context: TestContext, mode: FixtureMode = "normal") {
@@ -26,6 +27,8 @@ function complete(status = 'completed') {
   notify('item/completed', { item: { id: 'patch', type: 'fileChange', status: 'completed', changes: [{ path: 'task.md', kind: { type: 'update', move_path: null } }] } });
   notify('item/completed', { item: { id: 'search', type: 'webSearch', action: { query: 'current docs' } } });
   notify('item/completed', { item: { id: 'reason', type: 'reasoning', summary: ['checked'], content: [] } });
+  notify('item/started', { item: { id: 'compact', type: 'contextCompaction' } });
+  notify('item/completed', { item: { id: 'compact', type: 'contextCompaction' } });
   notify('thread/tokenUsage/updated', { tokenUsage: { last: { inputTokens: 10, cachedInputTokens: 4, cacheWriteInputTokens: 1, outputTokens: 8, reasoningOutputTokens: 2 } } });
   notify('item/completed', { item: { id: 'answer', type: 'agentMessage', text: 'final answer', phase: 'final_answer' } });
   notify('turn/completed', { turn: { id: 'turn-1', status } });
@@ -70,14 +73,16 @@ function assertExited(pid: number): void {
 test("native protocol initializes, preserves permission profiles, steers the current turn and maps final events", async context => {
   const fake = await fixture(context);
   const abort = new AbortController();
-  const turn = await startAppServerTurn({ codexPathOverride: fake.executable, apiKey: "test-key", baseUrl: "https://api.test/v1",
+  const telemetry: Array<Record<string, unknown>> = [];
+  const trace = createMessageTrace("chat", "message", event => telemetry.push(event));
+  const turn = await runWithTrace(trace, () => startAppServerTurn({ codexPathOverride: fake.executable, apiKey: "test-key", baseUrl: "https://api.test/v1",
     env: { HOME: "/chat", CODEX_HOME: "/chat/.codex", PATH: process.env.PATH ?? "", LEADER_TURN_MCP_TOKEN: "mcp-token",
       SHOULD_NOT_LEAK: "secret", OPENAI_API_KEY: "host-key" },
     config: { default_permissions: "wechat_memory", shell_environment_policy: { exclude: ["CODEX_API_KEY"] },
       mcp_servers: { wechat_control: { url: "http://127.0.0.1:1234", enabled_tools: ["report_progress"] } } },
     configOverrides: ['permissions.wechat_memory={filesystem={"/chat"="write"},network={enabled=true}}'] },
   { model: "test-model", workingDirectory: "/chat", sandboxMode: "workspace-write", approvalPolicy: "never",
-    modelReasoningEffort: "high", webSearchMode: "live", threadSource: "wechat" }, undefined, "first", abort.signal);
+    modelReasoningEffort: "high", webSearchMode: "live", threadSource: "wechat" }, undefined, "first", abort.signal));
   assert.equal(turn.threadId, "thread-1");
   assert.equal(turn.turnId, "turn-1");
   await turn.steer("follow up", turn.turnId);
@@ -107,6 +112,8 @@ test("native protocol initializes, preserves permission profiles, steers the cur
   assert.deepEqual(answers[0], { type: "item.completed", item: { id: "answer", type: "agent_message", text: "final answer" } });
   assert.deepEqual(events.at(-1), { type: "turn.completed", usage: { input_tokens: 10, cached_input_tokens: 4,
     cache_write_input_tokens: 1, output_tokens: 8, reasoning_output_tokens: 2 } });
+  assert.deepEqual(telemetry.map(event => event.stage).filter(stage => typeof stage === "string" && stage.includes("context_compaction")),
+    ["codex.context_compaction.started", "codex.context_compaction.completed"]);
   assert(events.some(event => "item" in event && event.item.type === "command_execution" && event.item.exit_code === 0));
   assert(events.some(event => "item" in event && event.item.type === "mcp_tool_call" && event.item.tool === "report_progress"));
   assert(events.some(event => "item" in event && event.item.type === "file_change" && event.item.changes[0].kind === "update"));
