@@ -94,6 +94,27 @@ test("native memory edits, early thread ID and restart resume persist in isolate
   assert.doesNotMatch(other.readMemory()["task.md"].content, /重发问题/);
 });
 
+test("oversized native turns rotate the persisted thread before the next message", async t => {
+  const root = fixture(t);
+  const resumes: Array<string | undefined> = [];
+  let turn = 0;
+  const sdkFactory = fakeFactory(async function* (_input, _settings, _sdk, resume) {
+    resumes.push(resume);
+    turn++;
+    yield { type: "thread.started", thread_id: `thread-${turn}` };
+    yield { type: "item.completed", item: { type: "agent_message", id: `answer-${turn}`, text: "已完成" } };
+    yield { type: "turn.completed", usage: {
+      ...usage, input_tokens: turn === 1 ? 64_001 : 1_000,
+    } };
+  });
+  const engine = new CodexReplyEngine({ root, model: "test-model", sdkFactory });
+  await engine.reply("account", request, noController);
+  await engine.reply("account", { ...request, messageId: "next", text: "继续" }, noController);
+  assert.deepEqual(resumes, [undefined, undefined]);
+  const workspace = await new WorkspaceStore(root).forChat("account", "chat");
+  assert.equal(workspace.getThreadId(), "thread-2");
+});
+
 test("each native turn gets current Beijing time, including midnight after thread resume", async t => {
   const root = fixture(t);
   t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-18T15:14:05Z") });

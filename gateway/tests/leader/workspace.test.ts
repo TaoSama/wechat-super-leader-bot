@@ -95,6 +95,18 @@ test("reconstructed stores retain SDK-written memory and refresh persisted threa
   assert.deepEqual(fs.readdirSync(workspace.workspacePath).filter(name => name.endsWith(".tmp")), []);
 });
 
+test("native usage schedules an oversized thread for rotation while retaining small threads", async (t) => {
+  const { store } = fixture(t);
+  const workspace = await store.forChat("account", "chat");
+  workspace.setThreadId("thread-small");
+  workspace.recordThreadUsage(64_000, false);
+  assert.equal(workspace.getThreadId(), "thread-small");
+  workspace.recordThreadUsage(64_001, true);
+  assert.equal(workspace.getThreadId(), undefined);
+  workspace.setThreadId("thread-fresh");
+  assert.equal(workspace.getThreadId(), "thread-fresh");
+});
+
 test("account and chat tuples isolate threads, SDK homes and memory", async (t) => {
   const { store } = fixture(t);
   const first = await store.forChat("account", "chat");

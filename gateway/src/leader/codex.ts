@@ -27,6 +27,10 @@ const DEFAULT_TIMEOUT_MS = 300000;
 const MAX_TIMEOUT_MS = 315000;
 // Upstream exec shutdown allows a 35s acknowledgement budget, including analytics flush.
 const DEFAULT_CLEANUP_TIMEOUT_MS = 40_000;
+// Keep resumed Codex threads below the range where production turns spent
+// tens of seconds rereading cached history. The current request, memory
+// snapshot and Controller context still travel through the fresh thread.
+export const MAX_RESUMED_INPUT_TOKENS = 64_000;
 const STOP_ABORT_GRACE_MS = 2_000;
 const UNCERTAIN_REPLY = "上次处理这条消息的结果尚不明确，为避免重复执行，我没有自动重跑。请查询任务状态后再决定下一步。";
 const FAILED_REPLY = "这次处理没有正常完成，执行结果待核实。我保留了会话和记忆，请先查询任务状态，避免重复执行。";
@@ -593,7 +597,22 @@ export class CodexReplyEngine implements GatewayReplyEngine {
           await traceSpan("codex.thread.save", async () => workspace.setThreadId(event.thread_id));
         }
         if (event.type === "item.completed" && event.item.type === "agent_message") text = event.item.text;
-        if (event.type === "turn.completed") completed = true;
+        if (event.type === "turn.completed") {
+          completed = true;
+          const inputTokens = event.usage.input_tokens;
+          try {
+            await traceSpan("codex.thread.usage", async () => workspace.recordThreadUsage(
+              inputTokens, inputTokens > MAX_RESUMED_INPUT_TOKENS), { inputTokens,
+                rotateBeforeNext: inputTokens > MAX_RESUMED_INPUT_TOKENS });
+            if (inputTokens > MAX_RESUMED_INPUT_TOKENS) traceEvent("codex.thread.rotate.scheduled", {
+              inputTokens, threshold: MAX_RESUMED_INPUT_TOKENS,
+            });
+          } catch {
+            // Usage persistence is an optimization hint. Preserve the
+            // completed reply while recording that rotation could not be saved.
+            traceEvent("codex.thread.rotate.failed", { inputTokens });
+          }
+        }
         if (event.type === "turn.failed" || event.type === "error") failed = true;
         if (completed && !failed && !replyReady && nativeEvents.itemsSettled) {
           query.accepting = false;
