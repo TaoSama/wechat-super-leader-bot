@@ -19,7 +19,7 @@ export interface RenewalState {
 export interface RenewalOptions {
   state: RenewalState;
   send: (chatId: string, text: string, options: {
-    deliveryKey: string; kind: "final"; shouldContinue: () => boolean; signal?: AbortSignal;
+    deliveryKey: string; kind: "final"; shouldContinue: () => boolean; signal?: AbortSignal; renewalReminder?: true;
   }) => Promise<number>;
   now?: () => number;
   active?: () => boolean;
@@ -85,7 +85,7 @@ export class RenewalNotifier {
             windowMs === state.policy.contextWindowMs && sendBudget === state.policy.sendBudget && this.eligible(chatId);
           if (!shouldContinue()) { outcome.skipped++; continue; }
           const sent = await this.options.send(chatId, renewalText(sendBudget), {
-            deliveryKey, kind: "final", shouldContinue,
+            deliveryKey, kind: "final", shouldContinue, renewalReminder: true,
             ...(this.options.signal ? { signal: this.options.signal } : {}),
           });
           if (sent > 0) outcome.sent++; else outcome.skipped++;

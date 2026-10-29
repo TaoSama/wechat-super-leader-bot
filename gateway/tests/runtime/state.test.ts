@@ -144,6 +144,34 @@ test("reply intent and acknowledgment roll back safely when durable checkpoints 
   mock.mock.restore();
 });
 
+test("renewal delivery can replace only an unsent legacy checkpoint", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-renewal-upgrade-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const credentials = path.join(directory, "account.json"), statePath = path.join(directory, "state.json");
+  fs.writeFileSync(credentials, JSON.stringify({ token: "synthetic", accountId: "fixture" }));
+  const state = new StateManager(credentials, statePath);
+  const key = "renewal:legacy", oldDigest = "a".repeat(64), newDigest = "b".repeat(64);
+  state.prepareReplyDelivery(key, oldDigest, 1);
+  const replaced = state.prepareRenewalReplyDelivery(key, newDigest, 1);
+  assert.equal(replaced.digest, newDigest);
+  assert.equal(replaced.acknowledgedChunks, 0);
+  assert.equal(new StateManager(credentials, statePath).replyDeliveries[key].digest, newDigest);
+
+  state.beginReplyChunk(key, 0);
+  state.confirmReplyChunk(key, 0);
+  assert.throws(() => state.prepareRenewalReplyDelivery(key, oldDigest, 1), /content or chunk plan changed/);
+  assert.equal(state.replyDeliveries[key].digest, newDigest);
+  assert.equal(state.replyDeliveries[key].acknowledgedChunks, 1);
+
+  const uncertainKey = "renewal:uncertain";
+  state.prepareReplyDelivery(uncertainKey, oldDigest, 1);
+  state.beginReplyChunk(uncertainKey, 0);
+  assert.throws(() => state.prepareRenewalReplyDelivery(uncertainKey, oldDigest, 1), /uncertain/);
+  assert.equal(state.replyDeliveries[uncertainKey].digest, oldDigest);
+  assert.equal(state.replyDeliveries[uncertainKey].inFlight, true);
+  assert.throws(() => state.prepareRenewalReplyDelivery("ordinary", newDigest, 1), /Invalid renewal delivery key/);
+});
+
 test("login replacement clears durable reply delivery intents", t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-delivery-account-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

@@ -73,6 +73,21 @@ test("final-hour reminder preempts a multipart result, then new inbound resumes 
   assert.deepEqual(f.acknowledgements, ["accepted"]);
 });
 
+test("legacy unsent renewal checkpoint upgrades without permanently blocking ordinary replies", async t => {
+  const f = fixture(t, 10);
+  const key = renewalDeliveryKey(f.state.getLoginFingerprint(), "chat", f.state.contextBudgets.chat.refreshedAt);
+  f.state.replyDeliveries[key] = { digest: "a".repeat(64), totalChunks: 1, acknowledgedChunks: 0, inFlight: false };
+  await assert.rejects(
+    f.ilink.sendMarkdownReply("chat", "ordinary", { deliveryKey: "ordinary", maxCharsPerChunk: 2_000 }),
+    LocalSendDeferredError,
+  );
+  await f.gateway.deliverNotificationsOnce();
+  assert.equal(f.state.replyDeliveries[key].acknowledgedChunks, 1);
+  assert.match(text(f.sends[0]), /主动发一条消息/);
+  await f.ilink.sendMarkdownReply("chat", "ordinary", { deliveryKey: "ordinary", maxCharsPerChunk: 2_000 });
+  assert.equal(text(f.sends[1]), "ordinary");
+});
+
 test("queued ordinary callers yield under the shared lock while concurrent notification passes send one reminder", async t => {
   const f = fixture(t, 2);
   const ordinary = f.ilink.sendMarkdownReply("chat", "ordinary", { deliveryKey: "ordinary", maxCharsPerChunk: 2_000 });
