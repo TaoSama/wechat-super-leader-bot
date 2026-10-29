@@ -422,6 +422,8 @@ export class ILinkClient {
     rawMarkdown: string,
     options?: { deliveryKey?: string; maxCharsPerChunk?: number;
       timeoutMs?: number; signal?: AbortSignal; shouldContinue?: () => boolean; kind?: "final" | "progress";
+      /** Renewal reminders may replace only an unsent legacy reminder checkpoint. */
+      renewalReminder?: boolean;
       /** Controller result messages are already split and must keep their frozen boundaries. */
       verbatim?: boolean }
   ): Promise<number> {
@@ -477,7 +479,9 @@ export class ILinkClient {
     traceEvent("wechat.reply.rendered", { chars: rendered.length, chunkCount: chunks.length,
       durationMs: performance.now() - renderStarted });
     const delivery = await traceSpan("wechat.reply.plan.persist", async () =>
-      this.stateManager.prepareReplyDelivery(deliveryKey, digest, chunks.length));
+      options?.renewalReminder
+        ? this.stateManager.prepareRenewalReplyDelivery(deliveryKey, digest, chunks.length)
+        : this.stateManager.prepareReplyDelivery(deliveryKey, digest, chunks.length));
     traceEvent("wechat.reply.plan", { chunkCount: chunks.length, acknowledgedChunks: delivery.acknowledgedChunks });
     if (delivery.acknowledgedChunks === chunks.length) {
       traceEvent("wechat.reply.reused", { outcome: "replayed" });

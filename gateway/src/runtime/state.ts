@@ -381,6 +381,25 @@ export class StateManager extends DeliveryState {
     return { ...item };
   }
 
+  /**
+   * Renewal reminders may change wording between releases. Only an unsent reminder
+   * can be replaced; acknowledged or uncertain evidence remains immutable.
+   */
+  public prepareRenewalReplyDelivery(deliveryKey: string, digest: string, totalChunks: number): ReplyDeliveryState {
+    if (!deliveryKey.startsWith("renewal:")) throw new Error("Invalid renewal delivery key");
+    const previous = this.replyDeliveries[deliveryKey];
+    if (!previous || (previous.digest === digest && previous.totalChunks === totalChunks) ||
+        previous.acknowledgedChunks > 0 || previous.inFlight || previous.failureReason !== undefined) {
+      return this.prepareReplyDelivery(deliveryKey, digest, totalChunks);
+    }
+    const next = { ...this.replyDeliveries, [deliveryKey]: { digest, totalChunks, acknowledgedChunks: 0, inFlight: false } };
+    const before = this.replyDeliveries;
+    this.replyDeliveries = next;
+    try { this.saveState(); }
+    catch (error) { this.replyDeliveries = before; throw error; }
+    return { ...next[deliveryKey] };
+  }
+
   public beginReplyChunk(deliveryKey: string, chunkIndex: number): void {
     this.updateReplyDelivery(deliveryKey, chunkIndex, true, false);
   }
