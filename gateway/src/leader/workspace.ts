@@ -423,17 +423,46 @@ export class LeaderWorkspace {
           typeof parsed.threadId !== "string" || !parsed.threadId.trim()) {
         throw new WorkspaceValidationError("Invalid workspace thread state");
       }
-      return parsed.threadId;
+      // Thread files written before bounded-context rotation have no usage
+      // metadata. Start a fresh thread once rather than resuming an unknown,
+      // potentially unbounded native history.
+      if (!("lastInputTokens" in parsed)) return undefined;
+      const lastInputTokens = parsed.lastInputTokens;
+      const rotateBeforeNext = "rotateBeforeNext" in parsed ? parsed.rotateBeforeNext : undefined;
+      if (typeof lastInputTokens !== "number" || !Number.isSafeInteger(lastInputTokens) || lastInputTokens < 0 ||
+          (rotateBeforeNext !== undefined && typeof rotateBeforeNext !== "boolean")) {
+        throw new WorkspaceValidationError("Invalid workspace thread state");
+      }
+      return rotateBeforeNext ? undefined : parsed.threadId;
     });
   }
 
   public setThreadId(id: string): void {
     storageOperation(() => {
       if (typeof id !== "string" || !id.trim()) throw new WorkspaceValidationError("Invalid thread ID");
-      const content = JSON.stringify({ threadId: id }) + "\n";
+      const content = JSON.stringify({ threadId: id, lastInputTokens: 0 }) + "\n";
       validateText(content, MAX_THREAD_BYTES);
       this.checkLayout();
       atomicWrite(path.join(this.workspacePath, THREAD_FILE), content);
+    });
+  }
+
+  /** Persist native usage so the next turn can avoid an oversized resumed history. */
+  public recordThreadUsage(inputTokens: number, rotateBeforeNext: boolean): void {
+    storageOperation(() => {
+      if (!Number.isSafeInteger(inputTokens) || inputTokens < 0) throw new WorkspaceValidationError("Invalid thread usage");
+      this.checkLayout();
+      const file = path.join(this.workspacePath, THREAD_FILE);
+      const raw = readText(file, MAX_THREAD_BYTES);
+      if (raw === undefined) return;
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw); } catch { throw new WorkspaceValidationError("Invalid workspace thread state"); }
+      if (typeof parsed !== "object" || parsed === null || !("threadId" in parsed) ||
+          typeof parsed.threadId !== "string" || !parsed.threadId.trim()) throw new WorkspaceValidationError("Invalid workspace thread state");
+      const content = JSON.stringify({ threadId: parsed.threadId, lastInputTokens: inputTokens,
+        ...(rotateBeforeNext ? { rotateBeforeNext: true } : {}) }) + "\n";
+      validateText(content, MAX_THREAD_BYTES);
+      atomicWrite(file, content);
     });
   }
 }
