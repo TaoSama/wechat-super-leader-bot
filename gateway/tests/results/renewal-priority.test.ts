@@ -52,24 +52,23 @@ for (const source of ["engine", "controller"] as const) {
   });
 }
 
-test("multipart 3 -> 2 yields its suffix, sends priority reminder, then resumes frozen text across restart and refresh", async t => {
+test("final-hour reminder preempts a multipart result, then new inbound resumes frozen text", async t => {
   const f = fixture(t, 3, "abcdefgh");
   f.state.updateOutbox("ordinary", { splitMaxChars: 2 });
   await f.gateway.deliverNotificationsOnce();
-  assert.equal(text(f.sends[0]), "ab");
-  assert.match(text(f.sends[1]), /发一条消息/);
-  assert.equal(f.state.replyDeliveries.ordinary.acknowledgedChunks, 1);
-  assert.equal(f.state.replyDeliveries.ordinary.inFlight, false);
+  assert.match(text(f.sends[0]), /主动发一条消息/);
+  assert.deepEqual(f.sends.slice(1).map(text), ["ab", "cd"]);
+  assert.equal(f.state.replyDeliveries.ordinary.acknowledgedChunks, 2);
   assert.equal(f.state.outbox.ordinary.status, "pending");
   const restarted = new StateManager(f.accountPath, f.statePath);
   await f.create(restarted).deliverNotificationsOnce();
-  assert.equal(text(f.sends[2]), "cd");
-  assert.equal(f.sends.length, 3, "one persisted reminder survives restart");
+  assert.equal(f.sends.length, 3, "accepted chunks and one reminder survive restart");
   assert.equal(restarted.replyDeliveries.ordinary.acknowledgedChunks, 2);
   assert.equal(restarted.outbox.ordinary.status, "pending");
   restarted.recordInboundContext("new-inbound", "chat", Date.now() - 100, true, "new-context");
   await f.create(restarted).deliverNotificationsOnce();
-  assert.deepEqual(f.sends.slice(3).map(text), ["ef", "gh"]);
+  assert.match(text(f.sends[0]), /主动发一条消息/);
+  assert.deepEqual(f.sends.slice(1).map(text), ["ab", "cd", "ef", "gh"]);
   assert.equal(restarted.outbox.ordinary, undefined);
   assert.deepEqual(f.acknowledgements, ["accepted"]);
 });

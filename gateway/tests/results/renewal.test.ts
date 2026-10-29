@@ -9,7 +9,7 @@ function fixture() {
   const sent: { chatId: string; text: string; deliveryKey: string }[] = [];
   const state: RenewalState = {
     contextBudgets: { chat: { refreshedAt: REFRESHED_AT } }, contextTokens: { chat: "context" },
-    policy: { contextWindowMs: 23 * HOUR }, replyDeliveries: {},
+    policy: { contextWindowMs: 23 * HOUR, sendBudget: 10 }, replyDeliveries: {},
     getLoginFingerprint: () => account, canSendToChat: () => allowed, remainingSendBudget: () => remaining,
   };
   const options: RenewalOptions = {
@@ -36,8 +36,8 @@ test("reminder becomes eligible exactly one hour before expiry and never after t
   }
   const f = fixture();
   assert.deepEqual(await f.notifier.deliverOnce(["chat"]), { sent: 1, skipped: 0 });
-  assert.match(f.sent[0].text, /发一条消息/);
-  assert.doesNotMatch(f.sent[0].text, /已续期|已刷新/);
+  assert.match(f.sent[0].text, /主动发一条消息/);
+  assert.match(f.sent[0].text, /刷新本轮 10 条消息额度/);
 });
 
 test("uninterested chats, short windows and inadmissible chats never get a reminder", async () => {
@@ -52,16 +52,20 @@ test("uninterested chats, short windows and inadmissible chats never get a remin
   f.setAllowed(false);
   assert.equal((await f.notifier.deliverOnce(["chat"])).sent, 0);
   assert.equal(f.sent.length, 0);
+  f.setAllowed(true);
+  f.state.policy.sendBudget = 0;
+  assert.equal((await f.notifier.deliverOnce(["chat"])).sent, 0);
+  assert.equal(f.sent.length, 0);
 });
 
-test("effective budget sends reminders only with one or two sends left even if raw persisted remaining is higher", async () => {
+test("effective budget sends a reminder while any send remains, including a full ten-send window", async () => {
   const f = fixture();
   Object.assign(f.state.contextBudgets.chat, { remaining: 10 });
-  for (const effective of [10, 4, 3, 0, -1, NaN, 1.5]) {
+  for (const effective of [0, -1, NaN, 1.5]) {
     f.setRemaining(effective);
     assert.equal((await f.notifier.deliverOnce(["chat"])).sent, 0);
   }
-  for (const remaining of [1, 2]) {
+  for (const remaining of [1, 2, 3, 10]) {
     const low = fixture(); low.setRemaining(remaining);
     assert.equal((await low.notifier.deliverOnce(["chat"])).sent, 1);
   }
@@ -101,7 +105,7 @@ test("queued send aborts on context, account, window or effective budget changes
     (f: ReturnType<typeof fixture>) => { f.setAccount("new-account"); },
     (f: ReturnType<typeof fixture>) => { f.state.contextBudgets.chat.refreshedAt++; },
     (f: ReturnType<typeof fixture>) => { f.state.policy.contextWindowMs++; },
-    (f: ReturnType<typeof fixture>) => { f.setRemaining(3); },
+    (f: ReturnType<typeof fixture>) => { f.setRemaining(0); },
     (f: ReturnType<typeof fixture>) => { f.setNow(REFRESHED_AT + 23 * HOUR); },
   ];
   for (const mutate of mutations) {
