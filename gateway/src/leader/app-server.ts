@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import * as path from "node:path";
 import { resolveCodexExecutable } from "./executable.js";
 import type { CodexOptions, ThreadEvent, ThreadItem, ThreadOptions, Usage } from "@openai/codex-sdk";
+import { traceEvent } from "../runtime/telemetry.js";
 
 const RPC_TIMEOUT_MS = 30_000;
 const EXIT_GRACE_MS = 1_000;
@@ -192,7 +193,14 @@ class Connection {
       }
       case "item/started":
       case "item/completed": {
-        const item = mapItem(object(params.item));
+        const rawItem = object(params.item);
+        // Codex 0.163 emits context compaction as an app-server item before
+        // the SDK exposes a typed ThreadItem for it. Keep the event in the
+        // latency trace even though it remains private from the reply stream.
+        if (rawItem.type === "contextCompaction" || rawItem.type === "context_compaction") {
+          traceEvent(message.method === "item/started" ? "codex.context_compaction.started" : "codex.context_compaction.completed");
+        }
+        const item = mapItem(rawItem);
         if (item) this.queue.push({ type: message.method === "item/started" ? "item.started" : "item.completed", item });
         break;
       }
