@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly GATEWAY_CONTEXT_WINDOW_MS=86400000
+readonly GATEWAY_CONTEXT_WINDOW_MS=82800000
 
 usage() {
   cat <<'EOF'
