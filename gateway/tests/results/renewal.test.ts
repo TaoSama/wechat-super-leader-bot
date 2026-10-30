@@ -5,11 +5,11 @@ import { RenewalNotifier, renewalDeliveryKey, type RenewalOptions, type RenewalS
 const HOUR = 60 * 60 * 1000;
 const REFRESHED_AT = 1_800_000_000_000;
 function fixture() {
-  let now = REFRESHED_AT + 23 * HOUR, remaining = 2, allowed = true, account = "account";
+  let now = REFRESHED_AT + 22 * HOUR, remaining = 2, allowed = true, account = "account";
   const sent: { chatId: string; text: string; deliveryKey: string }[] = [];
   const state: RenewalState = {
     contextBudgets: { chat: { refreshedAt: REFRESHED_AT } }, contextTokens: { chat: "context" },
-    policy: { contextWindowMs: 24 * HOUR, sendBudget: 10 }, replyDeliveries: {},
+    policy: { contextWindowMs: 23 * HOUR, sendBudget: 10 }, replyDeliveries: {},
     getLoginFingerprint: () => account, canSendToChat: () => allowed, remainingSendBudget: () => remaining,
   };
   const options: RenewalOptions = {
@@ -29,7 +29,7 @@ function fixture() {
 }
 
 test("reminder becomes eligible exactly one hour before expiry and never after the window", async () => {
-  for (const age of [0, 22 * HOUR, 23 * HOUR - 1, 24 * HOUR, 25 * HOUR, -1]) {
+  for (const age of [0, 21 * HOUR, 22 * HOUR - 1, 23 * HOUR, 24 * HOUR, -1]) {
     const f = fixture(); f.setNow(REFRESHED_AT + age);
     assert.equal((await f.notifier.deliverOnce(["chat"])).sent, 0);
     assert.equal(f.sent.length, 0);
@@ -48,7 +48,7 @@ test("uninterested chats, short windows and inadmissible chats never get a remin
     f.state.policy.contextWindowMs = windowMs;
     assert.equal((await f.notifier.deliverOnce(["chat"])).sent, 0);
   }
-  f.state.policy.contextWindowMs = 24 * HOUR;
+  f.state.policy.contextWindowMs = 23 * HOUR;
   f.setAllowed(false);
   assert.equal((await f.notifier.deliverOnce(["chat"])).sent, 0);
   assert.equal(f.sent.length, 0);
@@ -90,10 +90,10 @@ test("shared persisted acknowledgement, unknown and terminal failures suppress a
 test("a genuine new refreshedAt produces one new stable reminder after its own lead time", async () => {
   const f = fixture();
   await f.notifier.deliverOnce(["chat"]);
-  f.state.contextBudgets.chat.refreshedAt = REFRESHED_AT + 23 * HOUR;
+  f.state.contextBudgets.chat.refreshedAt = REFRESHED_AT + 22 * HOUR;
   assert.equal((await f.notifier.deliverOnce(["chat"])).sent, 0);
   f.setRemaining(2);
-  f.setNow(REFRESHED_AT + 46 * HOUR);
+  f.setNow(REFRESHED_AT + 44 * HOUR);
   assert.equal((await f.notifier.deliverOnce(["chat"])).sent, 1);
   assert.notEqual(f.sent[0].deliveryKey, f.sent[1].deliveryKey);
   assert.equal((await f.notifier.deliverOnce(["chat"])).sent, 0);
@@ -106,7 +106,7 @@ test("queued send aborts on context, account, window or effective budget changes
     (f: ReturnType<typeof fixture>) => { f.state.contextBudgets.chat.refreshedAt++; },
     (f: ReturnType<typeof fixture>) => { f.state.policy.contextWindowMs++; },
     (f: ReturnType<typeof fixture>) => { f.setRemaining(0); },
-    (f: ReturnType<typeof fixture>) => { f.setNow(REFRESHED_AT + 24 * HOUR); },
+    (f: ReturnType<typeof fixture>) => { f.setNow(REFRESHED_AT + 23 * HOUR); },
   ];
   for (const mutate of mutations) {
     const f = fixture();

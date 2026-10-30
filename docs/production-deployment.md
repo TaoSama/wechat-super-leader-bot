@@ -29,13 +29,13 @@ revision 的 `compose.yaml`、生产/Gateway overlay 和 seccomp 策略随发布
 开放的 `.runtime/controller.env`，并准备已有的微信账号文件、状态目录和
 `super-leader-codex` AppArmor profile。工作流不会读取、打印或上传这些运行时密钥。
 
-Gateway 默认使用 24 小时回复窗口（`GATEWAY_CONTEXT_WINDOW_MS=86400000`），并在最后 1 小时发送续期提醒。发布脚本会把该值写入不可变的 release env，并在容器健康检查后读取实际容器环境核对；生产环境文件中的旧值不会覆盖本次发布。回滚使用上一份 release env，恢复上一版本的窗口配置。
+Gateway 默认使用 23 小时回复窗口（`GATEWAY_CONTEXT_WINDOW_MS=82800000`），并在最后 1 小时发送续期提醒。发布脚本会把该值写入不可变的 release env，并在容器健康检查后读取实际容器环境核对；生产环境文件中的旧值不会覆盖本次发布。回滚使用上一份 release env，恢复上一版本的窗口配置。
 
 同仓库且由仓库所有者创建的非草稿 Pull Request 会由
 `.github/workflows/enable-auto-merge.yml` 自动开启 squash merge；工作流不检出或执行
 Pull Request 代码。`main` 的保护规则应要求 Ubuntu unit/integration 验证和 macOS 15
 验证通过。合并产生的 `main` push 会唯一触发生产部署；部署成功必须同时核对合并 revision、
-容器健康状态、`gateway_context_window_ms=86400000` 和 `deployment verified`。
+容器健康状态、`gateway_context_window_ms=82800000` 和 `deployment verified`。
 
 在 GitHub `production` Environment 中配置以下 **Secrets**：
 

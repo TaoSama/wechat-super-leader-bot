@@ -23,7 +23,7 @@ export const MAX_SEND_BUDGET = 1000;
 export const MAX_OUTBOX_LIMIT = 1000;
 
 export const DEFAULT_CONTEXT_POLICY: ContextPolicy = Object.freeze({
-  contextWindowMs: 24 * MILLISECONDS_PER_HOUR,
+  contextWindowMs: 23 * MILLISECONDS_PER_HOUR,
   sendBudget: 10,
   outboxLimit: MAX_OUTBOX_LIMIT,
 });

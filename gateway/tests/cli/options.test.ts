@@ -55,7 +55,7 @@ test("message chunk budget rejects nonpositive, fractional, nonfinite and unsafe
 });
 
 const POLICY_OPTIONS = [
-  { option: "context-window-ms", environment: "GATEWAY_CONTEXT_WINDOW_MS", field: "contextWindowMs", default: 86_400_000, maximum: 604_800_000, configured: 82_800_000 },
+  { option: "context-window-ms", environment: "GATEWAY_CONTEXT_WINDOW_MS", field: "contextWindowMs", default: 82_800_000, maximum: 604_800_000, configured: 86_400_000 },
   { option: "send-budget", environment: "GATEWAY_SEND_BUDGET", field: "sendBudget", default: 10, maximum: 1000, configured: 20 },
   { option: "outbox-limit", environment: "GATEWAY_OUTBOX_LIMIT", field: "outboxLimit", default: 1000, maximum: 1000, configured: 100 },
 ] as const;

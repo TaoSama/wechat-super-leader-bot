@@ -39,7 +39,7 @@ test('remote release verifies before switching and keeps a bounded rollback path
   assert.match(releaseScript, /release bundle checksum verification failed/);
   assert.match(releaseScript, /config --quiet/);
   assert.match(releaseScript, /CODEX_SECCOMP_PATH/);
-  assert.match(releaseScript, /GATEWAY_CONTEXT_WINDOW_MS=86400000/);
+  assert.match(releaseScript, /GATEWAY_CONTEXT_WINDOW_MS=82800000/);
   assert.match(releaseScript, /compose_base/);
   assert.match(releaseScript, /-u COMPOSE_FILE -u COMPOSE_PROFILES -u COMPOSE_ENV_FILES/);
   assert.match(releaseScript, /up -d --no-build --force-recreate controller gateway/);
