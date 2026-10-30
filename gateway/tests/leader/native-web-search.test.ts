@@ -67,7 +67,7 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
         assert.equal(features[feature], false, `${feature} must remain unavailable on headless hosts`);
       }
       assert.equal((config("agents") as Record<string, unknown>).max_concurrent_threads_per_session, 2);
-      assert.equal(config("model_auto_compact_token_limit"), 64000);
+      assert.equal(config("model_auto_compact_token_limit"), 200000);
       assert.equal(config("model_auto_compact_token_limit_scope"), "body_after_prefix");
       assert.equal(config("model_post_turn_compact_threshold_percent"), 90);
       assert.deepEqual((config("features") as Record<string, unknown>).context_management,
