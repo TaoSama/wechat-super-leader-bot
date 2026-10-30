@@ -79,6 +79,32 @@ func TestSymlinkContainmentAndRootAlias(t *testing.T) {
 	}
 }
 
+func TestBrokenNestedSymlinkDoesNotMakeCatalogIncomplete(t *testing.T) {
+	root := t.TempDir()
+	put(t, filepath.Join(root, "valid", "SKILL.md"), []byte(fixture))
+	if err := os.Symlink(filepath.Join(root, "missing"), filepath.Join(root, "stale-alias")); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := skills.Scan([]string{root})
+	if err != nil || len(items) != 1 || items[0].Name != "build:review" {
+		t.Fatalf("stale nested alias made catalog incomplete: %v %v", items, err)
+	}
+}
+
+func TestBrokenSkillMarkerKeepsCatalogIncomplete(t *testing.T) {
+	root := t.TempDir()
+	put(t, filepath.Join(root, "valid", "SKILL.md"), []byte(fixture))
+	if err := os.Symlink(filepath.Join(root, "missing", "SKILL.md"), filepath.Join(root, "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := skills.Scan([]string{root})
+	if err == nil || len(items) != 0 || !strings.Contains(err.Error(), "SKILL.md") {
+		t.Fatalf("broken marker was silently accepted or exposed siblings: %v %v", items, err)
+	}
+}
+
 func TestInvalidDocumentsAndBounds(t *testing.T) {
 	for name, content := range map[string][]byte{
 		"no-header": []byte("text only"), "bad-yaml": []byte("---\nname: [\n---\n"),
