@@ -6,10 +6,14 @@ const workflow = readFileSync(new URL('../../../.github/workflows/deploy-product
 const releaseScript = readFileSync(new URL('../../../scripts/deploy/remote-release.sh', import.meta.url), 'utf8');
 const overlay = readFileSync(new URL('../../../deploy/compose.release.yaml', import.meta.url), 'utf8');
 
-test('production CD deploys one main push with protected, immutable inputs', () => {
-  assert.match(workflow, /push:\s*\n\s*branches: \[main\]/);
-  assert.doesNotMatch(workflow, /pull_request:/);
-  assert.match(workflow, /build-and-deploy:\s*\n\s+name:[\s\S]*?\n\s+if: \$\{\{ github\.ref ===? 'refs\/heads\/main' \}\}/);
+test('production CD deploys one merged main PR with protected, immutable inputs', () => {
+  assert.match(workflow, /pull_request_target:\s*\n\s*types: \[closed\]/);
+  assert.match(workflow, /pull_request\.merged == true/);
+  assert.match(workflow, /pull_request\.base\.ref == github\.event\.repository\.default_branch/);
+  assert.match(workflow, /pull_request\.merge_commit_sha \|\| github\.sha/);
+  assert.match(workflow, /ref: \$\{\{ env\.REVISION \}\}/);
+  assert.doesNotMatch(workflow, /push:\s*\n/);
+  assert.doesNotMatch(workflow, /pull_request:\s*\n/);
   assert.match(workflow, /group: deploy-production/);
   assert.match(workflow, /environment:\s*\n\s+name: production/);
   assert.match(workflow, /permissions:\s*\n\s+contents: read/);
