@@ -30,6 +30,25 @@ function fixture(model?: LeaderModel, fallback = false) {
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe("independent task notification workers", () => {
+  it("keeps a waiting result interested beyond the bounded recent result list", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(START);
+    const { runtime } = fixture();
+    await runtime.initialize();
+    const waiting = await runtime.results.prepareResult({ key: "old-waiting", chatId: CHAT, text: "等待用户回来",
+      source: { type: "task", id: "old-waiting" }, kind: "completed", createdAt: START - 1_000, expiresAt: START + 600_000 });
+    await runtime.results.repository.markChatWaiting(CHAT, "quota_exhausted", START);
+    expect((await runtime.results.repository.get(waiting.id, START))?.status).toBe("waiting_for_user");
+    for (let index = 0; index < 101; index++) {
+      const recent = await runtime.results.prepareResult({ key: `accepted-${index}`, chatId: CHAT, text: `已完成 ${index}`,
+        source: { type: "task", id: `accepted-${index}` }, kind: "completed", createdAt: START, expiresAt: START + 600_000 });
+      const attempt = `9e5a2d54-450a-4a4b-86c4-7c8596a8${String(index).padStart(4, "0")}`;
+      await runtime.results.repository.claim(recent.id, attempt, START);
+      await runtime.results.repository.recordReceipt(recent.id, "accepted", attempt);
+    }
+    expect(await runtime.notificationInterest()).toEqual([CHAT]);
+    await runtime.stop();
+  });
+
   it("suppresses an already queued fallback after WeChat accepts the result", async () => {
     vi.useFakeTimers(); vi.setSystemTime(START);
     const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);

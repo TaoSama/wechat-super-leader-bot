@@ -94,6 +94,14 @@ export class PostgresDeliveryRepository implements DeliveryRepository {
       ORDER BY created_at DESC,id LIMIT $2`, [chatIds, Math.min(100, Math.max(0, limit))]);
     return result.rows.map(row => row.data);
   }
+  async hasActiveDelivery(chatId: string, now: number): Promise<boolean> {
+    const result = await this.pool.query<{ exists: boolean }>(`SELECT EXISTS(
+      SELECT 1 FROM result_deliveries
+      WHERE chat_id=$1 AND data->>'status' IN ('ready','preparing','waiting_for_user','claimed')
+        AND (data->>'expiresAt')::bigint > $2 AND retained_until > $2
+    ) AS exists`, [chatId, now]);
+    return result.rows[0]?.exists === true;
+  }
   async listMaintenance(chatIds: readonly string[], now: number, afterId?: string, limit = 20): Promise<DeliveryPlan[]> {
     const result = await this.pool.query<PlanRow>(`SELECT data FROM result_deliveries WHERE chat_id=ANY($1::text[])
       AND data->>'status' IN ('preparing','waiting_for_user') AND (data->>'expiresAt')::bigint > $2 AND retained_until > $2

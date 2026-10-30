@@ -206,11 +206,11 @@ export class TaskNotifications {
   async notificationInterest(): Promise<string[]> {
     const result: string[] = [];
     for (const chatId of this.config.allowedChatIds) {
-      const [schedules, plans, execution, goal] = await Promise.all([
-        this.automations.repository.list(chatId), this.results.repository.list([chatId]),
+      const [schedules, activeDelivery, execution, goal] = await Promise.all([
+        this.automations.repository.list(chatId), this.results.repository.hasActiveDelivery(chatId, this.now()),
         this.store.getLatestExecution(chatId), this.store.getLatestGoal(chatId),
       ]);
-      if (schedules.some(item => item.status === "active") || plans.some(item => ["ready", "preparing", "waiting_for_user", "claimed"].includes(item.status)) ||
+      if (schedules.some(item => item.status === "active") || activeDelivery ||
         execution?.status === "active" || goal?.status === "active") result.push(chatId);
     }
     return result;

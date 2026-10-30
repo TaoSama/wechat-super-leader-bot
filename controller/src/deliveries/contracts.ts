@@ -68,6 +68,8 @@ export interface DeliveryRepository {
   get(id: string, now?: number): Promise<DeliveryPlan | null>;
   getByKey(key: string): Promise<DeliveryPlan | null>;
   list(chatIds: readonly string[], limit?: number): Promise<DeliveryPlan[]>;
+  /** Returns whether an unexpired result can keep a chat interested, independent of UI list limits. */
+  hasActiveDelivery(chatId: string, now: number): Promise<boolean>;
   /** A cursor scan for maintenance work, independent from the bounded recent UI list. */
   listMaintenance(chatIds: readonly string[], now: number, afterId?: string, limit?: number): Promise<DeliveryPlan[]>;
   getArtifact(id: string): Promise<StoredResultArtifact | null>;

@@ -210,6 +210,24 @@ it("maintains every older pending result through cursor pages beyond the 100 mos
   expect(await repository.listMaintenance(["allowed"], NOW + 24 * 60 * 60_000)).toEqual([]);
 });
 
+it("reports an active result beyond the bounded recent UI list", async () => {
+  const { service, repository, now, advance } = fixture();
+  const waiting = await service.prepareResult(input("等待用户回来", { createdAt: NOW - 1_000 }));
+  const attempt = randomUUID();
+  await repository.claim(waiting.id, attempt, now());
+  await repository.defer(waiting.id, attempt, "quota_exhausted", now());
+  for (let index = 0; index < 101; index++) {
+    const recent = await service.prepareResult(input(`已完成 ${index}`));
+    const recentAttempt = randomUUID();
+    await repository.claim(recent.id, recentAttempt, now());
+    await repository.recordReceipt(recent.id, "accepted", recentAttempt);
+  }
+  expect((await repository.list(["allowed"])).every(plan => plan.status === "accepted")).toBe(true);
+  expect(await repository.hasActiveDelivery("allowed", now())).toBe(true);
+  advance(23 * 60 * 60_000 + 1);
+  expect(await repository.hasActiveDelivery("allowed", now())).toBe(false);
+});
+
 it("GET and claim persist expired attempts as uncertain without requiring the pending queue scan", async () => {
   const { service, repository, now, advance } = fixture();
   const first = await service.prepareResult(input("first"));
