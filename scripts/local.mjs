@@ -175,15 +175,25 @@ async function main(values) {
   }
 }
 
-async function installedSkillRoots() {
+export async function installedSkillRoots(home = homedir()) {
   const roots = [];
-  for (const directory of [join(homedir(), '.claude/skills'), join(homedir(), '.agents/skills')]) {
+  for (const directory of [join(home, '.claude/skills'), join(home, '.agents/skills')]) {
     let entries;
     try { entries = await readdir(directory, { withFileTypes: true }); }
     catch (error) { if (error.code === 'ENOENT') continue; throw error; }
     roots.push(directory);
     // Direct installed aliases are explicit roots. Deeper symlinks remain bounded by the daemon.
-    for (const entry of entries) if (entry.isSymbolicLink()) roots.push(join(directory, entry.name));
+    for (const entry of entries) {
+      if (!entry.isSymbolicLink()) continue;
+      const alias = join(directory, entry.name);
+      let metadata;
+      try { metadata = await stat(alias); }
+      catch (error) {
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') continue;
+        throw error;
+      }
+      if (metadata.isDirectory()) roots.push(alias);
+    }
   }
   return roots;
 }

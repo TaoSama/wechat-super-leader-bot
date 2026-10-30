@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { resolveControllerUrls } from '../../../scripts/local.mjs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { installedSkillRoots, resolveControllerUrls } from '../../../scripts/local.mjs';
 
 const cli = fileURLToPath(new URL('../../../scripts/local.mjs', import.meta.url));
 const run = (args, envOverrides = {}) => spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', env: { ...process.env, ...envOverrides } });
@@ -81,4 +84,36 @@ test('remote CONTROLLER_URL environment variable rejects --up and --down', () =>
     assert.equal(result.status, 1);
     assert.match(result.stderr, /CONTROLLER_URL points to a remote controller/);
   }
+});
+
+test('installedSkillRoots keeps base roots and directory aliases while filtering broken aliases', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'super-leader-local-skills-'));
+  const claudeRoot = join(home, '.claude', 'skills');
+  const agentsRoot = join(home, '.agents', 'skills');
+  await mkdir(claudeRoot, { recursive: true });
+  await mkdir(agentsRoot, { recursive: true });
+
+  const installedDirectory = join(home, 'installed-skill');
+  await mkdir(installedDirectory);
+  const validAlias = join(claudeRoot, 'installed-skill');
+  await symlink(installedDirectory, validAlias, 'dir');
+
+  const fileTarget = join(home, 'skill-file');
+  const fileContents = 'skill file remains untouched\n';
+  await writeFile(fileTarget, fileContents);
+  const fileAlias = join(claudeRoot, 'skill-file');
+  await symlink(fileTarget, fileAlias, 'file');
+
+  const danglingAlias = join(claudeRoot, 'missing-skill');
+  await symlink(join(home, 'missing-skill'), danglingAlias, 'dir');
+  const notDirectoryAlias = join(claudeRoot, 'nested-under-file');
+  await symlink(join(fileTarget, 'nested'), notDirectoryAlias, 'dir');
+
+  const roots = await installedSkillRoots(home);
+  assert.deepEqual(roots, [claudeRoot, validAlias, agentsRoot]);
+  assert.equal((await lstat(validAlias)).isSymbolicLink(), true);
+  assert.equal((await lstat(fileAlias)).isSymbolicLink(), true);
+  assert.equal((await lstat(danglingAlias)).isSymbolicLink(), true);
+  assert.equal((await lstat(notDirectoryAlias)).isSymbolicLink(), true);
+  assert.equal(await readFile(fileTarget, 'utf8'), fileContents);
 });

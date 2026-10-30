@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"unicode"
 	"unicode/utf8"
 
@@ -104,6 +105,14 @@ func (s *scanner) locate(path string) (*os.Root, string) {
 	return nil, ""
 }
 
+func isBrokenSymlink(path string, targetErr error) bool {
+	if !errors.Is(targetErr, os.ErrNotExist) && !errors.Is(targetErr, syscall.ENOTDIR) {
+		return false
+	}
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode()&os.ModeSymlink != 0
+}
+
 func (s *scanner) walk(path string, depth int) {
 	if s.entries >= MaxEntries {
 		s.problem(path, "entry limit reached")
@@ -116,6 +125,12 @@ func (s *scanner) walk(path string, depth int) {
 	s.entries++
 	real, err := filepath.EvalSymlinks(path)
 	if err != nil {
+		// A stale user-installed alias is unavailable by definition. Ignore only
+		// broken symlinks; preserve diagnostics for permission failures, type
+		// changes, and links that resolve outside the permitted roots.
+		if isBrokenSymlink(path, err) {
+			return
+		}
 		s.problem(path, "unresolvable path")
 		return
 	}
