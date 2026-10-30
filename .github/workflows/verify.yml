@@ -42,12 +42,12 @@ jobs:
             unit_group: all
             integration_group: progress
             name: integration-progress
-          - os: macos-14
+          - os: macos-15
             suite: unit
             unit_group: core
             integration_group: all
             name: unit-core
-          - os: macos-14
+          - os: macos-15
             suite: unit
             unit_group: daemon
             integration_group: all
@@ -112,5 +112,5 @@ jobs:
           SUPER_LEADER_SKIP_NATIVE_SKILL_DISCOVERY: ${{ matrix.os == 'ubuntu-24.04' && matrix.suite == 'unit' && '1' || '' }}
         run: node scripts/verify.mjs --suite ${{ matrix.suite }} --unit-group ${{ matrix.unit_group }} --integration-group ${{ matrix.integration_group }} --parallel
       - name: Verify native app-server steering
-        if: matrix.os == 'macos-14' && matrix.unit_group == 'core'
+        if: matrix.os == 'macos-15' && matrix.unit_group == 'core'
         run: node tests/integration/leader/progress-steering.mjs --run
