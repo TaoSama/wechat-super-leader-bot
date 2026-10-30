@@ -97,7 +97,7 @@ test('with --profile wechat, gateway is configured with exact production constra
   assert.equal(gateway.environment.GATEWAY_HEALTH_PATH, '/var/lib/super-leader-gateway/health.json');
   assert.equal(gateway.environment.GATEWAY_NOTIFICATIONS, undefined);
   assert.equal(gateway.environment.GATEWAY_MAX_CHARS, '3800');
-  assert.equal(gateway.environment.GATEWAY_CONTEXT_WINDOW_MS, '82800000');
+  assert.equal(gateway.environment.GATEWAY_CONTEXT_WINDOW_MS, '86400000');
   assert.equal(gateway.environment.GATEWAY_SEND_BUDGET, '10');
   assert.equal(gateway.environment.GATEWAY_OUTBOX_LIMIT, '1000');
   assert.equal(gateway.environment.GATEWAY_POLL_TIMEOUT_MS, '35000');

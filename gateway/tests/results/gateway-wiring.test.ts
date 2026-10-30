@@ -64,7 +64,7 @@ for (const renewal of ["accepted", "failed"] as const) test(`result failure stil
   f.state.setContextToken("broken", "broken-context");
   f.state.recordInboundContext("broken-inbound", "broken", Date.now() - 1000);
   f.state.setContextToken("renewal", "renewal-context");
-  f.state.recordInboundContext("renewal-inbound", "renewal", Date.now() - 22 * 60 * 60 * 1000 - 1000);
+  f.state.recordInboundContext("renewal-inbound", "renewal", Date.now() - 23 * 60 * 60 * 1000 - 1000);
   f.state.contextBudgets.renewal.remaining = 2;
   await assert.rejects(gateway.deliverNotificationsOnce(), error => error === failure);
   assert.equal(f.sends.length, 1);
