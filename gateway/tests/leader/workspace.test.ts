@@ -99,9 +99,9 @@ test("native usage schedules an oversized thread for rotation while retaining sm
   const { store } = fixture(t);
   const workspace = await store.forChat("account", "chat");
   workspace.setThreadId("thread-small");
-  workspace.recordThreadUsage(64_000, false);
+  workspace.recordThreadUsage(200_000, false);
   assert.equal(workspace.getThreadId(), "thread-small");
-  workspace.recordThreadUsage(64_001, true);
+  workspace.recordThreadUsage(200_001, true);
   assert.equal(workspace.getThreadId(), undefined);
   workspace.setThreadId("thread-fresh");
   assert.equal(workspace.getThreadId(), "thread-fresh");
