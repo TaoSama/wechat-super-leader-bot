@@ -1,8 +1,9 @@
 # 生产部署
 
-`.github/workflows/deploy-production.yml` 只监听 `main` 的 push。合并 Pull Request
-会产生一次 main push，因此不会再叠加 `pull_request.closed` 触发。`workflow_dispatch`
-用于人工重跑同一个 main revision；`deploy-production` 并发组不取消正在进行的发布。
+`.github/workflows/deploy-production.yml` 只处理合并到默认分支的
+`pull_request_target.closed` 事件。这样自动合并由 Actions 身份完成时，也不会依赖被
+GitHub 抑制的后续 push workflow。`workflow_dispatch` 用于人工重跑同一个 main
+revision；`deploy-production` 并发组不取消正在进行的发布。
 
 工作流在一个 Ubuntu runner 中并行构建 Controller 和 Gateway 的 `linux/amd64`
 Docker 归档。两个归档都带有完整 commit SHA 的 `org.opencontainers.image.revision`
@@ -34,7 +35,7 @@ Gateway 默认使用 23 小时回复窗口（`GATEWAY_CONTEXT_WINDOW_MS=82800000
 同仓库且由仓库所有者创建的非草稿 Pull Request 会由
 `.github/workflows/enable-auto-merge.yml` 自动开启 squash merge；工作流不检出或执行
 Pull Request 代码。`main` 的保护规则应要求 Ubuntu unit/integration 验证和 macOS 15
-验证通过。合并产生的 `main` push 会唯一触发生产部署；部署成功必须同时核对合并 revision、
+验证通过。合并到默认分支的 `pull_request_target.closed` 事件会唯一触发生产部署；部署成功必须同时核对合并 revision、
 容器健康状态、`gateway_context_window_ms=82800000` 和 `deployment verified`。
 
 在 GitHub `production` Environment 中配置以下 **Secrets**：
