@@ -104,7 +104,7 @@ test("oversized native turns rotate the persisted thread before the next message
     yield { type: "thread.started", thread_id: `thread-${turn}` };
     yield { type: "item.completed", item: { type: "agent_message", id: `answer-${turn}`, text: "已完成" } };
     yield { type: "turn.completed", usage: {
-      ...usage, input_tokens: turn === 1 ? 64_001 : 1_000,
+      ...usage, input_tokens: turn === 1 ? 200_001 : 1_000,
     } };
   });
   const engine = new CodexReplyEngine({ root, model: "test-model", sdkFactory });
