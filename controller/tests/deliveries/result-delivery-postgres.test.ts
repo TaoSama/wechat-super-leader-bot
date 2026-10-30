@@ -73,8 +73,10 @@ it.skipIf(!databaseUrl)("persists artifacts and cached summaries across process 
     }
     expect(new Set(seen)).toEqual(expected);
     expect(seen).toHaveLength(105);
+    expect(await repository.hasActiveDelivery("allowed", now)).toBe(true);
     expect(await repository.listMaintenance(["forbidden"], now)).toEqual([]);
     expect(await repository.listMaintenance(["allowed"], now + 3_600_000)).toEqual([]);
+    expect(await repository.hasActiveDelivery("allowed", now + 3_600_000)).toBe(false);
     const timeout = await service.prepareResult({ ...result, key: randomUUID(), text: "must not retry unknown" });
     const timeoutAttempt = randomUUID();
     await repository.claim(timeout.id, timeoutAttempt, now);

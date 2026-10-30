@@ -44,6 +44,11 @@ export class MemoryDeliveryRepository implements DeliveryRepository {
     return structuredClone([...this.plans.values()].filter(plan => chatIds.includes(plan.chatId))
       .sort((left, right) => right.createdAt - left.createdAt || left.id.localeCompare(right.id)).slice(0, Math.min(100, Math.max(0, limit))));
   }
+  async hasActiveDelivery(chatId: string, now: number): Promise<boolean> {
+    return [...this.plans.values()].some(plan => plan.chatId === chatId &&
+      ["ready", "preparing", "waiting_for_user", "claimed"].includes(plan.status) &&
+      plan.expiresAt > now && plan.retainedUntil > now);
+  }
   async listMaintenance(chatIds: readonly string[], now: number, afterId?: string, limit = 20): Promise<DeliveryPlan[]> {
     return structuredClone([...this.plans.values()].filter(plan => chatIds.includes(plan.chatId) &&
       ["preparing", "waiting_for_user"].includes(plan.status) && plan.expiresAt > now && plan.retainedUntil > now &&
