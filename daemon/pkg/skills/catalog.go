@@ -129,6 +129,9 @@ func (s *scanner) walk(path string, depth int) {
 		// broken symlinks; preserve diagnostics for permission failures, type
 		// changes, and links that resolve outside the permitted roots.
 		if isBrokenSymlink(path, err) {
+			if filepath.Base(path) == "SKILL.md" {
+				s.problem(path, "unresolvable path")
+			}
 			return
 		}
 		s.problem(path, "unresolvable path")

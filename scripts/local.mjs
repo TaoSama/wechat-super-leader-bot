@@ -190,7 +190,10 @@ export async function installedSkillRoots(home = homedir()) {
       try { metadata = await stat(alias); }
       catch (error) {
         if (error.code === 'ENOENT' || error.code === 'ENOTDIR') continue;
-        throw error;
+        // Preserve aliases whose state cannot be determined so the daemon can
+        // report an incomplete catalog and fail closed during skill resolution.
+        roots.push(alias);
+        continue;
       }
       if (metadata.isDirectory()) roots.push(alias);
     }

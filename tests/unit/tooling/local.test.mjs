@@ -108,9 +108,11 @@ test('installedSkillRoots keeps base roots and directory aliases while filtering
   await symlink(join(home, 'missing-skill'), danglingAlias, 'dir');
   const notDirectoryAlias = join(claudeRoot, 'nested-under-file');
   await symlink(join(fileTarget, 'nested'), notDirectoryAlias, 'dir');
+  const loopAlias = join(claudeRoot, 'loop');
+  await symlink(loopAlias, loopAlias, 'dir');
 
   const roots = await installedSkillRoots(home);
-  assert.deepEqual(roots, [claudeRoot, validAlias, agentsRoot]);
+  assert.deepEqual(roots, [claudeRoot, validAlias, loopAlias, agentsRoot]);
   assert.equal((await lstat(validAlias)).isSymbolicLink(), true);
   assert.equal((await lstat(fileAlias)).isSymbolicLink(), true);
   assert.equal((await lstat(danglingAlias)).isSymbolicLink(), true);

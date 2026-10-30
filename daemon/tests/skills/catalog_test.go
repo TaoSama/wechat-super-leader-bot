@@ -92,6 +92,19 @@ func TestBrokenNestedSymlinkDoesNotMakeCatalogIncomplete(t *testing.T) {
 	}
 }
 
+func TestBrokenSkillMarkerKeepsCatalogIncomplete(t *testing.T) {
+	root := t.TempDir()
+	put(t, filepath.Join(root, "valid", "SKILL.md"), []byte(fixture))
+	if err := os.Symlink(filepath.Join(root, "missing", "SKILL.md"), filepath.Join(root, "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := skills.Scan([]string{root})
+	if err == nil || len(items) != 0 || !strings.Contains(err.Error(), "SKILL.md") {
+		t.Fatalf("broken marker was silently accepted or exposed siblings: %v %v", items, err)
+	}
+}
+
 func TestInvalidDocumentsAndBounds(t *testing.T) {
 	for name, content := range map[string][]byte{
 		"no-header": []byte("text only"), "bad-yaml": []byte("---\nname: [\n---\n"),
