@@ -25,7 +25,7 @@ function fixture(t: TestContext, remaining: number, body = "ordinary", source: "
     ackReply: async (_account: string, _chat: string, _message: string, status: string) => { acknowledgements.push(status); },
   };
   t.mock.method(f.controller, "getMessageReply", async (_chat: string, messageId: string) => { reads.push(messageId); return { text: body }; });
-  f.state.contextBudgets.chat.refreshedAt = Date.now() - 22 * HOUR - 1_000;
+  f.state.contextBudgets.chat.refreshedAt = Date.now() - 23 * HOUR - 1_000;
   f.state.contextBudgets.chat.remaining = remaining;
   f.state.putOutbox({ kind: "reply", source, chatId: "chat", messageId: "message", deliveryKey: "ordinary",
     splitMaxChars: 2_000, status: "pending" });

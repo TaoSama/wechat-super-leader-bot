@@ -33,7 +33,7 @@ function assertDeferred(state: ContextBudgetState | undefined, kind: SendKind, r
 
 test("context policy defaults are conservative and configuration accepts the resource limits", () => {
   assert.deepEqual(validateContextPolicy(), {
-    contextWindowMs: 23 * 60 * 60 * 1000,
+    contextWindowMs: 24 * 60 * 60 * 1000,
     sendBudget: 10,
     outboxLimit: 1000,
   });

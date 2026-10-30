@@ -29,6 +29,8 @@ revision 的 `compose.yaml`、生产/Gateway overlay 和 seccomp 策略随发布
 开放的 `.runtime/controller.env`，并准备已有的微信账号文件、状态目录和
 `super-leader-codex` AppArmor profile。工作流不会读取、打印或上传这些运行时密钥。
 
+Gateway 默认使用 24 小时回复窗口（`GATEWAY_CONTEXT_WINDOW_MS=86400000`），并在最后 1 小时发送续期提醒。发布脚本会把该值写入不可变的 release env，并在容器健康检查后读取实际容器环境核对；生产环境文件中的旧值不会覆盖本次发布。回滚使用上一份 release env，恢复上一版本的窗口配置。
+
 在 GitHub `production` Environment 中配置以下 **Secrets**：
 
 - `DEPLOY_HOST`

@@ -2,6 +2,8 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
+readonly GATEWAY_CONTEXT_WINDOW_MS=86400000
+
 usage() {
   cat <<'EOF'
 Usage: remote-release.sh --release-dir PATH --stage-dir PATH --revision SHA \
@@ -121,7 +123,8 @@ had_previous=0
 previous_controller_image=''
 previous_gateway_image=''
 umask 077
-printf 'CONTROLLER_IMAGE=%s\nGATEWAY_IMAGE=%s\n' "$controller_image" "$gateway_image" > "$release_env_next"
+printf 'CONTROLLER_IMAGE=%s\nGATEWAY_IMAGE=%s\nGATEWAY_CONTEXT_WINDOW_MS=%s\n' \
+  "$controller_image" "$gateway_image" "$GATEWAY_CONTEXT_WINDOW_MS" > "$release_env_next"
 chmod 600 "$release_env_next"
 
 cleanup() {
@@ -222,9 +225,10 @@ if ! wait_healthy controller || ! wait_healthy gateway; then
 fi
 
 verify_runtime() {
-  local service container state health image image_revision
+  local service container gateway_container='' state health image image_revision
   for service in controller gateway; do
     container=$(compose_with_env "$release_env" ps -q "$service")
+    [[ $service == gateway ]] && gateway_container=$container
     state=$(docker inspect --format '{{.State.Status}}' "$container")
     health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container")
     image=$(docker inspect --format '{{.Config.Image}}' "$container")
@@ -233,6 +237,11 @@ verify_runtime() {
     printf 'service=%s container=%s state=%s health=%s image=%s revision=%s\n' \
       "$service" "$container" "$state" "$health" "$image" "$image_revision"
   done
+  local gateway_context_window
+  gateway_context_window=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$gateway_container" |
+    sed -n 's/^GATEWAY_CONTEXT_WINDOW_MS=//p')
+  [[ $gateway_context_window == "$GATEWAY_CONTEXT_WINDOW_MS" ]] || return 1
+  printf 'gateway_context_window_ms=%s\n' "$gateway_context_window"
 }
 
 if ! verify_runtime; then

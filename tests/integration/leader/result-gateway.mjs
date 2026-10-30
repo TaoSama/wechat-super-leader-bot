@@ -20,7 +20,7 @@ const SUMMARY = '模型摘要：任务成果已完成，完整正文随附件提
 const REPLY = '模型回复：已收到你的当前消息。';
 const PROCESS_MS = 30_000;
 const HTTP_MS = 5_000;
-const WINDOW_MS = 23 * 60 * 60_000;
+const WINDOW_MS = 24 * 60 * 60_000;
 const RENEWAL_TEXT = '回复窗口即将结束。请主动发一条消息，刷新本轮 10 条消息额度，避免定时任务结果继续等待。';
 const hash = (type, data) => createHash(type).update(data).digest('hex');
 const { values } = parseArgs({ options: { run: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } });
@@ -290,7 +290,7 @@ globalThis.fetch = async (input, init) => {
     const beforeEarly = sent.length;
     await runGateway();
     assert.equal(sent.length, beforeEarly, 'Low budget reminder was sent before the final hour');
-    await patchBudget({ remaining: 10, refreshedAt: Date.now() - 22 * 60 * 60_000 - 1000 });
+    await patchBudget({ remaining: 10, refreshedAt: Date.now() - 23 * 60 * 60_000 - 1000 });
     const beforeRenewal = sent.filter(message => textOf(message) === RENEWAL_TEXT).length;
     await runGateway(); await runGateway();
     assert.equal(sent.filter(message => textOf(message) === RENEWAL_TEXT).length, beforeRenewal + 1, 'Window renewal reminder was missing or repeated across restart');
@@ -300,7 +300,7 @@ globalThis.fetch = async (input, init) => {
     await input('提醒使用最后一次额度');
     const lastQuota = await prepare('saved-after-last-quota-reminder');
     await elapseDispatchInterval();
-    await patchBudget({ remaining: 1, refreshedAt: Date.now() - 22 * 60 * 60_000 - 1000 });
+    await patchBudget({ remaining: 1, refreshedAt: Date.now() - 23 * 60 * 60_000 - 1000 });
     const beforeLastQuota = sent.length;
     await runGateway();
     assert.deepEqual(sent.slice(beforeLastQuota).map(textOf), [RENEWAL_TEXT]);
@@ -319,7 +319,7 @@ globalThis.fetch = async (input, init) => {
     const splitText = '首'.repeat(3800) + '中'.repeat(3800) + '尾'.repeat(3800);
     const interrupted = await prepare(splitText);
     await elapseDispatchInterval();
-    await patchBudget({ remaining: 3, refreshedAt: Date.now() - 22 * 60 * 60_000 - 1000 });
+    await patchBudget({ remaining: 3, refreshedAt: Date.now() - 23 * 60 * 60_000 - 1000 });
     const beforeSplit = sent.length;
     await runGateway();
     assert.deepEqual(sent.slice(beforeSplit).map(textOf), [RENEWAL_TEXT],
