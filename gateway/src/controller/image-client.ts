@@ -59,6 +59,7 @@ export async function downloadControllerImage(options: {
         chunks.push(Buffer.from(next.value));
       }
     } finally { reader.releaseLock(); }
+    diagnostics.phase = "validate";
     const bytes = Buffer.concat(chunks);
     if (size !== image.size || createHash("sha256").update(bytes).digest("hex") !== image.sha256 ||
         validateImageBytes(bytes) !== image.mime) throw new Error("Controller image download failed integrity validation");

@@ -209,6 +209,7 @@ export class ResultClient {
       if (length !== null && (!/^\d+$/.test(length) || Number(length) !== artifact.size)) throw new Error("Controller result download length mismatch");
       diagnostics.phase = "body";
       const bytes = await this.readBody(response, artifact.size, signal, artifact.size);
+      diagnostics.phase = "validate";
       if (bytes.length !== artifact.size || createHash("sha256").update(bytes).digest("hex") !== artifact.sha256) {
         throw new Error("Controller result download integrity mismatch");
       }

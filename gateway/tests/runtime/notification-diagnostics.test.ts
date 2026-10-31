@@ -11,6 +11,9 @@ import { HealthTracker } from "../../src/runtime/health.js";
 import { harness, ID, ATTEMPT } from "../fixtures/notification-fixtures.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
+import type { ImageAttachment } from "../../src/wechat/media-delivery.js";
+import type { ResultArtifact } from "../../src/results/contracts.js";
 
 const PRIVATE = "private-token-account-message-url";
 const active = () => true;
@@ -185,6 +188,56 @@ test("an uninstrumented local-stage failure is left unproven by a skipped cycle"
   await assert.rejects(f.run(async () => { throw new Error(PRIVATE); }));
   await f.run(async () => ({ skipped: 1 }));
   assert.equal(f.events.length, 1);
+});
+
+test("reply schema rejection after JSON decoding is validation without extra requests or false recovery", async () => {
+  const f = fixture(); let bad = true, calls = 0;
+  const client = new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: PRIVATE,
+    fetchImpl: async () => { calls++; return Response.json({ text: bad ? null : "ok" }); } });
+  await assert.rejects(f.run(() => client.getMessageReply(PRIVATE, "message")), /missing string text field/);
+  assert.equal(f.events[0].operation, "reply_get");
+  assert.equal(f.events[0].phase, "validate");
+  assert.equal(f.events[0].httpStatus, 200);
+  assert.equal(f.events[0].requestAttempts, 1);
+  assert.equal(calls, 1);
+  await f.run(async () => ({ skipped: 1 }));
+  assert.equal(f.events.length, 1);
+  bad = false; await f.run(() => client.getMessageReply(PRIVATE, "message"));
+  assert.equal(f.events[1].event, "notification_cycle_recovered");
+  assert.equal(calls, 2);
+});
+
+test("complete download length, hash and image MIME rejection are validation without new retries", async () => {
+  const png = Buffer.from("89504e470d0a1a0a00000000", "hex");
+  const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+  const changed = Buffer.from(png); changed[changed.length - 1] = 1;
+  const jpeg = Buffer.from(png); jpeg.set([255, 216, 255]);
+  for (const kind of ["artifact", "image"] as const) {
+    for (const corruption of ["length", "hash", ...(kind === "image" ? ["mime"] : [])]) {
+      const f = fixture(); let calls = 0;
+      const bytes = corruption === "length" ? png.subarray(0, -1) : corruption === "hash" ? changed : jpeg;
+      const sha256 = corruption === "mime" ? digest(jpeg) : digest(png);
+      const fetchImpl: typeof fetch = async () => { calls++; return new Response(bytes, {
+        headers: { "content-type": kind === "artifact" ? "text/markdown" : "image/png" },
+      }); };
+      const image: ImageAttachment = { id: "image", mime: "image/png", size: png.length, sha256 };
+      const artifact: ResultArtifact = { id: ID, chatId: PRIVATE, name: "result.md", size: png.length, sha256,
+        expiresAt: 2000, downloadUrl: `http://127.0.0.1:8790/v1/result-artifacts/${ID}/download?expires=1000&signature=${"a".repeat(64)}` };
+      const action = kind === "artifact"
+        ? () => new ResultClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: PRIVATE, fetchImpl }).downloadArtifact(artifact)
+        : () => new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: PRIVATE, fetchImpl })
+          .downloadImage({ chatId: PRIVATE, messageId: "message", image });
+      await assert.rejects(f.run(action), kind === "artifact" ? /integrity mismatch/ : /integrity validation/);
+      assert.equal(f.events[0].operation, kind === "artifact" ? "artifact_download" : "image_download");
+      assert.equal(f.events[0].phase, "validate", `${kind} ${corruption}`);
+      assert.equal(f.events[0].httpStatus, 200);
+      assert.equal(f.events[0].requestAttempts, 1);
+      assert.equal(calls, 1);
+      await f.run(async () => ({ skipped: 1 }));
+      assert.equal(f.events.length, 1);
+      assert.ok(!JSON.stringify(f.events).includes(PRIVATE));
+    }
+  }
 });
 
 test("readiness is logged once; shutdown aborts and fatal diagnostic errors are not retried diagnostics", async () => {

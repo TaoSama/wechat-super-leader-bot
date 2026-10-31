@@ -56,7 +56,7 @@ export async function getControllerMessageReply(options: {
       throw new Error("Controller message reply returned invalid response schema (JSON)", { cause: error });
     }
     abort.signal.throwIfAborted();
-    diagnostics.phase = "decode";
+    diagnostics.phase = "validate";
     const reply = parseControllerReply(value, "message reply");
     diagnostics.success();
     return reply;
