@@ -50,3 +50,19 @@ node --test --test-reporter=spec --test-timeout=60000 gateway/dist-test/tests/**
 生产只支持单 Gateway 实例、同一持久状态文件；没有声称多个独立进程或文件原子共享。旧账本没有逐次消费时间，迁移保守汇总重叠窗口消费，可能暂时少给；下一次有效真实入站恢复正常 10 次。23 小时窗口、第 22 小时起且只剩 1/2 次的提醒门槛保持。
 
 本地模拟证明请求、扣额、持久化与恢复逻辑；不把它表述为生产微信真实送达。生产发布 revision、容器健康和窗口值由自动部署日志单独核对。没有修改 Controller runtime/数据库卷布局，没有迁移整包旧 worktree 修复。旧改动与未核实历史的边界见[遗留审计](legacy-worktree-audit-2026-10-31.md)。
+
+## CI 集成脚本迁移补充
+
+首轮 CI 的四项单元组通过，两项集成组因三个旧脚本仍访问 `context_budgets` 抛出 TypeError 而失败。已将 `wechat-budget.mjs`、`wechat-budget-notifications.mjs`、`sdk-result-gateway.mjs` 的断言迁到账号账本；重放时间仍取实际收件人窗口。全库 tests/scripts 已无旧字段引用。
+
+修正后通过真实入口本地运行：
+
+```text
+node tests/integration/leader/wechat-interaction.mjs --run --budget-only
+PASS-default-budget: realControllerProcess=true, realGatewayCli=true,
+  disposablePostgres=true, actualWeChatHttps=true, noProductionRequests=true
+node tests/integration/leader/sdk-result-gateway.mjs --run
+纯聊天最终答案、工具支持的 Controller 精确回复两场景通过，进程退出 0。
+```
+
+预算场景确认首轮准确用完 10 次，重启和重放不补额；原回复 12 段完整恢复、原模型仅执行一次；9 段普通确认之后，3 段成果整体等待，新入站先普通回复再恢复成果；摘要和附件分别扣额。脚本自行清理 PostgreSQL fixture、临时目录与进程。随后推送触发全部六项 CI 再验证。

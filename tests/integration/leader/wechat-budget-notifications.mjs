@@ -33,7 +33,7 @@ export async function verifyBudgetNotifications(harness) {
     'Budget confirmation lost the exact original title or deterministic pending receipt body');
   assert.equal(sent.length - ordinaryStart, ACKNOWLEDGEMENT_PARTS,
     'Model confirmation did not consume the real shared send budget');
-  assert.equal((await state()).context_budgets[chatId].remaining, SEND_BUDGET - ACKNOWLEDGEMENT_PARTS);
+  assert.equal((await state()).account_send_budget.remaining, SEND_BUDGET - ACKNOWLEDGEMENT_PARTS);
   const command = deliveries.at(-1);
   await waitForAccepted(command);
   sendFrame({ type: 'result', commandId: command.commandId,
@@ -68,7 +68,7 @@ export async function verifyBudgetNotifications(harness) {
   assert.deepEqual(deferred.messages, plan.messages);
   assert.deepEqual(deferred.source, plan.source);
   const firstDeferAttempt = deferred.lastDeferredAttemptId;
-  const frozenBudget = (await state()).context_budgets[chatId];
+  const frozenBudget = (await state()).account_send_budget;
   assert.equal(frozenBudget.remaining, 1);
   for (let index = 0; index < EMPTY_RESTART_POLLS; index++) {
     const restarted = await runGateway('--poll-once');
@@ -80,7 +80,7 @@ export async function verifyBudgetNotifications(harness) {
     assert.equal(deferred.status, 'waiting_for_user');
     assert.equal(deferred.lastDeferredAttemptId, firstDeferAttempt,
       'No-context restart opened a new result attempt');
-    assert.deepEqual((await state()).context_budgets[chatId], frozenBudget);
+    assert.deepEqual((await state()).account_send_budget, frozenBudget);
   }
 
   await elapseDispatchInterval();
@@ -100,8 +100,8 @@ export async function verifyBudgetNotifications(harness) {
   assert(parts.every(part => !/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/u.test(text(part))),
     'Result split a Unicode surrogate pair');
   const current = await state();
-  assert.notEqual(current.context_budgets[chatId].lastInboundKey, frozenBudget.lastInboundKey);
-  assert.equal(current.context_budgets[chatId].remaining, SEND_BUDGET - 4);
+  assert.notEqual(current.account_send_budget.lastInboundKey, frozenBudget.lastInboundKey);
+  assert.equal(current.account_send_budget.remaining, SEND_BUDGET - 4);
   assert(parts.every(part => part.context_token === current.context_tokens[chatId]));
   for (let index = 0; index < parts.length; index++) {
     const receipt = current.reply_deliveries[`result:${plan.id}:step:${index}`];
@@ -128,7 +128,7 @@ export async function verifyBudgetNotifications(harness) {
   // same default ledger as the task acknowledgement; no unlimited text splitting remains.
   const longCommandStart = deliveries.length;
   await refreshContext(directTask);
-  assert.equal((await state()).context_budgets[chatId].remaining, SEND_BUDGET - 1);
+  assert.equal((await state()).account_send_budget.remaining, SEND_BUDGET - 1);
   await waitFor(() => { healthy(); return deliveries.length === longCommandStart + 1; }, 'Long budget task accepted');
   const longCommand = deliveries.at(-1);
   await waitForAccepted(longCommand);
@@ -152,7 +152,7 @@ export async function verifyBudgetNotifications(harness) {
   assert.equal(fileParts[1].client_id, resultClientId(attachment.id, 1, 'file'));
   assert.equal(fileParts[1].item_list[0].type, 4);
   assert.equal(await artifactText(fileParts[1]), longRaw, 'AES attachment changed raw result bytes');
-  assert.equal((await state()).context_budgets[chatId].remaining, SEND_BUDGET - 3,
+  assert.equal((await state()).account_send_budget.remaining, SEND_BUDGET - 3,
     'File and text did not each consume one send from the shared quota');
   assert.equal((await getDelivery(attachment.id)).status, 'accepted');
   const finalSent = sent.length;
