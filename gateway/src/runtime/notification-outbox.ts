@@ -6,7 +6,7 @@ import { NOTIFICATION_CHAT_LIMIT, NOTIFICATION_LIMIT, NOTIFICATION_RECEIPT_RETRI
 import type { DeliveryOutboxItem } from "../types.js";
 import type { ILinkClient } from "../wechat/client.js";
 import { NOTIFICATION_REPLY_TIMEOUT_MS } from "./budgets.js";
-import { getDeferReason, LocalSendDeferredError, type DeferReason, type SendKind } from "./context-policy.js";
+import { LocalSendDeferredError, type DeferReason, type SendKind } from "./context-policy.js";
 import { sanitizeErrorType } from "./health.js";
 import type { StateManager } from "./state.js";
 
@@ -68,7 +68,7 @@ export class NotificationOutbox {
   }
   private kind(item: Notification): SendKind { return item.kind === "progress" ? "progress" : "final"; }
   private deferReason(chatId: string, kind: SendKind): DeferReason {
-    return getDeferReason(this.state.contextBudgets[chatId], this.state.policy, kind) ?? "context_changed";
+    return this.state.sendDeferReason(chatId, kind) ?? "context_changed";
   }
   private hasCompleteReply(deliveryKey: string): boolean {
     const evidence = this.state.replyDeliveries[deliveryKey];
@@ -215,7 +215,7 @@ export class NotificationOutbox {
       return false;
     }
     const kind = this.kind(item);
-    const context = this.state.contextTokens[item.chatId];
+    const context = this.state.contextTokens[item.chatId], budgetEpoch = this.state.accountSendBudget?.lastInboundKey;
     if (kind === "progress" && this.hasPendingReply(item.chatId) && item.status === "pending") {
       summary.skipped++; return false;
     }
@@ -261,7 +261,8 @@ export class NotificationOutbox {
       summary.skipped++;
       return false;
     }
-    if (context !== this.state.contextTokens[item.chatId] || fingerprint !== this.state.getLoginFingerprint()) {
+    if (context !== this.state.contextTokens[item.chatId] || fingerprint !== this.state.getLoginFingerprint() ||
+        budgetEpoch !== this.state.accountSendBudget?.lastInboundKey) {
       await this.defer(ref, "context_changed");
       summary.skipped++;
       return false;
@@ -286,7 +287,8 @@ export class NotificationOutbox {
         timeoutMs, signal: this.options.signal,
         shouldContinue: () => {
           if (item.attemptExpiresAt! <= Date.now() || item.expiresAt <= Date.now()) throw new LocalSendDeferredError("window_expired");
-          if (!this.active() || context !== this.state.contextTokens[item.chatId] || fingerprint !== this.state.getLoginFingerprint()) {
+          if (!this.active() || context !== this.state.contextTokens[item.chatId] || fingerprint !== this.state.getLoginFingerprint() ||
+              budgetEpoch !== this.state.accountSendBudget?.lastInboundKey) {
             throw new LocalSendDeferredError("context_changed");
           }
           if (kind === "progress" && this.hasPendingReply(item.chatId)) throw new LocalSendDeferredError("budget_exhausted");

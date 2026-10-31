@@ -1,3 +1,4 @@
+import { LocalSendDeferredError } from "../runtime/context-policy.js";
 import { createHash } from "node:crypto";
 import type { StateManager } from "../runtime/state.js";
 import { ILinkSendReceiptError } from "./send-receipt.js";
@@ -52,7 +53,7 @@ export async function sendImageReply(options: {
   const delivery = stateManager.prepareReplyDelivery(deliveryKey, digest, images.length);
   for (let index = delivery.acknowledgedChunks; index < images.length; index++) {
     signal?.throwIfAborted();
-    if (options.shouldContinue && !options.shouldContinue()) throw new Error("WeChat image reply interrupted before completion");
+    if (options.shouldContinue && !options.shouldContinue()) throw new LocalSendDeferredError("context_changed", "WeChat image reply interrupted before completion");
     const image = images[index];
     const downloaded = await beforeAbort(options.getImageBytes(image, signal), signal);
     signal?.throwIfAborted();
@@ -62,10 +63,10 @@ export async function sendImageReply(options: {
         createHash("sha256").update(bytes).digest("hex") !== image.sha256) {
       throw new Error("WeChat image bytes do not match the attachment metadata");
     }
-    if (options.shouldContinue && !options.shouldContinue()) throw new Error("WeChat image reply interrupted before upload");
+    if (options.shouldContinue && !options.shouldContinue()) throw new LocalSendDeferredError("context_changed", "WeChat image reply interrupted before upload");
     const uploaded = await beforeAbort(options.uploadImage(bytes, signal), signal);
     signal?.throwIfAborted();
-    if (options.shouldContinue && !options.shouldContinue()) throw new Error("WeChat image reply interrupted before completion");
+    if (options.shouldContinue && !options.shouldContinue()) throw new LocalSendDeferredError("context_changed", "WeChat image reply interrupted before completion");
     const clientId = `super-leader:image:${createHash("sha256").update(JSON.stringify([
       stateManager.getLoginFingerprint(), chatId, deliveryKey, index,
     ])).digest("hex").slice(0, 24)}`;

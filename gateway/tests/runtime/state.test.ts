@@ -298,8 +298,10 @@ test("reported remaining budget honors a lowered policy and expired window", t =
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-effective-budget-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const state = new StateManager(path.join(directory, "absent.json"), path.join(directory, "state.json"), { sendBudget: 4 });
-  state.contextBudgets.chat = { refreshedAt: Date.now(), grantedBudget: 10, remaining: 7, progressSent: 0, lastInboundKey: "inbound" };
+  state.contextWindows.chat = { refreshedAt: Date.now(), lastInboundKey: "inbound" };
+  state.accountSendBudget = { ...state.contextWindows.chat, inboundCreatedAt: Date.now(),
+    grantedBudget: 10, remaining: 7, progressSent: 0 };
   assert.equal(state.remainingSendBudget("chat"), 1);
-  state.contextBudgets.chat.refreshedAt -= state.policy.contextWindowMs;
+  state.contextWindows.chat.refreshedAt -= state.policy.contextWindowMs;
   assert.equal(state.remainingSendBudget("chat"), 0);
 });

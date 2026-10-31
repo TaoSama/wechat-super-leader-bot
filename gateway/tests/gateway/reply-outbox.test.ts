@@ -110,7 +110,8 @@ test("unknown legacy context queues reply without creating window or blocking an
   await new WeChatGateway({ stateManager: state, controller, ilink }).pollOnce();
   assert.deepEqual(posts, ["legacy", "fresh", "without-token"]);
   assert.deepEqual(sends, ["fresh", "without-token"]);
-  assert.equal(state.contextBudgets["without-token"].remaining, 0);
+  assert.equal(state.accountSendBudget!.remaining, 8, "both replies charge the single grant from the fresh recipient");
+  assert.equal(state.contextWindows["without-token"].lastInboundKey, "prior", "tokenless input cannot open a new recipient window");
   assert.equal(state.contextTokens["without-token"], "prior-context");
   assert.equal(state.canSendToChat("legacy"), false);
   assert.equal(state.syncBuf, "next");

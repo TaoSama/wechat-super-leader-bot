@@ -129,7 +129,7 @@ test("receipt intent survives restart and retries only the receipt", async t => 
 
 test("partial budget exhaustion defers durably and continues frozen chunks after refreshed context", async t => {
   const item = { ...notification(), text: "abcdefghijkl" }, f = setup(t, [item]), key = `notification:${item.id}`;
-  f.state.contextBudgets.chat.remaining = 1; f.state.saveState();
+  f.state.accountSendBudget!.remaining = 1; f.state.saveState();
   assert.equal((await f.create(4).deliverOnce()).skipped, 1);
   assert.deepEqual(f.sends.map(send => send.text), ["abcd"]);
   assert.equal(f.durable().outbox[key].status, "pending");
@@ -142,7 +142,7 @@ test("partial budget exhaustion defers durably and continues frozen chunks after
 
 test("lost defer response recovers matching remote marker without reusing the old attempt", async t => {
   const item = { ...notification(), text: "abcdefgh" }, f = setup(t, [item]), key = `notification:${item.id}`;
-  f.state.contextBudgets.chat.remaining = 1;
+  f.state.accountSendBudget!.remaining = 1;
   f.hooks.defer = () => {
     const ref = f.durable().outbox[key];
     assert.equal(ref.status, "defer"); assert.equal(ref.deferReason, "budget_exhausted");
@@ -161,7 +161,7 @@ test("lost defer response recovers matching remote marker without reusing the ol
 
 test("defer marker mismatch fails closed and preserves the durable intent", async t => {
   const item = { ...notification(), text: "abcdefgh" }, f = setup(t, [item]), key = `notification:${item.id}`;
-  f.state.contextBudgets.chat.remaining = 1;
+  f.state.accountSendBudget!.remaining = 1;
   f.hooks.defer = () => { throw new TypeError("lost"); };
   await assert.rejects(f.create(4).deliverOnce(), /lost/);
   f.records.set(item.id, { ...item, lastDeferredAttemptId: "00000000-0000-4000-8000-999999999999", lastDeferReason: "budget_exhausted" });
@@ -174,7 +174,7 @@ test("claimed recovery with exhausted local budget defers without another networ
   const f = setup(t), item = notification(), key = `notification:${item.id}`;
   f.hooks.claim = () => { throw new TypeError("lost claim response"); };
   await assert.rejects(f.create().deliverOnce(), /lost claim/);
-  f.hooks.claim = undefined; f.restart(); f.state.contextBudgets.chat.remaining = 0;
+  f.hooks.claim = undefined; f.restart(); f.state.accountSendBudget!.remaining = 0;
   assert.equal((await f.create().deliverOnce()).skipped, 1);
   assert.equal(f.sends.length, 0); assert.equal(f.records.get(item.id)!.status, "pending");
   assert.equal(f.durable().outbox[key].status, "pending");
@@ -186,7 +186,7 @@ test("in-flight uncertainty is sealed before any budget defer can reopen the att
   f.hooks.receipt = () => { throw new TypeError("receipt lost"); };
   await assert.rejects(f.create().deliverOnce(), /receipt lost/);
   assert.equal(f.durable().hasUncertainReply(key), true);
-  f.hooks.send = undefined; f.hooks.receipt = undefined; f.restart(); f.state.contextBudgets.chat.remaining = 0;
+  f.hooks.send = undefined; f.hooks.receipt = undefined; f.restart(); f.state.accountSendBudget!.remaining = 0;
   assert.equal((await f.create().deliverOnce()).uncertain, 1);
   assert.equal(f.sends.length, 1); assert.equal(f.records.get(item.id)!.status, "uncertain");
   f.state.recordInboundContext("new-inbound", "chat", Date.now()); await f.create().deliverOnce();
@@ -196,7 +196,7 @@ test("in-flight uncertainty is sealed before any budget defer can reopen the att
 test("expired partial delivery keeps outbox and acknowledged reply evidence", async t => {
   t.mock.timers.enable({ apis: ["Date"], now: 1_800_000_000_000 });
   const item = { ...notification(), text: "abcdefgh", expiresAt: Date.now() + 60_000 }, f = setup(t, [item]), key = `notification:${item.id}`;
-  f.state.contextBudgets.chat.remaining = 1;
+  f.state.accountSendBudget!.remaining = 1;
   await f.create(4).deliverOnce();
   t.mock.timers.tick(60_001); f.restart();
   await f.create().deliverOnce();
@@ -206,9 +206,13 @@ test("expired partial delivery keeps outbox and acknowledged reply evidence", as
   assert.equal(f.sends.length, 1);
 });
 
-test("an exhausted chat cannot occupy the notification queue head", async t => {
+test("an exhausted account blocks every notification until a real inbound refreshes the shared allowance", async t => {
   const f = setup(t, [notification(1, "a"), notification(2, "b")]);
-  f.state.contextBudgets.a.remaining = 0;
+  f.state.accountSendBudget!.remaining = 0;
+  assert.equal((await f.create().deliverOnce()).accepted, 0);
+  assert.equal(f.sends.length, 0);
+  f.state.recordInboundContext("new-inbound-b", "b", Date.now(), true, "context-b");
+  f.state.contextWindows.a.refreshedAt -= f.state.policy.contextWindowMs;
   assert.equal((await f.create().deliverOnce()).accepted, 1);
   assert.deepEqual(f.sends.map(send => send.chatId), ["b"]);
   assert.equal(f.calls.includes("claim:00000000-0000-4000-8000-000000000001"), false);
@@ -231,7 +235,7 @@ test("pending ordinary reply reserves its chat budget against progress notificat
   assert.equal(f.sends.length, 0); assert.equal(f.calls.some(call => call.startsWith("claim:")), false);
   f.state.removeOutbox("ordinary-reply");
   assert.equal((await f.create().deliverOnce()).accepted, 1);
-  assert.equal(f.state.contextBudgets.chat.progressSent, 1);
+  assert.equal(f.state.accountSendBudget!.progressSent, 1);
 });
 
 test("pending ordinary reply does not block a final notification", async t => {
@@ -239,7 +243,7 @@ test("pending ordinary reply does not block a final notification", async t => {
   f.state.putOutbox({ kind: "reply", deliveryKey: "ordinary-reply", chatId: "chat", messageId: "message",
     splitMaxChars: 100, status: "pending" });
   assert.equal((await f.create().deliverOnce()).accepted, 1);
-  assert.equal(f.state.contextBudgets.chat.progressSent, 0);
+  assert.equal(f.state.accountSendBudget!.progressSent, 0);
 });
 
 test("an existing blocked progress reference does not hide a new final notification", async t => {
@@ -265,7 +269,7 @@ test("crash before receipt intent preserves in-flight evidence and never defers 
   await assert.rejects(f.create().deliverOnce(), /receipt intent disk failure/);
   assert.equal(f.durable().outbox[key].status, "claimed");
   assert.equal(f.durable().hasUncertainReply(key), true);
-  update.mock.restore(); f.hooks.send = undefined; f.restart(); f.state.contextBudgets.chat.remaining = 0;
+  update.mock.restore(); f.hooks.send = undefined; f.restart(); f.state.accountSendBudget!.remaining = 0;
   assert.equal((await f.create().deliverOnce()).uncertain, 1);
   assert.equal(f.sends.length, 1); assert.equal(f.calls.some(call => call.startsWith("defer:")), false);
   assert.equal(f.state.outbox[key].status, "uncertain");
@@ -330,7 +334,7 @@ test("TTL expiry between chunks retains acknowledged partial evidence without fa
 for (const expiredLease of [false, true]) test(`complete chunk acknowledgements recover a failed receipt-intent write with exhausted budget${expiredLease ? " and projected uncertainty" : ""}`, async t => {
   t.mock.timers.enable({ apis: ["Date"], now: 1_800_000_000_000 });
   const f = setup(t), item = notification(), key = `notification:${item.id}`;
-  f.state.contextBudgets.chat.remaining = 1;
+  f.state.accountSendBudget!.remaining = 1;
   const originalUpdate = f.state.updateOutbox.bind(f.state);
   const update = t.mock.method(f.state, "updateOutbox", (deliveryKey: string, patch: Partial<DeliveryOutboxItem>) => {
     if (patch.status === "receipt") throw new Error("receipt intent disk failure");
@@ -339,7 +343,7 @@ for (const expiredLease of [false, true]) test(`complete chunk acknowledgements 
   await assert.rejects(f.create().deliverOnce(), /receipt intent disk failure/);
   assert.equal(f.durable().outbox[key].status, "claimed");
   assert.equal(f.durable().replyDeliveries[key].acknowledgedChunks, 1);
-  assert.equal(f.durable().contextBudgets.chat.remaining, 0);
+  assert.equal(f.durable().accountSendBudget!.remaining, 0);
   update.mock.restore(); f.restart();
   if (expiredLease) t.mock.timers.tick(60_001);
   assert.equal((await f.create().deliverOnce()).accepted, 1);
@@ -368,7 +372,7 @@ test("a successful final chunk crossing TTL records its real receipt without res
 
 test("an unsendable pending reference skips large Controller GET bodies until the budget is refreshed", async t => {
   const item = { ...notification(), text: "abcdefgh" }, f = setup(t, [item]);
-  f.state.contextBudgets.chat.remaining = 1;
+  f.state.accountSendBudget!.remaining = 1;
   await f.create(4).deliverOnce(); f.calls.length = 0;
   await f.create(4).deliverOnce();
   assert.deepEqual(f.calls, []);

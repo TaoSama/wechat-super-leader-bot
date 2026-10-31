@@ -165,14 +165,14 @@ test("server-only inbound replay across cursor, index and restart never forwards
   const makeGateway = (sm: StateManager) => new WeChatGateway({ stateManager: sm, controller,
     ilink: new ILinkClient({ stateManager: sm, fetchImpl }) });
   assert.equal((await makeGateway(original).pollOnce()).processedCount, 1);
-  assert.equal(original.contextBudgets.chat.remaining, 9);
+  assert.equal(original.accountSendBudget!.remaining, 9);
   original.consumeSendBudget("chat");
   const reloaded = new StateManager(accountPath, statePath);
   assert.equal((await makeGateway(reloaded).pollOnce()).polledCount, 0);
   assert.deepEqual(cursors, ["cursor-initial", "cursor-1"]);
   assert.equal(forwardCount, 1);
   assert.equal(sends, 1);
-  assert.equal(reloaded.contextBudgets.chat.remaining, 8);
+  assert.equal(reloaded.accountSendBudget!.remaining, 8);
   assert.equal(reloaded.inboundWatermarks.chat.keys.length, 1);
   assert.equal(reloaded.syncBuf, "cursor-2");
 });

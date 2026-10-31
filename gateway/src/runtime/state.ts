@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as crypto from "node:crypto";
 import { WeChatAccount, GatewaySyncState, ReplyDeliveryState } from "../types.js";
 import { DeliveryState } from "./delivery-state.js";
-import { effectiveRemaining, type ContextPolicy } from "./context-policy.js";
+import type { ContextPolicy } from "./context-policy.js";
 
 export const MAX_PROCESSED_MESSAGE_KEYS = 1000;
 export const MAX_REPLY_DELIVERIES = 1000;
@@ -75,11 +75,6 @@ export class StateManager extends DeliveryState {
 
   public setReplyEvidenceProtection(protect: (key: string) => boolean): void { this.replyEvidenceProtection = protect; }
 
-  public remainingSendBudget(chatId: string): number {
-    const budget = this.contextBudgets[chatId];
-    return budget && this.canSendToChat(chatId) ? effectiveRemaining(budget, this.policy) : 0;
-  }
-
   constructor(credentialsPath: string, statePath?: string, policy: Partial<ContextPolicy> = {}) {
     super(policy);
     this.credentialsPath = resolvePath(credentialsPath);
@@ -140,7 +135,8 @@ export class StateManager extends DeliveryState {
         this.processedMessageKeySet = new Set();
         this.sentReplyProgress = {};
         this.replyDeliveries = {};
-        this.contextBudgets = {};
+        this.contextWindows = {};
+        this.accountSendBudget = undefined;
         this.inboundWatermarks = {};
         this.outbox = {};
         this.baselineEstablished = false;
@@ -216,7 +212,8 @@ export class StateManager extends DeliveryState {
       sent_reply_progress: this.sentReplyProgress,
       reply_deliveries: this.replyDeliveries,
       baseline_established: this.baselineEstablished,
-      context_budgets: this.contextBudgets,
+      context_windows: this.contextWindows,
+      account_send_budget: this.accountSendBudget,
       inbound_watermarks: this.inboundWatermarks,
       delivery_outbox: this.outbox,
     };

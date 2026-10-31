@@ -16,6 +16,8 @@ import { createControllerFixture, waitFor } from '../../support/control-plane-fi
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const CHAT = 'synthetic-result-gateway-chat';
 const CONTEXT = 'synthetic-result-context';
+const OTHER_CHAT = 'synthetic-other-chat';
+const CONTEXTS = new Map([[CHAT, CONTEXT], [OTHER_CHAT, 'synthetic-other-context']]);
 const SUMMARY = '模型摘要：任务成果已完成，完整正文随附件提供。';
 const REPLY = '模型回复：已收到你的当前消息。';
 const PROCESS_MS = 30_000;
@@ -69,7 +71,7 @@ export async function verifyResultGateway() {
     const modelPort = await listen(model);
     const cleared = Object.fromEntries(Object.keys(process.env).map(key => [key, undefined]));
     controller = await createControllerFixture({ logs, secrets: [token], env: { ...cleared, ...env,
-      CONTROLLER_TOKEN: token, NODE_TOKENS: '{}', ALLOWED_CHAT_IDS: CHAT, PERSISTENCE_MODE: 'memory',
+      CONTROLLER_TOKEN: token, NODE_TOKENS: '{}', ALLOWED_CHAT_IDS: [CHAT, OTHER_CHAT].join(','), PERSISTENCE_MODE: 'memory',
       TASK_NOTIFICATION_TICK_MS: '100', LEADER_MODE: 'model',
       LEADER_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1`, LEADER_MODEL_API_KEY: 'synthetic-key', LEADER_MODEL_NAME: 'synthetic-model',
     } });
@@ -97,21 +99,21 @@ export async function verifyResultGateway() {
           respond(response, { ret: 0, get_updates_buf: `cursor-${++cursor}`, msgs: incoming.splice(0) }); return;
         }
         if (url.pathname === '/ilink/bot/getconfig') {
-          assert.equal(body.ilink_user_id, CHAT); assert.equal(body.context_token, CONTEXT);
+          assert(CONTEXTS.has(body.ilink_user_id)); assert.equal(body.context_token, CONTEXTS.get(body.ilink_user_id));
           respond(response, { ret: 0, typing_ticket: 'synthetic-ticket' }); return;
         }
         if (url.pathname === '/ilink/bot/sendtyping') {
-          assert.equal(body.ilink_user_id, CHAT); assert.equal(body.typing_ticket, 'synthetic-ticket');
+          assert(CONTEXTS.has(body.ilink_user_id)); assert.equal(body.typing_ticket, 'synthetic-ticket');
           events.push('typing'); respond(response, { ret: 0 }); return;
         }
         if (url.pathname === '/ilink/bot/getuploadurl') {
-          assert.equal(body.to_user_id, CHAT); assert.equal(body.media_type, 3);
+          assert(CONTEXTS.has(body.to_user_id)); assert.equal(body.media_type, 3);
           assert.equal(body.filesize % 16, 0); assert.equal(body.aeskey.length, 32);
           uploads.set(body.filekey, { authorization: body });
           respond(response, { ret: 0, upload_param: `upload-${body.filekey}` }); return;
         }
         assert.equal(url.pathname, '/ilink/bot/sendmessage');
-        assert.equal(body.msg.to_user_id, CHAT); assert.equal(body.msg.context_token, CONTEXT);
+        assert(CONTEXTS.has(body.msg.to_user_id)); assert.equal(body.msg.context_token, CONTEXTS.get(body.msg.to_user_id));
         assert.equal(body.msg.item_list.length, 1);
         const item = body.msg.item_list[0];
         if (item.type === 4) {
@@ -167,18 +169,19 @@ globalThis.fetch = async (input, init) => {
       const persisted = JSON.parse(await readFile(outboxPath, 'utf8'));
       // Fixture time passage between independent scenarios; keep all delivery,
       // account, budget and attempt evidence unchanged.
-      persisted.dispatchTimes[CHAT] = Date.now() - 60_001;
+      for (const chatId of CONTEXTS.keys()) persisted.dispatchTimes[chatId] = Date.now() - 60_001;
       await writeFile(outboxPath, JSON.stringify(persisted), { mode: 0o600 });
     };
     const patchBudget = async patch => {
       const persisted = await state();
-      assert(persisted.context_budgets?.[CHAT], 'True inbound did not create persistent context budget');
-      Object.assign(persisted.context_budgets[CHAT], patch);
+      assert(persisted.account_send_budget, 'True inbound did not create persistent context budget');
+      Object.assign(persisted.account_send_budget, patch);
+      if (patch.refreshedAt !== undefined) persisted.context_windows[CHAT].refreshedAt = patch.refreshedAt;
       await writeFile(statePath, JSON.stringify(persisted), { mode: 0o600 });
     };
-    const input = async (text = '当前消息', messageId = randomUUID(), createdAt = Date.now()) => {
-      const inbound = { message_type: 1, from_user_id: CHAT, client_id: messageId, create_time_ms: createdAt,
-        context_token: CONTEXT, item_list: [{ type: 1, text_item: { text } }] };
+    const input = async (text = '当前消息', messageId = randomUUID(), createdAt = Date.now(), chatId = CHAT) => {
+      const inbound = { message_type: 1, from_user_id: chatId, client_id: messageId, create_time_ms: createdAt,
+        context_token: CONTEXTS.get(chatId), item_list: [{ type: 1, text_item: { text } }] };
       incoming.push(inbound); await runGateway(); return inbound;
     };
     const plans = async () => {
@@ -193,8 +196,8 @@ globalThis.fetch = async (input, init) => {
       });
       return { status: response.status, body: await response.json() };
     };
-    const prepare = async text => {
-      const result = await createSchedule({ chatId: CHAT, input: {
+    const prepare = async (text, chatId = CHAT) => {
+      const result = await createSchedule({ chatId, input: {
         kind: 'reminder', title: 'synthetic runtime result', text, timezone: 'UTC', retention: 'retain',
         timing: { type: 'at', at: new Date(Date.now() + 500).toISOString() },
       } });
@@ -208,7 +211,7 @@ globalThis.fetch = async (input, init) => {
     await runGateway('--establish-baseline');
     const original = await input();
     assert.equal(sent.length, 1); assert.equal(textOf(sent[0]), REPLY);
-    assert.equal((await state()).context_budgets[CHAT].remaining, 9);
+    assert.equal((await state()).account_send_budget.remaining, 9);
     assert(events.includes('typing'));
 
     const threeDisplayText = '甲'.repeat(11400), threeText = `**${threeDisplayText}**`;
@@ -246,9 +249,9 @@ globalThis.fetch = async (input, init) => {
     await runGateway();
     assert.equal((await getPlan(blocked.id)).status, 'waiting_for_user');
     assert.equal(sent.length, countBeforeBlocked);
-    const beforeReplayBudget = (await state()).context_budgets[CHAT];
+    const beforeReplayBudget = (await state()).account_send_budget;
     incoming.push(original); await runGateway();
-    assert.deepEqual((await state()).context_budgets[CHAT], beforeReplayBudget, 'Historical input refreshed exhausted budget');
+    assert.deepEqual((await state()).account_send_budget, beforeReplayBudget, 'Historical input refreshed exhausted budget');
     assert.equal(sent.length, countBeforeBlocked);
     await elapseDispatchInterval();
     await input('续期并取结果');
@@ -294,13 +297,13 @@ globalThis.fetch = async (input, init) => {
       await patchBudget({ remaining, refreshedAt: Date.now() - 22 * 60 * 60_000 - 1000 });
       await runGateway();
       assert.equal(sent.length, beforeEarly, 'Reminder consumed quota when at least three sends remained');
-      assert.equal((await state()).context_budgets[CHAT].remaining, remaining);
+      assert.equal((await state()).account_send_budget.remaining, remaining);
     }
     await patchBudget({ remaining: 2 });
     const beforeRenewal = sent.filter(message => textOf(message) === RENEWAL_TEXT).length;
     await runGateway(); await runGateway();
     assert.equal(sent.filter(message => textOf(message) === RENEWAL_TEXT).length, beforeRenewal + 1, 'Window renewal reminder was missing or repeated across restart');
-    assert.equal((await state()).context_budgets[CHAT].remaining, 1);
+    assert.equal((await state()).account_send_budget.remaining, 1);
     console.log('PASS future task reminder requires final hour and 1–2 sends; durable deduplication survives CLI restart');
 
     await input('提醒使用最后一次额度');
@@ -310,7 +313,7 @@ globalThis.fetch = async (input, init) => {
     const beforeLastQuota = sent.length;
     await runGateway();
     assert.deepEqual(sent.slice(beforeLastQuota).map(textOf), [RENEWAL_TEXT]);
-    assert.equal((await state()).context_budgets[CHAT].remaining, 0);
+    assert.equal((await state()).account_send_budget.remaining, 0);
     assert.equal((await getPlan(lastQuota.id)).status, 'waiting_for_user');
     await runGateway();
     assert.equal(sent.length, beforeLastQuota + 1, 'Restart repeated reminder or exhausted result');
@@ -330,7 +333,7 @@ globalThis.fetch = async (input, init) => {
     await runGateway();
     assert.deepEqual(sent.slice(beforeSplit).map(textOf), [splitText.slice(0, 3800), RENEWAL_TEXT],
       'Reminder did not preempt the next result chunk as quota crossed from three to two');
-    assert.equal((await state()).context_budgets[CHAT].remaining, 1);
+    assert.equal((await state()).account_send_budget.remaining, 1);
     await runGateway();
     assert.equal(sent.length, beforeSplit + 2, 'Restart duplicated an accepted chunk or reminder');
     await elapseDispatchInterval();
@@ -339,6 +342,66 @@ globalThis.fetch = async (input, init) => {
       splitText.slice(3800, 7600), splitText.slice(7600)]);
     assert.equal((await getPlan(interrupted.id)).status, 'accepted');
     console.log('PASS three-chunk result yields at 3→2 quota; restart preserves accepted chunk; inbound resumes only remaining chunks');
+    await input('第二个收件人打开自己的回复窗口', randomUUID(), Date.now(), OTHER_CHAT);
+    await patchBudget({ remaining: 0 });
+    const waitingA = await prepare('shared-resume-a');
+    const waitingB = await prepare('shared-resume-b', OTHER_CHAT);
+    await runGateway();
+    assert.equal((await getPlan(waitingA.id)).status, 'waiting_for_user');
+    assert.equal((await getPlan(waitingB.id)).status, 'waiting_for_user');
+    await elapseDispatchInterval();
+    const beforeSharedResume = sent.length;
+    await input('B刷新账号额度也恢复A的成果', randomUUID(), Date.now(), OTHER_CHAT);
+    const resumed = sent.slice(beforeSharedResume);
+    assert.equal(resumed[0].to_user_id, OTHER_CHAT);
+    assert.equal(textOf(resumed[0]), REPLY);
+    assert.deepEqual(new Set(resumed.slice(1).map(textOf)), new Set(['shared-resume-a', 'shared-resume-b']));
+    assert.equal((await getPlan(waitingA.id)).status, 'accepted');
+    assert.equal((await getPlan(waitingB.id)).status, 'accepted');
+    assert.equal((await state()).account_send_budget.remaining, 7);
+    await patchBudget({ remaining: 2 });
+    await prepare('共'.repeat(3801));
+    await prepare('享'.repeat(3801), OTHER_CHAT);
+    await elapseDispatchInterval();
+    const beforeSharedSpend = sent.length;
+    await runGateway(); await runGateway();
+    assert.equal(sent.length - beforeSharedSpend, 2, 'Two recipients multiplied the last two account sends');
+    assert.equal((await state()).account_send_budget.remaining, 0);
+    console.log('PASS actual CLI: B inbound resumes both recipients; reply precedes results; both recipients share one durable quota and retain distinct context tokens across restart');
+    await elapseDispatchInterval();
+    await input('清空上一场景待发成果', randomUUID(), Date.now(), OTHER_CHAT);
+    const expiredPeer = await state();
+    expiredPeer.context_windows[CHAT].refreshedAt = Date.now() - WINDOW_MS - 1;
+    await writeFile(statePath, JSON.stringify(expiredPeer), { mode: 0o600 });
+    const latePlan = await prepare('late-peer-result');
+    const beforePeerExpiry = sent.length;
+    await runGateway();
+    assert.equal((await getPlan(latePlan.id)).status, 'waiting_for_user');
+    assert.equal(sent.length, beforePeerExpiry, 'Fresh account grant revived an expired recipient token');
+    const lateTime = Date.now();
+    await input('B较新的入站', randomUUID(), lateTime + 1000, OTHER_CHAT);
+    assert.equal((await getPlan(latePlan.id)).status, 'waiting_for_user');
+    const beforeLateBudget = (await state()).account_send_budget.remaining;
+    await elapseDispatchInterval();
+    await input('A迟到但真实的新入站', randomUUID(), lateTime, CHAT);
+    assert.equal((await getPlan(latePlan.id)).status, 'accepted');
+    assert.equal((await state()).account_send_budget.remaining, beforeLateBudget - 2,
+      'Late recipient inbound refilled global quota instead of only resuming its own window');
+    console.log('PASS actual CLI: B cannot revive expired A token; valid late A input resumes its waiting result without replenishing the newer shared account grant');
+    const peerRenewal = await state();
+    peerRenewal.context_windows[CHAT].refreshedAt = Date.now() - 22 * 60 * 60_000 - 1000;
+    peerRenewal.account_send_budget.remaining = 2;
+    await writeFile(statePath, JSON.stringify(peerRenewal), { mode: 0o600 });
+    const beforePeerRenewal = sent.length;
+    await runGateway(); await runGateway();
+    assert.equal(sent.length, beforePeerRenewal + 1);
+    assert.equal(sent.at(-1).to_user_id, CHAT);
+    assert.equal(textOf(sent.at(-1)), RENEWAL_TEXT);
+    assert.equal((await state()).account_send_budget.remaining, 1);
+    console.log('PASS actual CLI: A token approaching 23h triggers its 22h reminder even after B refreshes the shared account window; one reminder across restart');
+
+
+
     assert.equal(new Set(sent.map(message => message.client_id)).size, sent.length, 'Duplicate external client_id was sent');
     console.log(`PASS whole-result Gateway CLI runtime; ${sent.length} actual synthetic sendmessage requests, ${uploads.size} encrypted CDN uploads`);
   }, [

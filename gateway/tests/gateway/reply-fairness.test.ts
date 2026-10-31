@@ -246,7 +246,7 @@ test("a concurrent unrelated recovery cannot bypass refreshed chat's deferred re
   const f = fixture(t), gateway = f.createGateway(f.state);
   await gateway.pollOnce();
   const otherKey = f.state.computeDeliveryKey("other-chat", "other");
-  f.state.recordInboundContext(otherKey, "other-chat", f.timestamp, true, "other-context");
+  f.state.recordInboundContext(otherKey, "other-chat", f.timestamp + 1, true, "other-context");
   f.state.putOutbox({ kind: "reply", source: "controller", chatId: "other-chat", messageId: "other",
     deliveryKey: otherKey, splitMaxChars: 1, status: "pending" });
   let entered!: () => void, release!: () => void;
@@ -257,7 +257,7 @@ test("a concurrent unrelated recovery cannot bypass refreshed chat's deferred re
     entered();
     await releasePromise;
   });
-  const recovery = gateway.flushRepliesOnce();
+  const recovery = gateway.flushRepliesOnce("other-chat");
   await enteredPromise;
   f.nextPage();
   const polling = gateway.pollOnce();
@@ -268,8 +268,12 @@ test("a concurrent unrelated recovery cannot bypass refreshed chat's deferred re
     release();
     await Promise.all([recovery, polling]);
   }
-  assert.deepEqual(f.sends, ["A", "Z", "B"]);
+  assert.deepEqual(f.sends, ["A", "Z"], "the unrelated send consumes the shared refreshed allowance");
   assert.deepEqual(f.posts, ["m1", "m2"]);
+  assert.deepEqual(f.reads, ["other"]);
+  f.nextPage();
+  await gateway.pollOnce();
+  assert.deepEqual(f.sends, ["A", "Z", "B"], "the next refresh gives the deferred reply its fair turn");
   assert.deepEqual(f.reads, ["other", "m1"]);
   assert.equal(f.state.remainingSendBudget("chat"), 0);
   assert.equal(f.state.remainingSendBudget("other-chat"), 0);

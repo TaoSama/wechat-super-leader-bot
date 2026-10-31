@@ -7,7 +7,7 @@ import { StateManager } from "../../src/runtime/state.js";
 import { ResultClient } from "../../src/controller/result-client.js";
 import { FileResultOutbox, resultIdentity } from "../../src/results/outbox.js";
 import type { ResultDelivery } from "../../src/results/contracts.js";
-import { renewalDeliveryKey } from "../../src/results/renewal.js";
+import { accountRenewalDeliveryKey } from "../../src/results/renewal.js";
 import { LocalSendDeferredError } from "../../src/runtime/context-policy.js";
 
 const HOUR = 60 * 60 * 1000;
@@ -25,8 +25,9 @@ function fixture(t: TestContext, remaining: number, body = "ordinary", source: "
     ackReply: async (_account: string, _chat: string, _message: string, status: string) => { acknowledgements.push(status); },
   };
   t.mock.method(f.controller, "getMessageReply", async (_chat: string, messageId: string) => { reads.push(messageId); return { text: body }; });
-  f.state.contextBudgets.chat.refreshedAt = Date.now() - 22 * HOUR - 1_000;
-  f.state.contextBudgets.chat.remaining = remaining;
+  f.state.contextWindows.chat.refreshedAt = Date.now() - 22 * HOUR - 1_000;
+  f.state.accountSendBudget!.refreshedAt = f.state.contextWindows.chat.refreshedAt;
+  f.state.accountSendBudget!.remaining = remaining;
   f.state.putOutbox({ kind: "reply", source, chatId: "chat", messageId: "message", deliveryKey: "ordinary",
     splitMaxChars: 2_000, status: "pending" });
   const create = (state = f.state) => new WeChatGateway({ stateManager: state, ilink: state === f.state ? f.ilink : f.createILink(state),
@@ -41,7 +42,7 @@ for (const source of ["engine", "controller"] as const) {
     await f.gateway.deliverNotificationsOnce();
     assert.match(text(f.sends[0]), /发一条消息/);
     assert.equal(f.sends.length, remaining);
-    assert.equal(f.state.contextBudgets.chat.remaining, 0);
+    assert.equal(f.state.accountSendBudget!.remaining, 0);
     if (remaining === 1) {
       assert.equal(f.state.outbox.ordinary.status, "pending");
       assert.equal(f.acknowledgements.length, 0);
@@ -56,9 +57,9 @@ for (const remaining of [3, 10]) test(`ordinary reply is not blocked by a remind
   const f = fixture(t, remaining);
   await f.gateway.deliverNotificationsOnce();
   assert.deepEqual(f.sends.map(text), ["ordinary"]);
-  assert.equal(f.state.contextBudgets.chat.remaining, remaining - 1);
+  assert.equal(f.state.accountSendBudget!.remaining, remaining - 1);
   assert.equal(f.state.outbox.ordinary, undefined);
-  const key = renewalDeliveryKey(f.state.getLoginFingerprint(), "chat", f.state.contextBudgets.chat.refreshedAt);
+  const key = accountRenewalDeliveryKey(f.state.getLoginFingerprint(), f.state.accountSendBudget!);
   assert.equal(f.state.replyDeliveries[key], undefined);
 });
 
@@ -86,7 +87,7 @@ test("multipart 3 -> 2 yields its suffix, sends priority reminder, then resumes 
 
 test("legacy unsent renewal checkpoint upgrades without permanently blocking ordinary replies", async t => {
   const f = fixture(t, 2);
-  const key = renewalDeliveryKey(f.state.getLoginFingerprint(), "chat", f.state.contextBudgets.chat.refreshedAt);
+  const key = accountRenewalDeliveryKey(f.state.getLoginFingerprint(), f.state.accountSendBudget!);
   f.state.replyDeliveries[key] = { digest: "a".repeat(64), totalChunks: 1, acknowledgedChunks: 0, inFlight: false };
   await assert.rejects(
     f.ilink.sendMarkdownReply("chat", "ordinary", { deliveryKey: "ordinary", maxCharsPerChunk: 2_000 }),
@@ -117,7 +118,7 @@ test("unknown reminder never repeats or blocks a pending ordinary reply after re
   await assert.rejects(f.gateway.deliverNotificationsOnce(), /renewal response lost/);
   assert.equal(f.sends.length, 2);
   assert.equal(text(f.sends[1]), "ordinary");
-  const key = renewalDeliveryKey(f.state.getLoginFingerprint(), "chat", f.state.contextBudgets.chat.refreshedAt);
+  const key = accountRenewalDeliveryKey(f.state.getLoginFingerprint(), f.state.accountSendBudget!);
   assert.equal(f.state.replyDeliveries[key].inFlight, true);
   const restarted = new StateManager(f.accountPath, f.statePath);
   await f.create(restarted).deliverNotificationsOnce();
@@ -146,7 +147,7 @@ for (const evidence of ["unknown", "permanent-image-failure", "accepted"] as con
     const restarted = new StateManager(f.accountPath, f.statePath);
     await f.create(restarted).deliverNotificationsOnce();
     assert.equal(f.sends.length, 0);
-    assert.equal(restarted.contextBudgets.chat.remaining, 2);
+    assert.equal(restarted.accountSendBudget!.remaining, 2);
     assert.deepEqual(f.acknowledgements, [evidence === "accepted" ? "accepted" : "uncertain"]);
   });
 }
@@ -166,7 +167,7 @@ for (const terminal of ["expired", "uncertain", "superseded"] as const) {
     t.mock.method(f.client, "getDelivery", async () => item);
     await f.create().deliverNotificationsOnce();
     assert.equal(f.sends.length, 0);
-    assert.equal(f.state.contextBudgets.chat.remaining, 2);
+    assert.equal(f.state.accountSendBudget!.remaining, 2);
     const reconciled = new FileResultOutbox(`${f.statePath}.results.json`, () => f.state.getLoginFingerprint());
     assert.deepEqual(reconciled.references(), [], "normal dispatcher still reconciles the stale reference");
   });

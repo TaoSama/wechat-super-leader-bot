@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { RenewalNotifier, renewalDeliveryKey, type RenewalOptions, type RenewalState } from "../../src/results/renewal.js";
+import { RenewalNotifier, renewalDeliveryKey, accountRenewalDeliveryKey, type RenewalOptions, type RenewalState } from "../../src/results/renewal.js";
 
 const HOUR = 60 * 60 * 1000;
 const REFRESHED_AT = 1_800_000_000_000;
@@ -8,7 +8,8 @@ function fixture() {
   let now = REFRESHED_AT + 22 * HOUR, remaining = 2, allowed = true, account = "account";
   const sent: { chatId: string; text: string; deliveryKey: string }[] = [];
   const state: RenewalState = {
-    contextBudgets: { chat: { refreshedAt: REFRESHED_AT } }, contextTokens: { chat: "context" },
+    contextWindows: { chat: { refreshedAt: REFRESHED_AT } }, contextTokens: { chat: "context" },
+    accountSendBudget: { refreshedAt: REFRESHED_AT, lastInboundKey: "inbound", remaining: 2, progressSent: 0 },
     policy: { contextWindowMs: 23 * HOUR, sendBudget: 10 }, replyDeliveries: {},
     getLoginFingerprint: () => account, canSendToChat: () => allowed, remainingSendBudget: () => remaining,
   };
@@ -60,7 +61,7 @@ test("uninterested chats, short windows and inadmissible chats never get a remin
 
 test("only one or two effective sends qualify, regardless of the raw persisted counter", async () => {
   const f = fixture();
-  Object.assign(f.state.contextBudgets.chat, { remaining: 10 });
+  f.state.accountSendBudget!.remaining = 10;
   for (const effective of [0, -1, NaN, 1.5, 3, 10]) {
     f.setRemaining(effective);
     assert.equal((await f.notifier.deliverOnce(["chat"])).sent, 0);
@@ -90,7 +91,8 @@ test("shared persisted acknowledgement, unknown and terminal failures suppress a
 test("a genuine new refreshedAt produces one new stable reminder after its own lead time", async () => {
   const f = fixture();
   await f.notifier.deliverOnce(["chat"]);
-  f.state.contextBudgets.chat.refreshedAt = REFRESHED_AT + 22 * HOUR;
+  f.state.accountSendBudget!.refreshedAt = REFRESHED_AT + 22 * HOUR;
+  f.state.contextWindows.chat.refreshedAt = REFRESHED_AT + 22 * HOUR;
   assert.equal((await f.notifier.deliverOnce(["chat"])).sent, 0);
   f.setRemaining(2);
   f.setNow(REFRESHED_AT + 44 * HOUR);
@@ -103,7 +105,8 @@ test("queued send aborts on context, account, window or effective budget changes
   const mutations = [
     (f: ReturnType<typeof fixture>) => { f.state.contextTokens.chat = "new-context"; },
     (f: ReturnType<typeof fixture>) => { f.setAccount("new-account"); },
-    (f: ReturnType<typeof fixture>) => { f.state.contextBudgets.chat.refreshedAt++; },
+    (f: ReturnType<typeof fixture>) => { f.state.accountSendBudget!.refreshedAt++; },
+    (f: ReturnType<typeof fixture>) => { f.state.accountSendBudget!.lastInboundKey = "another-inbound"; },
     (f: ReturnType<typeof fixture>) => { f.state.policy.contextWindowMs++; },
     (f: ReturnType<typeof fixture>) => { f.setRemaining(0); },
     (f: ReturnType<typeof fixture>) => { f.setRemaining(3); },
@@ -148,7 +151,7 @@ test("single notifier does not enqueue concurrent duplicate reminders", async ()
 test("priority admission yields without deadlocking and terminal evidence releases ordinary sends", async () => {
   const f = fixture();
   assert.equal(f.notifier.shouldYield("chat", "ordinary"), true);
-  assert.equal(f.notifier.shouldYield("chat", renewalDeliveryKey("account", "chat", REFRESHED_AT)), false);
+  assert.equal(f.notifier.shouldYield("chat", accountRenewalDeliveryKey("account", f.state.accountSendBudget!)), false);
   await f.notifier.deliverOnce(["chat"]);
   assert.equal(f.notifier.shouldYield("chat", "ordinary"), false);
   const unknown = fixture();

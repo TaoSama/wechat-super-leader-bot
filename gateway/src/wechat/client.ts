@@ -1,3 +1,4 @@
+import { LocalSendDeferredError } from "../runtime/context-policy.js";
 import { performance } from "node:perf_hooks";
 import { traceEvent, traceSpan } from "../runtime/telemetry.js";
 import * as crypto from "node:crypto";
@@ -375,9 +376,13 @@ export class ILinkClient {
     if (attachments.length === 0) return 0;
     const fingerprint = this.stateManager.getLoginFingerprint();
     const contextToken = this.stateManager.contextTokens[chatId];
+    const budgetEpoch = this.stateManager.accountSendBudget?.lastInboundKey;
+    const windowKey = this.stateManager.contextWindows[chatId]?.lastInboundKey;
     if (!fingerprint || !contextToken) throw new Error("WeChat image delivery requires an active account and chat context");
     const shouldContinue = () => fingerprint === this.stateManager.getLoginFingerprint() &&
-      contextToken === this.stateManager.contextTokens[chatId] && (!options.shouldContinue || options.shouldContinue());
+      contextToken === this.stateManager.contextTokens[chatId] &&
+      budgetEpoch === this.stateManager.accountSendBudget?.lastInboundKey &&
+      windowKey === this.stateManager.contextWindows[chatId]?.lastInboundKey && (!options.shouldContinue || options.shouldContinue());
     const timeoutMs = options.timeoutMs ?? REPLY_TIMEOUT_MS;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > NOTIFICATION_REPLY_TIMEOUT_MS) {
       throw new Error("Invalid WeChat image reply timeout budget");
@@ -387,12 +392,12 @@ export class ILinkClient {
     const timer = setTimeout(() => controller.abort(new Error("WeChat image reply timed out")), timeoutMs);
     try {
       return await this.withChatSend(chatId, async () => {
-        if (!shouldContinue()) throw new Error("WeChat image reply interrupted before completion");
+        if (!shouldContinue()) throw new LocalSendDeferredError("context_changed", "WeChat image reply interrupted before completion");
         this.sendTyping(chatId);
         return deliverImages({ stateManager: this.stateManager, chatId, deliveryKey: options.deliveryKey,
           images: attachments, getImageBytes: options.getImageBytes,
           uploadImage: bytes => {
-            if (!shouldContinue()) throw new Error("WeChat image reply interrupted before completion");
+            if (!shouldContinue()) throw new LocalSendDeferredError("context_changed", "WeChat image reply interrupted before completion");
             return this.imageUploader.upload(chatId, bytes, signal);
           },
           sendImage: (item, clientId) => this.sendMessageItem(chatId, item, clientId, signal),
@@ -496,13 +501,15 @@ export class ILinkClient {
         const deterministicClientId = `super-leader:${crypto.createHash("sha256")
           .update(JSON.stringify([this.stateManager.getLoginFingerprint(), chatId, deliveryKey, idx])).digest("hex").slice(0, 24)}`;
         replySignal.throwIfAborted();
-        if (options?.shouldContinue && !options.shouldContinue()) throw new Error("WeChat reply interrupted before completion");
+        if (options?.shouldContinue && !options.shouldContinue()) throw new LocalSendDeferredError("context_changed", "WeChat reply interrupted before completion");
         await this.withChatSend(chatId, async () => {
-          if (options?.shouldContinue && !options.shouldContinue()) throw new Error("WeChat reply interrupted before completion");
+          if (options?.shouldContinue && !options.shouldContinue()) throw new LocalSendDeferredError("context_changed", "WeChat reply interrupted before completion");
           this.consumeSendBudget(chatId, deliveryKey, options?.kind);
           // Persist intent before the network call. A crash or ambiguous response cannot trigger a replay.
           traceEvent("wechat.chunk.start", { chunkIndex: idx, chunkCount: chunks.length });
-          await traceSpan("wechat.chunk.intent.persist", async () => this.stateManager.beginReplyChunk(deliveryKey, idx), { chunkIndex: idx });
+          // Do not yield between charging the ledger, persisting intent and starting the request.
+          this.stateManager.beginReplyChunk(deliveryKey, idx);
+          traceEvent("wechat.chunk.intent.persist", { chunkIndex: idx });
           try {
             await traceSpan("wechat.chunk.send", () => this.sendSingleTextNow(chatId, chunks[idx], deterministicClientId, replySignal), { chunkIndex: idx });
           } catch (error) {

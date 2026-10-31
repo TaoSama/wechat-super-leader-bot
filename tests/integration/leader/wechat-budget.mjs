@@ -26,7 +26,7 @@ export async function verifyWechatBudget(harness) {
   await input(BUDGET_REPLY_TASK, messageId, contextToken, { gatewayEnv: { GATEWAY_MAX_CHARS: String(REPLY_CHUNK_CHARS) } });
   const frozen = await state();
   assert.equal(sent.length - start, DEFAULT_SEND_BUDGET, 'Default CLI did not stop at exactly ten sends');
-  assert.equal(frozen.context_budgets[chatId].remaining, 0);
+  assert.equal(frozen.account_send_budget.remaining, 0);
   assert.equal(frozen.delivery_outbox[key].status, 'pending');
   assert.equal(frozen.delivery_outbox[key].splitMaxChars, REPLY_CHUNK_CHARS);
   assert.equal(frozen.reply_deliveries[key].acknowledgedChunks, DEFAULT_SEND_BUDGET);
@@ -47,7 +47,7 @@ export async function verifyWechatBudget(harness) {
   assert.equal(sent.length - start, DEFAULT_SEND_BUDGET, 'Restart reset the exhausted budget');
   assert.notEqual((await state()).sync_buf, frozen.sync_buf, 'Deferred delivery stalled getupdates cursor');
   incoming.push({ message_type: TEXT_TYPE, from_user_id: chatId, client_id: messageId,
-    create_time_ms: frozen.context_budgets[chatId].refreshedAt, context_token: contextToken,
+    create_time_ms: frozen.context_windows[chatId].refreshedAt, context_token: contextToken,
     item_list: [{ type: TEXT_TYPE, text_item: { text: BUDGET_REPLY_TASK } }] });
   await runGateway('--poll-once');
   assert.equal(sent.length - start, DEFAULT_SEND_BUDGET, 'Duplicate inbound replenished send quota');

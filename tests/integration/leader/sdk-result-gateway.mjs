@@ -248,7 +248,7 @@ globalThis.fetch = (input, init) => {
     assert.equal(initialState.delivery_outbox[deliveryKey].source, 'engine');
     assert.equal(initialState.delivery_outbox[deliveryKey].status, 'pending');
     assert.equal(initialState.reply_deliveries[deliveryKey].acknowledgedChunks, 1);
-    assert.equal(initialState.context_budgets[CHAT].remaining, 0);
+    assert.equal(initialState.account_send_budget.remaining, 0);
     assert.equal(initialJournal.stage, 'completed'); assert.equal(initialJournal.delivery, 'pending');
     assert.equal(initialJournal.reply.text, originalReply);
     assert.equal(sent.length, 1); assert.equal(textOf(sent[0]), expectedChunks[0]);

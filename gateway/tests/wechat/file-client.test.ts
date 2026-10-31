@@ -39,7 +39,7 @@ function fixture(t: TestContext) {
     if (url.pathname.endsWith("getuploadurl")) {
       assert.equal(body.media_type, 3);
       assert.equal(body.rawsize, BYTES.length);
-      if (checkOriginalBudget) assert.equal(state.contextBudgets.chat.remaining, 10, "upload alone never consumes a send");
+      if (checkOriginalBudget) assert.equal(state.accountSendBudget!.remaining, 10, "upload alone never consumes a send");
       return Response.json({ ret: 0, upload_param: "synthetic-upload" });
     }
     assert.ok(url.pathname.endsWith("sendmessage"));
@@ -57,7 +57,7 @@ test("client authorizes FILE upload and confirms its type=4 send against the sha
   const f = fixture(t);
   assert.equal(await f.client().sendFileReply("chat", BYTES, FILE, { deliveryKey: "file" }), 1);
   assert.deepEqual(f.calls, ["/ilink/bot/getuploadurl", "/c2c/upload", "/ilink/bot/sendmessage"]);
-  assert.equal(f.state.contextBudgets.chat.remaining, 9);
+  assert.equal(f.state.accountSendBudget!.remaining, 9);
   const sent = f.sends[0], item = (sent.item_list as UploadedFileItem[])[0];
   assert.equal(sent.context_token, "synthetic-context");
   assert.equal(item.type, 4);
@@ -77,7 +77,7 @@ test("file upload failure and local size or integrity rejection never consume ch
     const client = f.client(f.state, phase === "size" ? BYTES.length - 1 : undefined);
     await assert.rejects(client.sendFileReply("chat", BYTES,
       phase === "integrity" ? { ...FILE, sha256: "0".repeat(64) } : FILE, { deliveryKey: phase }));
-    assert.equal(f.state.contextBudgets.chat.remaining, 10);
+    assert.equal(f.state.accountSendBudget!.remaining, 10);
     assert.equal(f.sends.length, 0);
     assert.equal(f.state.replyDeliveries[phase].inFlight, false);
     if (phase !== "upload") assert.equal(f.calls.length, 0);
@@ -92,7 +92,7 @@ test("file response loss persists unknown outcome before restart and forbids eve
   await assert.rejects(f.client(f.restart()).sendFileReply("chat", BYTES, FILE, { deliveryKey: "unknown" }), /delivery uncertain/);
   assert.equal(f.sends.length, 1);
   assert.equal(f.calls.filter(path => path === "/c2c/upload").length, 1);
-  assert.equal(f.restart().contextBudgets.chat.remaining, 9);
+  assert.equal(f.restart().accountSendBudget!.remaining, 9);
 });
 
 test("explicit file rejection clears uncertainty and retry preserves deterministic client ID", async t => {
@@ -108,7 +108,7 @@ test("explicit file rejection clears uncertainty and retry preserves determinist
 
 test("file and ordinary text sends use one chat lock and cannot overspend the final shared send", async t => {
   const f = fixture(t); f.allowSpentBudget();
-  f.state.contextBudgets.chat.remaining = 1; f.state.saveState();
+  f.state.accountSendBudget!.remaining = 1; f.state.saveState();
   const client = f.client();
   const outcomes = await Promise.allSettled([
     client.sendFileReply("chat", BYTES, FILE, { deliveryKey: "file" }),
@@ -117,16 +117,16 @@ test("file and ordinary text sends use one chat lock and cannot overspend the fi
   assert.equal(outcomes.filter(item => item.status === "fulfilled").length, 1);
   assert.equal(outcomes.filter(item => item.status === "rejected").length, 1);
   assert.equal(f.sends.length, 1);
-  assert.equal(f.state.contextBudgets.chat.remaining, 0);
+  assert.equal(f.state.accountSendBudget!.remaining, 0);
 });
 
 test("admission guard is checked before consuming the last non-reserved file send", async t => {
   const f = fixture(t); f.allowSpentBudget();
-  f.state.contextBudgets.chat.remaining = 4; f.state.saveState();
+  f.state.accountSendBudget!.remaining = 4; f.state.saveState();
   assert.equal(await f.client().sendFileReply("chat", BYTES, FILE, { deliveryKey: "guard",
-    shouldContinue: () => f.state.contextBudgets.chat.remaining > 3,
+    shouldContinue: () => f.state.accountSendBudget!.remaining > 3,
   }), 1);
-  assert.equal(f.state.contextBudgets.chat.remaining, 3);
+  assert.equal(f.state.accountSendBudget!.remaining, 3);
   assert.equal(f.state.replyDeliveries.guard.inFlight, false);
 });
 
@@ -146,7 +146,7 @@ test("file and text cannot overlap sendmessage requests for the same chat", asyn
   ]);
   assert.equal(maximum, 1);
   assert.equal(f.sends.length, 2);
-  assert.equal(f.state.contextBudgets.chat.remaining, 8);
+  assert.equal(f.state.accountSendBudget!.remaining, 8);
 });
 
 test("new context or renewed window during CDN upload cancels the old file before final submission", async t => {
@@ -160,7 +160,7 @@ test("new context or renewed window during CDN upload cancels the old file befor
     });
     await assert.rejects(f.client().sendFileReply("chat", BYTES, FILE, { deliveryKey: mutation }), /reply interrupted/);
     assert.equal(f.sends.length, 0);
-    assert.equal(f.state.contextBudgets.chat.remaining, 10);
+    assert.equal(f.state.accountSendBudget!.remaining, 10);
     assert.equal(f.state.replyDeliveries[mutation].inFlight, false);
   }
 });
@@ -175,7 +175,7 @@ test("shared admission policy can yield a file after upload without consuming qu
   await assert.rejects(client.sendFileReply("chat", BYTES, FILE, { deliveryKey: "priority-file" }), LocalSendDeferredError);
   assert.equal(f.calls.filter(path => path === "/c2c/upload").length, 1);
   assert.equal(f.sends.length, 0);
-  assert.equal(f.state.contextBudgets.chat.remaining, 10);
+  assert.equal(f.state.accountSendBudget!.remaining, 10);
   assert.equal(f.restart().replyDeliveries["priority-file"].inFlight, false);
   client.setBeforeSendCheck(() => {});
   await client.sendFileReply("chat", BYTES, FILE, { deliveryKey: "priority-file" });

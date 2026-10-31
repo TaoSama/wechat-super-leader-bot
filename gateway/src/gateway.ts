@@ -15,9 +15,9 @@ import { ResultClient } from "./controller/result-client.js";
 import { FileResultOutbox } from "./results/outbox.js";
 import { ResultDeliveryRunner } from "./results/delivery.js";
 import { ResultDispatcher } from "./results/dispatcher.js";
-import { RenewalNotifier, renewalDeliveryKey } from "./results/renewal.js";
+import { RenewalNotifier, renewalDeliveryKey, accountRenewalDeliveryKey } from "./results/renewal.js";
 import { RESULT_TEXT_CHARS } from "./results/contracts.js";
-import { getDeferReason, LocalSendDeferredError } from "./runtime/context-policy.js";
+import { LocalSendDeferredError } from "./runtime/context-policy.js";
 import type { ControllerMessageResponse, DeliveryOutboxItem, InboundWeChatMessage } from "./types.js";
 import { OutboxBackpressureError } from "./runtime/delivery-state.js";
 import { CONFLICT_REPLY, ReplyEngineBackpressureError, ReplyEngineConflictError, ReplyEngineUnavailableError, type GatewayReplyEngine } from "./leader/contracts.js";
@@ -124,9 +124,10 @@ export class WeChatGateway {
     if (options.resultClient && options.resultOutbox) {
       this.resultClient = options.resultClient;
       const active = () => !this.stopped && this.stateManager.isReadyForActivePolling();
-      const isReplyPending = (chatId: string) => this.isReplyPending(chatId);
+      const isReplyPending = () => Object.keys(this.stateManager.contextWindows).some(chatId =>
+        Boolean(this.stateManager.contextTokens[chatId]?.trim()) && this.stateManager.canSendToChat(chatId) && this.isReplyPending(chatId));
       const canDispatch = (chatId: string, kind: "final" | "progress") => Boolean(this.stateManager.contextTokens[chatId]) && this.stateManager.canSendToChat(chatId, kind);
-      const deferReason = (chatId: string, kind: "final" | "progress") => getDeferReason(this.stateManager.contextBudgets[chatId], this.stateManager.policy, kind) ?? "context_changed";
+      const deferReason = (chatId: string, kind: "final" | "progress") => this.stateManager.sendDeferReason(chatId, kind) ?? "context_changed";
       const runner = new ResultDeliveryRunner({ state: this.stateManager,
         transport: {
           sendText: (chatId, text, sendOptions) => this.ilink.sendMarkdownReply(chatId, text, { ...sendOptions, maxCharsPerChunk: RESULT_TEXT_CHARS, verbatim: true }),
@@ -135,20 +136,24 @@ export class WeChatGateway {
         },
         downloadArtifact: (artifact, signal) => options.resultClient!.downloadArtifact(artifact, signal),
         budget: (chatId, kind) => ({ allowed: canDispatch(chatId, kind), remaining: this.stateManager.remainingSendBudget(chatId), reason: deferReason(chatId, kind) }),
-        contextFingerprint: chatId => JSON.stringify([this.stateManager.contextTokens[chatId], this.stateManager.contextBudgets[chatId]?.lastInboundKey]),
+        contextFingerprint: chatId => JSON.stringify([this.stateManager.contextTokens[chatId],
+          this.stateManager.contextWindows[chatId]?.lastInboundKey, this.stateManager.accountSendBudget?.lastInboundKey]),
         isReplyPending,
       });
       this.resultDispatcher = new ResultDispatcher({ controller: options.resultClient, store: options.resultOutbox,
         runner, state: this.stateManager, canDispatch, deferReason, isReplyPending, active, signal: this.notificationAbort.signal });
       this.renewalNotifier = new RenewalNotifier({ state: this.stateManager, active, signal: this.notificationAbort.signal,
         send: (chatId, text, sendOptions) => this.ilink.sendMarkdownReply(chatId, text, sendOptions) });
-      this.ilink.setBeforeSendCheck((chatId, deliveryKey) => {
-        if (this.renewalInterestedChats().includes(chatId) && this.renewalNotifier!.shouldYield(chatId, deliveryKey)) {
+      this.ilink.setBeforeSendCheck((_chatId, deliveryKey) => {
+        if (this.renewalInterestedChats().some(chat => this.renewalNotifier!.shouldYield(chat, deliveryKey))) {
           throw new LocalSendDeferredError("budget_exhausted", "Local send deferred for a priority renewal reminder");
         }
       });
       this.stateManager.setReplyEvidenceProtection(key => options.resultOutbox!.protectsDeliveryKey(key) ||
-        Object.entries(this.stateManager.contextBudgets).some(([chatId, budget]) => Date.now() >= budget.refreshedAt &&
+        Boolean(this.stateManager.accountSendBudget && Date.now() >= this.stateManager.accountSendBudget.refreshedAt &&
+          Date.now() - this.stateManager.accountSendBudget.refreshedAt < this.stateManager.policy.contextWindowMs &&
+          key === accountRenewalDeliveryKey(this.stateManager.getLoginFingerprint(), this.stateManager.accountSendBudget)) ||
+        Object.entries(this.stateManager.contextWindows).some(([chatId, budget]) => Date.now() >= budget.refreshedAt &&
           Date.now() - budget.refreshedAt < this.stateManager.policy.contextWindowMs &&
           key === renewalDeliveryKey(this.stateManager.getLoginFingerprint(), chatId, budget.refreshedAt)));
     } else {
@@ -332,9 +337,9 @@ export class WeChatGateway {
       }
       await traceSpan("message.authorization", () => this.controller.assertChatAllowed(msg.chatId));
       const fresh = await traceSpan("message.context.persist", async () => this.stateManager.recordInboundContext(msg.deliveryKey, msg.chatId, msg.createdAtMs, Boolean(msg.contextToken?.trim()), msg.contextToken));
-      const retryingAdmission = this.stateManager.contextBudgets[msg.chatId]?.lastInboundKey === msg.deliveryKey &&
+      const retryingAdmission = this.stateManager.contextWindows[msg.chatId]?.lastInboundKey === msg.deliveryKey &&
         !this.stateManager.isMessageProcessed(msg.deliveryKey);
-      if ((fresh || retryingAdmission) && msg.contextToken?.trim()) this.resultDispatcher?.noteInbound(msg.chatId, msg.deliveryKey);
+      if (fresh || retryingAdmission) this.noteAccountInbound(msg);
       if ((fresh || retryingAdmission) && msg.contextToken?.trim()) {
         // Give deferred replies this chat's refreshed budget before new progress or results.
         try { await this.flushRepliesOnce(msg.chatId); }
@@ -438,7 +443,7 @@ export class WeChatGateway {
       this.stateManager.recordProcessedMessageKey(msg.deliveryKey);
       return "skipped";
     }
-    const retryingAdmission = this.stateManager.contextBudgets[msg.chatId]?.lastInboundKey === msg.deliveryKey &&
+    const retryingAdmission = this.stateManager.contextWindows[msg.chatId]?.lastInboundKey === msg.deliveryKey &&
       !this.stateManager.isMessageProcessed(msg.deliveryKey);
     if (this.inbox.has(msg.deliveryKey)) {
       try { this.inbox.put(msg); }
@@ -446,7 +451,7 @@ export class WeChatGateway {
         if (!(error instanceof InboxConflictError)) throw error;
         traceEvent("message.inbox.conflict");
       }
-      if (retryingAdmission && msg.contextToken?.trim()) this.resultDispatcher?.noteInbound(msg.chatId, msg.deliveryKey);
+      if (retryingAdmission) this.noteAccountInbound(msg);
       return "skipped";
     }
     const { createdAtMs, ...message } = msg;
@@ -460,9 +465,22 @@ export class WeChatGateway {
     // Create a result resume intent only after both admission checkpoints have
     // succeeded. Retrying the poll or inbound runner then observes the same
     // durable generation without releasing results early.
-    if ((fresh || retryingAdmission) && msg.contextToken?.trim()) this.resultDispatcher?.noteInbound(msg.chatId, msg.deliveryKey);
+    if (fresh || retryingAdmission) this.noteAccountInbound(msg);
     this.inboundRunner.schedule();
     return "processed";
+  }
+
+  private noteAccountInbound(msg: InboundWeChatMessage): void {
+    if (!this.resultDispatcher || !msg.contextToken?.trim()) return;
+    const refreshedAccount = this.stateManager.accountSendBudget?.lastInboundKey === msg.deliveryKey;
+    const now = Date.now();
+    for (const [chatId, window] of Object.entries(this.stateManager.contextWindows)) {
+      if (!refreshedAccount && (chatId !== msg.chatId || window.lastInboundKey !== msg.deliveryKey)) continue;
+      if (this.stateManager.contextTokens[chatId]?.trim() && now >= window.refreshedAt &&
+          now - window.refreshedAt < this.stateManager.policy.contextWindowMs) {
+        this.resultDispatcher.noteInbound(chatId, msg.deliveryKey);
+      }
+    }
   }
 
   private isReplyPending(chatId: string): boolean {
