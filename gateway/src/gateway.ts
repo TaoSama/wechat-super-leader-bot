@@ -27,6 +27,8 @@ export { NotificationDiagnosticError } from "./runtime/notification-outbox.js";
 import { FileInboundInbox, InboxConflictError } from "./runtime/inbox.js";
 import { InboundRunner } from "./runtime/inbound-runner.js";
 import { QueryProgress, MAX_PROGRESS_CHARS, type ProgressSink } from "./leader/progress.js";
+import { rememberNotificationStage } from "./runtime/request-diagnostics.js";
+import { NotificationCycleDiagnostics } from "./runtime/notification-diagnostics.js";
 
 const MIN_NOTIFICATION_INTERVAL_MS = 1;
 const NOTIFICATION_INTEREST_CACHE_MS = 30_000;
@@ -82,6 +84,7 @@ export class WeChatGateway {
   private readonly activeReplyDeliveries = new Set<string>();
   private replyOutboxCursor = 0;
   private readonly notificationAbort = new AbortController();
+  private readonly notificationDiagnostics?: NotificationCycleDiagnostics;
 
   constructor(options: {
     stateManager: StateManager;
@@ -92,7 +95,9 @@ export class WeChatGateway {
     replyEngine?: GatewayReplyEngine;
     resultClient?: ResultClient;
     resultOutbox?: FileResultOutbox;
+    notificationDiagnostics?: NotificationCycleDiagnostics;
   }) {
+    this.notificationDiagnostics = options.notificationDiagnostics;
     this.replyEngine = options.replyEngine;
     this.stateManager = options.stateManager;
     this.ilink = options.ilink;
@@ -181,21 +186,21 @@ export class WeChatGateway {
         if (!this.notificationInterest || Date.now() - this.notificationInterest.fetchedAt >= NOTIFICATION_INTEREST_CACHE_MS) {
           this.notificationInterest = { ...await this.resultClient.notificationInterest(this.notificationAbort.signal), fetchedAt: Date.now() };
         }
-      } catch (error) { firstError = error; }
+      } catch (error) { rememberNotificationStage(error, "interest"); firstError = error; }
       // Renewal has priority over ordinary replies and task results, including local SDK replies.
       try { await this.renewalNotifier!.deliverOnce(this.renewalInterestedChats()); }
-      catch (error) { renewalError = error; }
+      catch (error) { rememberNotificationStage(error, "renewal"); renewalError = error; }
     }
-    try { await this.flushRepliesOnce(); } catch (error) { firstError ??= error; }
+    try { await this.flushRepliesOnce(); } catch (error) { rememberNotificationStage(error, "reply_recovery"); firstError ??= error; }
     try {
       if (this.resultDispatcher) {
         try { summary = await this.resultDispatcher.deliverOnce(this.notificationInterest?.chatIds ?? []); }
-        catch (error) { firstError ??= error; }
+        catch (error) { rememberNotificationStage(error, "result_delivery"); firstError ??= error; }
         // A multipart reply can cross 3 -> 2 and yield its unsent suffix during this pass.
         try { await this.renewalNotifier!.deliverOnce(this.renewalInterestedChats()); }
-        catch (error) { renewalError ??= error; }
+        catch (error) { rememberNotificationStage(error, "renewal"); renewalError ??= error; }
       } else summary = await this.notificationOutbox!.deliverOnce();
-    } catch (error) { firstError ??= error; }
+    } catch (error) { rememberNotificationStage(error, "notification_delivery"); firstError ??= error; }
     if (firstError !== undefined) throw firstError;
     if (renewalError !== undefined) throw renewalError;
     return summary;
@@ -666,7 +671,13 @@ export class WeChatGateway {
     this.inboundRunner.schedule();
     let notificationFailure: Error | undefined;
     const deliver = async (): Promise<void> => {
-      try { await this.deliverNotificationsOnce(); }
+      try {
+        if (this.notificationDiagnostics) {
+          await this.notificationDiagnostics.run(() => this.deliverNotificationsOnce(),
+            () => !this.stopped && !this.notificationAbort.signal.aborted,
+            error => !(error instanceof NotificationDiagnosticError));
+        } else await this.deliverNotificationsOnce();
+      }
       catch (err) {
         if (this.stopped || this.notificationAbort.signal.aborted) return;
         const error = err instanceof Error ? err : new Error("Notification delivery failed");

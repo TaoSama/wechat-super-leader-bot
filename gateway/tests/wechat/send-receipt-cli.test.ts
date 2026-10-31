@@ -11,6 +11,7 @@ import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { StateManager, writePrivateJsonSync } from "../../src/runtime/state.js";
 import type { ResultDelivery } from "../../src/results/contracts.js";
+import { parseNotificationCycle } from "../fixtures/notification-cycle-log.js";
 
 const WAIT_MS = 5_000;
 const STARTUP_WAIT_MS = 15_000;
@@ -81,7 +82,8 @@ function parseTelemetry(line: string): Record<string, unknown> | undefined {
 }
 
 function diagnosticLines(stderr: string): string[] {
-  return stderr.trim().split("\n").filter(Boolean).filter(line => parseTelemetry(line) === undefined);
+  return stderr.trim().split("\n").filter(Boolean)
+    .filter(line => parseTelemetry(line) === undefined && parseNotificationCycle(line) === undefined);
 }
 
 test("CLI diagnostics exclude only validated telemetry and retain unrelated JSON and plain errors", () => {
@@ -97,6 +99,12 @@ test("CLI diagnostics exclude only validated telemetry and retain unrelated JSON
     assert.throws(() => diagnosticLines(JSON.stringify({ ...event, ...invalid })));
   }
   assert.throws(() => diagnosticLines('{"event":"message_latency"'));
+  const ready = { event: "notification_cycle_ready", service: "gateway", timestamp: event.timestamp };
+  assert.deepEqual(diagnosticLines([JSON.stringify(ready), warning, plain].join("\n")), [warning, plain]);
+  assert.throws(() => diagnosticLines(JSON.stringify({ ...ready, token: "private" })));
+  assert.throws(() => diagnosticLines(JSON.stringify({ ...ready, causeCodes: [] })));
+  assert.throws(() => diagnosticLines(JSON.stringify({ ...ready, event: "notification_cycle_failed", failedRequests: [{ token: "private" }] })));
+  assert.throws(() => diagnosticLines(JSON.stringify({ ...ready, event: "notification_cycle_failed", causeCodes: [{}] })));
 });
 
 type Options = {
@@ -454,6 +462,13 @@ for (const endpoint of ["pending", "messages"] as const) {
       const diagnostics = diagnosticLines(running.output.stderr);
       assert.ok(diagnostics.length > 0);
       assert.ok(diagnostics.every(line => line === `[gateway] ${prefix} cycle error: ${expected}`));
+      if (endpoint === "pending") {
+        const failures = running.output.stderr.split("\n").map(parseNotificationCycle)
+          .filter(event => event?.event === "notification_cycle_failed");
+        assert.ok(failures.length > 0);
+        assert.ok(failures.every(event => event!.operation === "result_pending" && event!.httpStatus === status &&
+          event!.requestAttempts === 1 && event!.errorType === expected));
+      }
       assert.deepEqual([f.counts().claims, f.counts().receipts, f.sends.length], [0, 0, 0]);
       if (endpoint === "messages") {
         assert.ok(f.forwards.length >= 2);
