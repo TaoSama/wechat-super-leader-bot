@@ -14,6 +14,7 @@ import { FileUploader, type FileUploadMetadata, type UploadedFileItem } from "./
 import { deliverFileReply, type FileReplyOptions } from "./file-delivery.js";
 import { beforeAbort } from "../runtime/abort.js";
 import { CHANNEL_VERSION } from "./protocol.js";
+import { RequestDiagnostics } from "../runtime/request-diagnostics.js";
 export { CHANNEL_VERSION } from "./protocol.js";
 
 // Only used to reconstruct deliveries written by the short-lived citation-sanitizing
@@ -139,7 +140,8 @@ export class ILinkClient {
     payload: Record<string, unknown>,
     token: string,
     timeoutMs: number,
-    parentSignal?: AbortSignal
+    parentSignal?: AbortSignal,
+    diagnostics?: RequestDiagnostics
   ): Promise<Record<string, unknown>> {
     const uinRandom = crypto.randomBytes(4).readUInt32BE(0).toString(10);
     const uinHeader = Buffer.from(uinRandom, "utf8").toString("base64");
@@ -168,11 +170,14 @@ export class ILinkClient {
         redirect: "error",
         signal,
       }), signal);
+      if (diagnostics) { diagnostics.phase = "headers"; diagnostics.httpStatus = response.status; }
       traceEvent("wechat.http.headers", { purpose, httpStatus: response.status, durationMs: performance.now() - started });
       if (!response.ok) {
         throw new Error(`WeChat iLink HTTP ${response.status} on ${endpoint}`);
       }
+      if (diagnostics) diagnostics.phase = "body";
       const raw = await beforeAbort(response.text(), signal);
+      if (diagnostics) diagnostics.phase = "decode";
       if (!raw.trim() && endpoint === "ilink/bot/sendmessage") throw new ILinkSendReceiptError("EmptyResponse");
       const parsed = parseILinkJson(raw);
       signal.throwIfAborted();
@@ -181,6 +186,9 @@ export class ILinkClient {
       }
       outcome = "ok";
       return parsed as Record<string, unknown>;
+    } catch (error) {
+      diagnostics?.failure(error, 1, 1, controller.signal.aborted, Boolean(parentSignal?.aborted));
+      throw error;
     } finally {
       traceEvent("wechat.http.end", { purpose, outcome, durationMs: performance.now() - started });
       clearTimeout(timer);
@@ -342,6 +350,7 @@ export class ILinkClient {
       throw new Error(`No context token for chat ${chatId}; poll a new inbound message first`);
     }
     const clientId = clientIdOverride || `super-leader:${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+    const diagnostics = new RequestDiagnostics("wechat_sendmessage", clientId);
     const response = await this.request(
       "ilink/bot/sendmessage",
       {
@@ -358,10 +367,18 @@ export class ILinkClient {
       },
       account.token,
       SEND_REQUEST_TIMEOUT_MS,
-      signal
+      signal,
+      diagnostics
     );
 
-    await traceSpan("wechat.send.receipt.validate", async () => validateSendReceipt(response));
+    diagnostics.phase = "validate";
+    try {
+      await traceSpan("wechat.send.receipt.validate", async () => validateSendReceipt(response));
+      diagnostics.success();
+    } catch (error) {
+      diagnostics.failure(error, 1, 1, false, Boolean(signal?.aborted));
+      throw error;
+    }
     traceEvent("wechat.send.accepted");
   }
 

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { transferTimeoutMs } from "../runtime/transfer-budget.js";
 import { beforeAbort } from "../runtime/abort.js";
+import { RequestDiagnostics, type RequestOperation } from "../runtime/request-diagnostics.js";
 import { validateControllerUrl } from "./client.js";
 import { RESULT_FILE_BYTES, RESULT_PENDING_LIMIT, RESULT_RESPONSE_BYTES, RESULT_TIMEOUT_MS,
   parseResultDelivery, resultObject, resultUuid, type MaterializedResultDelivery, type ResultArtifact, type ResultDelivery } from "../results/contracts.js";
@@ -38,8 +39,11 @@ export class ResultClient {
       options.artifactPublicOrigin !== undefined && publicUrl.pathname !== "/") throw new Error("Invalid result artifact public origin");
     this.publicOrigin = publicUrl.origin;
   }
-  private async request(path: string, body?: Record<string, unknown>, parent?: AbortSignal, retries = 0, prefix = "/v1/deliveries"): Promise<unknown> {
+  private async request<T>(operation: RequestOperation, path: string, parse: (value: unknown) => T, body?: Record<string, unknown>, parent?: AbortSignal, retries = 0, prefix = "/v1/deliveries"): Promise<T> {
+    const diagnostics = new RequestDiagnostics(operation, JSON.stringify([prefix, path, body]));
     for (let attempt = 0; ; attempt++) {
+      diagnostics.phase = "fetch";
+      diagnostics.httpStatus = undefined;
       const abort = new AbortController(), signal = parent ? AbortSignal.any([abort.signal, parent]) : abort.signal;
       const timer = setTimeout(() => abort.abort(new Error("Controller result request timed out")), this.timeoutMs);
       try {
@@ -48,13 +52,24 @@ export class ResultClient {
           method: body ? "POST" : "GET", headers: { Authorization: `Bearer ${this.token}`, "Content-Type": "application/json" },
           ...(body ? { body: JSON.stringify(body) } : {}), redirect: "error", signal,
         }), signal);
+        diagnostics.phase = "headers";
+        diagnostics.httpStatus = response.status;
         if (!response.ok) throw new ResultHttpError(response.status);
+        diagnostics.phase = "body";
         const bytes = await this.readBody(response, RESULT_RESPONSE_BYTES, signal);
+        diagnostics.phase = "decode";
         const decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-        return JSON.parse(decoded) as unknown;
+        const value: unknown = JSON.parse(decoded);
+        diagnostics.phase = "validate";
+        const result = parse(value);
+        diagnostics.success();
+        return result;
       } catch (error) {
         if (attempt >= retries || parent?.aborted || error instanceof ResultHttpError && error.status < 500 ||
-          error instanceof SyntaxError) throw error;
+          error instanceof SyntaxError || diagnostics.phase === "validate") {
+          diagnostics.failure(error, attempt + 1, retries + 1, abort.signal.aborted, Boolean(parent?.aborted));
+          throw error;
+        }
       } finally { clearTimeout(timer); abort.abort(); }
     }
   }
@@ -80,76 +95,87 @@ export class ResultClient {
   async listDeliveries(chatIds: string[], signal?: AbortSignal): Promise<ResultDelivery[]> {
     if (!chatIds.length || chatIds.length > RESULT_PENDING_LIMIT || new Set(chatIds).size !== chatIds.length ||
       chatIds.some(id => typeof id !== "string" || !id.trim())) throw new Error("Invalid result chat IDs");
-    const result = resultObject(await this.request("/pending", { chatIds }, signal), ["items"]);
-    if (!Array.isArray(result.items) || result.items.length > RESULT_PENDING_LIMIT) throw new Error("Invalid result delivery list");
-    const items = result.items.map(item => parseResultDelivery(item));
-    if (new Set(items.map(item => item.id)).size !== items.length || items.some(item => !chatIds.includes(item.chatId) || item.status !== "ready")) {
-      throw new Error("Controller result list identity mismatch");
-    }
-    return items;
+    return this.request("result_pending", "/pending", raw => {
+      const result = resultObject(raw, ["items"]);
+      if (!Array.isArray(result.items) || result.items.length > RESULT_PENDING_LIMIT) throw new Error("Invalid result delivery list");
+      const items = result.items.map(item => parseResultDelivery(item));
+      if (new Set(items.map(item => item.id)).size !== items.length || items.some(item => !chatIds.includes(item.chatId) || item.status !== "ready")) {
+        throw new Error("Controller result list identity mismatch");
+      }
+      return items;
+    }, { chatIds }, signal);
   }
   async notificationInterest(signal?: AbortSignal): Promise<{ chatIds: string[]; interested: string[] }> {
-    const value = resultObject(await this.request("", undefined, signal, 0, "/v1/chats/notification-interest"), ["chatIds", "interested"]);
-    const valid = (raw: unknown): raw is string[] => Array.isArray(raw) && raw.length <= INTEREST_CHAT_LIMIT && new Set(raw).size === raw.length &&
-      raw.every(id => typeof id === "string" && id.trim() && id.length <= 512);
-    if (!valid(value.chatIds) || !valid(value.interested)) {
-      throw new Error("Controller notification interest response schema invalid");
-    }
-    const chatIds = value.chatIds, interested = value.interested;
-    if (interested.some(chat => !chatIds.includes(chat))) throw new Error("Controller notification interest response schema invalid");
-    return { chatIds, interested };
+    return this.request("notification_interest", "", raw => {
+      const value = resultObject(raw, ["chatIds", "interested"]);
+      const valid = (data: unknown): data is string[] => Array.isArray(data) && data.length <= INTEREST_CHAT_LIMIT && new Set(data).size === data.length &&
+        data.every(id => typeof id === "string" && id.trim() && id.length <= 512);
+      if (!valid(value.chatIds) || !valid(value.interested)) throw new Error("Controller notification interest response schema invalid");
+      const chatIds = value.chatIds, interested = value.interested;
+      if (interested.some(chat => !chatIds.includes(chat))) throw new Error("Controller notification interest response schema invalid");
+      return { chatIds, interested };
+    }, undefined, signal, 0, "/v1/chats/notification-interest");
   }
-  private async record(path: string, id: string, body?: Record<string, unknown>, signal?: AbortSignal, materialized = false, retries = 0): Promise<ResultDelivery> {
+  private async record(operation: RequestOperation, path: string, id: string, body?: Record<string, unknown>, signal?: AbortSignal,
+    options: { materialized?: boolean; retries?: number; validate?: (item: ResultDelivery) => void } = {}): Promise<ResultDelivery> {
     resultUuid(id);
-    const result = resultObject(await this.request(`/${id}${path}`, body, signal, retries), ["delivery"]);
-    const delivery = parseResultDelivery(result.delivery, materialized);
-    if (delivery.id !== id) throw new Error("Controller result identity mismatch");
-    return delivery;
+    return this.request(operation, `/${id}${path}`, raw => {
+      const result = resultObject(raw, ["delivery"]);
+      const delivery = parseResultDelivery(result.delivery, options.materialized);
+      if (delivery.id !== id) throw new Error("Controller result identity mismatch");
+      options.validate?.(delivery);
+      return delivery;
+    }, body, signal, options.retries);
   }
-  getDelivery(id: string, signal?: AbortSignal): Promise<ResultDelivery> { return this.record("", id, undefined, signal); }
+  getDelivery(id: string, signal?: AbortSignal): Promise<ResultDelivery> { return this.record("result_get", "", id, undefined, signal); }
   async claimDelivery(id: string, attemptId: string, signal?: AbortSignal): Promise<ResultDelivery> {
     resultUuid(attemptId);
-    const item = await this.record("/claim", id, { attemptId }, signal);
-    if (item.status !== "claimed" || item.attemptId !== attemptId) throw new Error("Controller result claim identity mismatch");
-    return item;
+    return this.record("result_claim", "/claim", id, { attemptId }, signal, { validate: item => {
+      if (item.status !== "claimed" || item.attemptId !== attemptId) throw new Error("Controller result claim identity mismatch");
+    } });
   }
   async materializeDelivery(id: string, attemptId: string, signal?: AbortSignal): Promise<MaterializedResultDelivery> {
     resultUuid(attemptId);
-    const item = await this.record("/materialize", id, { attemptId }, signal, true);
-    if (item.status !== "claimed" || item.attemptId !== attemptId) throw new Error("Controller result materialization identity mismatch");
-    this.artifactUrl(item.artifact);
-    return item as MaterializedResultDelivery;
+    return this.record("result_materialize", "/materialize", id, { attemptId }, signal, { materialized: true, validate: item => {
+      if (item.status !== "claimed" || item.attemptId !== attemptId) throw new Error("Controller result materialization identity mismatch");
+      this.artifactUrl(item.artifact);
+    } }) as Promise<MaterializedResultDelivery>;
   }
   async recordReceipt(id: string, attemptId: string, status: "accepted" | "uncertain", signal?: AbortSignal): Promise<ResultDelivery> {
     resultUuid(attemptId);
     if (status !== "accepted" && status !== "uncertain") throw new Error("Invalid result receipt status");
-    const item = await this.record("/receipt", id, { attemptId, status }, signal, false, RECEIPT_RETRIES);
-    if (item.attemptId !== attemptId || !["accepted", "uncertain"].includes(item.status) || status === "accepted" && item.status !== "accepted") {
-      throw new Error("Controller result receipt identity mismatch");
-    }
-    return item;
+    return this.record("result_receipt", "/receipt", id, { attemptId, status }, signal, { retries: RECEIPT_RETRIES, validate: item => {
+      if (item.attemptId !== attemptId || !["accepted", "uncertain"].includes(item.status) || status === "accepted" && item.status !== "accepted") {
+        throw new Error("Controller result receipt identity mismatch");
+      }
+    } });
   }
   async deferDelivery(id: string, attemptId: string, reason: string, submittedMessages = 0, signal?: AbortSignal): Promise<ResultDelivery> {
     resultUuid(attemptId);
     if (!reason.trim() || reason.length > 128) throw new Error("Invalid result defer reason");
     if (!Number.isSafeInteger(submittedMessages) || submittedMessages < 0) throw new Error("Invalid result submitted step count");
-    const item = await this.record("/defer", id, { attemptId, reason, submittedMessages }, signal);
-    if (!["waiting_for_user", "ready"].includes(item.status) || item.lastDeferredAttemptId !== attemptId || item.lastDeferReason !== reason ||
-      (item.submittedMessages ?? 0) < submittedMessages) throw new Error("Controller result defer state mismatch");
-    return item;
+    return this.record("result_defer", "/defer", id, { attemptId, reason, submittedMessages }, signal, { validate: item => {
+      if (!["waiting_for_user", "ready"].includes(item.status) || item.lastDeferredAttemptId !== attemptId || item.lastDeferReason !== reason ||
+        (item.submittedMessages ?? 0) < submittedMessages) throw new Error("Controller result defer state mismatch");
+    } });
   }
   async resumeDeliveries(chatId: string, signal?: AbortSignal, generation?: string): Promise<void> {
     if (!chatId.trim()) throw new Error("Invalid result resume chat ID");
     if (generation !== undefined && (!generation || generation.length > 512)) throw new Error("Invalid result resume generation");
-    const result = resultObject(await this.request("/resume", { chatId, ...(generation ? { generation } : {}) }, signal), ["resumed"]);
-    if (!Number.isSafeInteger(result.resumed) || (result.resumed as number) < 0) throw new Error("Invalid result resume count");
+    await this.request("result_resume", "/resume", raw => {
+      const result = resultObject(raw, ["resumed"]);
+      if (!Number.isSafeInteger(result.resumed) || (result.resumed as number) < 0) throw new Error("Invalid result resume count");
+    }, { chatId, ...(generation ? { generation } : {}) }, signal);
   }
   async blockChatDeliveries(chatId: string, reason: string, signal?: AbortSignal): Promise<number> {
     if (!chatId.trim() || !reason.trim() || reason.length > 128) throw new Error("Invalid result blocked chat request");
-    const result = resultObject(await this.request("/blocked", { chatId, reason }, signal), ["blocked"]);
-    if (!Number.isSafeInteger(result.blocked) || (result.blocked as number) < 0) throw new Error("Invalid result blocked count");
-    return result.blocked as number;
+    return this.request("result_blocked", "/blocked", raw => {
+      const result = resultObject(raw, ["blocked"]);
+      if (!Number.isSafeInteger(result.blocked) || (result.blocked as number) < 0) throw new Error("Invalid result blocked count");
+      return result.blocked as number;
+    }, { chatId, reason }, signal);
   }
+
   private artifactUrl(artifact: ResultArtifact): string {
     resultUuid(artifact.id);
     if (!artifact.downloadUrl) throw new Error("Result artifact download URL missing");
@@ -170,19 +196,27 @@ export class ResultClient {
     const abort = new AbortController(), signal = parent ? AbortSignal.any([abort.signal, parent]) : abort.signal;
     const timer = setTimeout(() => abort.abort(new Error("Result artifact download timed out")),
       this.downloadTimeoutMs ?? transferTimeoutMs(artifact.size, RESULT_TIMEOUT_MS));
+    const diagnostics = new RequestDiagnostics("artifact_download", artifact.id);
     try {
       signal.throwIfAborted();
       const response = await beforeAbort(this.fetchImpl(url, { method: "GET", redirect: "error", signal }), signal);
+      diagnostics.phase = "headers";
+      diagnostics.httpStatus = response.status;
       if (response.status !== 200 || response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "text/markdown") {
         throw new Error("Controller result download invalid response");
       }
       const length = response.headers.get("content-length");
       if (length !== null && (!/^\d+$/.test(length) || Number(length) !== artifact.size)) throw new Error("Controller result download length mismatch");
+      diagnostics.phase = "body";
       const bytes = await this.readBody(response, artifact.size, signal, artifact.size);
       if (bytes.length !== artifact.size || createHash("sha256").update(bytes).digest("hex") !== artifact.sha256) {
         throw new Error("Controller result download integrity mismatch");
       }
+      diagnostics.success();
       return bytes;
+    } catch (error) {
+      diagnostics.failure(error, 1, 1, abort.signal.aborted, Boolean(parent?.aborted));
+      throw error;
     } finally { clearTimeout(timer); abort.abort(); }
   }
 }
