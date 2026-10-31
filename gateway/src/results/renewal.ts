@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { ReplyDeliveryState } from "../types.js";
 
 const RENEWAL_LEAD_MS = 60 * 60 * 1000;
+const RENEWAL_BUDGET_THRESHOLD = 3;
 function renewalText(sendBudget: number): string {
   return `回复窗口即将结束。请主动发一条消息，刷新本轮 ${sendBudget} 条消息额度，避免定时任务结果继续等待。`;
 }
@@ -45,7 +46,7 @@ export class RenewalNotifier {
         now - refreshedAt < windowMs - RENEWAL_LEAD_MS || now - refreshedAt >= windowMs ||
         !state.canSendToChat(chatId, "final")) return false;
     const remaining = state.remainingSendBudget(chatId);
-    return Number.isSafeInteger(remaining) && remaining > 0;
+    return Number.isSafeInteger(remaining) && remaining > 0 && remaining < RENEWAL_BUDGET_THRESHOLD;
   }
 
   private pendingDelivery(chatId: string) {

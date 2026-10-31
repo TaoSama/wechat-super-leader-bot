@@ -290,12 +290,18 @@ globalThis.fetch = async (input, init) => {
     const beforeEarly = sent.length;
     await runGateway();
     assert.equal(sent.length, beforeEarly, 'Low budget reminder was sent before the final hour');
-    await patchBudget({ remaining: 10, refreshedAt: Date.now() - 22 * 60 * 60_000 - 1000 });
+    for (const remaining of [3, 10]) {
+      await patchBudget({ remaining, refreshedAt: Date.now() - 22 * 60 * 60_000 - 1000 });
+      await runGateway();
+      assert.equal(sent.length, beforeEarly, 'Reminder consumed quota when at least three sends remained');
+      assert.equal((await state()).context_budgets[CHAT].remaining, remaining);
+    }
+    await patchBudget({ remaining: 2 });
     const beforeRenewal = sent.filter(message => textOf(message) === RENEWAL_TEXT).length;
     await runGateway(); await runGateway();
     assert.equal(sent.filter(message => textOf(message) === RENEWAL_TEXT).length, beforeRenewal + 1, 'Window renewal reminder was missing or repeated across restart');
-    assert.equal((await state()).context_budgets[CHAT].remaining, 9);
-    console.log('PASS future task reminder uses the final hour and any remaining quota; durable deduplication survives CLI restart');
+    assert.equal((await state()).context_budgets[CHAT].remaining, 1);
+    console.log('PASS future task reminder requires final hour and 1–2 sends; durable deduplication survives CLI restart');
 
     await input('提醒使用最后一次额度');
     const lastQuota = await prepare('saved-after-last-quota-reminder');
@@ -322,18 +328,17 @@ globalThis.fetch = async (input, init) => {
     await patchBudget({ remaining: 3, refreshedAt: Date.now() - 22 * 60 * 60_000 - 1000 });
     const beforeSplit = sent.length;
     await runGateway();
-    assert.deepEqual(sent.slice(beforeSplit).map(textOf), [RENEWAL_TEXT],
-      'Reminder did not preempt the pending result in the final hour');
-    assert.equal((await state()).context_budgets[CHAT].remaining, 2);
+    assert.deepEqual(sent.slice(beforeSplit).map(textOf), [splitText.slice(0, 3800), RENEWAL_TEXT],
+      'Reminder did not preempt the next result chunk as quota crossed from three to two');
+    assert.equal((await state()).context_budgets[CHAT].remaining, 1);
     await runGateway();
-    assert.equal(sent.length, beforeSplit + 1, 'Restart duplicated the persisted reminder');
+    assert.equal(sent.length, beforeSplit + 2, 'Restart duplicated an accepted chunk or reminder');
     await elapseDispatchInterval();
     await input('继续未发送分段');
-    assert.deepEqual(sent.slice(beforeSplit).map(textOf), [RENEWAL_TEXT, REPLY,
-      splitText.slice(0, 3800),
+    assert.deepEqual(sent.slice(beforeSplit).map(textOf), [splitText.slice(0, 3800), RENEWAL_TEXT, REPLY,
       splitText.slice(3800, 7600), splitText.slice(7600)]);
     assert.equal((await getPlan(interrupted.id)).status, 'accepted');
-    console.log('PASS final-hour reminder preempts a pending result; restart preserves it; inbound resumes all frozen chunks');
+    console.log('PASS three-chunk result yields at 3→2 quota; restart preserves accepted chunk; inbound resumes only remaining chunks');
     assert.equal(new Set(sent.map(message => message.client_id)).size, sent.length, 'Duplicate external client_id was sent');
     console.log(`PASS whole-result Gateway CLI runtime; ${sent.length} actual synthetic sendmessage requests, ${uploads.size} encrypted CDN uploads`);
   }, [
