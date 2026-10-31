@@ -58,14 +58,14 @@ test("uninterested chats, short windows and inadmissible chats never get a remin
   assert.equal(f.sent.length, 0);
 });
 
-test("effective budget sends a reminder while any send remains, including a full ten-send window", async () => {
+test("only one or two effective sends qualify, regardless of the raw persisted counter", async () => {
   const f = fixture();
   Object.assign(f.state.contextBudgets.chat, { remaining: 10 });
-  for (const effective of [0, -1, NaN, 1.5]) {
+  for (const effective of [0, -1, NaN, 1.5, 3, 10]) {
     f.setRemaining(effective);
     assert.equal((await f.notifier.deliverOnce(["chat"])).sent, 0);
   }
-  for (const remaining of [1, 2, 3, 10]) {
+  for (const remaining of [1, 2]) {
     const low = fixture(); low.setRemaining(remaining);
     assert.equal((await low.notifier.deliverOnce(["chat"])).sent, 1);
   }
@@ -106,6 +106,7 @@ test("queued send aborts on context, account, window or effective budget changes
     (f: ReturnType<typeof fixture>) => { f.state.contextBudgets.chat.refreshedAt++; },
     (f: ReturnType<typeof fixture>) => { f.state.policy.contextWindowMs++; },
     (f: ReturnType<typeof fixture>) => { f.setRemaining(0); },
+    (f: ReturnType<typeof fixture>) => { f.setRemaining(3); },
     (f: ReturnType<typeof fixture>) => { f.setNow(REFRESHED_AT + 23 * HOUR); },
   ];
   for (const mutate of mutations) {

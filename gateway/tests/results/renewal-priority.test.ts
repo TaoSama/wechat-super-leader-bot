@@ -52,29 +52,40 @@ for (const source of ["engine", "controller"] as const) {
   });
 }
 
-test("final-hour reminder preempts a multipart result, then new inbound resumes frozen text", async t => {
+for (const remaining of [3, 10]) test(`ordinary reply is not blocked by a reminder with ${remaining} sends remaining`, async t => {
+  const f = fixture(t, remaining);
+  await f.gateway.deliverNotificationsOnce();
+  assert.deepEqual(f.sends.map(text), ["ordinary"]);
+  assert.equal(f.state.contextBudgets.chat.remaining, remaining - 1);
+  assert.equal(f.state.outbox.ordinary, undefined);
+  const key = renewalDeliveryKey(f.state.getLoginFingerprint(), "chat", f.state.contextBudgets.chat.refreshedAt);
+  assert.equal(f.state.replyDeliveries[key], undefined);
+});
+
+test("multipart 3 -> 2 yields its suffix, sends priority reminder, then resumes frozen text across restart and refresh", async t => {
   const f = fixture(t, 3, "abcdefgh");
   f.state.updateOutbox("ordinary", { splitMaxChars: 2 });
   await f.gateway.deliverNotificationsOnce();
-  assert.match(text(f.sends[0]), /主动发一条消息/);
-  assert.deepEqual(f.sends.slice(1).map(text), ["ab", "cd"]);
-  assert.equal(f.state.replyDeliveries.ordinary.acknowledgedChunks, 2);
+  assert.equal(text(f.sends[0]), "ab");
+  assert.match(text(f.sends[1]), /主动发一条消息/);
+  assert.equal(f.state.replyDeliveries.ordinary.acknowledgedChunks, 1);
+  assert.equal(f.state.replyDeliveries.ordinary.inFlight, false);
   assert.equal(f.state.outbox.ordinary.status, "pending");
   const restarted = new StateManager(f.accountPath, f.statePath);
   await f.create(restarted).deliverNotificationsOnce();
-  assert.equal(f.sends.length, 3, "accepted chunks and one reminder survive restart");
+  assert.equal(text(f.sends[2]), "cd");
+  assert.equal(f.sends.length, 3, "one persisted reminder survives restart");
   assert.equal(restarted.replyDeliveries.ordinary.acknowledgedChunks, 2);
   assert.equal(restarted.outbox.ordinary.status, "pending");
   restarted.recordInboundContext("new-inbound", "chat", Date.now() - 100, true, "new-context");
   await f.create(restarted).deliverNotificationsOnce();
-  assert.match(text(f.sends[0]), /主动发一条消息/);
-  assert.deepEqual(f.sends.slice(1).map(text), ["ab", "cd", "ef", "gh"]);
+  assert.deepEqual(f.sends.slice(3).map(text), ["ef", "gh"]);
   assert.equal(restarted.outbox.ordinary, undefined);
   assert.deepEqual(f.acknowledgements, ["accepted"]);
 });
 
 test("legacy unsent renewal checkpoint upgrades without permanently blocking ordinary replies", async t => {
-  const f = fixture(t, 10);
+  const f = fixture(t, 2);
   const key = renewalDeliveryKey(f.state.getLoginFingerprint(), "chat", f.state.contextBudgets.chat.refreshedAt);
   f.state.replyDeliveries[key] = { digest: "a".repeat(64), totalChunks: 1, acknowledgedChunks: 0, inFlight: false };
   await assert.rejects(
