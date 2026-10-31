@@ -1,9 +1,21 @@
 # 生产部署
 
-`.github/workflows/deploy-production.yml` 只处理合并到默认分支的
-`pull_request_target.closed` 事件。这样自动合并由 Actions 身份完成时，也不会依赖被
-GitHub 抑制的后续 push workflow。`workflow_dispatch` 用于人工重跑同一个 main
-revision；`deploy-production` 并发组不取消正在进行的发布。
+`.github/workflows/deploy-production.yml` 监听 `Verify` 的 `workflow_run.completed`。
+`GITHUB_TOKEN` 自动合并产生的 `push` 和 `pull_request.closed` 都不会启动后续工作流，
+因此部署以 Verify 完成为入口，再通过 GitHub API 核对成功的同仓库 PR 验证、仓库所有者
+身份、非草稿、当前 PR head、合并状态和实际 merge SHA。自动合并尚未结束时最多等待
+5 分钟；未合并且没有开启自动合并的 PR、失败验证、fork、旧 head、非 main 目标均跳过。
+API 错误和等待超时会失败，不会进入生产发布。
+
+保留 `pull_request_target.closed` 作为人工合并入口：即使 CI 通过数小时后才合并，
+也会重新查询该 PR head 对应的成功 Verify，再执行相同的合并和当前主干门禁。
+机器人合并依赖 `workflow_run`，两个入口偶尔重叠时由串行队列和远端幂等检查去重。
+
+实际合并 SHA 必须仍是当前 main。发布 job 使用 `deploy-production` 并发组和
+`queue: max`，串行处理、最多保留 100 个待发布 job，不取消正在执行的发布。
+排队后、镜像构建后和远端激活前都会重新检查 main；版本被更新时拒绝发布旧 SHA。
+只检出主干上的可信门禁脚本和核实后的合并提交，不执行 PR head 或使用 PR artifacts。
+`workflow_dispatch` 保留为人工恢复入口，且只接受调用时的当前 main revision。
 
 工作流在一个 Ubuntu runner 中并行构建 Controller 和 Gateway 的 `linux/amd64`
 Docker 归档。两个归档都带有完整 commit SHA 的 `org.opencontainers.image.revision`
@@ -18,6 +30,8 @@ Docker 归档。两个归档都带有完整 commit SHA 的 `org.opencontainers.i
    成功，再检查运行状态、镜像和 revision。数据库、Controller runtime、微信账号和
    Gateway 状态路径由现有 Compose 配置继续管理。
 
+重复触发同一版本时，只有 release env 完全一致、Controller/Gateway 的实际镜像 ID 和
+revision 一致、容器健康、Gateway 窗口正确才跳过重建；上一版回滚选择保持不变。
 健康检查失败时，脚本会恢复上一次 `.runtime/release.env` 并尝试重新启动旧镜像，随后
 以失败状态结束。首次发布没有可回滚版本；Compose、Docker、SSH、归档校验或旧版本
 重启失败都会在对应停止点失败，工作流不会报告部署成功。成功发布后只清理同名仓库中
@@ -35,8 +49,19 @@ Gateway 默认使用 23 小时回复窗口（`GATEWAY_CONTEXT_WINDOW_MS=82800000
 同仓库且由仓库所有者创建的非草稿 Pull Request 会由
 `.github/workflows/enable-auto-merge.yml` 自动开启 squash merge；工作流不检出或执行
 Pull Request 代码。`main` 的保护规则应要求 Ubuntu unit/integration 验证和 macOS 15
-验证通过。合并到默认分支的 `pull_request_target.closed` 事件会唯一触发生产部署；部署成功必须同时核对合并 revision、
+验证通过。Verify 完成事件经过合并门禁后触发生产部署；部署成功必须同时核对合并 revision、
 容器健康状态、`gateway_context_window_ms=82800000` 和 `deployment verified`。
+
+首次引入监听器时，工作流必须先存在于默认分支才会接收 `workflow_run`。安装该监听器
+的 PR 可能已经完成 Verify 才合并，不能假设它会自动部署自己。此时应分别记录修复合并、
+人工恢复发布和之后正常 PR 合并触发的自动发布；人工 dispatch 或重跑旧 CI 不能作为
+正常自动合并链路已验收的证据。工作流事件应为 `workflow_run`，门禁日志中的源 Verify
+run、PR head、merge SHA 应与生产镜像 revision 一致。
+
+回退部署触发逻辑应通过新 PR 恢复配置，并保留必要的人工发布入口。运行时发布失败沿用
+上一版本镜像回滚，不执行数据库迁移或修改持久化布局。main 若在最后一次版本检查后、
+远端激活过程中更新，当前发布可能短暂落后；全局串行队列随后处理新版本，旧版本不会
+在一个已经完成的新版本发布之后反向覆盖它。排队超过 100 个 job 时需人工处理取消的发布。
 
 在 GitHub `production` Environment 中配置以下 **Secrets**：
 
@@ -63,3 +88,6 @@ docker-compose --env-file /dev/null --profile wechat \
   -f deploy/compose.gateway.yaml -f deploy/compose.release.yaml \
   --env-file .runtime/controller.env config --quiet
 ```
+
+旧版 actionlint（如 1.7.12）尚未识别 GitHub 新增的 `concurrency.queue`；可针对这一项
+使用 `-ignore 'unexpected key "queue"'` 检查其余规则，并以 GitHub 实际工作流解析为准。

@@ -6,15 +6,21 @@ const workflow = readFileSync(new URL('../../../.github/workflows/deploy-product
 const releaseScript = readFileSync(new URL('../../../scripts/deploy/remote-release.sh', import.meta.url), 'utf8');
 const overlay = readFileSync(new URL('../../../deploy/compose.release.yaml', import.meta.url), 'utf8');
 
-test('production CD deploys one merged main PR with protected, immutable inputs', () => {
-  assert.match(workflow, /pull_request_target:\s*\n\s*types: \[closed\]/);
-  assert.match(workflow, /pull_request\.merged == true/);
-  assert.match(workflow, /pull_request\.base\.ref == github\.event\.repository\.default_branch/);
-  assert.match(workflow, /pull_request\.merge_commit_sha \|\| github\.sha/);
+test('production CD gates Verify completions before deploying immutable merged revisions', () => {
+  assert.match(workflow, /workflow_run:\s*\n\s*workflows: \[Verify\]\s*\n\s*types: \[completed\]/);
+  assert.match(workflow, /workflow_run\.conclusion == 'success'/);
+  assert.match(workflow, /workflow_run\.event == 'pull_request'/);
+  assert.match(workflow, /ref: refs\/heads\/main/);
+  assert.match(workflow, /needs: resolve/);
+  assert.match(workflow, /REVISION: \$\{\{ needs\.resolve\.outputs\.revision \}\}/);
   assert.match(workflow, /ref: \$\{\{ env\.REVISION \}\}/);
+  assert.equal((workflow.match(/--assert-current "\$REVISION"/g) ?? []).length, 3);
+  assert.doesNotMatch(workflow, /ref:.*workflow_run\.head_sha/);
+  assert.doesNotMatch(workflow, /download-artifact/);
+  assert.match(workflow, /pull_request_target:\s*\n\s*types: \[closed\]/);
   assert.doesNotMatch(workflow, /push:\s*\n/);
   assert.doesNotMatch(workflow, /pull_request:\s*\n/);
-  assert.match(workflow, /group: deploy-production/);
+  assert.match(workflow, /group: deploy-production\s*\n\s*queue: max\s*\n\s*cancel-in-progress: false/);
   assert.match(workflow, /environment:\s*\n\s+name: production/);
   assert.match(workflow, /permissions:\s*\n\s+contents: read/);
   assert.match(workflow, /--platform linux\/amd64/);

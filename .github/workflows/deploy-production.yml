@@ -1,33 +1,55 @@
 name: Deploy production
 
-# A merged pull request is the deployment boundary. Using pull_request_target
-# avoids relying on a push emitted by an Actions token, which GitHub suppresses
-# from triggering another workflow.
+# Workflow completions are emitted even when an Actions token performs the merge.
 on:
+  workflow_run:
+    workflows: [Verify]
+    types: [completed]
   pull_request_target:
     types: [closed]
   workflow_dispatch:
 
 permissions:
   contents: read
-
-concurrency:
-  group: deploy-production
-  cancel-in-progress: false
-
-env:
-  REVISION: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
-  CONTROLLER_IMAGE: super-leader-controller:${{ github.event.pull_request.merge_commit_sha || github.sha }}
-  GATEWAY_IMAGE: super-leader-gateway:${{ github.event.pull_request.merge_commit_sha || github.sha }}
+  actions: read
+  pull-requests: read
 
 jobs:
+  resolve:
+    name: Resolve verified merged revision
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request_target' && github.event.pull_request.merged == true) ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'pull_request')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      revision: ${{ steps.revision.outputs.revision }}
+    steps:
+      - name: Check out trusted deployment gate
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          ref: refs/heads/main
+      - name: Resolve verified merged revision
+        id: revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/deploy/resolve-revision.mjs
+
   build-and-deploy:
     name: Build and deploy linux/amd64 images
-    if: >-
-      ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
-          (github.event_name == 'pull_request_target' &&
-           github.event.pull_request.merged == true &&
-           github.event.pull_request.base.ref == github.event.repository.default_branch) }}
+    needs: resolve
+    if: needs.resolve.outputs.revision != ''
+    concurrency:
+      group: deploy-production
+      queue: max
+      cancel-in-progress: false
+    env:
+      REVISION: ${{ needs.resolve.outputs.revision }}
+      CONTROLLER_IMAGE: super-leader-controller:${{ needs.resolve.outputs.revision }}
+      GATEWAY_IMAGE: super-leader-gateway:${{ needs.resolve.outputs.revision }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment:
@@ -39,6 +61,11 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ env.REVISION }}
+
+      - name: Reject a superseded queued release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/deploy/resolve-revision.mjs --assert-current "$REVISION"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
@@ -132,6 +159,7 @@ jobs:
 
       - name: Transfer and activate the release on the VPS
         env:
+          GH_TOKEN: ${{ github.token }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
@@ -141,6 +169,7 @@ jobs:
           DEPLOY_ENV_FILE: ${{ vars.DEPLOY_ENV_FILE }}
         run: |
           set -Eeuo pipefail
+          node scripts/deploy/resolve-revision.mjs --assert-current "$REVISION"
           release_root="$RUNNER_TEMP/super-leader-release-$REVISION"
           deploy_port="${DEPLOY_PORT:-22}"
           env_file="${DEPLOY_ENV_FILE:-.runtime/controller.env}"
@@ -175,6 +204,7 @@ jobs:
             --compose-gateway "$remote_stage/compose.gateway.yaml" \
             --seccomp-policy "$remote_stage/codex-seccomp.json" \
             --env-file "$env_file"
+          node scripts/deploy/resolve-revision.mjs --assert-current "$REVISION"
           ssh "${ssh_opts[@]}" "$target" "$remote_command"
 
       - name: Retain bounded build diagnostics on failure

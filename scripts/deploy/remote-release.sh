@@ -200,15 +200,50 @@ wait_healthy() {
   return 1
 }
 
+verify_runtime() {
+  local service expected_image expected_image_id image_id container gateway_container='' state health image image_revision
+  for service in controller gateway; do
+    container=$(compose_with_env "$release_env" ps -q "$service") || return 1
+    [[ -n $container ]] || return 1
+    [[ $service == gateway ]] && gateway_container=$container
+    state=$(docker inspect --format '{{.State.Status}}' "$container") || return 1
+    health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container") || return 1
+    image=$(docker inspect --format '{{.Config.Image}}' "$container") || return 1
+    image_revision=$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container") || return 1
+    if [[ $service == controller ]]; then expected_image=$controller_image; else expected_image=$gateway_image; fi
+    image_id=$(docker inspect --format '{{.Image}}' "$container") || return 1
+    expected_image_id=$(docker image inspect --format '{{.Id}}' "$expected_image") || return 1
+    [[ $state == running && $health == healthy && $image_revision == "$revision" && $image == "$expected_image" ]] || return 1
+    [[ -n $image_id && $image_id == "$expected_image_id" ]] || return 1
+    printf 'service=%s container=%s state=%s health=%s image=%s revision=%s\n' \
+      "$service" "$container" "$state" "$health" "$image" "$image_revision"
+  done
+  local gateway_context_window
+  gateway_context_window=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$gateway_container" |
+    sed -n 's/^GATEWAY_CONTEXT_WINDOW_MS=//p') || return 1
+  [[ $gateway_context_window == "$GATEWAY_CONTEXT_WINDOW_MS" ]] || return 1
+  printf 'gateway_context_window_ms=%s\n' "$gateway_context_window"
+}
+
+if [[ -f $release_env ]] && cmp -s "$release_env" "$release_env_next" && verify_runtime; then
+  log "deployment already healthy for revision $revision; skipping recreation"
+  exit 0
+fi
+
 log 'validating the staged Compose configuration with immutable image names'
 if ! compose_with_env "$release_env_next" config --quiet; then
   die 'staged Compose configuration failed before activation'
 fi
 if [[ -f $release_env ]]; then
-  cp -p "$release_env" "$release_env_previous"
-  had_previous=1
-  previous_controller_image=$(sed -n 's/^CONTROLLER_IMAGE=//p' "$release_env_previous")
-  previous_gateway_image=$(sed -n 's/^GATEWAY_IMAGE=//p' "$release_env_previous")
+  # Retrying an unhealthy release must not replace its last working rollback selection.
+  if ! cmp -s "$release_env" "$release_env_next"; then
+    cp -p "$release_env" "$release_env_previous"
+  fi
+  if [[ -f $release_env_previous ]]; then
+    had_previous=1
+    previous_controller_image=$(sed -n 's/^CONTROLLER_IMAGE=//p' "$release_env_previous")
+    previous_gateway_image=$(sed -n 's/^GATEWAY_IMAGE=//p' "$release_env_previous")
+  fi
 fi
 mkdir -p "${release_env%/*}"
 mv -f "$release_env_next" "$release_env"
@@ -223,26 +258,6 @@ if ! wait_healthy controller || ! wait_healthy gateway; then
   rollback || true
   die 'new containers failed health verification; deployment is not successful'
 fi
-
-verify_runtime() {
-  local service container gateway_container='' state health image image_revision
-  for service in controller gateway; do
-    container=$(compose_with_env "$release_env" ps -q "$service")
-    [[ $service == gateway ]] && gateway_container=$container
-    state=$(docker inspect --format '{{.State.Status}}' "$container")
-    health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container")
-    image=$(docker inspect --format '{{.Config.Image}}' "$container")
-    image_revision=$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container")
-    [[ $state == running && $health == healthy && $image_revision == "$revision" ]] || return 1
-    printf 'service=%s container=%s state=%s health=%s image=%s revision=%s\n' \
-      "$service" "$container" "$state" "$health" "$image" "$image_revision"
-  done
-  local gateway_context_window
-  gateway_context_window=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$gateway_container" |
-    sed -n 's/^GATEWAY_CONTEXT_WINDOW_MS=//p')
-  [[ $gateway_context_window == "$GATEWAY_CONTEXT_WINDOW_MS" ]] || return 1
-  printf 'gateway_context_window_ms=%s\n' "$gateway_context_window"
-}
 
 if ! verify_runtime; then
   rollback || true
