@@ -1,3 +1,4 @@
+import { LocalSendDeferredError } from "../runtime/context-policy.js";
 import { performance } from "node:perf_hooks";
 import { traceEvent, traceSpan } from "../runtime/telemetry.js";
 import * as crypto from "node:crypto";
@@ -391,12 +392,12 @@ export class ILinkClient {
     const timer = setTimeout(() => controller.abort(new Error("WeChat image reply timed out")), timeoutMs);
     try {
       return await this.withChatSend(chatId, async () => {
-        if (!shouldContinue()) throw new Error("WeChat image reply interrupted before completion");
+        if (!shouldContinue()) throw new LocalSendDeferredError("context_changed", "WeChat image reply interrupted before completion");
         this.sendTyping(chatId);
         return deliverImages({ stateManager: this.stateManager, chatId, deliveryKey: options.deliveryKey,
           images: attachments, getImageBytes: options.getImageBytes,
           uploadImage: bytes => {
-            if (!shouldContinue()) throw new Error("WeChat image reply interrupted before completion");
+            if (!shouldContinue()) throw new LocalSendDeferredError("context_changed", "WeChat image reply interrupted before completion");
             return this.imageUploader.upload(chatId, bytes, signal);
           },
           sendImage: (item, clientId) => this.sendMessageItem(chatId, item, clientId, signal),
@@ -500,9 +501,9 @@ export class ILinkClient {
         const deterministicClientId = `super-leader:${crypto.createHash("sha256")
           .update(JSON.stringify([this.stateManager.getLoginFingerprint(), chatId, deliveryKey, idx])).digest("hex").slice(0, 24)}`;
         replySignal.throwIfAborted();
-        if (options?.shouldContinue && !options.shouldContinue()) throw new Error("WeChat reply interrupted before completion");
+        if (options?.shouldContinue && !options.shouldContinue()) throw new LocalSendDeferredError("context_changed", "WeChat reply interrupted before completion");
         await this.withChatSend(chatId, async () => {
-          if (options?.shouldContinue && !options.shouldContinue()) throw new Error("WeChat reply interrupted before completion");
+          if (options?.shouldContinue && !options.shouldContinue()) throw new LocalSendDeferredError("context_changed", "WeChat reply interrupted before completion");
           this.consumeSendBudget(chatId, deliveryKey, options?.kind);
           // Persist intent before the network call. A crash or ambiguous response cannot trigger a replay.
           traceEvent("wechat.chunk.start", { chunkIndex: idx, chunkCount: chunks.length });

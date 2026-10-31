@@ -2,7 +2,7 @@
 
 ## 结论与边界
 
-本报告固定对照主干提交 `923d102275a215b06df2f54c481e6674bb999f8b`（`fix(wechat): restore low-budget renewal reminder threshold (#74)`）。主仓库为 `/Users/luwentao/Workspaces/wechat-super-leader-bot`；除特别标注，旧目录位于其 `.claude/worktrees/`。所有旧目录只读；本轮遗留审计只新增此报告，没有移植补丁、解决旧冲突、清理旧目录、启动业务或部署。
+本报告固定对照主干提交 `923d102275a215b06df2f54c481e6674bb999f8b`（`fix(wechat): restore low-budget renewal reminder threshold (#74)`）。主仓库路径以 `<repo-root>` 表示（在仓库根目录执行 `git rev-parse --show-toplevel` 获取）；除特别标注，旧目录位于其 `.claude/worktrees/`。所有旧目录只读；本轮遗留审计只新增此报告，没有移植补丁、解决旧冲突、清理旧目录、启动业务或部署。
 
 已经确认确有**未提交且未被当前主干等价吸收的修复内容**，主要集中在 `fix-audit-regressions-20261023`。但文件数量、旧分支提交数量都不能直接解释为“漏了多少功能”：许多旧 dirty 文件已与当前主干逐字相同，另一些已拆分或被后续实现替代。下文按用户可见行为分组，区别“已吸收”“部分吸收”“未见等价实现”“待确认”。
 
@@ -277,7 +277,7 @@ rem69 历史还有原生媒体序号、journal 幂等、session 保留、checkpo
 
 ## 外部 792d 工作区：#57 已作内容确认
 
-路径：`/Users/luwentao/Workspaces/dotfiles/codex/worktrees/792d/wechat-super-leader-bot`。HEAD a1e12ce，干净。
+路径：`<external-worktrees>/792d/wechat-super-leader-bot`。HEAD a1e12ce，干净。
 
 证据超过“PR 显示 MERGED”：
 
@@ -307,10 +307,12 @@ rem69 历史还有原生媒体序号、journal 幂等、session 保留、checkpo
 可复现基本命令：
 
 ```sh
-GIT_OPTIONAL_LOCKS=0 git -C /absolute/legacy-worktree status --porcelain=v1 -uall
-git -C /Users/luwentao/Workspaces/wechat-super-leader-bot show 923d102:path/to/file
-git -C /absolute/legacy-worktree diff HEAD -- path/to/file
-git -C /Users/luwentao/Workspaces/wechat-super-leader-bot grep -n needle 923d102 -- relevant/path
+repo_root=$(git rev-parse --show-toplevel)
+legacy_worktree="$repo_root/.claude/worktrees/<legacy-worktree>"
+GIT_OPTIONAL_LOCKS=0 git -C "$legacy_worktree" status --porcelain=v1 -uall
+git -C "$repo_root" show 923d102:path/to/file
+git -C "$legacy_worktree" diff HEAD -- path/to/file
+git -C "$repo_root" grep -n needle 923d102 -- relevant/path
 ```
 
 采用内容对照而不是历史等同推断，符合 Git 对 squash 和 diff 的实际语义；方法资料见 [Git diff 官方文档](https://git-scm.com/docs/git-diff) 与 [Git 合并/冲突说明](https://git-scm.com/docs/user-manual)。外部资料只用于校准 Git 方法，本仓库的吸收结论均来自上述本地源码。
@@ -503,14 +505,14 @@ git -C /Users/luwentao/Workspaces/wechat-super-leader-bot grep -n needle 923d102
 
 | 状态 | 路径 | 与固定主干内容关系 |
 |---|---|---|
-| ?? | `controller/node_modules` | 软链接 → /Users/luwentao/Workspaces/wechat-super-leader-bot/.claude/worktrees/remediation-69/controller/node_modules |
+| ?? | `controller/node_modules` | 软链接 → <repo-root>/.claude/worktrees/remediation-69/controller/node_modules |
 
 ### remediation-61
 
 | 状态 | 路径 | 与固定主干内容关系 |
 |---|---|---|
 | ?? | `controller/.background-child-diagnostics.cjs` | 主干无同名文件 |
-| ?? | `controller/node_modules` | 软链接 → /Users/luwentao/Workspaces/wechat-super-leader-bot/.claude/worktrees/remediation-69/controller/node_modules |
+| ?? | `controller/node_modules` | 软链接 → <repo-root>/.claude/worktrees/remediation-69/controller/node_modules |
 
 ### remediation-62
 
@@ -519,7 +521,7 @@ git -C /Users/luwentao/Workspaces/wechat-super-leader-bot grep -n needle 923d102
 | ?? | `.pg62-run.mjs` | 主干无同名文件 |
 | ?? | `.pg62-trace.ts` | 主干无同名文件 |
 | ?? | `.pg62-vitest.config.mjs` | 主干无同名文件 |
-| ?? | `controller/node_modules` | 软链接 → /Users/luwentao/Workspaces/wechat-super-leader-bot/.claude/worktrees/remediation-69/controller/node_modules |
+| ?? | `controller/node_modules` | 软链接 → <repo-root>/.claude/worktrees/remediation-69/controller/node_modules |
 
 ### remediation-69
 

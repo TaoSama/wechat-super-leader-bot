@@ -1,3 +1,4 @@
+import { LocalSendDeferredError } from "../runtime/context-policy.js";
 import { createHash } from "node:crypto";
 import type { StateManager } from "../runtime/state.js";
 import { beforeAbort } from "../runtime/abort.js";
@@ -59,7 +60,7 @@ export async function deliverFileReply(options: FileDeliveryOptions): Promise<nu
     if (account !== state.getLoginFingerprint() || context !== state.contextTokens[chatId] ||
         refreshedAt !== state.contextWindows?.[chatId]?.refreshedAt || budgetEpoch !== state.accountSendBudget?.lastInboundKey ||
         options.shouldContinue && !options.shouldContinue()) {
-      throw new Error("WeChat file reply interrupted before completion");
+      throw new LocalSendDeferredError("context_changed", "WeChat file reply interrupted before completion");
     }
   };
   try {

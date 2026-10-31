@@ -26,10 +26,12 @@ function fixture(t: TestContext, includeFollowingChat = false, images = [image])
   let failure: "image" | "text" | undefined;
   let downloadFailureStatus: number | undefined;
   let downloadFailureImageId: string | undefined;
+  let uploadHook: (() => Promise<void>) | undefined;
   const ilinkFetch: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     if (url.pathname === "/c2c/upload") {
       events.push("cdn-upload");
+      await uploadHook?.();
       return new Response(null, { headers: { "x-encrypted-param": "synthetic" } });
     }
     if (url.pathname.endsWith("getupdates")) return Response.json({ ret: 0, get_updates_buf: "next", msgs: [{
@@ -92,6 +94,8 @@ function fixture(t: TestContext, includeFollowingChat = false, images = [image])
     ilink: new ILinkClient({ stateManager: manager, fetchImpl: ilinkFetch }),
     controller: new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic", fetchImpl: controllerFetch }) });
   return { state, sent, events, forwarded, replyReads, downloaded, sentChats, gateway, reload: () => new StateManager(credentials, statePath),
+    includeFollowing: () => { includeFollowingChat = true; },
+    setUploadHook: (hook?: () => Promise<void>) => { uploadHook = hook; },
     failDownload: (status?: number, imageId?: string) => { downloadFailureStatus = status; downloadFailureImageId = imageId; },
     fail: (value: typeof failure) => { failure = value; } };
 }
@@ -255,4 +259,40 @@ test("permanent image failure remains quarantined after its processed key is evi
   assert.equal(resumed.isMessageProcessed(key), true);
   assert.equal(resumed.hasPermanentReplyFailure(imageKey), true);
   assert.deepEqual({ forwarded: f.forwarded, downloaded: f.downloaded, sent: f.sent }, before);
+});
+
+test("a peer refresh during an ordinary image upload defers safely without stopping inbound processing or rerunning the model", {
+  timeout: 10_000,
+}, async t => {
+  const f = fixture(t), gateway = f.gateway();
+  t.after(() => gateway.stop());
+  let uploaded!: () => void, release!: () => void;
+  const started = new Promise<void>(resolve => { uploaded = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  f.setUploadHook(async () => { uploaded(); await gate; });
+  try {
+    assert.equal((await gateway.pollOnce(false)).processedCount, 1);
+    await started;
+    f.includeFollowing();
+    assert.equal((await gateway.pollOnce(false)).processedCount, 1);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(f.state.accountSendBudget!.lastInboundKey,
+      f.state.computeDeliveryKey("following-chat", "following-message"));
+    assert.deepEqual(f.sentChats, ["following-chat"], "the peer can reply while the first upload is waiting");
+  } finally { release(); }
+  await new Promise<void>(resolve => setImmediate(resolve));
+  const key = f.state.computeDeliveryKey("chat", "message"), imageKey = `image-reply:${key}`;
+  assert.equal(f.state.outbox[key]?.status, "pending", "a definite context interruption must remain safely recoverable");
+  assert.equal(f.state.replyDeliveries[imageKey].inFlight, false);
+  assert.equal(f.state.replyDeliveries[imageKey].acknowledgedChunks, 0);
+  assert.equal(f.state.accountSendBudget!.remaining, 9, "the interrupted image did not consume the new epoch");
+  f.setUploadHook(undefined);
+  await gateway.flushRepliesOnce();
+  assert.deepEqual(f.sentChats, ["following-chat", "chat", "chat"]);
+  assert.deepEqual(f.sent, [1, 2, 1]);
+  assert.deepEqual(f.forwarded, ["chat", "following-chat"], "recovery must not submit the original model request again");
+  assert.deepEqual(f.replyReads, ["chat"], "recovery obtains the frozen response through GET");
+  assert.deepEqual(f.state.outbox, {});
+  assert.equal(f.state.accountSendBudget!.remaining, 7);
+  assert.equal((await gateway.pollOnce(false)).interrupted, false, "a safe image deferral must not halt the Gateway");
 });
