@@ -34,33 +34,36 @@ test("send charges persist across restart and a failed charge rolls back both co
   assert.throws(() => state.consumeSendBudget(CHAT_ID), LocalSendDeferredError);
   state.recordInboundContext("inbound-one", CHAT_ID, createdAt);
   state.consumeSendBudget(CHAT_ID, "progress");
-  assert.equal(reload().contextBudgets[CHAT_ID].remaining, state.policy.sendBudget - 1);
-  assert.equal(reload().contextBudgets[CHAT_ID].progressSent, 1);
-  const before = structuredClone(state.contextBudgets);
+  assert.equal(reload().accountSendBudget!.remaining, state.policy.sendBudget - 1);
+  assert.equal(reload().accountSendBudget!.progressSent, 1);
+  const before = structuredClone(state.contextWindows);
+  const beforeBudget = structuredClone(state.accountSendBudget);
   const failure = new Error("synthetic charge checkpoint failure");
   const save = t.mock.method(state, "saveState", () => { throw failure; });
   assert.throws(() => state.consumeSendBudget(CHAT_ID, "progress"), error => error === failure);
-  assert.deepEqual(state.contextBudgets, before);
-  assert.deepEqual(reload().contextBudgets, before);
+  assert.deepEqual(state.contextWindows, before);
+  assert.deepEqual(reload().contextWindows, before);
+  assert.deepEqual(state.accountSendBudget, beforeBudget);
+  assert.deepEqual(reload().accountSendBudget, beforeBudget);
   save.mock.restore();
   state.consumeSendBudget(CHAT_ID);
-  assert.equal(reload().contextBudgets[CHAT_ID].remaining, state.policy.sendBudget - 2);
-  assert.equal(reload().contextBudgets[CHAT_ID].progressSent, 1);
+  assert.equal(reload().accountSendBudget!.remaining, state.policy.sendBudget - 2);
+  assert.equal(reload().accountSendBudget!.progressSent, 1);
 });
 
 test("restarting with a lower budget accounts for all sends spent under the old policy", t => {
   for (const alreadySpent of [7, 2]) {
     const { state, reload, createdAt } = fixture(t, { sendBudget: 10 });
     state.recordInboundContext("first", CHAT_ID, createdAt);
-    assert.equal(reload().contextBudgets[CHAT_ID].grantedBudget, 10);
+    assert.equal(reload().accountSendBudget!.grantedBudget, 10);
     for (let count = 0; count < alreadySpent; count++) state.consumeSendBudget(CHAT_ID);
     let restarted = reload({ sendBudget: 5 });
     const allowed = Math.max(0, 5 - alreadySpent);
     for (let count = 0; count < allowed; count++) {
       assert.equal(restarted.canSendToChat(CHAT_ID), true);
       restarted.consumeSendBudget(CHAT_ID);
-      assert.equal(restarted.contextBudgets[CHAT_ID].remaining, allowed - count - 1);
-      assert.equal(restarted.contextBudgets[CHAT_ID].grantedBudget, 5);
+      assert.equal(restarted.accountSendBudget!.remaining, allowed - count - 1);
+      assert.equal(restarted.accountSendBudget!.grantedBudget, 5);
       restarted = reload({ sendBudget: 5 });
     }
     assert.equal(restarted.canSendToChat(CHAT_ID), false);
@@ -75,27 +78,27 @@ test("restarting with a higher budget cannot refill an old window but a new inbo
   state.consumeSendBudget(CHAT_ID);
   state.consumeSendBudget(CHAT_ID);
   let restarted = reload({ sendBudget: 10 });
-  assert.equal(restarted.contextBudgets[CHAT_ID].remaining, 3);
-  assert.equal(restarted.contextBudgets[CHAT_ID].grantedBudget, 5);
+  assert.equal(restarted.accountSendBudget!.remaining, 3);
+  assert.equal(restarted.accountSendBudget!.grantedBudget, 5);
   for (let count = 0; count < 3; count++) {
     restarted.consumeSendBudget(CHAT_ID);
-    assert.equal(restarted.contextBudgets[CHAT_ID].grantedBudget, 5);
+    assert.equal(restarted.accountSendBudget!.grantedBudget, 5);
     restarted = reload({ sendBudget: 10 });
   }
   assert.equal(restarted.canSendToChat(CHAT_ID), false);
   assert.equal(restarted.recordInboundContext("new-window", CHAT_ID, createdAt + 1), true);
-  assert.equal(reload({ sendBudget: 10 }).contextBudgets[CHAT_ID].remaining, 10);
-  assert.equal(reload({ sendBudget: 10 }).contextBudgets[CHAT_ID].grantedBudget, 10);
+  assert.equal(reload({ sendBudget: 10 }).accountSendBudget!.remaining, 10);
+  assert.equal(reload({ sendBudget: 10 }).accountSendBudget!.grantedBudget, 10);
 });
 
 test("invalid persisted initial grants are rejected before restart can authorize sends", t => {
   const { state, reload, statePath, createdAt } = fixture(t);
   state.recordInboundContext("first", CHAT_ID, createdAt);
   const disk = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
-    context_budgets: Record<string, { grantedBudget: unknown }>;
+    account_send_budget: { grantedBudget: unknown };
   };
   for (const invalid of [null, -1, 0, 0.5, 1, 1001, "10"]) {
-    disk.context_budgets[CHAT_ID].grantedBudget = invalid;
+    disk.account_send_budget.grantedBudget = invalid;
     fs.writeFileSync(statePath, JSON.stringify(disk));
     assert.throws(() => reload(), /Failed to load gateway state/);
   }
@@ -106,28 +109,32 @@ test("failed inbound checkpoints roll back budgets, tokens and timestamp waterma
   const failure = new Error("synthetic inbound checkpoint failure");
   let save = t.mock.method(state, "saveState", () => { throw failure; });
   assert.throws(() => state.recordInboundContext("first", CHAT_ID, createdAt, true, "synthetic-first-context"), error => error === failure);
-  assert.deepEqual(state.contextBudgets, {});
+  assert.deepEqual(state.contextWindows, {});
+  assert.equal(state.accountSendBudget, undefined);
   assert.deepEqual(state.inboundWatermarks, {});
   assert.deepEqual(state.contextTokens, {});
   save.mock.restore();
   state.recordInboundContext("first", CHAT_ID, createdAt, true, "synthetic-first-context");
   state.consumeSendBudget(CHAT_ID);
   const before = {
-    budgets: structuredClone(state.contextBudgets),
+    budgets: structuredClone(state.contextWindows),
+    accountBudget: structuredClone(state.accountSendBudget),
     watermarks: structuredClone(state.inboundWatermarks),
     tokens: { ...state.contextTokens },
   };
   save = t.mock.method(state, "saveState", () => { throw failure; });
   assert.throws(() => state.recordInboundContext("second", CHAT_ID, createdAt + 1, true, "synthetic-second-context"), error => error === failure);
-  assert.deepEqual(state.contextBudgets, before.budgets);
+  assert.deepEqual(state.contextWindows, before.budgets);
   assert.deepEqual(state.inboundWatermarks, before.watermarks);
   assert.deepEqual(state.contextTokens, before.tokens);
-  assert.deepEqual(reload().contextBudgets, before.budgets);
+  assert.deepEqual(reload().contextWindows, before.budgets);
+  assert.deepEqual(state.accountSendBudget, before.accountBudget);
+  assert.deepEqual(reload().accountSendBudget, before.accountBudget);
   assert.deepEqual(reload().inboundWatermarks, before.watermarks);
   assert.deepEqual(reload().contextTokens, before.tokens);
   save.mock.restore();
   state.recordInboundContext("second", CHAT_ID, createdAt + 1);
-  assert.equal(reload().contextBudgets[CHAT_ID].lastInboundKey, "second");
+  assert.equal(reload().contextWindows[CHAT_ID].lastInboundKey, "second");
 });
 
 test("changing the account identity or token clears all delivery state", t => {
@@ -141,13 +148,14 @@ test("changing the account identity or token clears all delivery state", t => {
     state.putOutbox(reference());
     fs.writeFileSync(credentialsPath, JSON.stringify(account));
     const changed = reload();
-    assert.deepEqual(changed.contextBudgets, {});
+    assert.deepEqual(changed.contextWindows, {});
+    assert.equal(changed.accountSendBudget, undefined);
     assert.deepEqual(changed.inboundWatermarks, {});
     assert.deepEqual(changed.contextTokens, {});
     assert.deepEqual(changed.outbox, {});
     assert.equal(changed.canSendToChat(CHAT_ID), false);
     changed.saveState();
-    assert.deepEqual(reload().contextBudgets, {});
+    assert.deepEqual(reload().contextWindows, {});
   }
 });
 
@@ -156,16 +164,16 @@ test("only timestamped new inbound messages refresh budget across restart", t =>
   state.recordInboundContext("first", CHAT_ID, createdAt);
   state.consumeSendBudget(CHAT_ID, "progress");
   state.recordInboundContext("first", CHAT_ID, createdAt);
-  assert.equal(state.contextBudgets[CHAT_ID].remaining, state.policy.sendBudget - 1);
+  assert.equal(state.accountSendBudget!.remaining, state.policy.sendBudget - 1);
   const restarted = reload();
   restarted.recordInboundContext("first", CHAT_ID, createdAt);
-  assert.equal(restarted.contextBudgets[CHAT_ID].remaining, state.policy.sendBudget - 1);
+  assert.equal(restarted.accountSendBudget!.remaining, state.policy.sendBudget - 1);
   restarted.recordInboundContext("same-time-new-key", CHAT_ID, createdAt);
-  assert.equal(restarted.contextBudgets[CHAT_ID].remaining, state.policy.sendBudget);
-  assert.equal(restarted.contextBudgets[CHAT_ID].progressSent, 0);
+  assert.equal(restarted.accountSendBudget!.remaining, state.policy.sendBudget);
+  assert.equal(restarted.accountSendBudget!.progressSent, 0);
   restarted.consumeSendBudget(CHAT_ID);
   restarted.recordInboundContext("later", CHAT_ID, createdAt + 1);
-  assert.equal(restarted.contextBudgets[CHAT_ID].remaining, state.policy.sendBudget);
+  assert.equal(restarted.accountSendBudget!.remaining, state.policy.sendBudget);
   assert.deepEqual(reload().inboundWatermarks[CHAT_ID], { createdAtMs: createdAt + 1, keys: ["later"] });
 });
 
@@ -175,31 +183,31 @@ test("missing, invalid, future and older inbound timestamps never refresh quota 
   assert.equal(state.canSendToChat(CHAT_ID), false);
   state.recordInboundContext("valid", CHAT_ID, createdAt);
   state.consumeSendBudget(CHAT_ID);
-  const expected = structuredClone(state.contextBudgets[CHAT_ID]);
+  const expected = structuredClone(state.contextWindows[CHAT_ID]);
   for (const [key, timestamp] of [
     ["missing", undefined], ["nan", NaN], ["infinity", Infinity], ["negative", -1],
     ["fraction", createdAt + 0.5], ["future", Date.now() + 60_000], ["older", createdAt - 1],
   ] as const) {
     assert.doesNotThrow(() => state.recordInboundContext(key, CHAT_ID, timestamp));
-    assert.deepEqual(state.contextBudgets[CHAT_ID], expected);
+    assert.deepEqual(state.contextWindows[CHAT_ID], expected);
     assert.doesNotThrow(() => state.recordProcessedMessageKey(key));
     assert.equal(state.isMessageProcessed(key), true);
   }
-  assert.deepEqual(reload().contextBudgets[CHAT_ID], expected);
+  assert.deepEqual(reload().contextWindows[CHAT_ID], expected);
   assert.deepEqual(reload().inboundWatermarks[CHAT_ID], { createdAtMs: createdAt, keys: ["valid"] });
 });
 
-test("timestamp watermarks prevent replay across restart and isolate chats", t => {
+test("per-recipient timestamp watermarks cannot refill the account budget with an older message in another chat", t => {
   const { state, reload, createdAt } = fixture(t);
   state.recordInboundContext("first", CHAT_ID, createdAt);
   state.consumeSendBudget(CHAT_ID);
   const restarted = reload();
   restarted.recordInboundContext("first", CHAT_ID, createdAt);
   restarted.recordInboundContext("previous-window", CHAT_ID, createdAt - 1);
-  assert.equal(restarted.contextBudgets[CHAT_ID].remaining, state.policy.sendBudget - 1);
+  assert.equal(restarted.accountSendBudget!.remaining, state.policy.sendBudget - 1);
   assert.deepEqual(restarted.inboundWatermarks[CHAT_ID], { createdAtMs: createdAt, keys: ["first"] });
   restarted.recordInboundContext("new-chat", "second-chat", createdAt - 1);
-  assert.equal(restarted.contextBudgets["second-chat"].remaining, state.policy.sendBudget);
+  assert.equal(restarted.accountSendBudget!.remaining, state.policy.sendBudget - 1);
 });
 
 test("small server clock skew grants a usable window while preserving its original timestamp for replay detection", t => {
@@ -210,15 +218,15 @@ test("small server clock skew grants a usable window while preserving its origin
     const serverTime = now + skew;
     assert.equal(state.recordInboundContext("skewed", CHAT_ID, serverTime, true, "synthetic-context"), true);
     assert.equal(state.canSendToChat(CHAT_ID), true);
-    assert.equal(state.contextBudgets[CHAT_ID].refreshedAt, now);
+    assert.equal(state.contextWindows[CHAT_ID].refreshedAt, now);
     assert.deepEqual(reload().inboundWatermarks[CHAT_ID], { createdAtMs: serverTime, keys: ["skewed"] });
     state.consumeSendBudget(CHAT_ID);
     const restarted = reload();
     assert.equal(restarted.recordInboundContext("skewed", CHAT_ID, serverTime, true, "replayed-context"), false);
-    assert.equal(restarted.contextBudgets[CHAT_ID].remaining, state.policy.sendBudget - 1);
+    assert.equal(restarted.accountSendBudget!.remaining, state.policy.sendBudget - 1);
     assert.equal(restarted.contextTokens[CHAT_ID], "synthetic-context");
     assert.equal(restarted.recordInboundContext("beyond-tolerance", CHAT_ID, now + MAX_INBOUND_CLOCK_SKEW_MS + 1), false);
-    assert.equal(restarted.contextBudgets[CHAT_ID].remaining, state.policy.sendBudget - 1);
+    assert.equal(restarted.accountSendBudget!.remaining, state.policy.sendBudget - 1);
   }
 });
 
@@ -229,27 +237,27 @@ test("clock rollback and later replay never refill or extend a window granted fr
   const serverTime = now + MAX_INBOUND_CLOCK_SKEW_MS;
   state.recordInboundContext("skewed", CHAT_ID, serverTime, true, "synthetic-context");
   state.consumeSendBudget(CHAT_ID);
-  const original = structuredClone(state.contextBudgets[CHAT_ID]);
+  const original = structuredClone(state.contextWindows[CHAT_ID]);
   t.mock.timers.setTime(now - 1);
   const restarted = reload();
   assert.equal(restarted.recordInboundContext("skewed", CHAT_ID, serverTime), false);
-  assert.deepEqual(restarted.contextBudgets[CHAT_ID], original);
+  assert.deepEqual(restarted.contextWindows[CHAT_ID], original);
   assert.equal(restarted.canSendToChat(CHAT_ID), false);
   t.mock.timers.setTime(serverTime);
   assert.equal(restarted.recordInboundContext("skewed", CHAT_ID, serverTime), false);
-  assert.deepEqual(restarted.contextBudgets[CHAT_ID], original);
+  assert.deepEqual(restarted.contextWindows[CHAT_ID], original);
   t.mock.timers.setTime(now + state.policy.contextWindowMs - 1);
   assert.equal(restarted.canSendToChat(CHAT_ID), true);
   t.mock.timers.setTime(now + state.policy.contextWindowMs);
   assert.equal(restarted.canSendToChat(CHAT_ID), false);
-  assert.equal(reload().contextBudgets[CHAT_ID].refreshedAt, now);
+  assert.equal(reload().contextWindows[CHAT_ID].refreshedAt, now);
 });
 
 test("baseline inbound checkpoints tokens and watermarks without granting quota or accepting stale tokens", t => {
   const { state, reload, createdAt } = fixture(t);
   assert.equal(state.recordInboundContext("baseline", CHAT_ID, createdAt, false, "synthetic-baseline-token"), true);
   const restarted = reload();
-  assert.equal(restarted.contextBudgets[CHAT_ID], undefined);
+  assert.equal(restarted.contextWindows[CHAT_ID], undefined);
   assert.equal(restarted.contextTokens[CHAT_ID], "synthetic-baseline-token");
   assert.deepEqual(restarted.inboundWatermarks[CHAT_ID], { createdAtMs: createdAt, keys: ["baseline"] });
   assert.equal(restarted.recordInboundContext("baseline", CHAT_ID, createdAt, true, "synthetic-replayed-token"), false);
@@ -259,21 +267,21 @@ test("baseline inbound checkpoints tokens and watermarks without granting quota 
   assert.equal(restarted.recordInboundContext("older", CHAT_ID, createdAt, true, "synthetic-stale-token"), false);
   const persisted = reload();
   assert.equal(persisted.contextTokens[CHAT_ID], "synthetic-active-token");
-  assert.equal(persisted.contextBudgets[CHAT_ID].remaining, state.policy.sendBudget - 1);
+  assert.equal(persisted.accountSendBudget!.remaining, state.policy.sendBudget - 1);
 });
 
 test("watermark-only inbound preserves an existing budget and token across restart", t => {
   const { state, reload, createdAt } = fixture(t);
   state.recordInboundContext("active", CHAT_ID, createdAt, true, "synthetic-active-token");
   state.consumeSendBudget(CHAT_ID, "progress");
-  const previous = structuredClone(state.contextBudgets[CHAT_ID]);
+  const previous = structuredClone(state.contextWindows[CHAT_ID]);
   assert.equal(state.recordInboundContext("no-context-token", CHAT_ID, createdAt + 1, false, undefined), true);
   const restarted = reload();
-  assert.deepEqual(restarted.contextBudgets[CHAT_ID], previous);
+  assert.deepEqual(restarted.contextWindows[CHAT_ID], previous);
   assert.equal(restarted.contextTokens[CHAT_ID], "synthetic-active-token");
   assert.deepEqual(restarted.inboundWatermarks[CHAT_ID], { createdAtMs: createdAt + 1, keys: ["no-context-token"] });
   assert.equal(restarted.recordInboundContext("no-context-token", CHAT_ID, createdAt + 1, true, "synthetic-replayed-token"), false);
-  assert.deepEqual(reload().contextBudgets[CHAT_ID], previous);
+  assert.deepEqual(reload().contextWindows[CHAT_ID], previous);
   assert.equal(reload().contextTokens[CHAT_ID], "synthetic-active-token");
 });
 
@@ -285,15 +293,15 @@ test("a saturated timestamp key set withholds refresh without blocking messages 
   assert.equal(state.inboundWatermarks[CHAT_ID].keys.length, SAME_TIMESTAMP_KEY_LIMIT);
   state.consumeSendBudget(CHAT_ID);
   assert.doesNotThrow(() => state.recordInboundContext("overflow", CHAT_ID, createdAt));
-  assert.equal(state.contextBudgets[CHAT_ID].remaining, state.policy.sendBudget - 1);
+  assert.equal(state.accountSendBudget!.remaining, state.policy.sendBudget - 1);
   assert.equal(state.inboundWatermarks[CHAT_ID].keys.length, SAME_TIMESTAMP_KEY_LIMIT);
   state.recordProcessedMessageKey("overflow");
   assert.equal(state.isMessageProcessed("overflow"), true);
   const restarted = reload();
   restarted.recordInboundContext("overflow-after-restart", CHAT_ID, createdAt);
-  assert.equal(restarted.contextBudgets[CHAT_ID].remaining, state.policy.sendBudget - 1);
+  assert.equal(restarted.accountSendBudget!.remaining, state.policy.sendBudget - 1);
   restarted.recordInboundContext("newer", CHAT_ID, createdAt + 1);
-  assert.equal(restarted.contextBudgets[CHAT_ID].remaining, state.policy.sendBudget);
+  assert.equal(restarted.accountSendBudget!.remaining, state.policy.sendBudget);
   assert.deepEqual(reload().inboundWatermarks[CHAT_ID], { createdAtMs: createdAt + 1, keys: ["newer"] });
 });
 

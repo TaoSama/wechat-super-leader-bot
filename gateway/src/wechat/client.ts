@@ -375,9 +375,13 @@ export class ILinkClient {
     if (attachments.length === 0) return 0;
     const fingerprint = this.stateManager.getLoginFingerprint();
     const contextToken = this.stateManager.contextTokens[chatId];
+    const budgetEpoch = this.stateManager.accountSendBudget?.lastInboundKey;
+    const windowKey = this.stateManager.contextWindows[chatId]?.lastInboundKey;
     if (!fingerprint || !contextToken) throw new Error("WeChat image delivery requires an active account and chat context");
     const shouldContinue = () => fingerprint === this.stateManager.getLoginFingerprint() &&
-      contextToken === this.stateManager.contextTokens[chatId] && (!options.shouldContinue || options.shouldContinue());
+      contextToken === this.stateManager.contextTokens[chatId] &&
+      budgetEpoch === this.stateManager.accountSendBudget?.lastInboundKey &&
+      windowKey === this.stateManager.contextWindows[chatId]?.lastInboundKey && (!options.shouldContinue || options.shouldContinue());
     const timeoutMs = options.timeoutMs ?? REPLY_TIMEOUT_MS;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > NOTIFICATION_REPLY_TIMEOUT_MS) {
       throw new Error("Invalid WeChat image reply timeout budget");
@@ -502,7 +506,9 @@ export class ILinkClient {
           this.consumeSendBudget(chatId, deliveryKey, options?.kind);
           // Persist intent before the network call. A crash or ambiguous response cannot trigger a replay.
           traceEvent("wechat.chunk.start", { chunkIndex: idx, chunkCount: chunks.length });
-          await traceSpan("wechat.chunk.intent.persist", async () => this.stateManager.beginReplyChunk(deliveryKey, idx), { chunkIndex: idx });
+          // Do not yield between charging the ledger, persisting intent and starting the request.
+          this.stateManager.beginReplyChunk(deliveryKey, idx);
+          traceEvent("wechat.chunk.intent.persist", { chunkIndex: idx });
           try {
             await traceSpan("wechat.chunk.send", () => this.sendSingleTextNow(chatId, chunks[idx], deterministicClientId, replySignal), { chunkIndex: idx });
           } catch (error) {

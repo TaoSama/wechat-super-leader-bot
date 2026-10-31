@@ -20,7 +20,8 @@ interface FileDeliveryOptions extends FileReplyOptions {
   metadata: FileUploadMetadata;
   state: Pick<StateManager, "getLoginFingerprint" | "contextTokens" | "prepareReplyDelivery" |
     "beginReplyChunk" | "rejectReplyChunk" | "confirmReplyChunk"> & {
-      contextBudgets?: Record<string, { refreshedAt: number }>;
+      contextWindows?: Record<string, { refreshedAt: number }>;
+      accountSendBudget?: { lastInboundKey: string };
     };
   upload: (bytes: Buffer, metadata: FileUploadMetadata, signal: AbortSignal) => Promise<UploadedFileItem>;
   withChatSend: <T>(send: () => Promise<T>, signal: AbortSignal) => Promise<T>;
@@ -41,7 +42,7 @@ export async function deliverFileReply(options: FileDeliveryOptions): Promise<nu
   }
   options.signal?.throwIfAborted();
   const account = state.getLoginFingerprint(), context = state.contextTokens[chatId];
-  const refreshedAt = state.contextBudgets?.[chatId]?.refreshedAt;
+  const refreshedAt = state.contextWindows?.[chatId]?.refreshedAt, budgetEpoch = state.accountSendBudget?.lastInboundKey;
   if (!account || !context) throw new Error("WeChat file delivery requires an active account and chat context");
   const metadata = { fileName: options.metadata.fileName, byteLength: options.metadata.byteLength,
     sha256: options.metadata.sha256 };
@@ -56,7 +57,8 @@ export async function deliverFileReply(options: FileDeliveryOptions): Promise<nu
   const assertCurrent = () => {
     signal.throwIfAborted();
     if (account !== state.getLoginFingerprint() || context !== state.contextTokens[chatId] ||
-        refreshedAt !== state.contextBudgets?.[chatId]?.refreshedAt || options.shouldContinue && !options.shouldContinue()) {
+        refreshedAt !== state.contextWindows?.[chatId]?.refreshedAt || budgetEpoch !== state.accountSendBudget?.lastInboundKey ||
+        options.shouldContinue && !options.shouldContinue()) {
       throw new Error("WeChat file reply interrupted before completion");
     }
   };

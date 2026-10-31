@@ -144,7 +144,7 @@ for (const newInbound of [false, true]) {
       if (newInbound) {
         assert.equal(item.lastDeferReason, "context_changed");
         assert.equal(item.submittedMessages, 0);
-        assert.equal(durable.contextBudgets.chat.remaining, durable.policy.sendBudget, "stale notification spends no refreshed quota");
+        assert.equal(durable.accountSendBudget!.remaining, durable.policy.sendBudget, "stale notification spends no refreshed quota");
       } else {
         assert.equal(sends[1].context_token, ORIGINAL_CONTEXT);
         assert.deepEqual(sends[1].item_list, [{ type: 1, text_item: { text: NOTICE_TEXT } }]);

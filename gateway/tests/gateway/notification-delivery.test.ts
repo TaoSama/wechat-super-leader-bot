@@ -122,8 +122,8 @@ test("missing prerequisites, expired budgets and stop perform no list/claim/send
     const f = harness(t, { baseline: mode !== "baseline" });
     if (mode === "context") f.state.contextTokens = {};
     if (mode === "account") f.state.account = null;
-    if (mode === "budget") f.state.contextBudgets = {};
-    if (mode === "window") f.state.contextBudgets.chat.refreshedAt = Date.now() - f.state.policy.contextWindowMs;
+    if (mode === "budget") f.state.contextWindows = {};
+    if (mode === "window") f.state.contextWindows.chat.refreshedAt = Date.now() - f.state.policy.contextWindowMs;
     if (mode === "stop") f.gateway.stop();
     assert.deepEqual(await f.gateway.deliverNotificationsOnce(), { accepted: 0, uncertain: 0, skipped: 0 });
     assert.equal(f.requests.length, 0); assert.equal(f.sends.length, 0);
@@ -201,7 +201,7 @@ for (const mode of ["stop", "expiry", "attempt-expiry", "context", "account", "b
     if (mode === "context") delete f.state.contextTokens.chat;
     if (mode === "account") f.state.account!.accountId = "changed";
     if (mode === "baseline") f.state.baselineEstablished = false;
-    if (mode === "budget") f.state.contextBudgets.chat.remaining = 0;
+    if (mode === "budget") f.state.accountSendBudget!.remaining = 0;
     return item;
   };
   const deferred = ["stop", "context", "account", "baseline", "budget"].includes(mode);
@@ -232,7 +232,7 @@ for (const mode of ["stop", "expiry", "attempt-expiry", "context", "account", "b
 });
 test("post-claim exhausted budget defers durably and resumes only after new inbound context", async t => {
   const f = harness(t);
-  f.hooks.claim = item => { f.state.contextBudgets.chat.remaining = 0; return item; };
+  f.hooks.claim = item => { f.state.accountSendBudget!.remaining = 0; return item; };
   assert.equal((await f.gateway.deliverNotificationsOnce()).skipped, 1);
   assert.equal(f.sends.length, 0);
   const state = new StateManager(f.accountPath, f.statePath);

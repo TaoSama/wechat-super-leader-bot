@@ -15,7 +15,7 @@ const IMAGE: ImageAttachment = { id: "image-one", mime: "image/png", size: PNG.l
 
 test("shared admission policy checks every image and yields a 3 -> 2 batch without an unknown send", async t => {
   const f = fixture(t), client = f.client();
-  f.state.contextBudgets.chat.remaining = 3;
+  f.state.accountSendBudget!.remaining = 3;
   const images = [IMAGE, { ...IMAGE, id: "image-two" }];
   client.setBeforeSendCheck((chatId, key) => {
     assert.equal(chatId, "chat"); assert.equal(key, "priority-images");
@@ -25,7 +25,7 @@ test("shared admission policy checks every image and yields a 3 -> 2 batch witho
     deliveryKey: "priority-images", getImageBytes: async () => PNG,
   }), LocalSendDeferredError);
   assert.equal(f.sends.length, 1);
-  assert.equal(f.state.contextBudgets.chat.remaining, 2);
+  assert.equal(f.state.accountSendBudget!.remaining, 2);
   const restarted = new StateManager(f.credentials, f.statePath);
   assert.equal(restarted.replyDeliveries["priority-images"].acknowledgedChunks, 1);
   assert.equal(restarted.replyDeliveries["priority-images"].inFlight, false);

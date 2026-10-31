@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ReplyDeliveryState } from "../types.js";
+import type { ContextBudgetState } from "../runtime/context-policy.js";
 
 const RENEWAL_LEAD_MS = 60 * 60 * 1000;
 const RENEWAL_BUDGET_THRESHOLD = 3;
@@ -8,7 +9,8 @@ function renewalText(sendBudget: number): string {
 }
 
 export interface RenewalState {
-  contextBudgets: Record<string, { refreshedAt: number }>;
+  contextWindows: Record<string, { refreshedAt: number }>;
+  accountSendBudget: ContextBudgetState | undefined;
   contextTokens: Record<string, string>;
   policy: { contextWindowMs: number; sendBudget: number };
   replyDeliveries: Record<string, ReplyDeliveryState>;
@@ -31,6 +33,10 @@ export function renewalDeliveryKey(account: string, chatId: string, refreshedAt:
   return `renewal:${createHash("sha256").update(JSON.stringify([account, chatId, refreshedAt])).digest("hex")}`;
 }
 
+export function accountRenewalDeliveryKey(account: string, budget: Pick<ContextBudgetState, "refreshedAt" | "lastInboundKey">): string {
+  return `renewal:${createHash("sha256").update(JSON.stringify([account, "account-window-v1", budget.refreshedAt, budget.lastInboundKey])).digest("hex")}`;
+}
+
 /** The caller supplies only chats with an active task, future schedule or pending result. */
 export class RenewalNotifier {
   private delivering = false;
@@ -38,7 +44,10 @@ export class RenewalNotifier {
   private active(): boolean { return !this.options.signal?.aborted && (this.options.active?.() ?? true); }
   private eligible(chatId: string): boolean {
     const { state } = this.options;
-    const windowMs = state.policy.contextWindowMs, refreshedAt = state.contextBudgets[chatId]?.refreshedAt;
+    const windowMs = state.policy.contextWindowMs;
+    const accountRefreshedAt = state.accountSendBudget?.refreshedAt, chatRefreshedAt = state.contextWindows[chatId]?.refreshedAt;
+    const refreshedAt = accountRefreshedAt === undefined || chatRefreshedAt === undefined
+      ? undefined : Math.min(accountRefreshedAt, chatRefreshedAt);
     const now = (this.options.now ?? Date.now)();
     if (!this.active() || !Number.isSafeInteger(windowMs) || windowMs <= RENEWAL_LEAD_MS ||
         !Number.isSafeInteger(state.policy.sendBudget) || state.policy.sendBudget <= 0 ||
@@ -53,11 +62,18 @@ export class RenewalNotifier {
     const { state } = this.options;
     const account = state.getLoginFingerprint(), token = state.contextTokens[chatId];
     if (!account || !token || !this.eligible(chatId)) return undefined;
-    const refreshedAt = state.contextBudgets[chatId].refreshedAt, windowMs = state.policy.contextWindowMs;
-    const deliveryKey = renewalDeliveryKey(account, chatId, refreshedAt);
+    const budget = state.accountSendBudget!;
+    const refreshedAt = budget.refreshedAt, lastInboundKey = budget.lastInboundKey, windowMs = state.policy.contextWindowMs;
+    const deliveryKey = accountRenewalDeliveryKey(account, budget);
+    // Preserve a reminder already submitted by the previous per-chat implementation.
+    for (const [legacyChat, window] of Object.entries(state.contextWindows)) {
+      if (window.refreshedAt !== refreshedAt) continue;
+      const legacy = state.replyDeliveries[renewalDeliveryKey(account, legacyChat, refreshedAt)];
+      if (legacy && (legacy.acknowledgedChunks > 0 || legacy.inFlight || legacy.failureReason)) return undefined;
+    }
     const prior = state.replyDeliveries[deliveryKey];
     if (prior && (prior.acknowledgedChunks > 0 || prior.inFlight || prior.failureReason)) return undefined;
-    return { account, token, refreshedAt, windowMs, sendBudget: state.policy.sendBudget, deliveryKey };
+    return { account, token, refreshedAt, lastInboundKey, windowMs, sendBudget: state.policy.sendBudget, deliveryKey };
   }
 
   /** A synchronous policy check for transport admission; no network work while its chat lock is held. */
@@ -79,10 +95,11 @@ export class RenewalNotifier {
           const { state } = this.options;
           const pending = this.pendingDelivery(chatId);
           if (!pending) { outcome.skipped++; continue; }
-          const { account, token, refreshedAt, windowMs, sendBudget, deliveryKey } = pending;
+          const { account, token, refreshedAt, lastInboundKey, windowMs, sendBudget, deliveryKey } = pending;
           // Checked again by the shared send path after queueing and immediately before submission.
           const shouldContinue = () => account === state.getLoginFingerprint() &&
-            token === state.contextTokens[chatId] && refreshedAt === state.contextBudgets[chatId]?.refreshedAt &&
+            token === state.contextTokens[chatId] && refreshedAt === state.accountSendBudget?.refreshedAt &&
+            lastInboundKey === state.accountSendBudget?.lastInboundKey &&
             windowMs === state.policy.contextWindowMs && sendBudget === state.policy.sendBudget && this.eligible(chatId);
           if (!shouldContinue()) { outcome.skipped++; continue; }
           const sent = await this.options.send(chatId, renewalText(sendBudget), {

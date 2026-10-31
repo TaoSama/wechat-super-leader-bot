@@ -18,6 +18,8 @@ export interface GatewaySyncState {
   baseline_in_progress?: boolean;
   baseline_established_at?: string;
   context_budgets?: Record<string, import("./runtime/context-policy.js").ContextBudgetState>;
+  context_windows?: Record<string, import("./runtime/account-context.js").ChatContextWindow>;
+  account_send_budget?: import("./runtime/account-context.js").AccountSendBudget;
   inbound_watermarks?: Record<string, { createdAtMs: number; keys: string[] }>;
   delivery_outbox?: Record<string, DeliveryOutboxItem>;
 }

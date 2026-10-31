@@ -1,5 +1,6 @@
 import type { DeliveryOutboxItem, DeliveryOutboxSource, GatewaySyncState } from "../types.js";
-import { canSend, consumeSend, validateContextPolicy, MAX_SEND_BUDGET, type ContextBudgetState, type ContextPolicy, type SendKind } from "./context-policy.js";
+import { consumeSend, effectiveRemaining, getDeferReason, LocalSendDeferredError, validateContextPolicy, type ContextPolicy, type SendKind } from "./context-policy.js";
+import { restoreAccountContext, type AccountSendBudget, type ChatContextWindow } from "./account-context.js";
 
 const MAX_SAME_TIMESTAMP_KEYS = 256;
 export const MAX_INBOUND_CLOCK_SKEW_MS = 30_000;
@@ -29,7 +30,8 @@ export class OutboxBackpressureError extends Error {
 /** Small references only: full replies remain in the originating reply store. */
 export abstract class DeliveryState {
   public readonly policy: ContextPolicy;
-  public contextBudgets: Record<string, ContextBudgetState> = {};
+  public contextWindows: Record<string, ChatContextWindow> = {};
+  public accountSendBudget: AccountSendBudget | undefined;
   public contextTokens: Record<string, string> = {};
   public inboundWatermarks: Record<string, { createdAtMs: number; keys: string[] }> = {};
   public outbox: Record<string, DeliveryOutboxItem> = {};
@@ -38,17 +40,7 @@ export abstract class DeliveryState {
   constructor(policy: Partial<ContextPolicy> = {}) { this.policy = validateContextPolicy(policy); }
 
   protected restoreDeliveryState(state: GatewaySyncState): void {
-    const budgets = state.context_budgets ?? {};
-    if (!budgets || typeof budgets !== "object" || Array.isArray(budgets)) throw new Error("Invalid context budgets");
-    for (const entry of Object.values(budgets)) {
-      if (!entry || !Number.isSafeInteger(entry.refreshedAt) || entry.refreshedAt < 0 ||
-          !Number.isSafeInteger(entry.remaining) || entry.remaining < 0 ||
-          !Number.isSafeInteger(entry.progressSent) || entry.progressSent < 0 || typeof entry.lastInboundKey !== "string" ||
-          entry.grantedBudget !== undefined && (!Number.isSafeInteger(entry.grantedBudget) || entry.grantedBudget < entry.remaining ||
-            entry.grantedBudget <= 0 || entry.grantedBudget > MAX_SEND_BUDGET)) {
-        throw new Error("Invalid context budget");
-      }
-    }
+    const context = restoreAccountContext(state, this.policy);
     const watermarks = state.inbound_watermarks ?? {};
     if (!watermarks || typeof watermarks !== "object" || Array.isArray(watermarks)) throw new Error("Invalid inbound watermarks");
     for (const item of Object.values(watermarks)) {
@@ -72,7 +64,8 @@ export abstract class DeliveryState {
       item.source = outboxSource(item.source);
       validateEngineAcknowledgement(item);
     }
-    this.contextBudgets = budgets;
+    this.contextWindows = context.windows;
+    this.accountSendBudget = context.budget;
     this.inboundWatermarks = watermarks;
     this.outbox = outbox;
   }
@@ -82,14 +75,22 @@ export abstract class DeliveryState {
     if (!deliveryKey || !chatId || createdAtMs === undefined || !Number.isSafeInteger(createdAtMs) ||
         createdAtMs < 0 || createdAtMs - now > MAX_INBOUND_CLOCK_SKEW_MS || watermark && (createdAtMs < watermark.createdAtMs ||
           createdAtMs === watermark.createdAtMs && (watermark.keys.includes(deliveryKey) || watermark.keys.length >= MAX_SAME_TIMESTAMP_KEYS))) return false;
-    const previous = this.contextBudgets[chatId], previousToken = this.contextTokens[chatId];
+    const previous = this.contextWindows[chatId], previousToken = this.contextTokens[chatId];
+    const previousBudget = this.accountSendBudget;
     this.inboundWatermarks[chatId] = { createdAtMs, keys: watermark?.createdAtMs === createdAtMs ? [...watermark.keys, deliveryKey] : [deliveryKey] };
-    if (grantBudget) this.contextBudgets[chatId] = { refreshedAt: Math.min(createdAtMs, now), remaining: this.policy.sendBudget,
-      grantedBudget: this.policy.sendBudget, progressSent: 0, lastInboundKey: deliveryKey };
+    if (grantBudget) {
+      const refreshedAt = Math.min(createdAtMs, now);
+      this.contextWindows[chatId] = { refreshedAt, lastInboundKey: deliveryKey };
+      if (!previousBudget || createdAtMs >= previousBudget.inboundCreatedAt) {
+        this.accountSendBudget = { refreshedAt, inboundCreatedAt: createdAtMs, remaining: this.policy.sendBudget,
+          grantedBudget: this.policy.sendBudget, progressSent: 0, lastInboundKey: deliveryKey };
+      }
+    }
     if (contextToken) this.contextTokens[chatId] = contextToken;
     try { this.saveState(); }
     catch (error) {
-      if (previous) this.contextBudgets[chatId] = previous; else delete this.contextBudgets[chatId];
+      if (previous) this.contextWindows[chatId] = previous; else delete this.contextWindows[chatId];
+      this.accountSendBudget = previousBudget;
       if (watermark) this.inboundWatermarks[chatId] = watermark; else delete this.inboundWatermarks[chatId];
       if (previousToken !== undefined) this.contextTokens[chatId] = previousToken; else delete this.contextTokens[chatId];
       throw error;
@@ -98,14 +99,27 @@ export abstract class DeliveryState {
   }
 
   public canSendToChat(chatId: string, kind: SendKind = "final"): boolean {
-    return canSend(this.contextBudgets[chatId], this.policy, kind);
+    return this.sendDeferReason(chatId, kind) === undefined;
+  }
+
+  public sendDeferReason(chatId: string, kind: SendKind = "final") {
+    const window = this.contextWindows[chatId], budget = this.accountSendBudget;
+    if (!window || !budget) return "window_expired" as const;
+    return getDeferReason({ ...budget, refreshedAt: window.refreshedAt }, this.policy, kind) ??
+      getDeferReason(budget, this.policy, kind);
+  }
+
+  public remainingSendBudget(chatId: string): number {
+    return this.accountSendBudget && this.canSendToChat(chatId) ? effectiveRemaining(this.accountSendBudget, this.policy) : 0;
   }
 
   public consumeSendBudget(chatId: string, kind: SendKind = "final"): void {
-    const previous = this.contextBudgets[chatId];
-    this.contextBudgets[chatId] = consumeSend(previous, this.policy, kind);
+    const reason = this.sendDeferReason(chatId, kind);
+    if (reason) throw new LocalSendDeferredError(reason);
+    const previous = this.accountSendBudget!;
+    this.accountSendBudget = { ...previous, ...consumeSend(previous, this.policy, kind) };
     try { this.saveState(); }
-    catch (error) { if (previous) this.contextBudgets[chatId] = previous; else delete this.contextBudgets[chatId]; throw error; }
+    catch (error) { this.accountSendBudget = previous; throw error; }
   }
 
   public assertOutboxCapacity(deliveryKey?: string): void {

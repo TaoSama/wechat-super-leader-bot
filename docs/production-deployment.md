@@ -44,6 +44,8 @@ revision 的 `compose.yaml`、生产/Gateway overlay 和 seccomp 策略随发布
 开放的 `.runtime/controller.env`，并准备已有的微信账号文件、状态目录和
 `super-leader-codex` AppArmor profile。工作流不会读取、打印或上传这些运行时密钥。
 
+Gateway 在单实例的持久状态中维护账号共享发送账本；不同任务、业务会话和收件人合计使用 10 次额度。`context_token` 和窗口仍按实际收件人保存，其他收件人的新消息不能续活过期 token。升级会保守迁移旧的分聊天账本，不额外补发额度；下一条有效新入站正常刷新。
+
 Gateway 默认使用 23 小时回复窗口（`GATEWAY_CONTEXT_WINDOW_MS=82800000`）。存在任务或可恢复的待发内容时，仅在最后 1 小时且有效剩余额度为 1 或 2 次时发送续期提醒，剩余至少 3 次不提醒；完整计算和优先级见 [README](../README.md#微信回复窗口与提醒)。发布脚本会把窗口值写入不可变的 release env，并在容器健康检查后读取实际容器环境核对；生产环境文件中的旧值不会覆盖本次发布。回滚使用上一份 release env，恢复上一版本的窗口配置。
 
 同仓库且由仓库所有者创建的非草稿 Pull Request 会由
