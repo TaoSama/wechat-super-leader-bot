@@ -17,6 +17,14 @@ API 错误和等待超时会失败，不会进入生产发布。
 只检出主干上的可信门禁脚本和核实后的合并提交，不执行 PR head 或使用 PR artifacts。
 `workflow_dispatch` 保留为人工恢复入口，且只接受调用时的当前 main revision。
 
+手动入口的 `diagnostic_only` 默认关闭。开启时只运行独立的 diagnostic-only job，
+resolve 和正式发布 job 均跳过。诊断只检出可信 main，再核对调用 revision 仍为当前 main；
+与正式发布共享串行并发组。它使用 `environment: {name: production, deployment: false}`
+读取既有环境 secrets/vars，不创建 deployment 对象、不更新生产部署历史。
+required reviewers 和 wait timer 仍然生效；若环境以后配置 custom protection app，
+GitHub 会因其与 `deployment: false` 不兼容而拒绝运行，不应删除保护规则绕过。
+诊断结果只表示 SSH/SFTP 诊断是否通过，上线仍须核对实际生产 runtime revision。
+
 工作流在一个 Ubuntu runner 中并行构建 Controller 和 Gateway 的 `linux/amd64`
 Docker 归档。两个归档都带有完整 commit SHA 的 `org.opencontainers.image.revision`
 标签，并在传输前检查平台、revision 和 SHA-256。归档通过固定 `known_hosts` 的 SSH
@@ -37,6 +45,65 @@ revision 一致、容器健康、Gateway 窗口正确才跳过重建；上一版
 重启失败都会在对应停止点失败，工作流不会报告部署成功。成功发布后只清理同名仓库中
 已被替代的镜像 tag，并保留当前和上一版本供一次回滚使用；临时归档和脚本会清理。
 生产容器日志仍由现有的 `json-file` 10 MiB × 3 轮转策略限制。
+
+### 传输观测、取消与 stage 归属
+
+`scripts/deploy/transfer-release.mjs` 使用固定的十份发布文件清单。SSH 前将每份文件的
+basename、准确 bytes、SHA-256、总字节数及 revision/run/attempt 直接写入 Actions 日志；
+传输期间约每 15 秒记录远端已收字节、耗时和平均速率。远端文件长度/hash 再次核验通过后，
+重新检查当前 main，随后才调用原来的 release 脚本。20 分钟发布 job 总预算保持不变。
+生产传输的周期采样遇到 DNS、超时、连接建立或连接中断错误时，记录固定分类的
+`transfer_progress_unavailable` 并继续传输及后续采样；归属、完整性、认证等其他错误仍停止。
+诊断模式的采样和生产传完后的最终状态/hash 校验均保持严格失败，不能绕过激活门禁。
+
+每次 stage 为 `.runtime/releases/<revision>-<run>-<attempt>`，原子创建并写入随机归属标记。
+已有同名目录会拒绝覆盖。清理必须匹配归属标记，只移除固定发布文件及 release 脚本生成的
+`release.env.next`；发现额外文件时保留额外文件和标记，并记录清理未确认。
+传输失败、校验失败或最终 main 门禁失败均非零退出，不能进入激活。
+
+SIGINT/SIGTERM 会终止并等待本地 SSH/SCP 进程组，必要时有界升级到 SIGKILL。
+若逃逸后代仍持有输出管道，停止失败会受控返回 `process_stop`；保留未确认的子进程记录，
+不删除远端 stage，也不声称清理完成。
+Actions 的传输 step 使用 `exec node` 替换入口 bash，因此发送到入口 PID 的信号直接
+交给 Node。Node 在唯一的自有临时目录中以 0600 创建凭证文件，等待传输停止及远端清理
+结束后才删除；入口 shell 不使用可能提前删 key 的 EXIT trap。构建后版本检查单独执行，
+取消该检查后不会启动后续传输 step。
+进入远端激活后，本地 SSH 退出或断链不能证明远端 release/Compose 已停止；只有 SSH
+明确返回成功、确认远端命令已完成后，wrapper 才可继续清理。激活中的取消/断链会保留
+stage，记录 `activation_completion_unknown`，交由原任务核查。初始清理状态始终为
+`unconfirmed`，只有实际完成归属校验和删除后才记录 `confirmed`。
+SIGKILL、runner 丢失或网络不可达可能阻止日志和清理；不能据此声称已经清理。
+普通清理最多 8 秒，其中连接最多 5 秒；诊断会按剩余期限缩短连接/执行预算，另外保留
+2 秒进程终止宽限。剩余时间不足以完成最小连接和执行时直接记录清理未确认。
+
+工具 stdout/stderr 仅在有大小上限的内部缓冲中处理，日志只输出固定 schema 和错误分类，
+不回显连接目标、命令、私钥、token 或原始 SSH 错误。保留现有严格 host key 校验。
+事后 artifact 上传包含 cancelled 情况，但只是 best effort；关键证据依赖运行中日志。
+
+### Diagnostic-only 验证边界
+
+诊断只生成一份 1 MiB 成功样本和一份 256 KiB 限速取消样本，整个运行的文件 payload
+合计 1.25 MiB，硬上限 2 MiB，无重传重试（SSH/TCP 协议开销不计入文件 payload）。
+只进行一组成功与取消验证：成功样本核对长度/hash，取消样本须实际部分写入后停止，
+并检查子进程结束、写入停止及自有 stage 清理。传输、验证和取消共用 60 秒期限，
+在第 50 秒中止业务操作，为有界停止及清理预留时间。未确认的情况均失败退出。
+诊断不会读取生产业务数据，也不调用 Docker load、Compose 或 remote-release。
+它不能证明完整镜像传输已恢复吞吐，更不能充当生产发布验收。
+
+不连接生产的可复现验证：
+
+```sh
+node --test tests/unit/deploy/transfer.test.mjs tests/unit/deploy/production-cd.test.mjs
+node tests/integration/deploy/release-transfer.mjs --run
+```
+
+后者创建独立 Docker SSH/SFTP 服务，使用合成密钥和文件，覆盖两种取消信号、
+Actions 实际 bash wrapper 的入口信号、凭证在远端清理完成后才移除、远端继续激活时
+保留 stage、真实认证失败、完整性失败、外来 stage 和额外文件保护；结束时
+清理自建容器、镜像及临时文件，不创建持久 volume。Verify integration-core 会运行它。
+
+镜像回滚仍由原 release 脚本执行：恢复旧镜像选择不等于撤销本轮 staged Compose 路由配置。
+本改动不改变路由、业务代码、Controller runtime 根目录或任何生产 volume。
 
 VPS 的 `DEPLOY_PATH` 只需要提供现有的 Compose 项目目录；每次发布会把与镜像相同
 revision 的 `compose.yaml`、生产/Gateway overlay 和 seccomp 策略随发布包传输并校验，

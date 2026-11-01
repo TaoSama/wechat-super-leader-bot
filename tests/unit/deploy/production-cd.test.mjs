@@ -5,6 +5,8 @@ import test from 'node:test';
 const workflow = readFileSync(new URL('../../../.github/workflows/deploy-production.yml', import.meta.url), 'utf8');
 const releaseScript = readFileSync(new URL('../../../scripts/deploy/remote-release.sh', import.meta.url), 'utf8');
 const overlay = readFileSync(new URL('../../../deploy/compose.release.yaml', import.meta.url), 'utf8');
+const transfer = readFileSync(new URL('../../../scripts/deploy/transfer-release.mjs', import.meta.url), 'utf8');
+const files = readFileSync(new URL('../../../scripts/deploy/transfer-files.mjs', import.meta.url), 'utf8');
 
 test('production CD gates Verify completions before deploying immutable merged revisions', () => {
   assert.match(workflow, /workflow_run:\s*\n\s*workflows: \[Verify\]\s*\n\s*types: \[completed\]/);
@@ -14,7 +16,9 @@ test('production CD gates Verify completions before deploying immutable merged r
   assert.match(workflow, /needs: resolve/);
   assert.match(workflow, /REVISION: \$\{\{ needs\.resolve\.outputs\.revision \}\}/);
   assert.match(workflow, /ref: \$\{\{ env\.REVISION \}\}/);
-  assert.equal((workflow.match(/--assert-current "\$REVISION"/g) ?? []).length, 3);
+  const production = workflow.split('\n  diagnostic-only:')[0];
+  assert.equal((production.match(/--assert-current "\$REVISION"/g) ?? []).length, 2);
+  assert.match(transfer, /'--assert-current', config.revision/);
   assert.doesNotMatch(workflow, /ref:.*workflow_run\.head_sha/);
   assert.doesNotMatch(workflow, /download-artifact/);
   assert.match(workflow, /pull_request_target:\s*\n\s*types: \[closed\]/);
@@ -32,14 +36,29 @@ test('production CD gates Verify completions before deploying immutable merged r
   assert.match(workflow, /sha256sum controller\.tar gateway\.tar/);
   assert.match(workflow, /compose\.yaml compose\.release\.yaml compose\.production\.yaml compose\.gateway\.yaml codex-seccomp\.json/);
   assert.match(workflow, /cp scripts\/deploy\/remote-release\.sh "\$release_root\/remote-release\.sh"/);
-  assert.match(workflow, /"\$release_root\/compose\.release\.yaml" "\$release_root\/compose\.yaml"/);
-  assert.match(workflow, /scp_opts=\(\-i "\$key_file" \-P "\$deploy_port"/);
-  assert.match(workflow, /scp -q "\$\{scp_opts\[@\]\}"/);
-  assert.doesNotMatch(workflow, /scp -q "\$\{ssh_opts\[@\]\}"/);
-  assert.match(workflow, /--compose-base/);
-  assert.match(workflow, /--seccomp-policy/);
-  assert.match(workflow, /StrictHostKeyChecking=yes/);
-  assert.match(workflow, /UserKnownHostsFile=/);
+  assert.match(workflow, /exec node scripts\/deploy\/transfer-release.mjs[\s\S]*--release-root/);
+  assert.match(workflow, /--credentials-root "\$RUNNER_TEMP"/);
+  assert.doesNotMatch(workflow, /trap .*key_file/);
+  assert.match(files, /'compose.release.yaml', 'compose.yaml', 'compose.production.yaml', 'compose.gateway.yaml'/);
+  assert.match(transfer, /--compose-base/);
+  assert.match(transfer, /--seccomp-policy/);
+  assert.match(transfer, /StrictHostKeyChecking=yes/);
+  assert.match(transfer, /UserKnownHostsFile=/);
+  assert.doesNotMatch(transfer, /\['-q'/);
+});
+
+test('diagnostic-only is manual trusted-main, mutually exclusive with deploy, and creates no deployment record', () => {
+  assert.match(workflow, /workflow_dispatch:[\s\S]*diagnostic_only:[\s\S]*type: boolean[\s\S]*default: false/);
+  assert.match(workflow, /github.ref == 'refs\/heads\/main' && !inputs.diagnostic_only/);
+  const diagnostic = workflow.split('\n  diagnostic-only:')[1];
+  assert.match(diagnostic, /github.event_name == 'workflow_dispatch' && github.ref == 'refs\/heads\/main' && inputs.diagnostic_only/);
+  assert.match(diagnostic, /environment:\s*\n\s+name: production\s*\n\s+deployment: false/);
+  assert.match(diagnostic, /ref: refs\/heads\/main/);
+  assert.match(diagnostic, /transfer-release.mjs --diagnostic/);
+  assert.doesNotMatch(diagnostic, /docker load|docker compose|remote-release.sh|--release-root/);
+  assert.match(diagnostic, /does not establish a deployed runtime revision/);
+  assert.match(workflow, /timeout-minutes: 20/);
+  assert.match(workflow, /failure\(\) \|\| cancelled\(\)/);
 });
 
 test('remote release verifies before switching and keeps a bounded rollback path', () => {

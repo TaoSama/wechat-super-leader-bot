@@ -8,6 +8,11 @@ on:
   pull_request_target:
     types: [closed]
   workflow_dispatch:
+    inputs:
+      diagnostic_only:
+        description: 'Diagnostic-only bounded SSH/SFTP probe; never activate production'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -18,7 +23,7 @@ jobs:
   resolve:
     name: Resolve verified merged revision
     if: >-
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && !inputs.diagnostic_only) ||
       (github.event_name == 'pull_request_target' && github.event.pull_request.merged == true) ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'pull_request')
@@ -61,6 +66,10 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ env.REVISION }}
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '24'
 
       - name: Reject a superseded queued release
         env:
@@ -157,6 +166,11 @@ jobs:
           printf 'REVISION=%s\nCONTROLLER_IMAGE=%s\nGATEWAY_IMAGE=%s\n' "$REVISION" "$CONTROLLER_IMAGE" "$GATEWAY_IMAGE" \
             > "$release_root/manifest.env"
 
+      - name: Reject a superseded built release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/deploy/resolve-revision.mjs --assert-current "$REVISION"
+
       - name: Transfer and activate the release on the VPS
         env:
           GH_TOKEN: ${{ github.token }}
@@ -168,50 +182,57 @@ jobs:
           DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
           DEPLOY_ENV_FILE: ${{ vars.DEPLOY_ENV_FILE }}
         run: |
-          set -Eeuo pipefail
-          node scripts/deploy/resolve-revision.mjs --assert-current "$REVISION"
-          release_root="$RUNNER_TEMP/super-leader-release-$REVISION"
-          deploy_port="${DEPLOY_PORT:-22}"
-          env_file="${DEPLOY_ENV_FILE:-.runtime/controller.env}"
-          key_file="$RUNNER_TEMP/deploy-key"
-          known_hosts_file="$RUNNER_TEMP/deploy-known-hosts"
-          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > "$key_file"
-          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$known_hosts_file"
-          chmod 600 "$key_file" "$known_hosts_file"
-          ssh_opts=(-i "$key_file" -p "$deploy_port" -o BatchMode=yes -o StrictHostKeyChecking=yes
-            -o UserKnownHostsFile="$known_hosts_file" -o LogLevel=ERROR)
-          scp_opts=(-i "$key_file" -P "$deploy_port" -o BatchMode=yes -o StrictHostKeyChecking=yes
-            -o UserKnownHostsFile="$known_hosts_file" -o LogLevel=ERROR)
-          target="$DEPLOY_USER@$DEPLOY_HOST"
-          remote_stage="$DEPLOY_PATH/.runtime/releases/$REVISION"
-          ssh "${ssh_opts[@]}" "$target" "umask 077; mkdir -p '$remote_stage'"
-          scp -q "${scp_opts[@]}" \
-            "$release_root/controller.tar" "$release_root/gateway.tar" "$release_root/release.sha256" \
-            "$release_root/manifest.env" "$release_root/compose.release.yaml" "$release_root/compose.yaml" \
-            "$release_root/compose.production.yaml" "$release_root/compose.gateway.yaml" \
-            "$release_root/codex-seccomp.json" "$release_root/remote-release.sh" \
-            "$target:$remote_stage/"
-          ssh "${ssh_opts[@]}" "$target" "chmod 700 '$remote_stage/remote-release.sh'"
-
-          printf -v remote_command '%q ' \
-            "$remote_stage/remote-release.sh" \
-            --release-dir "$DEPLOY_PATH" --stage-dir "$remote_stage" --revision "$REVISION" \
-            --controller-image "$CONTROLLER_IMAGE" --gateway-image "$GATEWAY_IMAGE" \
-            --controller-archive "$remote_stage/controller.tar" --gateway-archive "$remote_stage/gateway.tar" \
-            --checksums "$remote_stage/release.sha256" --compose-overlay "$remote_stage/compose.release.yaml" \
-            --compose-base "$remote_stage/compose.yaml" \
-            --compose-production "$remote_stage/compose.production.yaml" \
-            --compose-gateway "$remote_stage/compose.gateway.yaml" \
-            --seccomp-policy "$remote_stage/codex-seccomp.json" \
-            --env-file "$env_file"
-          node scripts/deploy/resolve-revision.mjs --assert-current "$REVISION"
-          ssh "${ssh_opts[@]}" "$target" "$remote_command"
+          exec node scripts/deploy/transfer-release.mjs \
+            --release-root "$RUNNER_TEMP/super-leader-release-$REVISION" --credentials-root "$RUNNER_TEMP"
 
       - name: Retain bounded build diagnostics on failure
-        if: ${{ failure() }}
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: production-deploy-diagnostics-${{ env.REVISION }}
           path: ${{ runner.temp }}/super-leader-release-${{ env.REVISION }}/*.log
           if-no-files-found: warn
           retention-days: 7
+
+  diagnostic-only:
+    name: Diagnostic-only bounded SSH/SFTP transfer (no production activation)
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.diagnostic_only
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    concurrency:
+      group: deploy-production
+      queue: max
+      cancel-in-progress: false
+    environment:
+      name: production
+      deployment: false
+    steps:
+      - name: Check out trusted main for diagnostic-only
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          ref: refs/heads/main
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '24'
+      - name: Reject a superseded diagnostic-only revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ github.sha }}
+        run: node scripts/deploy/resolve-revision.mjs --assert-current "$REVISION"
+      - name: Diagnostic-only transfer and cancellation; payload at most 2 MiB, operations at most 60 seconds
+        env:
+          REVISION: ${{ github.sha }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+        run: |
+          exec node scripts/deploy/transfer-release.mjs --diagnostic --credentials-root "$RUNNER_TEMP"
+      - name: Diagnostic-only summary (never deployment acceptance)
+        if: ${{ always() }}
+        run: |
+          printf '%s\n' 'Diagnostic-only SSH/SFTP probe: ${{ job.status }}.' \
+            'No production activation. This result does not establish a deployed runtime revision.' >> "$GITHUB_STEP_SUMMARY"
