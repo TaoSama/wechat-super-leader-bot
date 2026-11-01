@@ -1,7 +1,10 @@
-# The release workflow supplies immutable image names for the existing Compose
-# services. Runtime volumes, limits and health checks stay in the base overlays.
+# Production releases run both services on the same private Compose network.
+# Keep public artifact origins separate from the internal Controller transport.
 services:
   controller:
     image: ${CONTROLLER_IMAGE:?set CONTROLLER_IMAGE}
   gateway:
     image: ${GATEWAY_IMAGE:?set GATEWAY_IMAGE}
+    environment:
+      CONTROLLER_URL: http://controller:8790
+      ALLOW_INSECURE_CONTROLLER: "true"

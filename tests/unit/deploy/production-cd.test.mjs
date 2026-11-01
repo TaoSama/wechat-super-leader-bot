@@ -63,7 +63,7 @@ test('remote release verifies before switching and keeps a bounded rollback path
   assert.doesNotMatch(releaseScript, /compose.*\bdown\b/);
 });
 
-test('release overlay only selects images and cannot introduce volumes', () => {
+test('release overlay selects same-stack images and transport without introducing volumes', () => {
   assert.match(overlay, /controller:\s*\n\s+image: \$\{CONTROLLER_IMAGE:\?set CONTROLLER_IMAGE\}/);
   assert.match(overlay, /gateway:\s*\n\s+image: \$\{GATEWAY_IMAGE:\?set GATEWAY_IMAGE\}/);
   assert.doesNotMatch(overlay.replace(/^\s*#.*$/gm, ''), /volume|volumes|ports|privileged/);
