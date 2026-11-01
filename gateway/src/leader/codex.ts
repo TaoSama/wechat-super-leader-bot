@@ -15,7 +15,7 @@ import { ReplyEngineBackpressureError, ReplyEngineConflictError, ReplyEngineUnav
   type GatewayReplyEngine, type ControllerToolClient, type ReplyEngineTurnOptions } from "./contracts.js";
 import { ControlMcp, CONTROL_TOKEN_ENV, hasConsoleCredential, redactConsoleCredentials } from "./control-mcp.js";
 import { DEFAULT_CONTROLLER_TIMEOUT_MS, DEFAULT_CONTROLLER_MAX_RETRIES } from "../runtime/budgets.js";
-import { AUTO_COMPACT_TOKEN_LIMIT, HEADLESS_CODEX_CONFIG, HEADLESS_SKILLS_ROOT } from "./headless-config.js";
+import { HEADLESS_CODEX_CONFIG, HEADLESS_SKILLS_ROOT } from "./headless-config.js";
 import { traceEvent, traceSpan } from "../runtime/telemetry.js";
 import { NativeEventTrace, nativeId } from "./native-events.js";
 import { buildLeaderPrompt as prompt } from "./prompt.js";
@@ -27,9 +27,6 @@ const DEFAULT_TIMEOUT_MS = 300000;
 const MAX_TIMEOUT_MS = 315000;
 // Upstream exec shutdown allows a 35s acknowledgement budget, including analytics flush.
 const DEFAULT_CLEANUP_TIMEOUT_MS = 40_000;
-// Give native Compact room to preserve history; rotate only when the native
-// runtime still finishes above the same threshold or cannot compact.
-export const MAX_RESUMED_INPUT_TOKENS = AUTO_COMPACT_TOKEN_LIMIT;
 const STOP_ABORT_GRACE_MS = 2_000;
 const UNCERTAIN_REPLY = "上次处理这条消息的结果尚不明确，为避免重复执行，我没有自动重跑。请查询任务状态后再决定下一步。";
 const FAILED_REPLY = "这次处理没有正常完成，执行结果待核实。我保留了会话和记忆，请先查询任务状态，避免重复执行。";
@@ -600,16 +597,10 @@ export class CodexReplyEngine implements GatewayReplyEngine {
           completed = true;
           const inputTokens = event.usage.input_tokens;
           try {
-            await traceSpan("codex.thread.usage", async () => workspace.recordThreadUsage(
-              inputTokens, inputTokens > MAX_RESUMED_INPUT_TOKENS), { inputTokens,
-                rotateBeforeNext: inputTokens > MAX_RESUMED_INPUT_TOKENS });
-            if (inputTokens > MAX_RESUMED_INPUT_TOKENS) traceEvent("codex.thread.rotate.scheduled", {
-              inputTokens, threshold: MAX_RESUMED_INPUT_TOKENS,
-            });
+            await traceSpan("codex.thread.usage", async () => workspace.recordThreadUsage(inputTokens), { inputTokens });
           } catch {
-            // Usage persistence is an optimization hint. Preserve the
-            // completed reply while recording that rotation could not be saved.
-            traceEvent("codex.thread.rotate.failed", { inputTokens });
+            // Usage metadata must not discard a completed reply or its thread.
+            traceEvent("codex.thread.usage.failed", { inputTokens });
           }
         }
         if (event.type === "turn.failed" || event.type === "error") failed = true;

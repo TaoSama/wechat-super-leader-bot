@@ -71,7 +71,7 @@ describe("Leader console link integration", () => {
     const f = fixture([], issuer);
     const inventory = vi.spyOn(f.hub, "getAllSessions");
     const reply = await f.create().handle(chatId, messageId, text);
-    expect(reply.text).toBe(`控制台\n\n控制台登录链接（1小时内有效，仅可使用一次，打开后地址栏会自动隐藏登录凭证）：\n${url}`);
+    expect(reply.text).toBe(`控制台\n\n控制台登录链接（签发后1小时内可重复登录，打开后地址栏会自动隐藏登录凭证）：\n${url}`);
     expect(f.model.calls).toEqual([]);
     expect(issuer).toHaveBeenCalledExactlyOnceWith(requestId);
     expect(inventory).not.toHaveBeenCalled();
@@ -81,7 +81,7 @@ describe("Leader console link integration", () => {
     const history = state!.data.history as Array<{ role: string; content: string }>;
     expect(history).toHaveLength(2);
     expect(history[0]).toMatchObject({ role: "user", content: text });
-    expect(history[1].content).toContain("[一次性控制台登录链接已生成，有效期1小时]");
+    expect(history[1].content).toContain("[控制台登录链接已生成，签发后1小时内可重复登录]");
     expect(JSON.stringify(history)).not.toContain("direct-private-token");
     expect(JSON.stringify(history)).not.toContain("https://leader.taoai.site");
     expect(state!.data.receipts).toEqual([expect.objectContaining({ messageId, text: reply.text })]);
@@ -115,7 +115,7 @@ describe("Leader console link integration", () => {
     expect(f.model.calls).toEqual([]);
   });
 
-  it("issues one-time link, appends URL with updated notice, and keeps model trace and history completely sanitized", async () => {
+  it("issues reusable link, appends URL with updated notice, and keeps model trace and history completely sanitized", async () => {
     const issuer = vi.fn(async (requestId: string) => ({
       url: `https://leader.taoai.site/#login=secret-otp-token-for-${requestId}`,
       expiresAt: "2026-10-11T12:00:00.000Z",
@@ -128,7 +128,7 @@ describe("Leader console link integration", () => {
     // 1. 用户收到的回复包含真实链接，且文案为“打开后地址栏会自动隐藏登录凭证”
     expect(reply.text).toContain("已为你生成控制台链接");
     expect(reply.text).toContain("https://leader.taoai.site/#login=secret-otp-token-for-console_link_");
-    expect(reply.text).toContain("1小时内有效，仅可使用一次，打开后地址栏会自动隐藏登录凭证");
+    expect(reply.text).toContain("签发后1小时内可重复登录，打开后地址栏会自动隐藏登录凭证");
     expect(issuer).toHaveBeenCalledTimes(1);
     const invokedRequestId = issuer.mock.calls[0][0];
     expect(invokedRequestId).toMatch(/^console_link_[0-9a-f]{64}$/);
@@ -151,7 +151,7 @@ describe("Leader console link integration", () => {
     expect(state).not.toBeNull();
     const history = state!.data.history as Array<{ role: string; content: string }>;
     expect(history.length).toBe(2);
-    expect(history[1].content).toContain("[一次性控制台登录链接已生成，有效期1小时]");
+    expect(history[1].content).toContain("[控制台登录链接已生成，签发后1小时内可重复登录]");
     expect(history[1].content).not.toContain("secret-otp-token");
     expect(history[1].content).not.toContain("https://leader.taoai.site");
 

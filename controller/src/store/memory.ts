@@ -576,7 +576,7 @@ export class MemoryStore implements IStore {
     const normalizedSession = normalizeConsoleSessionRecord(session);
     const validNow = validateIsoTimestamp(now, "now");
     if (validTokenHash === normalizedSession.tokenHash) {
-      throw new Error("Session tokenHash must be distinct from one-time link tokenHash");
+      throw new Error("Session tokenHash must be distinct from link tokenHash");
     }
     if (Date.parse(normalizedSession.expiresAt) <= validNow.ms) {
       throw new Error("Invalid ConsoleSessionRecord: session expiresAt must be greater than now");
@@ -586,14 +586,11 @@ export class MemoryStore implements IStore {
     if (!existingLink) {
       return false;
     }
-    if (existingLink.consumedAt !== undefined) {
-      return false;
-    }
     if (Date.parse(existingLink.expiresAt) <= validNow.ms) {
       return false;
     }
 
-    existingLink.consumedAt = validNow.iso;
+    existingLink.consumedAt ??= validNow.iso;
     this.consoleSessions.set(
       normalizedSession.tokenHash,
       cloneConsoleSessionRecord(normalizedSession)

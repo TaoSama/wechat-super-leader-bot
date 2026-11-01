@@ -153,10 +153,39 @@ async function main() {
 
       const consumeResults = await Promise.all([
         store1.consumeConsoleLink(tokenHash, sessionRecord, new Date(nowMs).toISOString()),
-        store2.consumeConsoleLink(tokenHash, sessionRecord, new Date(nowMs).toISOString()),
+        store2.consumeConsoleLink(tokenHash, {
+          ...sessionRecord,
+          tokenHash: createHash('sha256').update(randomBytes(32)).digest('hex'),
+        }, new Date(nowMs).toISOString()),
       ]);
       const successes = consumeResults.filter(Boolean);
-      assert.equal(successes.length, 1, 'Dual-store concurrent link consumption must yield exactly 1 winner');
+      assert.equal(successes.length, 2, 'Both concurrent logins must succeed with independent session tokens');
+
+      const laterLoginAt = new Date(nowMs + 60_000).toISOString();
+      assert.equal(await store2.consumeConsoleLink(tokenHash, {
+        ...sessionRecord,
+        tokenHash: createHash('sha256').update(randomBytes(32)).digest('hex'),
+        createdAt: laterLoginAt,
+      }, laterLoginAt), true, 'An already-used link must support subsequent login');
+      const storedLink = await store2.createConsoleLinkIfAbsent({
+        tokenHash,
+        createdAt: laterLoginAt,
+        expiresAt: new Date(nowMs + 7200_000).toISOString(),
+      });
+      assert.deepEqual(storedLink, { tokenHash, createdAt, expiresAt, consumedAt: createdAt },
+        'Repeated login and issuance must preserve the original expiry and first-login audit');
+
+      for (const offset of [0, 1]) {
+        const expiredLoginAt = new Date(Date.parse(expiresAt) + offset).toISOString();
+        const rejectedSessionHash = createHash('sha256').update(randomBytes(32)).digest('hex');
+        assert.equal(await store2.consumeConsoleLink(tokenHash, {
+          tokenHash: rejectedSessionHash,
+          createdAt: expiredLoginAt,
+          expiresAt: new Date(Date.parse(expiredLoginAt) + 3600_000).toISOString(),
+        }, expiredLoginAt), false, 'Login at or after original expiry must fail');
+        assert.equal(await store1.getConsoleSession(rejectedSessionHash, expiredLoginAt), null,
+          'Expired links must never create sessions');
+      }
 
       const activeSession = await store1.getConsoleSession(sessionHash, new Date(nowMs).toISOString());
       assert(activeSession, 'Active session must be retrieved from database');
@@ -180,13 +209,18 @@ async function main() {
         expiresAt: new Date(nowMs + 3600_000).toISOString(),
       };
 
-      let conflictErrorThrown = false;
-      try {
-        await store1.consumeConsoleLink(rollbackTokenHash, conflictingSessionRecord, new Date(nowMs).toISOString());
-      } catch {
-        conflictErrorThrown = true;
-      }
-      assert.equal(conflictErrorThrown, true, 'Consuming link with duplicate session tokenHash must throw on insert');
+      await assert.rejects(
+        store1.consumeConsoleLink(rollbackTokenHash, conflictingSessionRecord, new Date(nowMs).toISOString()),
+        error => error.code === '23505',
+        'Creating a duplicate session tokenHash must reject with a unique violation'
+      );
+      await assert.rejects(
+        store2.consumeConsoleLink(tokenHash, conflictingSessionRecord, laterLoginAt),
+        error => error.code === '23505',
+        'A duplicate session token on repeat login must also reject'
+      );
+      assert.deepEqual(await store1.createConsoleLinkIfAbsent({ tokenHash, createdAt, expiresAt }), storedLink,
+        'Failed repeat login must preserve the existing first-login audit and original expiry');
 
       const checkUnconsumed = docker([
         'exec', containerName, 'psql', '-U', 'leader', '-d', 'leader', '-t', '-A',
@@ -238,10 +272,17 @@ async function main() {
       const token = issued.url.split('#login=')[1];
       assert(token && token.length > 0);
 
-      simulatedTime += 3600_000 + 1000;
+      simulatedTime = Date.parse(issued.expiresAt) - 1;
+      assert(await authService.exchangeToken(token), 'Link must permit login immediately before expiry');
+      assert(await authService.exchangeToken(token), 'Repeated login must succeed before the original expiry');
+      assert.deepEqual(await authService.issueLink('expire-req-1'), issued,
+        'Request replay must return the original URL and expiry after login');
 
+      simulatedTime = Date.parse(issued.expiresAt);
       const exchanged = await authService.exchangeToken(token);
-      assert.equal(exchanged, null, 'Exchanging token after 1 hour must fail (return null)');
+      assert.equal(exchanged, null, 'Exchanging token exactly at 1 hour must fail (return null)');
+      await assert.rejects(authService.issueLink('expire-req-1'), error => error.statusCode === 410,
+        'Expired requestId must not revive or extend its original link');
 
       const issued2 = await authService.issueLink('valid-req-2');
       const token2 = issued2.url.split('#login=')[1];
@@ -311,7 +352,7 @@ async function main() {
     const tokenBeta = issueResDifferent.body.url.split('#login=')[1];
     assert.notEqual(tokenAlpha, tokenBeta, 'Different requestId must produce distinct links');
 
-    console.log('[5/8] Testing concurrent token exchange (at least 8 parallel requests -> exactly 1 succeeds)');
+    console.log('[5/8] Testing concurrent token exchange (8 parallel requests create 8 independent sessions)');
     const exchangeAttempts = await Promise.all(
       Array.from({ length: 8 }, () =>
         postJson('/auth/exchange', { token: tokenAlpha }, { origin: publicUrl })
@@ -319,9 +360,12 @@ async function main() {
     );
 
     const successExchanges = exchangeAttempts.filter((res) => res.status === 200);
-    const failedExchanges = exchangeAttempts.filter((res) => res.status === 401);
-    assert.equal(successExchanges.length, 1, 'Exactly one concurrent exchange must succeed');
-    assert.equal(failedExchanges.length, 7, 'All other concurrent exchanges must return 401');
+    assert.equal(successExchanges.length, exchangeAttempts.length, 'Every concurrent login must succeed');
+    const sessionCookies = successExchanges.map(res => res.headers.get('set-cookie').split(';')[0]);
+    assert.equal(new Set(sessionCookies).size, exchangeAttempts.length,
+      'Every concurrent login must receive an independent session token');
+    const restoredSessions = await Promise.all(sessionCookies.map(cookie => getJson('/auth/session', { cookie })));
+    assert(restoredSessions.every(res => res.status === 200), 'Every concurrent session must be usable');
 
     const successRes = successExchanges[0];
     assert.equal(successRes.body.authenticated, true);
@@ -337,7 +381,12 @@ async function main() {
     const sessionCookie = setCookie.split(';')[0];
 
     const replayRes = await postJson('/auth/exchange', { token: tokenAlpha }, { origin: publicUrl });
-    assert.equal(replayRes.status, 401, 'Replaying consumed token must fail with 401');
+    assert.equal(replayRes.status, 200, 'Repeated login must succeed within the original validity period');
+    assert.notEqual(replayRes.headers.get('set-cookie').split(';')[0], sessionCookie);
+
+    const tamperedToken = `${tokenAlpha[0] === 'A' ? 'B' : 'A'}${tokenAlpha.slice(1)}`;
+    const tamperedRes = await postJson('/auth/exchange', { token: tamperedToken }, { origin: publicUrl });
+    assert.equal(tamperedRes.status, 401, 'Tampered token must be rejected');
 
     console.log('[6/8] Testing /auth/session, /auth/logout, and cookie vs bearer permissions');
     const sessionRes = await getJson('/auth/session', { cookie: sessionCookie });
@@ -368,7 +417,7 @@ async function main() {
     );
     assert.equal(issueLinkWithCookie.status, 401, 'POST /v1/console-links with cookie must be rejected (401)');
 
-    console.log('[7/8] Testing Controller restart persistence (consumed link remains consumed, session valid)');
+    console.log('[7/8] Testing Controller restart persistence, repeat login, logout and original expiry');
     await server.stop();
     activeServer = null;
 
@@ -378,7 +427,12 @@ async function main() {
     await restartedServer.start();
 
     const replayAfterRestart = await postJson('/auth/exchange', { token: tokenAlpha }, { origin: publicUrl });
-    assert.equal(replayAfterRestart.status, 401, 'Consumed token must remain 401 across Controller restarts');
+    assert.equal(replayAfterRestart.status, 200, 'Used unexpired links must remain reusable across Controller restarts');
+    const reissuedAfterRestart = await postJson('/v1/console-links', { requestId: 'req-alpha' },
+      { authorization: `Bearer ${controllerToken}` });
+    assert.equal(reissuedAfterRestart.status, 200);
+    assert.deepEqual(reissuedAfterRestart.body, issueRes.body,
+      'Restart and repeated login must preserve the originally issued URL and expiry');
 
     const sessionAfterRestart = await getJson('/auth/session', { cookie: sessionCookie });
     assert.equal(sessionAfterRestart.status, 200, 'Session must remain valid across Controller restarts');
@@ -393,6 +447,26 @@ async function main() {
 
     const checkBetaLoggedOut = await getJson('/auth/session', { cookie: betaCookie });
     assert.equal(checkBetaLoggedOut.status, 401, 'Logged out session must return 401');
+
+    const betaLoginAgain = await postJson('/auth/exchange', { token: tokenBeta }, { origin: publicUrl });
+    assert.equal(betaLoginAgain.status, 200, 'Original link must permit logging in again after logout');
+    const newBetaCookie = betaLoginAgain.headers.get('set-cookie').split(';')[0];
+    assert.notEqual(newBetaCookie, betaCookie);
+    assert.equal((await getJson('/auth/session', { cookie: newBetaCookie })).status, 200);
+    assert.equal((await getJson('/auth/session', { cookie: betaCookie })).status, 401,
+      'Logging in again must not revive the revoked session');
+    assert.equal((await getJson('/auth/session', { cookie: sessionCookie })).status, 200,
+      'Logging out one session must not revoke other independent sessions');
+
+    serverNow = Date.parse(issueRes.body.expiresAt) - 1;
+    assert.equal((await postJson('/auth/exchange', { token: tokenAlpha }, { origin: publicUrl })).status, 200,
+      'Used links must work immediately before their original expiry after restart');
+    serverNow += 1;
+    assert.equal((await postJson('/auth/exchange', { token: tokenAlpha }, { origin: publicUrl })).status, 401,
+      'Used links must fail exactly at their original expiry after restart');
+    const expiredIssuance = await postJson('/v1/console-links', { requestId: 'req-alpha' },
+      { authorization: `Bearer ${controllerToken}` });
+    assert.equal(expiredIssuance.status, 410, 'Repeated issuance must not revive an expired link');
 
     await restartedServer.stop();
     activeServer = null;

@@ -49,7 +49,7 @@ class FakePgPool {
           if (inTx) {
             for (const [hash, consumedAt] of stagedLinkUpdates) {
               const link = this.links.get(hash);
-              if (link) link.consumed_at = consumedAt;
+              if (link) link.consumed_at ??= consumedAt;
             }
             for (const [hash, s] of stagedSessionInserts) {
               this.sessions.set(hash, { ...s });
@@ -85,21 +85,18 @@ class FakePgPool {
           return { rows: [] };
         }
 
-        // UPDATE console_links SET consumed_at = $2::timestamptz WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > $2::timestamptz RETURNING token_hash;
-        if (normalized.startsWith("UPDATE console_links SET consumed_at = $2::timestamptz")) {
+        if (normalized.startsWith("UPDATE console_links SET consumed_at = COALESCE(consumed_at, $2::timestamptz)")) {
           const tokenHash = params?.[0] as string;
           const nowIso = params?.[1] as string;
           const nowMs = Date.parse(nowIso);
           const link = this.links.get(tokenHash);
 
-          // Check if link exists, not yet consumed in storage and not yet staged in another tx
-          if (link && !link.consumed_at && Date.parse(link.expires_at) > nowMs) {
+          if (link && Date.parse(link.expires_at) > nowMs) {
+            const firstLoginAt = link.consumed_at ?? nowIso;
             if (inTx) {
-              // Atomically claim in storage to prevent concurrent tx from also matching
-              link.consumed_at = nowIso;
-              stagedLinkUpdates.set(tokenHash, nowIso);
+              stagedLinkUpdates.set(tokenHash, firstLoginAt);
             } else {
-              link.consumed_at = nowIso;
+              link.consumed_at = firstLoginAt;
             }
             return { rows: [{ token_hash: tokenHash }] };
           }
@@ -110,11 +107,6 @@ class FakePgPool {
         if (normalized.startsWith("INSERT INTO console_sessions")) {
           if (this.failNextSessionInsert) {
             this.failNextSessionInsert = false;
-            // Roll back the claimed link immediately if needed
-            for (const [h] of stagedLinkUpdates) {
-              const link = this.links.get(h);
-              if (link) delete link.consumed_at;
-            }
             throw new Error("Simulated session insert failure");
           }
           const tokenHash = params?.[0] as string;
@@ -219,7 +211,7 @@ describe("Console Auth Store Contract (Memory & Postgres)", () => {
 
   for (const backend of backends) {
     describe(backend.name, () => {
-      it("creates one-time link and does not overwrite or revive existing link", async () => {
+      it("creates a login link and does not overwrite or revive the existing link", async () => {
         const { store } = await backend.create();
         const rawToken = "link_secret_1234567890_test_token";
         const tokenHash = hashConsoleToken(rawToken);
@@ -285,7 +277,7 @@ describe("Console Auth Store Contract (Memory & Postgres)", () => {
         ).rejects.toThrow(/64-character lowercase hexadecimal/i);
       });
 
-      it("consumes one-time link atomically and creates session; second consume fails", async () => {
+      it("creates independent sessions on repeat login without changing expiry or first-login audit", async () => {
         const { store } = await backend.create();
         const linkHash = hashConsoleToken("raw_link_token_1");
         const sessionHash = hashConsoleToken("raw_session_token_1");
@@ -317,24 +309,34 @@ describe("Console Auth Store Contract (Memory & Postgres)", () => {
         expect(session!.tokenHash).toBe(sessionHash);
         expect(session!.expiresAt).toBe(sessionExp);
 
-        // Second consume with another session fails (link already consumed)
+        const nextLoginTime = new Date(t0.getTime() + 120_000).toISOString();
         const sessionHash2 = hashConsoleToken("raw_session_token_2");
         const success2 = await store.consumeConsoleLink(
           linkHash,
           {
             tokenHash: sessionHash2,
-            createdAt: consumeTime,
+            createdAt: nextLoginTime,
             expiresAt: sessionExp,
           },
-          consumeTime
+          nextLoginTime
         );
-        expect(success2).toBe(false);
+        expect(success2).toBe(true);
+        expect(await store.getConsoleSession(sessionHash2, nextLoginTime)).not.toBeNull();
 
-        // session2 was not created
-        expect(await store.getConsoleSession(sessionHash2, consumeTime)).toBeNull();
+        const unchangedLink = await store.createConsoleLinkIfAbsent({
+          tokenHash: linkHash,
+          createdAt: nextLoginTime,
+          expiresAt: sessionExp,
+        });
+        expect(unchangedLink).toEqual({
+          tokenHash: linkHash,
+          createdAt: t0.toISOString(),
+          expiresAt: linkExp,
+          consumedAt: consumeTime,
+        });
       });
 
-      it("rejects consume if link is expired", async () => {
+      it.each([0, 1])("rejects login at the original link expiry plus %i ms without creating a session", async offset => {
         const { store } = await backend.create();
         const linkHash = hashConsoleToken("expired_link_token");
         const sessionHash = hashConsoleToken("session_for_expired_link");
@@ -349,7 +351,7 @@ describe("Console Auth Store Contract (Memory & Postgres)", () => {
         });
 
         // Try consuming after link expiration
-        const afterExp = new Date(t0.getTime() + 3600_001).toISOString();
+        const afterExp = new Date(Date.parse(linkExp) + offset).toISOString();
         const sessionExp = new Date(t0.getTime() + 86400_000).toISOString();
 
         const success = await store.consumeConsoleLink(
@@ -466,7 +468,7 @@ describe("Console Auth Store Contract (Memory & Postgres)", () => {
         expect(deleted).toBeNull();
       });
 
-      it("isolates multiple concurrent consume attempts: exactly one succeeds", async () => {
+      it("allows concurrent login attempts with independent sessions", async () => {
         const { store } = await backend.create();
         const linkHash = hashConsoleToken("concurrent_link");
         const t0 = new Date("2026-10-11T12:00:00.000Z");
@@ -491,19 +493,35 @@ describe("Console Auth Store Contract (Memory & Postgres)", () => {
 
         const successes = results.filter((r) => r === true);
         const failures = results.filter((r) => r === false);
-        expect(successes).toHaveLength(1);
-        expect(failures).toHaveLength(4);
+        expect(successes).toHaveLength(candidateSessions.length);
+        expect(failures).toHaveLength(0);
 
-        // Check which session was created: exactly one
         const activeSessions = await Promise.all(
           candidateSessions.map((s) => store.getConsoleSession(s.tokenHash, t0.toISOString()))
         );
-        expect(activeSessions.filter((s) => s !== null)).toHaveLength(1);
+        expect(activeSessions.filter((s) => s !== null)).toHaveLength(candidateSessions.length);
+      });
+
+      it("allows an already-used unexpired link while preserving its stored first-login time", async () => {
+        const { store } = await backend.create();
+        const createdAt = "2026-10-11T12:00:00.000Z";
+        const consumedAt = "2026-10-11T12:01:00.000Z";
+        const expiresAt = "2026-10-11T13:00:00.000Z";
+        const tokenHash = hashConsoleToken("previously_used_link");
+        const link = { tokenHash, createdAt, expiresAt, consumedAt };
+        await store.createConsoleLinkIfAbsent(link);
+        const now = "2026-10-11T12:30:00.000Z";
+        expect(await store.consumeConsoleLink(tokenHash, {
+          tokenHash: hashConsoleToken("new_session_for_used_link"),
+          createdAt: now,
+          expiresAt,
+        }, now)).toBe(true);
+        expect(await store.createConsoleLinkIfAbsent(link)).toEqual(link);
       });
     });
   }
 
-  it("rolls back Postgres transaction if session insertion fails during consume", async () => {
+  it.each([undefined, "2026-10-11T11:59:00.000Z"])("preserves first-login audit %s on Postgres session insertion failure", async consumedAt => {
     const { store, fakePool } = createPostgresStoreWithFakePool();
     await store.init();
 
@@ -513,8 +531,9 @@ describe("Console Auth Store Contract (Memory & Postgres)", () => {
 
     await store.createConsoleLinkIfAbsent({
       tokenHash: linkHash,
-      createdAt: t0.toISOString(),
+      createdAt: new Date(t0.getTime() - 600_000).toISOString(),
       expiresAt: new Date(t0.getTime() + 3600_000).toISOString(),
+      consumedAt,
     });
 
     fakePool.failNextSessionInsert = true;
@@ -531,9 +550,9 @@ describe("Console Auth Store Contract (Memory & Postgres)", () => {
       )
     ).rejects.toThrow("Simulated session insert failure");
 
-    // Because of rollback, link is still unconsumed!
     const linkRow = fakePool.links.get(linkHash);
-    expect(linkRow?.consumed_at).toBeUndefined();
+    expect(linkRow?.consumed_at).toBe(consumedAt);
+    expect(await store.getConsoleSession(sessionHash, t0.toISOString())).toBeNull();
 
     // Now try again without error: should succeed
     const ok = await store.consumeConsoleLink(
@@ -546,7 +565,7 @@ describe("Console Auth Store Contract (Memory & Postgres)", () => {
       t0.toISOString()
     );
     expect(ok).toBe(true);
-    expect(fakePool.links.get(linkHash)?.consumed_at).toBe(t0.toISOString());
+    expect(fakePool.links.get(linkHash)?.consumed_at).toBe(consumedAt ?? t0.toISOString());
   });
 
   it("preserves console auth tables and existing links across PostgresStore.init() re-runs", async () => {

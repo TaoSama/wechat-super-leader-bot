@@ -182,7 +182,7 @@ test("an interested recipient nearing 23 hours is reminded even after another re
   const f = harness(t), now = Date.now(), recipientRefreshedAt = now - 22 * HOUR;
   f.state.contextWindows.chat.refreshedAt = recipientRefreshedAt;
   f.state.recordInboundContext("peer-fresh-account", "peer", now, true, "peer-token");
-  f.state.accountSendBudget!.remaining = 2;
+  f.state.accountSendBudget!.remaining = 8;
   const notifier = new RenewalNotifier({ state: f.state, send: f.ilink.sendMarkdownReply.bind(f.ilink) });
   assert.equal((await notifier.deliverOnce(["chat", "peer"])).sent, 1);
   assert.equal(f.sends.length, 1);
@@ -190,6 +190,6 @@ test("an interested recipient nearing 23 hours is reminded even after another re
   assert.equal(f.sends[0].context_token, "synthetic-context");
   assert.equal(f.state.contextWindows.chat.refreshedAt, recipientRefreshedAt);
   assert.equal(f.state.accountSendBudget!.refreshedAt, now);
-  assert.equal(f.state.accountSendBudget!.remaining, 1);
+  assert.equal(f.state.accountSendBudget!.remaining, 7);
   assert.equal((await notifier.deliverOnce(["chat", "peer"])).sent, 0);
 });

@@ -20,7 +20,7 @@ ${LEADER_MEMORY_INSTRUCTIONS}下面的快照已在本轮开始时从磁盘读取
 减少不必要的模型往返：已确定需要业务工具时，在同一次 exec 中通过 ALL_TOOLS 查找描述相符的运行时工具，核对具体工具所需参数后直接调用；不先打印工具清单或完整 schema 再等下一轮。未找到明确匹配时说明不可用，不猜名或换通道；其他原生工具和技能仍按需发现。
 仅对本轮 Controller 调用的单次 exec，第一行使用 // @exec: {"yield_time_ms":${CONTROL_EXEC_YIELD_MS}}；返回运行中 cell 时继续使用原生 wait 取得结果，不重复提交。其他工具根据实际耗时选择等待预算。
 多个互不依赖的只读操作可在同一次 exec 中使用 Promise.allSettled 并行，并逐一检查结果。依赖前一步结果的调用、授权核对和状态变更必须依序执行。
-Controller 业务工具返回 result 供你结合用户问题作答，外层 Codex 统一负责推理、参数选择和结果整合，没有内层模型替你编排。若工具返回 reply，reply.text 已是需要原样交付的业务正文，由 Gateway 交付；会话目录、真实标题、任务确认和一次性控制台凭证不能改写。混合查询与业务操作时，最终回复只写额外查询结果、分析或明确拒绝的说明，原样业务回执由 Gateway 附上，不重复复述回执；只有权威业务回执时直接结束本轮。完成必要的记忆增量维护后直接结束本轮，不为结束本轮机械写入 task.md。结果不明确或失败时如实说明，不能声称完成。`;
+Controller 业务工具返回 result 供你结合用户问题作答，外层 Codex 统一负责推理、参数选择和结果整合，没有内层模型替你编排。若工具返回 reply，reply.text 已是需要原样交付的业务正文，由 Gateway 交付；会话目录、真实标题、任务确认和控制台凭证不能改写。控制台链接自签发起1小时内可重复登录，重复使用不延长原有效期，到期后不能再登录。混合查询与业务操作时，最终回复只写额外查询结果、分析或明确拒绝的说明，原样业务回执由 Gateway 附上，不重复复述回执；只有权威业务回执时直接结束本轮。完成必要的记忆增量维护后直接结束本轮，不为结束本轮机械写入 task.md。结果不明确或失败时如实说明，不能声称完成。`;
 
 export function buildLeaderPrompt(memory: ReturnType<LeaderWorkspace["readMemory"]>, request: ControllerMessageRequest, controllerInstructions = "", systemPrompt = LEADER_SYSTEM_PROMPT): string {
   const time = Object.fromEntries(REPLY_TIME_FORMAT.formatToParts(new Date()).map(part => [part.type, part.value]));

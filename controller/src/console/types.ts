@@ -7,6 +7,7 @@ export interface ConsoleLinkRecord {
   tokenHash: string;
   createdAt: string;
   expiresAt: string;
+  /** First successful login time; the link remains reusable until expiresAt. */
   consumedAt?: string;
 }
 

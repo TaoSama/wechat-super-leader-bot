@@ -161,7 +161,10 @@ export class GatewaySettings {
     };
     try {
       const page = await readAppServerThreadHistory(options, threadId, { cursor, limit }, new AbortController().signal);
-      return { threadId: page.threadId, items: projectHistoryItems(page.items), nextCursor: page.nextCursor, fetchedAt, truncated: false };
+      const metadata = { threadId: page.threadId, nextCursor: page.nextCursor, fetchedAt, truncated: false,
+        ...(page.turnStatuses ? { turnStatuses: page.turnStatuses } : {}) };
+      const items = projectHistoryItems(page.items, metadata);
+      return { ...metadata, items, truncated: items.some(item => item.truncated) };
     } catch (error) {
       if (cursor !== undefined && error instanceof AppServerRejectedError) {
         throw new RuntimeResourceError(409, "history_context_expired", "History context expired; reload the latest page");

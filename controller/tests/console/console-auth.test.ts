@@ -81,7 +81,7 @@ describe("Console Auth HTTP API & Security", () => {
     expect(exchanged).toBeNull();
   });
 
-  it("POST /v1/console-links issues 1h link with 43-char token, same requestId is idempotent without extending expiry, used gives 409, expired gives 410", async () => {
+  it("POST /v1/console-links reuses the original 1h link before and after login without extending expiry, expired gives 410", async () => {
     let now = 1700000000000;
     const ctx = await createServerFixture({
       consolePublicUrl: "https://leader.taoai.site",
@@ -121,7 +121,7 @@ describe("Console Auth HTTP API & Security", () => {
       expect(data2.url).toBe(data1.url);
       expect(data2.expiresAt).toBe(data1.expiresAt);
 
-      // 3. Consume token, then requesting link again returns 409
+      // 3. Login does not invalidate the link or extend its original deadline.
       const exRes = await fetch(`${ctx.baseUrl}/auth/exchange`, {
         method: "POST",
         headers: {
@@ -132,7 +132,7 @@ describe("Console Auth HTTP API & Security", () => {
       });
       expect(exRes.status).toBe(200);
 
-      const resConsumed = await fetch(`${ctx.baseUrl}/v1/console-links`, {
+      const resUsed = await fetch(`${ctx.baseUrl}/v1/console-links`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -140,9 +140,19 @@ describe("Console Auth HTTP API & Security", () => {
         },
         body: JSON.stringify({ requestId: "req-1" }),
       });
-      expect(resConsumed.status).toBe(409);
-      const errConsumed = await resConsumed.json();
-      expect(errConsumed.error).toMatch(/consumed/i);
+      expect(resUsed.status).toBe(200);
+      expect(await resUsed.json()).toEqual(data1);
+
+      now = Date.parse(data1.expiresAt);
+      const resExpiredOriginal = await fetch(`${ctx.baseUrl}/v1/console-links`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${ctx.controllerToken}`,
+        },
+        body: JSON.stringify({ requestId: "req-1" }),
+      });
+      expect(resExpiredOriginal.status).toBe(410);
 
       // 4. Request for expired link returns 410
       const resExpInitial = await fetch(`${ctx.baseUrl}/v1/console-links`, {
@@ -172,7 +182,7 @@ describe("Console Auth HTTP API & Security", () => {
     }
   });
 
-  it("POST /auth/exchange enforces strict JSON with token only, rejecting invalid/replay/expired with 401", async () => {
+  it("POST /auth/exchange rejects invalid or tampered tokens while allowing repeated login until the original expiry", async () => {
     let now = 1700000000000;
     const ctx = await createServerFixture({
       consolePublicUrl: "https://leader.taoai.site",
@@ -225,6 +235,17 @@ describe("Console Auth HTTP API & Security", () => {
       });
       expect(resInvalidToken.status).toBe(401);
 
+      const tamperedToken = `${validToken[0] === "A" ? "B" : "A"}${validToken.slice(1)}`;
+      const resTampered = await fetch(`${ctx.baseUrl}/auth/exchange`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: ctx.consoleOrigin,
+        },
+        body: JSON.stringify({ token: tamperedToken }),
+      });
+      expect(resTampered.status).toBe(401);
+
       // Valid exchange succeeds
       const resOk = await fetch(`${ctx.baseUrl}/auth/exchange`, {
         method: "POST",
@@ -238,8 +259,8 @@ describe("Console Auth HTTP API & Security", () => {
       const okData = await resOk.json();
       expect(okData.authenticated).toBe(true);
 
-      // Replay attempt fails with 401
-      const resReplay = await fetch(`${ctx.baseUrl}/auth/exchange`, {
+      now += 3600_000 - 1;
+      const resRepeat = await fetch(`${ctx.baseUrl}/auth/exchange`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -247,7 +268,52 @@ describe("Console Auth HTTP API & Security", () => {
         },
         body: JSON.stringify({ token: validToken }),
       });
-      expect(resReplay.status).toBe(401);
+      expect(resRepeat.status).toBe(200);
+      expect(resRepeat.headers.getSetCookie()[0].split(";")[0])
+        .not.toBe(resOk.headers.getSetCookie()[0].split(";")[0]);
+
+      for (const advance of [1, 1000]) {
+        now += advance;
+        const resExpired = await fetch(`${ctx.baseUrl}/auth/exchange`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Origin: ctx.consoleOrigin,
+          },
+          body: JSON.stringify({ token: validToken }),
+        });
+        expect(resExpired.status).toBe(401);
+        expect(resExpired.headers.getSetCookie()).toEqual([]);
+      }
+    } finally {
+      await ctx.stop();
+    }
+  });
+
+  it("allows concurrent logins using the same link and creates independent sessions", async () => {
+    const ctx = await createServerFixture({ consolePublicUrl: "https://leader.taoai.site" });
+    try {
+      const issued = await fetch(`${ctx.baseUrl}/v1/console-links`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ctx.controllerToken}` },
+        body: JSON.stringify({ requestId: "req-concurrent-logins" }),
+      });
+      expect(issued.status).toBe(200);
+      const { url } = await issued.json();
+      const responses = await Promise.all(Array.from({ length: 8 }, () =>
+        fetch(`${ctx.baseUrl}/auth/exchange`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Origin: ctx.consoleOrigin },
+          body: JSON.stringify({ token: new URL(url).hash.slice("#login=".length) }),
+        })
+      ));
+      expect(responses.map(response => response.status)).toEqual(Array(8).fill(200));
+      const cookies = responses.map(response => response.headers.getSetCookie()[0].split(";")[0]);
+      expect(new Set(cookies).size).toBe(cookies.length);
+      const sessions = await Promise.all(cookies.map(cookie =>
+        fetch(`${ctx.baseUrl}/auth/session`, { headers: { Cookie: cookie } })
+      ));
+      expect(sessions.map(response => response.status)).toEqual(Array(8).fill(200));
     } finally {
       await ctx.stop();
     }
@@ -628,6 +694,21 @@ describe("Console Auth HTTP API & Security", () => {
         headers: { Cookie: cookieHeader },
       });
       expect(resSessionAfter.status).toBe(401);
+
+      const resLoginAgain = await fetch(`${ctx.baseUrl}/auth/exchange`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: ctx.consoleOrigin },
+        body: JSON.stringify({ token }),
+      });
+      expect(resLoginAgain.status).toBe(200);
+      const replacementCookie = resLoginAgain.headers.getSetCookie()[0].split(";")[0];
+      expect(replacementCookie).not.toBe(cookieHeader);
+      expect((await fetch(`${ctx.baseUrl}/auth/session`, {
+        headers: { Cookie: replacementCookie },
+      })).status).toBe(200);
+      expect((await fetch(`${ctx.baseUrl}/auth/session`, {
+        headers: { Cookie: cookieHeader },
+      })).status).toBe(401);
     } finally {
       await ctx.stop();
     }

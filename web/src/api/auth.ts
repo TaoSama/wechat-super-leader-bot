@@ -2,7 +2,7 @@ import { AuthSessionResponse, AuthLogoutResponse } from "../types";
 import { ApiAuthError, ApiHttpError } from "./errors";
 
 /**
- * Exchanges a one-time token for an HttpOnly session cookie.
+ * Exchanges a login token for an HttpOnly session cookie.
  * POST /auth/exchange
  * Body: { token }
  * Headers: Content-Type: application/json
@@ -14,7 +14,7 @@ export async function exchangeLoginToken(
 ): Promise<AuthSessionResponse> {
   const cleanToken = token.trim();
   if (!cleanToken) {
-    throw new ApiAuthError(401, "未提供一次性登录凭证");
+    throw new ApiAuthError(401, "未提供登录凭证");
   }
 
  const response = await fetch("/auth/exchange", {
