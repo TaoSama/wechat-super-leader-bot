@@ -8,6 +8,17 @@ const overlay = readFileSync(new URL('../../../deploy/compose.release.yaml', imp
 const transfer = readFileSync(new URL('../../../scripts/deploy/transfer-release.mjs', import.meta.url), 'utf8');
 const files = readFileSync(new URL('../../../scripts/deploy/transfer-files.mjs', import.meta.url), 'utf8');
 
+test('Node-only deployment and diagnostic setup do not require package-manager caching or installation', () => {
+  const setups = [...workflow.matchAll(/uses: actions\/setup-node@[^\n]+\n        with:\n((?:          [^\n]*\n)+)/g)];
+  assert.equal(setups.length, 2, 'both production and diagnostic Node setup are covered');
+  for (const [, inputs] of setups) {
+    assert.match(inputs, /node-version: '24'/);
+    assert.match(inputs, /package-manager-cache: false/);
+    assert.doesNotMatch(inputs, /^\s*cache:/m, 'explicit cache input would override the disabled auto-cache');
+  }
+  assert.doesNotMatch(workflow, /pnpm\/action-setup|\b(?:pnpm|npm|yarn) (?:install|ci)\b/);
+});
+
 test('production CD gates Verify completions before deploying immutable merged revisions', () => {
   assert.match(workflow, /workflow_run:\s*\n\s*workflows: \[Verify\]\s*\n\s*types: \[completed\]/);
   assert.match(workflow, /workflow_run\.conclusion == 'success'/);
