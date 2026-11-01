@@ -21,6 +21,7 @@ const CLI = resolve(values['gateway-cli'] || join(ROOT, 'gateway/dist/index.js')
 const EVIDENCE = resolve(values.evidence || join(ROOT, '.runtime/progress-steering'));
 const TOKEN = 'synthetic-progress-steering-token', ACCOUNT = 'synthetic-progress-account';
 const CHAT = 'synthetic-progress-chat', TIMEOUT_MS = 90_000, OUTPUT_LIMIT = 262_144;
+const STEER_ACK_TIMEOUT_MS = 10_000;
 const ROOT_TEXT = '请仔细整理一个普通聊天回答，并在核对过程中向我报告具体进展。';
 const STEER_TEXT = `追加要求原文_${randomUUID()}：最终回答必须包含“雨后的青石路”。`;
 const PROGRESS = ['已经核对了问题的第一部分，正在整理可以直接使用的建议。',
@@ -69,7 +70,8 @@ async function nativeFrames(path) {
   let raw;
   try { raw = await readFile(path, 'utf8'); } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
   const streams = new Map(), frames = [];
-  for (const line of raw.trim().split('\n').filter(Boolean)) {
+  // The observer may still be appending its final record during a live read.
+  for (const line of raw.slice(0, raw.lastIndexOf('\n') + 1).split('\n').filter(Boolean)) {
     const entry = JSON.parse(line);
     if (!['stdin', 'stdout'].includes(entry.direction)) continue;
     const key = `${entry.pid}:${entry.direction}`, text = (streams.get(key) || '') + entry.text;
@@ -107,6 +109,7 @@ async function main() {
   const evidence = { status: 'running', gatewayCli: CLI, codex, checks: [], requests: [], replies: [] };
   const queue = [], errors = [], pollBatches = [];
   let server, provider, gateway, requests = 0, rootQueued = false, secondQueued = false;
+  let steerGatePromise;
   const check = (name, condition) => { evidence.checks.push({ name, passed: Boolean(condition) }); assert(condition, name); };
   const message = text => ({ message_type: 1, from_user_id: CHAT, client_id: randomUUID(),
     create_time_ms: String(Date.now()), context_token: `synthetic-context-${randomUUID()}`,
@@ -145,11 +148,34 @@ async function main() {
         if (!hasProgressOutput || !hasLimitResult) {
           return response(res, call(2, [...PROGRESS.slice(1), '这一条超过本轮额度，不应发送给用户。']));
         }
-        if (!hasSteerText) await new Promise(done => setTimeout(done, 200));
         if (!hasSteerText) {
-          return response(res, { id: `msg_${randomUUID()}`, type: 'message', status: 'completed', role: 'assistant',
-            content: [{ type: 'output_text', annotations: [], text: FINAL }] });
+          assert.equal(number, 3, 'The next model request must contain the acknowledged follow-up');
+          steerGatePromise = waitUntil(async () => {
+            const frames = await nativeFrames(protocol);
+            const start = frames.find(entry => entry.direction === 'stdin' && entry.frame.method === 'turn/start');
+            const started = start && frames.find(entry => entry.direction === 'stdout' && entry.frame.id === start.frame.id)?.frame.result;
+            if (!started?.turn?.id) return false;
+            const steer = frames.find(entry => entry.direction === 'stdin' && entry.frame.method === 'turn/steer' &&
+              entry.frame.params.threadId === start.frame.params.threadId && entry.frame.params.expectedTurnId === started.turn.id);
+            if (!steer) return false;
+            assert(steer.frame.params.input[0].text.includes(STEER_TEXT), 'Steer gate requires the exact follow-up text');
+            const receipt = frames.find(entry => entry.direction === 'stdout' && entry.frame.id === steer.frame.id);
+            if (!receipt) return false;
+            assert(!receipt.frame.error, 'Native steer must succeed before the model response is released');
+            assert.equal(receipt.frame.result?.turnId, started.turn.id, 'Steer gate must acknowledge the original native turn');
+            evidence.steerGate = { request: number, turnId: started.turn.id, acknowledgedAt: receipt.at, releasedAt: Date.now() };
+            return true;
+          }, 'native steer acknowledgement before releasing the model response', STEER_ACK_TIMEOUT_MS);
+          await steerGatePromise;
+          check('third model response waits for an acknowledged steer of its original turn',
+            evidence.steerGate?.request === 3 && evidence.steerGate.acknowledgedAt <= evidence.steerGate.releasedAt);
+          // Keep the sample non-final so the next native request proves consumption of the appended input.
+          return response(res, { id: `ctc_boundary_${number}`, type: 'custom_tool_call', call_id: `steer_boundary_${number}`,
+            name: 'exec', namespace: 'functions', input: 'text("继续整理当前轮已接收的要求。");' });
         }
+        assert(steerGatePromise, 'The acknowledged follow-up must follow the held model response');
+        await steerGatePromise;
+        check('a new model request contains the exact acknowledged follow-up', number === 4 && Boolean(evidence.steerGate));
         return response(res, { id: `msg_${randomUUID()}`, type: 'message', status: 'completed', role: 'assistant',
           content: [{ type: 'output_text', annotations: [], text: FINAL }] });
       }
