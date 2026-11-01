@@ -9,6 +9,7 @@ import { TransferFailure, TransferProcesses, errorCategory } from './transfer-pr
 import { RELEASE_FILES, DIAGNOSTIC_FILES, DIAGNOSTIC_PAYLOAD_LIMIT, REMOTE_FILES, manifestFor, quoteShell } from './transfer-files.mjs';
 
 const PROGRESS_MS = 15_000;
+const PROGRESS_UNAVAILABLE_CATEGORIES = new Set(['dns', 'timeout', 'network_connect', 'network_closed']);
 const REMOTE_OPERATION_MS = 30_000;
 const CLEANUP_MS = 8_000;
 const SSH_CONNECT_SECONDS = 5;
@@ -114,7 +115,14 @@ export class ReleaseTransfer {
       while (!sampling.signal.aborted) {
         try { await delay(PROGRESS_MS, undefined, { signal: sampling.signal }); }
         catch (error) { if (sampling.signal.aborted && error.name === 'AbortError') break; throw error; }
-        if (!sampling.signal.aborted) await this.progress(files);
+        if (!sampling.signal.aborted) {
+          try { await this.progress(files); }
+          catch (error) {
+            if (this.config.diagnostic || this.signal.aborted || !(error instanceof TransferFailure) ||
+              !PROGRESS_UNAVAILABLE_CATEGORIES.has(error.category)) throw error;
+            this.log('transfer_progress_unavailable', { category: error.category });
+          }
+        }
       }
     })().catch(error => { samplingFailure = error; this.abort.abort(); });
     let result;
@@ -161,19 +169,19 @@ export class ReleaseTransfer {
     const copying = this.copy([cancel], { signal: AbortSignal.any([this.signal, cancelCase.signal]), limited: true })
       .then(value => { settled = true; return { value }; }, error => { settled = true; return { error }; });
     const partialDeadline = Math.min(this.deadline - DIAGNOSTIC_RESERVE_MS, Date.now() + DIAGNOSTIC_PARTIAL_WAIT_MS);
-    let partial = 0, cancelled;
+    let partial = 0, pollingFailed = false, pollingError;
     try {
       while (!settled && Date.now() < partialDeadline) {
         await delay(DIAGNOSTIC_POLL_MS, undefined, { signal: this.signal });
         partial = await this.progress([cancel]);
         if (partial > 0 && partial < cancel.bytes) break;
       }
-    } finally {
-      cancelCase.abort();
-      const outcome = await copying;
-      if (outcome.error) throw outcome.error;
-      cancelled = outcome.value;
-    }
+    } catch (error) { pollingFailed = true; pollingError = error; }
+    cancelCase.abort();
+    const outcome = await copying;
+    if (pollingFailed) throw pollingError;
+    if ('error' in outcome) throw outcome.error;
+    const cancelled = outcome.value;
     if (cancelled.reason !== 'cancelled' || cancelled.code === 0 || partial <= 0 || partial >= cancel.bytes || this.processes.children.size !== 0) {
       throw new TransferFailure('diagnostic_cancel');
     }
@@ -254,7 +262,8 @@ async function main() {
       credentials = await mkdtemp(join(values['credentials-root'], 'release-transfer-credentials-'));
       values['key-file'] = join(credentials, 'key');
       values['known-hosts-file'] = join(credentials, 'known_hosts');
-      await writeFile(values['key-file'], process.env.DEPLOY_SSH_PRIVATE_KEY, { mode: 0o600, flag: 'wx' });
+      const privateKey = process.env.DEPLOY_SSH_PRIVATE_KEY;
+      await writeFile(values['key-file'], privateKey.endsWith('\n') ? privateKey : `${privateKey}\n`, { mode: 0o600, flag: 'wx' });
       await writeFile(values['known-hosts-file'], process.env.DEPLOY_KNOWN_HOSTS, { mode: 0o600, flag: 'wx' });
     }
     await new ReleaseTransfer(transferConfiguration(values), { signal: abort.signal }).execute();

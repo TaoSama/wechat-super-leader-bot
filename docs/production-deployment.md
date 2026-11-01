@@ -52,6 +52,9 @@ revision 一致、容器健康、Gateway 窗口正确才跳过重建；上一版
 basename、准确 bytes、SHA-256、总字节数及 revision/run/attempt 直接写入 Actions 日志；
 传输期间约每 15 秒记录远端已收字节、耗时和平均速率。远端文件长度/hash 再次核验通过后，
 重新检查当前 main，随后才调用原来的 release 脚本。20 分钟发布 job 总预算保持不变。
+生产传输的周期采样遇到 DNS、超时、连接建立或连接中断错误时，记录固定分类的
+`transfer_progress_unavailable` 并继续传输及后续采样；归属、完整性、认证等其他错误仍停止。
+诊断模式的采样和生产传完后的最终状态/hash 校验均保持严格失败，不能绕过激活门禁。
 
 每次 stage 为 `.runtime/releases/<revision>-<run>-<attempt>`，原子创建并写入随机归属标记。
 已有同名目录会拒绝覆盖。清理必须匹配归属标记，只移除固定发布文件及 release 脚本生成的
@@ -59,6 +62,8 @@ basename、准确 bytes、SHA-256、总字节数及 revision/run/attempt 直接�
 传输失败、校验失败或最终 main 门禁失败均非零退出，不能进入激活。
 
 SIGINT/SIGTERM 会终止并等待本地 SSH/SCP 进程组，必要时有界升级到 SIGKILL。
+若逃逸后代仍持有输出管道，停止失败会受控返回 `process_stop`；保留未确认的子进程记录，
+不删除远端 stage，也不声称清理完成。
 Actions 的传输 step 使用 `exec node` 替换入口 bash，因此发送到入口 PID 的信号直接
 交给 Node。Node 在唯一的自有临时目录中以 0600 创建凭证文件，等待传输停止及远端清理
 结束后才删除；入口 shell 不使用可能提前删 key 的 EXIT trap。构建后版本检查单独执行，

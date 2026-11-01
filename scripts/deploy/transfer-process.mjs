@@ -53,15 +53,26 @@ export class TransferProcesses {
     let stdout = '', stderr = '', bytes = 0, reason, stopping, timer;
     let closeChild;
     const closed = new Promise(resolve => { closeChild = resolve; });
+    let rejectStop;
+    const stopFailure = new Promise((_, reject) => { rejectStop = reject; });
     const stop = category => {
       reason ??= category;
-      stopping ??= (async () => {
+      if (stopping) return;
+      stopping = (async () => {
         groupSignal(child, 'SIGTERM');
         await boundedWait(closed, STOP_GRACE_MS);
         // A parent may exit before its descendants; still signal the whole group.
         groupSignal(child, 'SIGKILL');
         if (!await boundedWait(closed, STOP_GRACE_MS)) throw new TransferFailure('process_stop');
       })();
+      // An escaped descendant can keep stdio open after the group has exited.
+      // Observe stop failure immediately, independently of the child's close event.
+      stopping.catch(error => {
+        // Keep unresolved children in the registry, but let the CLI report and exit.
+        child.unref();
+        for (const stream of child.stdio) stream?.unref?.();
+        rejectStop(error);
+      });
     };
     const abort = () => stop('cancelled');
     const capture = stream => data => {
@@ -83,7 +94,7 @@ export class TransferProcesses {
     if (timeoutMs !== undefined) timer = setTimeout(() => stop('timeout'), Math.max(1, timeoutMs));
     child.stdin.end(input);
     try {
-      const outcome = await result;
+      const outcome = await Promise.race([result, stopFailure]);
       if (stopping) await stopping;
       return { ...outcome, stdout, stderr, reason };
     } finally {

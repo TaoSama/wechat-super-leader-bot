@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createServer, connect } from 'node:net';
 import { transferSshFixture } from '../../support/transfer-ssh-fixture.mjs';
 import { ReleaseTransfer, transferConfiguration } from '../../../scripts/deploy/transfer-release.mjs';
+import { TransferFailure } from '../../../scripts/deploy/transfer-process.mjs';
 import { RELEASE_FILES } from '../../../scripts/deploy/transfer-files.mjs';
 
 const CLI = fileURLToPath(new URL('../../../scripts/deploy/transfer-release.mjs', import.meta.url));
@@ -92,7 +93,7 @@ async function cli(env, { interrupt, args = [], wrapper = false, production = fa
     const script = join(fixture.root, 'actions-entry.sh');
     await writeFile(script, block.split('\n').map(line => line.slice(10)).join('\n'));
     command = '/bin/bash'; commandArgs = ['--noprofile', '--norc', '-e', '-o', 'pipefail', script];
-    env = { ...env, RUNNER_TEMP: fixture.root, DEPLOY_SSH_PRIVATE_KEY: await fixture.privateKey(),
+    env = { ...env, RUNNER_TEMP: fixture.root, DEPLOY_SSH_PRIVATE_KEY: (await fixture.privateKey()).trimEnd(),
       DEPLOY_KNOWN_HOSTS: await readFile(knownHosts, 'utf8') };
   }
   child = spawn(command, commandArgs, { env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -154,7 +155,7 @@ try {
     const wrapped = await cli(fixture.environment(), { interrupt, wrapper: true });
     assert.notEqual(wrapped.code, 0);
     assert.ok(wrapped.events.some(event => event.event === 'transfer_failed' && event.category === 'cancelled'));
-    console.log(`PASS actual diagnostic Actions bash wrapper ${interrupt}: entry PID cancellation, owned keys usable through remote cleanup, removed last, no activation`);
+    console.log(`PASS actual diagnostic Actions bash wrapper ${interrupt}: key without trailing newline authenticates, entry PID cancellation, keys removed after remote cleanup, no activation`);
   }
 
   const invalid = await cli(fixture.environment(), { args: ['--release-root', 'SYNTHETIC_REMOTE_STDERR_MUST_NOT_LEAK'] });
@@ -219,20 +220,31 @@ try {
 
   await writeFile(join(root, 'controller.tar'), Buffer.alloc(256 * 1024, 'p'));
   class SlowTransfer extends ReleaseTransfer {
+    sampleFailed = false;
     copy(files) { return super.copy(files, { limited: true }); }
+    async remote(op, ...args) {
+      if (op === 'status' && this.copyStarted && Date.now() - this.copyStarted >= 15000 && !this.sampleFailed) {
+        this.sampleFailed = true;
+        throw new TransferFailure('network_closed');
+      }
+      return super.remote(op, ...args);
+    }
   }
-  const slowAbort = new AbortController(), slowLog = [];
-  const slow = new SlowTransfer(configFor(), { signal: slowAbort.signal,
-    beforeActivate: async () => { throw new Error('must not activate'); }, log: value => {
-      const event = JSON.parse(value);
-      slowLog.push(event);
-      if (event.event === 'transfer_progress' && event.elapsed_ms >= 15000 && event.received_bytes > 0) slowAbort.abort();
-    } });
-  await assert.rejects(slow.execute(), { category: 'cancelled' });
-  assert.ok(slowLog.some(event => event.event === 'transfer_progress' && event.elapsed_ms >= 15000 && event.received_bytes > 0));
+  const slowLog = [];
+  const slow = new SlowTransfer(configFor(), {
+    beforeActivate: async () => { throw new Error('gate intentionally rejects'); },
+    log: value => slowLog.push(JSON.parse(value)) });
+  await assert.rejects(slow.execute(), { category: 'revision_gate' });
+  const unavailable = slowLog.findIndex(event => event.event === 'transfer_progress_unavailable' && event.category === 'network_closed');
+  assert.ok(unavailable >= 0);
+  const later = slowLog.slice(unavailable + 1).find(event => event.event === 'transfer_progress' &&
+    event.transfer_elapsed_ms >= 30000 && event.received_bytes > 0 && event.received_bytes < 256 * 1024);
+  assert.ok(later, 'sampling recovers while the real SCP remains active');
+  assert.ok(slowLog.some(event => event.event === 'transfer_verified'));
+  assert.ok(!slowLog.some(event => event.event === 'activation_start'));
   absent(slow.config.stage);
   await writeFile(join(root, 'controller.tar'), 'synthetic controller.tar\n');
-  console.log('PASS 15-second periodic sampler observes real slow SFTP before cancellation; owned stage removed');
+  console.log('PASS real slow SFTP survives first 15-second sample failure, later sampling recovers, final hash verified, revision gate still blocks activation');
 
   const foreignConfig = configFor();
   fixture.python(`import os; os.makedirs(${JSON.stringify(foreignConfig.stage)}); open(${JSON.stringify(`${foreignConfig.stage}/.transfer-owner`)},'w').write('foreign'); open(${JSON.stringify(`${foreignConfig.stage}/controller.tar`)},'w').write('must-stay')`);
