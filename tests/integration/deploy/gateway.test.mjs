@@ -6,6 +6,7 @@ import test from 'node:test';
 
 const composeYamlPath = fileURLToPath(new URL('../../../compose.yaml', import.meta.url));
 const composeProdPath = fileURLToPath(new URL('../../../deploy/compose.production.yaml', import.meta.url));
+const composeReleasePath = fileURLToPath(new URL('../../../deploy/compose.release.yaml', import.meta.url));
 const composeGatewayPath = fileURLToPath(new URL('../../../deploy/compose.gateway.yaml', import.meta.url));
 
 const fakeEnv = {
@@ -245,4 +246,40 @@ test('Dockerfile.gateway defines valid non-root UID 1000 and standard ENTRYPOINT
   assert.match(content, /USER node/);
   assert.match(content, /ENTRYPOINT \["node", "dist\/index\.js"\]/);
   assert.match(content, /CMD \["--run"\]/);
+});
+
+test('release transport stays inside the stack while public origins, auth and runtime volumes stay configured', () => {
+  for (const publicOrigin of ['https://leader.example.com', 'https://results.invalid']) {
+    const parsed = JSON.parse(execCompose([
+      '--env-file', '/dev/null', '--profile', 'wechat',
+      '-f', composeYamlPath, '-f', composeProdPath, '-f', composeGatewayPath, '-f', composeReleasePath,
+      'config', '--format', 'json',
+    ], { encoding: 'utf8', timeout: 10000, env: { ...fakeEnv,
+      CONTROLLER_IMAGE: 'synthetic-controller:release', GATEWAY_IMAGE: 'synthetic-gateway:release',
+      CONTROLLER_URL: 'https://old-public-controller.invalid', ALLOW_INSECURE_CONTROLLER: 'false',
+      RESULT_PUBLIC_ORIGIN: publicOrigin } }));
+    const gateway = parsed.services.gateway, controller = parsed.services.controller;
+    assert.equal(gateway.environment.CONTROLLER_URL, 'http://controller:8790');
+    assert.equal(gateway.environment.ALLOW_INSECURE_CONTROLLER, 'true');
+    assert.equal(gateway.environment.RESULT_PUBLIC_ORIGIN, publicOrigin);
+    assert.equal(gateway.environment.CONTROLLER_TOKEN, fakeEnv.CONTROLLER_TOKEN);
+    assert.equal(controller.environment.CONTROLLER_TOKEN, fakeEnv.CONTROLLER_TOKEN);
+    assert.equal(controller.environment.ALLOW_INSECURE_CONTROLLER, undefined);
+    assert.deepEqual(gateway.networks, controller.networks);
+    assert.deepEqual(Object.keys(parsed.volumes).sort(), ['controller-db', 'controller-runtime']);
+    assert.equal(controller.environment.CONTROLLER_DATA_ROOT, '/var/lib/super-leader-runtime');
+    assert.equal(controller.volumes.length, 1);
+    assert.equal(controller.volumes[0].source, 'controller-runtime');
+    assert.equal(controller.volumes[0].target, '/var/lib/super-leader-runtime');
+  }
+});
+
+test('non-release Gateway keeps an explicit remote HTTPS Controller without enabling private HTTP', () => {
+  const parsed = JSON.parse(execCompose([
+    '--env-file', '/dev/null', '--profile', 'wechat',
+    '-f', composeYamlPath, '-f', composeProdPath, '-f', composeGatewayPath,
+    'config', '--format', 'json',
+  ], { encoding: 'utf8', timeout: 10000, env: { ...fakeEnv, CONTROLLER_URL: 'https://remote-controller.invalid' } }));
+  assert.equal(parsed.services.gateway.environment.CONTROLLER_URL, 'https://remote-controller.invalid');
+  assert.equal(parsed.services.gateway.environment.ALLOW_INSECURE_CONTROLLER, undefined);
 });
