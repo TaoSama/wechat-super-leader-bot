@@ -23,9 +23,67 @@ const safeLogs = async output => {
     'SYNTHETIC_REMOTE_STDERR_MUST_NOT_LEAK', fixture.root]) assert.ok(!output.includes(secret));
 };
 
+// Hold the first successful file open independently of the CLI's own cancellation
+// case. Observing that case's partial-byte log races its immediate self-cancel.
+async function uploadProxy(env, onPartial) {
+  const sockets = new Set(), timers = new Set();
+  const server = createServer(client => {
+    const upstream = connect(Number(env.DEPLOY_PORT), env.DEPLOY_HOST);
+    sockets.add(client); sockets.add(upstream);
+    let uploaded = 0;
+    const close = () => { client.destroy(); upstream.destroy(); sockets.delete(client); sockets.delete(upstream); };
+    client.on('error', close); upstream.on('error', close);
+    client.on('close', close); upstream.on('close', close);
+    upstream.pipe(client);
+    client.on('data', chunk => {
+      client.pause();
+      let offset = 0;
+      const send = () => {
+        if (client.destroyed || upstream.destroyed) return;
+        const part = chunk.subarray(offset, offset + 1024);
+        upstream.write(part, () => {
+          offset += part.length; uploaded += part.length;
+          if (uploaded >= 65536) onPartial();
+          if (offset >= chunk.length) { client.resume(); return; }
+          const timer = setTimeout(() => { timers.delete(timer); send(); }, 16);
+          timers.add(timer);
+        });
+      };
+      send();
+    });
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port, knownHosts = join(fixture.root, `proxy-hosts-${port}`);
+  const publicKey = (await readFile(fixture.values['known-hosts-file'], 'utf8')).trim().split(' ').slice(1).join(' ');
+  await writeFile(knownHosts, `[127.0.0.1]:${port} ${publicKey}\n`);
+  return { port, knownHosts, async close() {
+    for (const timer of timers) clearTimeout(timer);
+    for (const socket of sockets) socket.destroy();
+    await new Promise(resolve => server.close(resolve));
+  } };
+}
+
 async function cli(env, { interrupt, args = [], wrapper = false, production = false } = {}) {
+  let child, stdout = '', stderr = '', signalled = false, groups = [], observerFailure;
+  const signalEntry = () => {
+    if (!interrupt || signalled || observerFailure) return;
+    try {
+      if (!production) {
+        const stage = transferConfiguration(fixture.values, env).stage;
+        const received = Number(fixture.python(`import os; p=${JSON.stringify(`${stage}/success.bin`)}; print(os.stat(p).st_size if os.path.isfile(p) else 0)`).trim());
+        if (received <= 0 || received >= 1048576) return;
+      }
+      groups = execFileSync('ps', ['-axo', 'pid=,ppid='], { encoding: 'utf8' }).trim().split('\n')
+        .map(row => row.trim().split(/\s+/).map(Number)).filter(([, parent]) => parent === child.pid).map(([pid]) => pid);
+      signalled = true;
+      child.kill(interrupt);
+    } catch (error) { observerFailure = error; child.kill('SIGTERM'); }
+  };
+  const proxy = interrupt && !production ? await uploadProxy(env, signalEntry) : undefined;
+  const knownHosts = proxy?.knownHosts ?? fixture.values['known-hosts-file'];
+  if (proxy) env = { ...env, DEPLOY_PORT: String(proxy.port) };
   let command = process.execPath, commandArgs = [CLI, '--diagnostic', '--key-file', fixture.values['key-file'],
-    '--known-hosts-file', fixture.values['known-hosts-file'], ...args];
+    '--known-hosts-file', knownHosts, ...args];
   if (wrapper) {
     const name = production ? 'Transfer and activate the release on the VPS' : 'Diagnostic-only transfer and cancellation;';
     const section = workflow.slice(workflow.indexOf(`      - name: ${name}`));
@@ -35,21 +93,13 @@ async function cli(env, { interrupt, args = [], wrapper = false, production = fa
     await writeFile(script, block.split('\n').map(line => line.slice(10)).join('\n'));
     command = '/bin/bash'; commandArgs = ['--noprofile', '--norc', '-e', '-o', 'pipefail', script];
     env = { ...env, RUNNER_TEMP: fixture.root, DEPLOY_SSH_PRIVATE_KEY: await fixture.privateKey(),
-      DEPLOY_KNOWN_HOSTS: await readFile(fixture.values['known-hosts-file'], 'utf8') };
+      DEPLOY_KNOWN_HOSTS: await readFile(knownHosts, 'utf8') };
   }
-  const child = spawn(command, commandArgs, { env, stdio: ['ignore', 'pipe', 'pipe'] });
-  let stdout = '', stderr = '', signalled = false, groups = [], observerFailure;
+  child = spawn(command, commandArgs, { env, stdio: ['ignore', 'pipe', 'pipe'] });
   const timeout = setTimeout(() => child.kill('SIGKILL'), 65_000);
   child.stdout.on('data', chunk => {
     stdout += chunk;
-    if (interrupt && !signalled && (production ? stdout.includes('"event":"transfer_start"') : /"name":"cancel.bin","received_bytes":[1-9]/.test(stdout))) {
-      try {
-        groups = execFileSync('ps', ['-axo', 'pid=,ppid='], { encoding: 'utf8' }).trim().split('\n')
-          .map(row => row.trim().split(/\s+/).map(Number)).filter(([, parent]) => parent === child.pid).map(([pid]) => pid);
-        signalled = true;
-        child.kill(interrupt);
-      } catch (error) { observerFailure = error; child.kill('SIGTERM'); }
-    }
+    if (production && stdout.includes('"event":"transfer_start"')) signalEntry();
   });
   child.stderr.on('data', chunk => { stderr += chunk; });
   const result = await new Promise((resolve, reject) => {
@@ -57,6 +107,7 @@ async function cli(env, { interrupt, args = [], wrapper = false, production = fa
     child.once('close', (code, signal) => resolve({ code, signal }));
   });
   clearTimeout(timeout);
+  await proxy?.close();
   if (observerFailure) throw observerFailure;
   await safeLogs(stdout + stderr);
   if (interrupt) {
