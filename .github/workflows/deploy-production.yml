@@ -166,6 +166,11 @@ jobs:
           printf 'REVISION=%s\nCONTROLLER_IMAGE=%s\nGATEWAY_IMAGE=%s\n' "$REVISION" "$CONTROLLER_IMAGE" "$GATEWAY_IMAGE" \
             > "$release_root/manifest.env"
 
+      - name: Reject a superseded built release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/deploy/resolve-revision.mjs --assert-current "$REVISION"
+
       - name: Transfer and activate the release on the VPS
         env:
           GH_TOKEN: ${{ github.token }}
@@ -177,18 +182,8 @@ jobs:
           DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
           DEPLOY_ENV_FILE: ${{ vars.DEPLOY_ENV_FILE }}
         run: |
-          set -Eeuo pipefail
-          node scripts/deploy/resolve-revision.mjs --assert-current "$REVISION"
-          release_root="$RUNNER_TEMP/super-leader-release-$REVISION"
-          key_file="$RUNNER_TEMP/deploy-key"
-          known_hosts_file="$RUNNER_TEMP/deploy-known-hosts"
-          trap 'rm -f -- "$key_file" "$known_hosts_file"' EXIT
-          umask 077
-          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > "$key_file"
-          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$known_hosts_file"
-          chmod 600 "$key_file" "$known_hosts_file"
-          node scripts/deploy/transfer-release.mjs --release-root "$release_root" \
-            --key-file "$key_file" --known-hosts-file "$known_hosts_file"
+          exec node scripts/deploy/transfer-release.mjs \
+            --release-root "$RUNNER_TEMP/super-leader-release-$REVISION" --credentials-root "$RUNNER_TEMP"
 
       - name: Retain bounded build diagnostics on failure
         if: ${{ failure() || cancelled() }}
@@ -220,9 +215,13 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: '24'
-      - name: Diagnostic-only transfer and cancellation; payload at most 2 MiB, operations at most 60 seconds
+      - name: Reject a superseded diagnostic-only revision
         env:
           GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ github.sha }}
+        run: node scripts/deploy/resolve-revision.mjs --assert-current "$REVISION"
+      - name: Diagnostic-only transfer and cancellation; payload at most 2 MiB, operations at most 60 seconds
+        env:
           REVISION: ${{ github.sha }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
@@ -231,16 +230,7 @@ jobs:
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
         run: |
-          set -Eeuo pipefail
-          node scripts/deploy/resolve-revision.mjs --assert-current "$REVISION"
-          key_file="$RUNNER_TEMP/diagnostic-only-key"
-          known_hosts_file="$RUNNER_TEMP/diagnostic-only-known-hosts"
-          trap 'rm -f -- "$key_file" "$known_hosts_file"' EXIT
-          umask 077
-          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > "$key_file"
-          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$known_hosts_file"
-          node scripts/deploy/transfer-release.mjs --diagnostic \
-            --key-file "$key_file" --known-hosts-file "$known_hosts_file"
+          exec node scripts/deploy/transfer-release.mjs --diagnostic --credentials-root "$RUNNER_TEMP"
       - name: Diagnostic-only summary (never deployment acceptance)
         if: ${{ always() }}
         run: |

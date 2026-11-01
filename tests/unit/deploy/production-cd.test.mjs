@@ -36,7 +36,9 @@ test('production CD gates Verify completions before deploying immutable merged r
   assert.match(workflow, /sha256sum controller\.tar gateway\.tar/);
   assert.match(workflow, /compose\.yaml compose\.release\.yaml compose\.production\.yaml compose\.gateway\.yaml codex-seccomp\.json/);
   assert.match(workflow, /cp scripts\/deploy\/remote-release\.sh "\$release_root\/remote-release\.sh"/);
-  assert.match(workflow, /node scripts\/deploy\/transfer-release.mjs --release-root/);
+  assert.match(workflow, /exec node scripts\/deploy\/transfer-release.mjs[\s\S]*--release-root/);
+  assert.match(workflow, /--credentials-root "\$RUNNER_TEMP"/);
+  assert.doesNotMatch(workflow, /trap .*key_file/);
   assert.match(files, /'compose.release.yaml', 'compose.yaml', 'compose.production.yaml', 'compose.gateway.yaml'/);
   assert.match(transfer, /--compose-base/);
   assert.match(transfer, /--seccomp-policy/);

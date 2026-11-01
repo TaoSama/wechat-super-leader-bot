@@ -234,9 +234,11 @@ export class ReleaseTransfer {
 
 async function main() {
   const { values } = parseArgs({ options: { diagnostic: { type: 'boolean' }, 'release-root': { type: 'string' },
-    'key-file': { type: 'string' }, 'known-hosts-file': { type: 'string' }, help: { type: 'boolean', short: 'h' } } });
+    'key-file': { type: 'string' }, 'known-hosts-file': { type: 'string' }, 'credentials-root': { type: 'string' },
+    help: { type: 'boolean', short: 'h' } } });
   if (values.help) {
-    console.log('Usage: node scripts/deploy/transfer-release.mjs --key-file PATH --known-hosts-file PATH\n' +
+    console.log('Usage: node scripts/deploy/transfer-release.mjs\n' +
+      '  (--credentials-root PATH | --key-file PATH --known-hosts-file PATH)\n' +
       '  (--release-root PATH | --diagnostic)\nUses existing DEPLOY_*, REVISION and GITHUB_RUN_ID/GITHUB_RUN_ATTEMPT inputs.');
     return;
   }
@@ -244,8 +246,27 @@ async function main() {
   const cancel = () => abort.abort();
   process.on('SIGINT', cancel);
   process.on('SIGTERM', cancel);
-  try { await new ReleaseTransfer(transferConfiguration(values), { signal: abort.signal }).execute(); }
-  finally { process.off('SIGINT', cancel); process.off('SIGTERM', cancel); }
+  let credentials;
+  try {
+    if (values['credentials-root'] !== undefined) {
+      if (!values['credentials-root'] || values['key-file'] !== undefined || values['known-hosts-file'] !== undefined ||
+        !process.env.DEPLOY_SSH_PRIVATE_KEY || !process.env.DEPLOY_KNOWN_HOSTS) throw new TransferFailure('configuration');
+      credentials = await mkdtemp(join(values['credentials-root'], 'release-transfer-credentials-'));
+      values['key-file'] = join(credentials, 'key');
+      values['known-hosts-file'] = join(credentials, 'known_hosts');
+      await writeFile(values['key-file'], process.env.DEPLOY_SSH_PRIVATE_KEY, { mode: 0o600, flag: 'wx' });
+      await writeFile(values['known-hosts-file'], process.env.DEPLOY_KNOWN_HOSTS, { mode: 0o600, flag: 'wx' });
+    }
+    await new ReleaseTransfer(transferConfiguration(values), { signal: abort.signal }).execute();
+  } finally {
+    try {
+      // SSH cleanup must finish before its authentication files disappear.
+      if (credentials) {
+        await rm(credentials, { recursive: true, force: true });
+        console.log(JSON.stringify({ schema: 1, event: 'credential_cleanup_state', cleanup: 'confirmed' }));
+      }
+    } finally { process.off('SIGINT', cancel); process.off('SIGTERM', cancel); }
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

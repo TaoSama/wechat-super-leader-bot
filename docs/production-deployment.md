@@ -59,6 +59,10 @@ basename、准确 bytes、SHA-256、总字节数及 revision/run/attempt 直接�
 传输失败、校验失败或最终 main 门禁失败均非零退出，不能进入激活。
 
 SIGINT/SIGTERM 会终止并等待本地 SSH/SCP 进程组，必要时有界升级到 SIGKILL。
+Actions 的传输 step 使用 `exec node` 替换入口 bash，因此发送到入口 PID 的信号直接
+交给 Node。Node 在唯一的自有临时目录中以 0600 创建凭证文件，等待传输停止及远端清理
+结束后才删除；入口 shell 不使用可能提前删 key 的 EXIT trap。构建后版本检查单独执行，
+取消该检查后不会启动后续传输 step。
 进入远端激活后，本地 SSH 退出或断链不能证明远端 release/Compose 已停止；只有 SSH
 明确返回成功、确认远端命令已完成后，wrapper 才可继续清理。激活中的取消/断链会保留
 stage，记录 `activation_completion_unknown`，交由原任务核查。初始清理状态始终为
@@ -88,8 +92,9 @@ node --test tests/unit/deploy/transfer.test.mjs tests/unit/deploy/production-cd.
 node tests/integration/deploy/release-transfer.mjs --run
 ```
 
-后者创建独立 Docker SSH/SFTP 服务，使用合成密钥和文件，覆盖两种取消信号、远端
-继续激活时保留 stage、真实认证失败、完整性失败、外来 stage 和额外文件保护；结束时
+后者创建独立 Docker SSH/SFTP 服务，使用合成密钥和文件，覆盖两种取消信号、
+Actions 实际 bash wrapper 的入口信号、凭证在远端清理完成后才移除、远端继续激活时
+保留 stage、真实认证失败、完整性失败、外来 stage 和额外文件保护；结束时
 清理自建容器、镜像及临时文件，不创建持久 volume。Verify integration-core 会运行它。
 
 镜像回滚仍由原 release 脚本执行：恢复旧镜像选择不等于撤销本轮 staged Compose 路由配置。

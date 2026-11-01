@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { writeFile, mkdir, readFile } from 'node:fs/promises';
+import { writeFile, mkdir, readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -15,6 +15,7 @@ const { values } = parseArgs({ options: { run: { type: 'boolean' }, help: { type
 if (!values.run || values.help) { console.log('Usage: node tests/integration/deploy/release-transfer.mjs --run'); process.exit(0); }
 
 const fixture = await transferSshFixture();
+const workflow = await readFile(new URL('../../../.github/workflows/deploy-production.yml', import.meta.url), 'utf8');
 const lines = text => text.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
 const absent = stage => assert.equal(fixture.python(`import os; print(os.path.exists(${JSON.stringify(stage)}))`).trim(), 'False');
 const safeLogs = async output => {
@@ -22,14 +23,26 @@ const safeLogs = async output => {
     'SYNTHETIC_REMOTE_STDERR_MUST_NOT_LEAK', fixture.root]) assert.ok(!output.includes(secret));
 };
 
-async function cli(env, { interrupt, args = [] } = {}) {
-  const child = spawn(process.execPath, [CLI, '--diagnostic', '--key-file', fixture.values['key-file'],
-    '--known-hosts-file', fixture.values['known-hosts-file'], ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+async function cli(env, { interrupt, args = [], wrapper = false, production = false } = {}) {
+  let command = process.execPath, commandArgs = [CLI, '--diagnostic', '--key-file', fixture.values['key-file'],
+    '--known-hosts-file', fixture.values['known-hosts-file'], ...args];
+  if (wrapper) {
+    const name = production ? 'Transfer and activate the release on the VPS' : 'Diagnostic-only transfer and cancellation;';
+    const section = workflow.slice(workflow.indexOf(`      - name: ${name}`));
+    const block = /^        run: \|\n((?:          [^\n]*\n)+)/m.exec(section)?.[1];
+    assert.ok(block?.includes('exec node scripts/deploy/transfer-release.mjs'));
+    const script = join(fixture.root, 'actions-entry.sh');
+    await writeFile(script, block.split('\n').map(line => line.slice(10)).join('\n'));
+    command = '/bin/bash'; commandArgs = ['--noprofile', '--norc', '-e', '-o', 'pipefail', script];
+    env = { ...env, RUNNER_TEMP: fixture.root, DEPLOY_SSH_PRIVATE_KEY: await fixture.privateKey(),
+      DEPLOY_KNOWN_HOSTS: await readFile(fixture.values['known-hosts-file'], 'utf8') };
+  }
+  const child = spawn(command, commandArgs, { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '', stderr = '', signalled = false, groups = [], observerFailure;
   const timeout = setTimeout(() => child.kill('SIGKILL'), 65_000);
   child.stdout.on('data', chunk => {
     stdout += chunk;
-    if (interrupt && !signalled && /"name":"cancel.bin","received_bytes":[1-9]/.test(stdout)) {
+    if (interrupt && !signalled && (production ? stdout.includes('"event":"transfer_start"') : /"name":"cancel.bin","received_bytes":[1-9]/.test(stdout))) {
       try {
         groups = execFileSync('ps', ['-axo', 'pid=,ppid='], { encoding: 'utf8' }).trim().split('\n')
           .map(row => row.trim().split(/\s+/).map(Number)).filter(([, parent]) => parent === child.pid).map(([pid]) => pid);
@@ -47,8 +60,16 @@ async function cli(env, { interrupt, args = [] } = {}) {
   if (observerFailure) throw observerFailure;
   await safeLogs(stdout + stderr);
   if (interrupt) {
-    assert.ok(signalled && groups.length > 0, 'interrupt occurred during a real partial SCP');
+    assert.ok(signalled && (production || groups.length > 0), 'interrupt reached the real entry PID during transport');
     for (const group of groups) assert.throws(() => process.kill(-group, 0), { code: 'ESRCH' });
+  }
+  if (wrapper) {
+    const events = lines(stdout);
+    const remoteCleanup = events.findIndex(event => event.event === 'cleanup_state' && event.cleanup === 'confirmed');
+    const credentialCleanup = events.findIndex(event => event.event === 'credential_cleanup_state' && event.cleanup === 'confirmed');
+    assert.ok(remoteCleanup >= 0 && credentialCleanup > remoteCleanup, 'credentials remain usable until remote cleanup completes');
+    assert.ok(!(await readdir(fixture.root)).some(name => name.startsWith('release-transfer-credentials-')));
+    assert.ok(!events.some(event => event.event === 'activation_start'));
   }
   return { ...result, events: lines(stdout), errors: lines(stderr) };
 }
@@ -78,6 +99,13 @@ try {
     console.log(`PASS real CLI ${interrupt}: nonzero exit, client process groups gone, stage removed, no activation`);
   }
 
+  for (const interrupt of ['SIGINT', 'SIGTERM']) {
+    const wrapped = await cli(fixture.environment(), { interrupt, wrapper: true });
+    assert.notEqual(wrapped.code, 0);
+    assert.ok(wrapped.events.some(event => event.event === 'transfer_failed' && event.category === 'cancelled'));
+    console.log(`PASS actual diagnostic Actions bash wrapper ${interrupt}: entry PID cancellation, owned keys usable through remote cleanup, removed last, no activation`);
+  }
+
   const invalid = await cli(fixture.environment(), { args: ['--release-root', 'SYNTHETIC_REMOTE_STDERR_MUST_NOT_LEAK'] });
   assert.notEqual(invalid.code, 0);
   assert.equal(invalid.errors[0].category, 'configuration');
@@ -89,6 +117,14 @@ try {
   for (const name of RELEASE_FILES) await writeFile(join(root, name), name === 'remote-release.sh'
     ? '#!/bin/sh\nprintf active > /tmp/activation-sentinel\nprintf SYNTHETIC_REMOTE_STDERR_MUST_NOT_LEAK >&2\nexit 0\n' : `synthetic ${name}\n`);
   const configFor = () => transferConfiguration({ ...fixture.values, diagnostic: false, 'release-root': root }, fixture.environment());
+  const productionEnv = fixture.environment();
+  const productionRoot = join(fixture.root, `super-leader-release-${productionEnv.REVISION}`);
+  await mkdir(productionRoot);
+  for (const name of RELEASE_FILES) await writeFile(join(productionRoot, name), await readFile(join(root, name)));
+  const wrappedProduction = await cli(productionEnv, { interrupt: 'SIGTERM', wrapper: true, production: true });
+  assert.notEqual(wrappedProduction.code, 0);
+  assert.ok(wrappedProduction.events.some(event => event.event === 'transfer_failed' && event.category === 'cancelled'));
+  console.log('PASS actual production Actions bash wrapper SIGTERM: nonzero, authentication retained through cleanup, no activation');
   const captured = [];
   let gated = 0;
   const rejected = new ReleaseTransfer(configFor(), { log: value => captured.push(value), beforeActivate: async () => {
