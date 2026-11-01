@@ -80,7 +80,7 @@ export async function pgConsumeConsoleLink(
   const normalizedSession = normalizeConsoleSessionRecord(session);
   const validNow = validateIsoTimestamp(now, "now");
   if (validTokenHash === normalizedSession.tokenHash) {
-    throw new Error("Session tokenHash must be distinct from one-time link tokenHash");
+    throw new Error("Session tokenHash must be distinct from link tokenHash");
   }
   if (Date.parse(normalizedSession.expiresAt) <= validNow.ms) {
     throw new Error("Invalid ConsoleSessionRecord: session expiresAt must be greater than now");
@@ -92,9 +92,8 @@ export async function pgConsumeConsoleLink(
     const updateRes = await client.query(
       `
       UPDATE console_links
-      SET consumed_at = $2::timestamptz
+      SET consumed_at = COALESCE(consumed_at, $2::timestamptz)
       WHERE token_hash = $1
-        AND consumed_at IS NULL
         AND expires_at > $2::timestamptz
       RETURNING token_hash;
       `,

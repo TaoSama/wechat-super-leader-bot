@@ -53,23 +53,25 @@ for (const source of ["engine", "controller"] as const) {
   });
 }
 
-for (const remaining of [3, 10]) test(`ordinary reply is not blocked by a reminder with ${remaining} sends remaining`, async t => {
+for (const remaining of [3, 8, 10]) test(`expiry reminder precedes ordinary reply even with ${remaining} sends remaining`, async t => {
   const f = fixture(t, remaining);
   await f.gateway.deliverNotificationsOnce();
-  assert.deepEqual(f.sends.map(text), ["ordinary"]);
-  assert.equal(f.state.accountSendBudget!.remaining, remaining - 1);
+  assert.equal(f.sends.length, 2);
+  assert.match(text(f.sends[0]), /主动发一条消息/);
+  assert.equal(text(f.sends[1]), "ordinary");
+  assert.equal(f.state.accountSendBudget!.remaining, remaining - 2);
   assert.equal(f.state.outbox.ordinary, undefined);
   const key = accountRenewalDeliveryKey(f.state.getLoginFingerprint(), f.state.accountSendBudget!);
-  assert.equal(f.state.replyDeliveries[key], undefined);
+  assert.equal(f.state.replyDeliveries[key].acknowledgedChunks, 1);
 });
 
-test("multipart 3 -> 2 yields its suffix, sends priority reminder, then resumes frozen text across restart and refresh", async t => {
+test("expiry reminder precedes multipart text and unsent suffix resumes across restart and refresh", async t => {
   const f = fixture(t, 3, "abcdefgh");
   f.state.updateOutbox("ordinary", { splitMaxChars: 2 });
   await f.gateway.deliverNotificationsOnce();
-  assert.equal(text(f.sends[0]), "ab");
-  assert.match(text(f.sends[1]), /主动发一条消息/);
-  assert.equal(f.state.replyDeliveries.ordinary.acknowledgedChunks, 1);
+  assert.match(text(f.sends[0]), /主动发一条消息/);
+  assert.deepEqual(f.sends.slice(1).map(text), ["ab", "cd"]);
+  assert.equal(f.state.replyDeliveries.ordinary.acknowledgedChunks, 2);
   assert.equal(f.state.replyDeliveries.ordinary.inFlight, false);
   assert.equal(f.state.outbox.ordinary.status, "pending");
   const restarted = new StateManager(f.accountPath, f.statePath);

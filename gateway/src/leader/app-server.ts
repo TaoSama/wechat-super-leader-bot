@@ -4,6 +4,8 @@ import * as path from "node:path";
 import { resolveCodexExecutable } from "./executable.js";
 import type { CodexOptions, ThreadEvent, ThreadItem, ThreadOptions, Usage } from "@openai/codex-sdk";
 import { traceEvent } from "../runtime/telemetry.js";
+import { historyCursor, historyIdentity, historyTurnStatus, MAX_HISTORY_CURSOR_LENGTH, readHistoryTurnStatuses,
+  type HistoryTurnStatuses } from "./history-turns.js";
 
 const RPC_TIMEOUT_MS = 30_000;
 const EXIT_GRACE_MS = 1_000;
@@ -138,7 +140,7 @@ class Connection {
 
   public send(value: unknown): void { this.child.stdin.write(`${JSON.stringify(value)}\n`); }
 
-  public rpc(method: string, params: unknown): Promise<unknown> {
+  public rpc(method: string, params: unknown, timeoutMs = RPC_TIMEOUT_MS): Promise<unknown> {
     if (this.closed || this.closePromise || this.signal.aborted) return Promise.reject(new Error("Codex app-server is closed"));
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {
@@ -147,7 +149,7 @@ class Connection {
         reject(new Error("Codex app-server request timed out"));
         this.fail(new Error("Codex app-server request timed out"));
         void this.close();
-      }, RPC_TIMEOUT_MS);
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       try { this.send({ id, method, params }); }
       catch { this.pending.delete(id); clearTimeout(timer); reject(new Error("Codex app-server input failed")); }
@@ -247,6 +249,7 @@ export interface AppServerHistoryPage {
   readonly threadId: string;
   readonly items: ObjectValue[];
   readonly nextCursor: string | null;
+  readonly turnStatuses?: HistoryTurnStatuses;
 }
 
 function appServerEnvironment(options: CodexOptions): { executable: string; args: string[]; env: Record<string, string> } {
@@ -280,7 +283,7 @@ export async function readAppServerThreadHistory(options: CodexOptions, threadId
   page: { cursor?: string; limit: number }, signal: AbortSignal): Promise<AppServerHistoryPage> {
   if (!threadId || !/^[A-Za-z0-9._:-]{1,256}$/.test(threadId)) throw new Error("Invalid Codex thread ID");
   if (!Number.isSafeInteger(page.limit) || page.limit < 1 || page.limit > 50) throw new Error("Invalid history limit");
-  if (page.cursor !== undefined && (page.cursor.length > 4096 || !page.cursor.trim())) throw new Error("Invalid history cursor");
+  if (page.cursor !== undefined && (page.cursor.length > MAX_HISTORY_CURSOR_LENGTH || !page.cursor.trim())) throw new Error("Invalid history cursor");
   if (signal.aborted) throw new Error("Codex app-server history read aborted");
   const connection = await createAppServerConnection(options, signal);
   try {
@@ -295,11 +298,17 @@ export async function readAppServerThreadHistory(options: CodexOptions, threadId
     const result = object(pageResult);
     if (!Array.isArray(result.data) || result.data.length > page.limit) throw new Error("Codex app-server returned an oversized history page");
     const values = result.data.map(object).filter(item => !!string(object(item.item).id));
-    const nextCursor = result.nextCursor === null || result.nextCursor === undefined ? null : string(result.nextCursor);
-    if (result.nextCursor !== null && result.nextCursor !== undefined && (!nextCursor || nextCursor.length > 4096)) {
-      throw new Error("Codex app-server returned an invalid history cursor");
+    const nextCursor = historyCursor(result.nextCursor, new Set(page.cursor ? [page.cursor] : []));
+    const cacheKey = JSON.stringify([options.env?.CODEX_HOME ?? "", options.env?.HOME ?? "", options.codexPathOverride ?? "", threadId]);
+    const turnStatuses = await readHistoryTurnStatuses((method, params, timeout) => connection.rpc(method, params, timeout),
+      cacheKey, threadId, values);
+    if (turnStatuses) {
+      for (const value of values) {
+        const status = historyTurnStatus(turnStatuses[historyIdentity(value.turnId)]);
+        if (status) value.turnStatus = status;
+      }
     }
-    return { threadId, items: values.reverse(), nextCursor: nextCursor || null };
+    return { threadId, items: values.reverse(), nextCursor, ...(turnStatuses ? { turnStatuses } : {}) };
   } finally {
     await connection.close();
   }

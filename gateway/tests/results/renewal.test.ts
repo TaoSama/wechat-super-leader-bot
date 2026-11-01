@@ -59,16 +59,16 @@ test("uninterested chats, short windows and inadmissible chats never get a remin
   assert.equal(f.sent.length, 0);
 });
 
-test("only one or two effective sends qualify, regardless of the raw persisted counter", async () => {
+test("expiry reminder qualifies with any positive effective budget, regardless of the raw persisted counter", async () => {
   const f = fixture();
   f.state.accountSendBudget!.remaining = 10;
-  for (const effective of [0, -1, NaN, 1.5, 3, 10]) {
+  for (const effective of [0, -1, NaN, Infinity, 1.5]) {
     f.setRemaining(effective);
     assert.equal((await f.notifier.deliverOnce(["chat"])).sent, 0);
   }
-  for (const remaining of [1, 2]) {
-    const low = fixture(); low.setRemaining(remaining);
-    assert.equal((await low.notifier.deliverOnce(["chat"])).sent, 1);
+  for (const remaining of [1, 2, 3, 8, 10]) {
+    const available = fixture(); available.setRemaining(remaining);
+    assert.equal((await available.notifier.deliverOnce(["chat"])).sent, 1);
   }
 });
 
@@ -109,7 +109,6 @@ test("queued send aborts on context, account, window or effective budget changes
     (f: ReturnType<typeof fixture>) => { f.state.accountSendBudget!.lastInboundKey = "another-inbound"; },
     (f: ReturnType<typeof fixture>) => { f.state.policy.contextWindowMs++; },
     (f: ReturnType<typeof fixture>) => { f.setRemaining(0); },
-    (f: ReturnType<typeof fixture>) => { f.setRemaining(3); },
     (f: ReturnType<typeof fixture>) => { f.setNow(REFRESHED_AT + 23 * HOUR); },
   ];
   for (const mutate of mutations) {

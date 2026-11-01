@@ -354,7 +354,7 @@ export class DirectToolExecutor {
         } else if (name === "list_sessions" && parseSessionDirectoryQuery(request.text)) {
           reply = { text: titles.render("") };
         } else if (name === "get_console_link" && link.issuedLink) {
-          reply = { text: `控制台登录链接（1小时内有效，仅可使用一次）：\n${link.issuedLink.url}` };
+          reply = { text: `控制台登录链接（签发后1小时内可重复登录）：\n${link.issuedLink.url}` };
         }
       }
       signal.throwIfAborted();

@@ -67,10 +67,6 @@ export class ConsoleAuthService {
       expiresAt,
     });
 
-    if (record.consumedAt) {
-      throw new ConsoleAuthError("Console link has already been consumed", 409);
-    }
-
     if (Date.parse(record.expiresAt) <= nowMs) {
       throw new ConsoleAuthError("Console link has expired", 410);
     }

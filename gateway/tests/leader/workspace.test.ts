@@ -95,16 +95,33 @@ test("reconstructed stores retain SDK-written memory and refresh persisted threa
   assert.deepEqual(fs.readdirSync(workspace.workspacePath).filter(name => name.endsWith(".tmp")), []);
 });
 
-test("native usage schedules an oversized thread for rotation while retaining small threads", async (t) => {
-  const { store } = fixture(t);
+test("native usage remains diagnostic and preserves the same thread across restarts", async (t) => {
+  const { root, store } = fixture(t);
   const workspace = await store.forChat("account", "chat");
-  workspace.setThreadId("thread-small");
-  workspace.recordThreadUsage(200_000, false);
-  assert.equal(workspace.getThreadId(), "thread-small");
-  workspace.recordThreadUsage(200_001, true);
-  assert.equal(workspace.getThreadId(), undefined);
-  workspace.setThreadId("thread-fresh");
-  assert.equal(workspace.getThreadId(), "thread-fresh");
+  workspace.setThreadId("thread-persisted");
+  for (const inputTokens of [200_000, 200_001, 1_000]) {
+    workspace.recordThreadUsage(inputTokens);
+    assert.equal((await new WorkspaceStore(root).forChat("account", "chat")).getThreadId(), "thread-persisted");
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(workspace.workspacePath, ".thread.json"), "utf8")),
+      { threadId: "thread-persisted", lastInputTokens: inputTokens });
+  }
+});
+
+test("legacy thread IDs and rotation hints retain their native conversation without rewriting history", async t => {
+  const { root, store } = fixture(t);
+  const workspace = await store.forChat("account", "chat");
+  const file = path.join(workspace.workspacePath, ".thread.json");
+  for (const state of [{ threadId: "legacy-thread" },
+    { threadId: "legacy-thread", lastInputTokens: 250_000, rotateBeforeNext: true }]) {
+    const content = JSON.stringify(state);
+    fs.writeFileSync(file, content, { mode: 0o600 });
+    assert.equal((await new WorkspaceStore(root).forChat("account", "chat")).getThreadId(), "legacy-thread");
+    assert.equal(fs.readFileSync(file, "utf8"), content);
+  }
+  workspace.recordThreadUsage(1_000);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { threadId: "legacy-thread", lastInputTokens: 1_000 });
+  fs.writeFileSync(file, JSON.stringify({ threadId: "legacy-thread", rotateBeforeNext: "true" }));
+  assert.throws(() => workspace.getThreadId(), /Invalid workspace thread state/);
 });
 
 test("account and chat tuples isolate threads, SDK homes and memory", async (t) => {

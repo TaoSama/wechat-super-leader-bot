@@ -94,25 +94,29 @@ test("native memory edits, early thread ID and restart resume persist in isolate
   assert.doesNotMatch(other.readMemory()["task.md"].content, /重发问题/);
 });
 
-test("oversized native turns rotate the persisted thread before the next message", async t => {
+test("high native usage keeps the same task before and after compaction-sized usage drops and engine restarts", async t => {
   const root = fixture(t);
   const resumes: Array<string | undefined> = [];
   let turn = 0;
   const sdkFactory = fakeFactory(async function* (_input, _settings, _sdk, resume) {
     resumes.push(resume);
     turn++;
-    yield { type: "thread.started", thread_id: `thread-${turn}` };
+    yield { type: "thread.started", thread_id: "thread-persisted" };
     yield { type: "item.completed", item: { type: "agent_message", id: `answer-${turn}`, text: "已完成" } };
     yield { type: "turn.completed", usage: {
-      ...usage, input_tokens: turn === 1 ? 200_001 : 1_000,
+      ...usage, input_tokens: turn <= 2 ? 250_000 : 1_000,
     } };
   });
-  const engine = new CodexReplyEngine({ root, model: "test-model", sdkFactory });
+  const options = { root, model: "test-model", sdkFactory };
+  const engine = new CodexReplyEngine(options);
   await engine.reply("account", request, noController);
   await engine.reply("account", { ...request, messageId: "next", text: "继续" }, noController);
-  assert.deepEqual(resumes, [undefined, undefined]);
+  await new CodexReplyEngine(options).reply("account", { ...request, messageId: "restart", text: "重启后继续" }, noController);
+  assert.deepEqual(resumes, [undefined, "thread-persisted", "thread-persisted"]);
   const workspace = await new WorkspaceStore(root).forChat("account", "chat");
-  assert.equal(workspace.getThreadId(), "thread-2");
+  assert.equal(workspace.getThreadId(), "thread-persisted");
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(workspace.workspacePath, ".thread.json"), "utf8")),
+    { threadId: "thread-persisted", lastInputTokens: 1_000 });
 });
 
 test("each native turn gets current Beijing time, including midnight after thread resume", async t => {

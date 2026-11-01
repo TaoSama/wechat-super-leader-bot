@@ -66,7 +66,7 @@ export type Hub = Pick<NodeHub, "getAllSessions" | "getNodeStatusList" | "getNod
 const sanitizeConsoleLinkSecrets = (text: string, issuedUrl?: string): string => {
   let result = text;
   if (issuedUrl) {
-    result = result.replaceAll(issuedUrl, "[一次性控制台登录链接已生成，有效期1小时]");
+    result = result.replaceAll(issuedUrl, "[控制台登录链接已生成，签发后1小时内可重复登录]");
   }
   result = result.replace(/#login=[A-Za-z0-9_.~%-]+/g, "#login=[REDACTED]");
   return result;
@@ -662,7 +662,7 @@ export class LeaderOrchestrator {
 
   private attachConsoleLink(content: string, linkContext: LinkContext): string {
     if (!linkContext.issuedLink) return content;
-    const notice = `\n\n控制台登录链接（1小时内有效，仅可使用一次，打开后地址栏会自动隐藏登录凭证）：\n${linkContext.issuedLink.url}`;
+    const notice = `\n\n控制台登录链接（签发后1小时内可重复登录，打开后地址栏会自动隐藏登录凭证）：\n${linkContext.issuedLink.url}`;
     return `${content.trim()}${notice}`;
   }
 

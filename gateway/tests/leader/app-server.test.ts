@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test, type TestContext } from "node:test";
 import { AppServerRejectedError, readAppServerThreadHistory, startAppServerTurn } from "../../src/leader/app-server.js";
 import { createMessageTrace, runWithTrace } from "../../src/runtime/telemetry.js";
+import { historyFixture } from "./history-fixture.js";
+import { CodexReplyEngine } from "../../src/leader/codex.js";
+import { WorkspaceStore } from "../../src/leader/workspace.js";
+import { directToolController } from "./direct-tool-fixture.js";
 
-type FixtureMode = "normal" | "reject" | "lost" | "lateAck" | "failed" | "interrupted" | "turn-fail" | "invalid" | "oversized" | "timeout" | "crash";
-async function fixture(context: TestContext, mode: FixtureMode = "normal") {
+type FixtureMode = "normal" | "auto" | "reject" | "lost" | "lateAck" | "failed" | "interrupted" | "turn-fail" | "invalid" | "oversized" | "timeout" | "crash";
+async function fixture(context: TestContext, mode: FixtureMode = "normal", inputTokens = 10) {
   const root = await mkdtemp(path.join(os.tmpdir(), "wechat-app-server-"));
   const executable = path.join(root, "codex");
   const log = path.join(root, "protocol.jsonl");
@@ -29,7 +33,7 @@ function complete(status = 'completed') {
   notify('item/completed', { item: { id: 'reason', type: 'reasoning', summary: ['checked'], content: [] } });
   notify('item/started', { item: { id: 'compact', type: 'contextCompaction' } });
   notify('item/completed', { item: { id: 'compact', type: 'contextCompaction' } });
-  notify('thread/tokenUsage/updated', { tokenUsage: { last: { inputTokens: 10, cachedInputTokens: 4, cacheWriteInputTokens: 1, outputTokens: 8, reasoningOutputTokens: 2 } } });
+  notify('thread/tokenUsage/updated', { tokenUsage: { last: { inputTokens: ${inputTokens}, cachedInputTokens: 4, cacheWriteInputTokens: 1, outputTokens: 8, reasoningOutputTokens: 2 } } });
   notify('item/completed', { item: { id: 'answer', type: 'agentMessage', text: 'final answer', phase: 'final_answer' } });
   notify('turn/completed', { turn: { id: 'turn-1', status } });
 }
@@ -45,6 +49,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   if (message.method === 'turn/start') {
     if (mode === 'turn-fail') return send({ id: message.id, error: { code: -32000, message: 'synthetic turn failure' } });
     send({ id: message.id, result: { turn: { id: 'turn-1' } } });
+    if (mode === 'auto') complete();
     if (mode === 'failed' || mode === 'interrupted') complete(mode);
     if (mode === 'invalid') process.stdout.write('not json\\n');
     if (mode === 'oversized') process.stdout.write('x'.repeat(8 * 1024 * 1024 + 1));
@@ -132,6 +137,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   const message = JSON.parse(line);
   if (message.method === 'initialize') send({ id: message.id, result: {} });
   if (message.method === 'thread/read') send({ id: message.id, result: { thread: { id: message.params.threadId } } });
+  if (message.method === 'thread/turns/list') send({ id: message.id, result: { data: [{ id: 'turn-1', status: 'completed' }], nextCursor: null } });
   if (message.method === 'thread/items/list') send({ id: message.id, result: { data: [
     { turnId: 'turn-1', turnStatus: 'completed', item: { id: 'new', type: 'agentMessage', text: 'new' } },
     { turnId: 'turn-1', turnStatus: 'completed', item: { id: 'old', type: 'userMessage', content: [{ type: 'text', text: 'old' }] } }
@@ -142,6 +148,143 @@ setInterval(() => {}, 1000);
   const page = await readAppServerThreadHistory({ codexPathOverride: executable }, "thread-1", { limit: 2 }, new AbortController().signal);
   assert.deepEqual(page.items.map(item => (item.item as { id: string }).id), ["old", "new"]);
   assert.equal(page.nextCursor, "next");
+});
+
+test("history paginates native items and enriches exact turn states through bounded read-only metadata", async context => {
+  const fake = await historyFixture(context, {
+    itemsPages: {
+      "": { data: [
+        { turnId: "turn-new", startedAtMs: 1_000, completedAtMs: 2_000, item: { id: "answer", type: "agentMessage", text: "answer" } },
+        { turnId: "turn-new", item: { id: "user", type: "userMessage", content: [{ type: "text", text: "user" }] } },
+      ], nextCursor: "older" },
+      older: { data: [
+        { turnId: "turn-old", item: { id: "compact", type: "contextCompaction" } },
+        { turnId: "turn-old", item: { id: "tool", type: "commandExecution", status: "completed" } },
+      ], nextCursor: null },
+    },
+    turnPages: {
+      "": { data: [{ id: "turn-new", status: "inProgress" }, { id: "unrelated", status: "completed" }], nextCursor: "older-turns" },
+      "older-turns": { data: [{ id: "turn-old", status: "interrupted" }], nextCursor: null },
+    },
+  });
+  const options = { codexPathOverride: fake.executable };
+  const latest = await readAppServerThreadHistory(options, "thread-1", { limit: 2 }, new AbortController().signal);
+  const older = await readAppServerThreadHistory(options, "thread-1", { limit: 2, cursor: latest.nextCursor! }, new AbortController().signal);
+  assert.deepEqual(latest.items.map(item => (item.item as { id: string }).id), ["user", "answer"]);
+  assert.deepEqual(older.items.map(item => (item.item as { id: string }).id), ["tool", "compact"]);
+  assert.equal(older.nextCursor, null);
+  assert.equal(latest.turnStatuses?.["turn-new"], "inProgress");
+  assert.equal(latest.turnStatuses?.unrelated, undefined);
+  assert(older.items.every(item => item.turnStatus === "interrupted"));
+  const records = await fake.records();
+  assert(records.filter(record => record.method).every(record =>
+    ["initialize", "initialized", "thread/read", "thread/items/list", "thread/turns/list"].includes(record.method!)));
+  assert.deepEqual(records.filter(record => record.method === "thread/items/list").map(record => record.params?.cursor), [undefined, "older"]);
+  assert(records.filter(record => record.method === "thread/turns/list").every(record =>
+    record.params?.itemsView === "notLoaded" && record.params?.limit === 50));
+  for (const record of records.filter(record => record.pid)) assertExited(record.pid!);
+});
+
+test("optional metadata refusal, timeout and invalid cursors preserve readable item history and close processes", async context => {
+  for (const mode of ["reject", "timeout", "invalid-cursor", "oversized"] as const) {
+    const fake = await historyFixture(context, {
+      itemsPages: { "": { data: [{ turnId: "turn-1", startedAtMs: 1_000, completedAtMs: 2_000,
+        item: { id: "tool", type: "commandExecution", status: "completed" } }], nextCursor: "next-items" } },
+      ...(mode === "reject" || mode === "timeout" ? { metadataMode: mode } : {}),
+      turnPages: { "": mode === "oversized" ? { data: Array.from({ length: 51 }, () => ({ id: "turn-1", status: "completed" })) }
+        : { data: [{ id: "turn-1", status: "completed" }], nextCursor: 123 } },
+    });
+    const startedAt = performance.now();
+    const page = await readAppServerThreadHistory({ codexPathOverride: fake.executable }, "thread-1", { limit: 1 }, new AbortController().signal);
+    assert.equal(page.items.length, 1);
+    assert.equal(page.nextCursor, "next-items");
+    assert.equal(page.items[0].turnStatus, undefined);
+    assert.equal(page.turnStatuses, undefined);
+    assert(performance.now() - startedAt < 5_000, "optional metadata and process shutdown must stay bounded");
+    const records = await fake.records();
+    assert.equal(records.filter(record => record.method === "thread/turns/list").length, 1);
+    assertExited(records[0].pid!);
+  }
+});
+
+test("metadata scans stop after three pages and native item cursors cannot repeat", async context => {
+  const fake = await historyFixture(context, {
+    itemsPages: {
+      "": { data: [{ turnId: "old-turn", item: { id: "old-item", type: "agentMessage", text: "old" } }], nextCursor: "same" },
+      same: { data: [], nextCursor: "same" },
+    },
+    turnPages: Object.fromEntries(["", "page-1", "page-2", "page-3"].map((cursor, index) =>
+      [cursor, { data: [{ id: `unrelated-${index}`, status: "completed" }], nextCursor: `page-${index + 1}` }])),
+  });
+  const options = { codexPathOverride: fake.executable };
+  const page = await readAppServerThreadHistory(options, "thread-1", { limit: 1 }, new AbortController().signal);
+  assert.equal(page.items.length, 1);
+  assert.equal(page.turnStatuses, undefined);
+  assert.equal((await fake.records()).filter(record => record.method === "thread/turns/list").length, 3);
+  await assert.rejects(readAppServerThreadHistory(options, "thread-1", { limit: 1, cursor: "same" }, new AbortController().signal), /invalid history cursor/);
+  for (const record of (await fake.records()).filter(record => record.pid)) assertExited(record.pid!);
+});
+
+test("metadata caches do not mix equal thread IDs from different native workspaces", async context => {
+  const fake = await historyFixture(context, {
+    itemsPages: { "": { data: [{ turnId: "same-turn", item: { id: "same-item", type: "agentMessage", text: "answer" } }], nextCursor: null } },
+    turnPagesByHome: {
+      "/workspace-a/.codex": { "": { data: [{ id: "same-turn", status: "completed" }], nextCursor: null } },
+      "/workspace-b/.codex": { "": { data: [], nextCursor: null } },
+    },
+  });
+  const a = await readAppServerThreadHistory({ codexPathOverride: fake.executable, env: { CODEX_HOME: "/workspace-a/.codex" } },
+    "same-thread", { limit: 1 }, new AbortController().signal);
+  const b = await readAppServerThreadHistory({ codexPathOverride: fake.executable, env: { CODEX_HOME: "/workspace-b/.codex" } },
+    "same-thread", { limit: 1 }, new AbortController().signal);
+  assert.equal(a.items[0].turnStatus, "completed");
+  assert.equal(b.items[0].turnStatus, undefined);
+  assert.equal(b.turnStatuses, undefined);
+  for (const record of (await fake.records()).filter(record => record.pid)) assertExited(record.pid!);
+});
+
+test("native latest-page polls return newly discovered status for a deep item page loaded only once", async context => {
+  const fake = await historyFixture(context, {
+    itemsPages: {
+      "older-items": { data: [{ turnId: "turn-200", item: { id: "old", type: "agentMessage", text: "old" } }], nextCursor: null },
+      "": { data: [{ turnId: "turn-0", item: { id: "new", type: "agentMessage", text: "new" } }], nextCursor: "older-items" },
+    },
+    turnPages: Object.fromEntries([0, 50, 100, 150, 200].map(start => [start ? `turn-page-${start}` : "", {
+      data: Array.from({ length: Math.min(50, 201 - start) }, (_, index) => ({ id: `turn-${start + index}`, status: "completed" })),
+      nextCursor: start + 50 < 201 ? `turn-page-${start + 50}` : null,
+    }])),
+  });
+  const options = { codexPathOverride: fake.executable };
+  const older = await readAppServerThreadHistory(options, "thread", { limit: 1, cursor: "older-items" }, new AbortController().signal);
+  assert.equal(older.items[0].turnStatus, undefined);
+  const latest = await readAppServerThreadHistory(options, "thread", { limit: 1 }, new AbortController().signal);
+  assert.equal(latest.turnStatuses?.["turn-0"], "completed");
+  assert.equal(latest.turnStatuses?.["turn-200"], "completed");
+  const records = await fake.records();
+  assert.deepEqual(records.filter(record => record.method === "thread/items/list").map(record => record.params?.cursor), ["older-items", undefined]);
+  assert.deepEqual(records.filter(record => record.method === "thread/turns/list").map(record => record.params?.cursor),
+    [undefined, "turn-page-50", "turn-page-100", undefined, "turn-page-150", "turn-page-200"]);
+  for (const record of records.filter(record => record.pid)) assertExited(record.pid!);
+});
+
+test("native compaction events and high token usage retain the task on the next message after restart", async context => {
+  const fake = await fixture(context, "auto", 250_000);
+  const root = await mkdtemp(path.join(await realpath(os.tmpdir()), "wechat-native-compaction-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const options = { root, model: "test-model", codexPath: fake.executable };
+  const controller = directToolController();
+  for (const messageId of ["first", "next"]) {
+    const engine = new CodexReplyEngine(options);
+    context.after(() => engine.stop());
+    assert.deepEqual(await engine.reply("account", { chatId: "chat", messageId, text: "继续" }, controller),
+      { text: "final answer" });
+    await engine.stop();
+  }
+  assert.equal((await new WorkspaceStore(root).forChat("account", "chat")).getThreadId(), "thread-1");
+  const records = await fake.records();
+  assert.deepEqual(records.filter(record => record.method === "thread/start" || record.method === "thread/resume").map(record =>
+    [record.method, record.params.threadId]), [["thread/start", undefined], ["thread/resume", "thread-1"]]);
+  for (const record of records.filter(record => record.pid)) assertExited(record.pid);
 });
 
 test("resume and protocol steer refusals stay distinct from uncertain transport failure", async context => {

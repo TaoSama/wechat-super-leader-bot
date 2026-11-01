@@ -38,6 +38,9 @@ test("prompt keeps console credentials outside both model context envelopes", ()
     text: "测试 https://console.invalid/#login=synthetic-message-secret" });
   assert.doesNotMatch(output, /synthetic-memory-secret|synthetic-message-secret/);
   assert.match(output, /#login=\[REDACTED\]/);
+  assert.match(output, /控制台链接自签发起1小时内可重复登录/);
+  assert.match(output, /重复使用不延长原有效期，到期后不能再登录/);
+  assert.doesNotMatch(output, /一次性控制台/);
 });
 
 test("prompt batches known control discovery with invocation and retains native waiting and authority rules", () => {
