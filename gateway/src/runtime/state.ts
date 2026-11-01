@@ -182,7 +182,9 @@ export class StateManager extends DeliveryState {
               item.inFlight && item.acknowledgedChunks === item.totalChunks ||
               item.failureReason !== undefined &&
                 (!["AttachmentExpired", "AttachmentUnavailable"].includes(item.failureReason) ||
-                 item.inFlight || item.acknowledgedChunks === item.totalChunks)) {
+                 item.inFlight || item.acknowledgedChunks === item.totalChunks) ||
+              item.renewalRejected !== undefined && (item.renewalRejected !== true || !key.startsWith("renewal:") ||
+                item.inFlight || item.acknowledgedChunks === item.totalChunks)) {
             throw new Error("Invalid reply delivery state");
           }
           this.replyDeliveries[key] = { ...item };
@@ -326,12 +328,13 @@ export class StateManager extends DeliveryState {
   }
 
   public hasPermanentReplyFailure(deliveryKey: string): boolean {
-    return this.replyDeliveries[deliveryKey]?.failureReason !== undefined;
+    const item = this.replyDeliveries[deliveryKey];
+    return item?.failureReason !== undefined || item?.renewalRejected === true;
   }
 
   public recordReplyFailure(deliveryKey: string, reason: NonNullable<ReplyDeliveryState["failureReason"]>): void {
     const previous = this.replyDeliveries[deliveryKey];
-    if (!previous || previous.inFlight || previous.acknowledgedChunks === previous.totalChunks ||
+    if (!previous || previous.inFlight || previous.renewalRejected || previous.acknowledgedChunks === previous.totalChunks ||
         previous.failureReason !== undefined && previous.failureReason !== reason) {
       throw new Error("Invalid WeChat permanent reply failure transition");
     }
@@ -348,7 +351,7 @@ export class StateManager extends DeliveryState {
         throw new Error("WeChat reply content or chunk plan changed; refusing replay");
       }
       if (previous.inFlight) throw new Error("WeChat reply delivery uncertain; refusing replay");
-      if (previous.failureReason) throw new Error("WeChat reply permanently failed; refusing replay");
+      if (this.hasPermanentReplyFailure(deliveryKey)) throw new Error("WeChat reply permanently failed; refusing replay");
       return { ...previous };
     }
     if (this.getReplySentChunks(deliveryKey) > 0) {
@@ -386,7 +389,7 @@ export class StateManager extends DeliveryState {
     if (!deliveryKey.startsWith("renewal:")) throw new Error("Invalid renewal delivery key");
     const previous = this.replyDeliveries[deliveryKey];
     if (!previous || (previous.digest === digest && previous.totalChunks === totalChunks) ||
-        previous.acknowledgedChunks > 0 || previous.inFlight || previous.failureReason !== undefined) {
+        previous.acknowledgedChunks > 0 || previous.inFlight || this.hasPermanentReplyFailure(deliveryKey)) {
       return this.prepareReplyDelivery(deliveryKey, digest, totalChunks);
     }
     const next = { ...this.replyDeliveries, [deliveryKey]: { digest, totalChunks, acknowledgedChunks: 0, inFlight: false } };
@@ -405,19 +408,22 @@ export class StateManager extends DeliveryState {
     this.updateReplyDelivery(deliveryKey, chunkIndex, false, true);
   }
 
-  public rejectReplyChunk(deliveryKey: string, chunkIndex: number): void {
-    this.updateReplyDelivery(deliveryKey, chunkIndex, false, false);
+  public rejectReplyChunk(deliveryKey: string, chunkIndex: number, options?: { renewalReminder?: true }): void {
+    if (options?.renewalReminder === true && !deliveryKey.startsWith("renewal:")) throw new Error("Invalid renewal delivery key");
+    this.updateReplyDelivery(deliveryKey, chunkIndex, false, false, options?.renewalReminder === true);
   }
 
-  private updateReplyDelivery(deliveryKey: string, chunkIndex: number, inFlight: boolean, acknowledged: boolean): void {
+  private updateReplyDelivery(deliveryKey: string, chunkIndex: number, inFlight: boolean, acknowledged: boolean,
+    renewalRejected = false): void {
     const previous = this.replyDeliveries[deliveryKey];
-    if (!previous || previous.failureReason || previous.acknowledgedChunks !== chunkIndex || chunkIndex >= previous.totalChunks ||
+    if (!previous || this.hasPermanentReplyFailure(deliveryKey) || previous.acknowledgedChunks !== chunkIndex || chunkIndex >= previous.totalChunks ||
         previous.inFlight === inFlight) {
       throw new Error("Invalid WeChat reply chunk transition");
     }
     const previousProgress = this.sentReplyProgress[deliveryKey];
     const count = chunkIndex + (acknowledged ? 1 : 0);
-    this.replyDeliveries[deliveryKey] = { ...previous, acknowledgedChunks: count, inFlight };
+    this.replyDeliveries[deliveryKey] = { ...previous, acknowledgedChunks: count, inFlight,
+      ...(renewalRejected ? { renewalRejected: true as const } : {}) };
     if (count > 0) this.sentReplyProgress[deliveryKey] = count;
     try { this.saveState(); }
     catch (error) {

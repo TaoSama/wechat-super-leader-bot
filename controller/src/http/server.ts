@@ -34,6 +34,7 @@ import { createNotificationRouter } from "../notifications/routes.js";
 import { hashConsoleToken } from "../console/types.js";
 import { createMediaRouter } from "../sessions/media-routes.js";
 import { createMessageReplyRouter } from "../sessions/message-reply-routes.js";
+import { consoleLinkRequestId, restoreConsoleLinkReply } from "../console/link-reply.js";
 import { createReadResponseCompression } from "./response-compression.js";
 import { createMessageStream } from "./message-stream.js";
 import { createDirectToolsRouter } from "./direct-tools.js";
@@ -122,7 +123,9 @@ export class ControllerServer {
     this.directLeader = new LeaderOrchestrator(store, this.hub, this.commands, businessModel, now,
       requestId => this.consoleAuth.issueLink(requestId), this.executions, this.goals, this.taskNotifications.automations,
       this.taskNotifications.background, { isAllowed: chatId => this.config.allowedChatIds.has(chatId),
-        goalsAvailable: Boolean(leaderModel), settings: this.settings });
+        goalsAvailable: Boolean(leaderModel), settings: this.settings,
+        consoleLinkResolver: requestId => this.consoleAuth.recoverLink(requestId),
+        consoleLinkRedactor: (requestId, text) => this.consoleAuth.redactReply(requestId, text) });
     if (leaderModel) this.leader = this.directLeader;
     this.resolver = new NaturalLanguageResolver();
     this.statusEvents = new StatusEvents(() => this.statusSnapshot());
@@ -266,7 +269,8 @@ export class ControllerServer {
       } }));
     apiRouter.use(createDirectToolsRouter(this.directLeader.direct, chatId => this.config.allowedChatIds.has(chatId)));
     apiRouter.use(createMediaRouter(this.store, () => this.config.allowedChatIds, this.now));
-    apiRouter.use(createMessageReplyRouter(this.store, () => this.config.allowedChatIds));
+    apiRouter.use(createMessageReplyRouter(this.store, () => this.config.allowedChatIds,
+      requestId => this.consoleAuth.recoverLink(requestId)));
     apiRouter.use("/notifications", createNotificationRouter(this.store, () => this.config.allowedChatIds, this.now));
     apiRouter.use("/deliveries", createResultDeliveryRouter(this.taskNotifications.results, () => this.config.allowedChatIds));
     apiRouter.use("/background-tasks", createBackgroundRouter(this.taskNotifications.background, () => this.config.allowedChatIds));
@@ -396,7 +400,7 @@ export class ControllerServer {
             if (existingMsg.text !== text) throw new ConflictError("Message ID already used with different text");
             traceEvent("controller.replay", { replayed: true });
             await reply({
-              text: existingMsg.replyText,
+              text: await restoreConsoleLinkReply(existingMsg.replyText, chatId, messageId, requestId => this.consoleAuth.recoverLink(requestId)),
               commandId: existingMsg.commandId,
               ...(existingMsg.images ? { images: existingMsg.images } : {}),
             });
@@ -405,7 +409,8 @@ export class ControllerServer {
 
           if (this.leader) {
             const result = await traceSpan("controller.leader", () => this.leader!.handle(chatId, messageId, text, stream?.report));
-            await traceSpan("controller.persist", () => this.store.recordMessage({ chatId, messageId, text, replyText: result.text,
+            const replyText = await this.consoleAuth.redactReply(consoleLinkRequestId(chatId, messageId), result.text);
+            await traceSpan("controller.persist", () => this.store.recordMessage({ chatId, messageId, text, replyText,
               commandId: result.commandId, ...(result.images ? { images: result.images } : {}), createdAt: new Date().toISOString() }));
             await reply(result);
             return;

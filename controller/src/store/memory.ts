@@ -567,6 +567,11 @@ export class MemoryStore implements IStore {
     return cloneConsoleLinkRecord(stored);
   }
 
+  async getConsoleLink(tokenHash: string): Promise<ConsoleLinkRecord | null> {
+    const record = this.consoleLinks.get(validateConsoleTokenHash(tokenHash));
+    return record ? cloneConsoleLinkRecord(record) : null;
+  }
+
   async consumeConsoleLink(
     tokenHash: string,
     session: ConsoleSessionRecord,

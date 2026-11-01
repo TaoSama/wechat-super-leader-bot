@@ -74,6 +74,7 @@ test("expiry reminder qualifies with any positive effective budget, regardless o
 
 test("shared persisted acknowledgement, unknown and terminal failures suppress all repeat sends", async () => {
   for (const patch of [{ acknowledgedChunks: 1, inFlight: false }, { acknowledgedChunks: 0, inFlight: true },
+    { acknowledgedChunks: 0, inFlight: false, renewalRejected: true as const },
     { acknowledgedChunks: 0, inFlight: false, failureReason: "AttachmentUnavailable" as const }]) {
     const f = fixture();
     f.state.replyDeliveries[renewalDeliveryKey("account", "chat", REFRESHED_AT)] = {

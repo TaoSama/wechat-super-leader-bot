@@ -1,5 +1,6 @@
 import { REPORT_PROGRESS_TOOL, progressText, type QueryProgressReporter } from "../notifications/model-progress.js";
 import { DirectToolExecutor } from "./direct-executor.js";
+import { consoleLinkRequestId, redactConsoleLinkSecrets, redactIssuedConsoleLink, restoreConsoleLinkReply, type ConsoleLinkResolver, type ConsoleLinkRedactor } from "../console/link-reply.js";
 import { traceEvent, traceSpan } from "../runtime/telemetry.js";
 import type { LocalSettingsService } from "../settings/local-service.js";
 import { isConsoleLinkQuery, parseSessionDirectoryQuery } from "@super-leader/wechat-text";
@@ -68,8 +69,7 @@ const sanitizeConsoleLinkSecrets = (text: string, issuedUrl?: string): string =>
   if (issuedUrl) {
     result = result.replaceAll(issuedUrl, "[控制台登录链接已生成，签发后1小时内可重复登录]");
   }
-  result = result.replace(/#login=[A-Za-z0-9_.~%-]+/g, "#login=[REDACTED]");
-  return result;
+  return redactConsoleLinkSecrets(result);
 };
 
 interface LinkContext {
@@ -89,10 +89,12 @@ export class LeaderOrchestrator {
   constructor(private store: IStore, private hub: Hub, private commands: Pick<CommandService, "submit">,
     private model: LeaderModel, private now: () => number = Date.now, private consoleLinkIssuer?: ConsoleLinkIssuer,
     executions?: ExecutionScheduler, goals?: GoalScheduler, private automations?: AutomationService,
-    private background?: BackgroundToolService, private readonly directOptions: { settings?: LocalSettingsService; isAllowed?: (chatId: string) => boolean; goalsAvailable?: boolean } = {}) {
+    private background?: BackgroundToolService, private readonly directOptions: { settings?: LocalSettingsService; isAllowed?: (chatId: string) => boolean; goalsAvailable?: boolean; consoleLinkResolver?: ConsoleLinkResolver; consoleLinkRedactor?: ConsoleLinkRedactor } = {}) {
     this.executions = executions ?? new ExecutionScheduler(store, commands, { now });
     this.goals = new GoalConversation(store, hub, goals ?? new GoalScheduler(store, commands, createGoalDecider(model), { now }), now);
     this.direct = new DirectToolExecutor({ store, hub, now, automations, background, settings: directOptions.settings,
+      consoleLinkResolver: directOptions.consoleLinkResolver,
+      consoleLinkRedactor: directOptions.consoleLinkRedactor,
       isAllowed: directOptions.isAllowed ?? (() => true), goalsAvailable: directOptions.goalsAvailable ?? true,
       goals: this.goals, executions: this.executions,
       save: (chatId, revision, data) => this.save(chatId, revision, data),
@@ -125,7 +127,8 @@ export class LeaderOrchestrator {
     const receipt = data.receipts.find(item => item.messageId === messageId);
     if (receipt) {
       if (receipt.inputHash !== inputHash) throw new ConflictError("Message ID already used with different text");
-      return { text: receipt.text, commandId: receipt.commandId, ...(receipt.images ? { images: receipt.images } : {}) };
+      return { text: await restoreConsoleLinkReply(receipt.text, chatId, messageId, this.directOptions.consoleLinkResolver),
+        commandId: receipt.commandId, ...(receipt.images ? { images: receipt.images } : {}) };
     }
     if (data.inflight) {
       if (data.inflight.expiresAt > this.now()) throw new CommandError(409, "上一条请求尚未结束，请稍后查询");
@@ -189,7 +192,7 @@ export class LeaderOrchestrator {
     let directory = false;
     let invalidatedConfirmation = false;
     const linkContext: LinkContext = {
-      requestId: `console_link_${hash([chatId, messageId])}`,
+      requestId: consoleLinkRequestId(chatId, messageId),
     };
     if (ambiguous) {
       reply = { text: "当前同时有计划和持续目标待确认，请先取消其中一项，再确认要执行的内容。" };
@@ -268,7 +271,7 @@ export class LeaderOrchestrator {
     }
     reply.text = clip(reply.text, directory ? MAX_DIRECTORY_REPLY_CHARS : MAX_REPLY_CHARS);
     data.inflight = undefined;
-    data.receipts.push({ messageId, inputHash, ...reply });
+    data.receipts.push({ messageId, inputHash, ...reply, text: redactIssuedConsoleLink(reply.text, linkContext.requestId, linkContext.issuedLink?.url) });
     const userHistory = sanitizeConsoleLinkSecrets(text);
     const assistantHistory = sanitizeConsoleLinkSecrets(reply.text, linkContext.issuedLink?.url);
     const confirmationFor = data.pending && data.pending !== previousPlan ? data.pending.id

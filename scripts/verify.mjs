@@ -15,7 +15,7 @@ const CONTROLLER_UNIT_STEP_IDS = new Set(['controller-typecheck', 'controller-te
 const WEB_UNIT_STEP_IDS = new Set(['web-tests']);
 const SERIAL_UNIT_STEP_IDS = new Set(['daemon-race', 'terminal-delivery-sample']);
 const POSTGRES_STEP_IDS = new Set([
-  'synthetic-integration', 'console-auth-integration',
+  'synthetic-integration', 'console-auth-integration', 'console-link-delivery-integration',
   'task-notifications-postgres', 'scheduled-sessions-postgres',
 ]);
 const WECHAT_STEP_IDS = new Set(['wechat-interaction']);
@@ -71,6 +71,7 @@ export function verificationPlan(suite = 'all', { skipNativeProgress = false } =
     step('gateway-native-skill-tests', 'pnpm', ['--dir', 'gateway', 'run', 'test:native-skill']),
     step('synthetic-integration', process.execPath, ['tests/integration/run.mjs']),
     step('console-auth-integration', process.execPath, ['tests/integration/console-auth.mjs', '--run']),
+    step('console-link-delivery-integration', process.execPath, ['tests/integration/console-link-delivery.mjs', '--run']),
     step('wechat-interaction', process.execPath, ['tests/integration/leader/wechat-interaction.mjs', '--run']),
     ...(skipNativeProgress ? [] : [step('native-progress-steering', process.execPath, ['tests/integration/leader/progress-steering.mjs', '--run'])]),
     step('message-latency', process.execPath, ['tests/integration/leader/message-latency.mjs', '--run']),

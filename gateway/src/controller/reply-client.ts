@@ -45,7 +45,7 @@ export async function getControllerMessageReply(options: {
     diagnostics.phase = "headers";
     diagnostics.httpStatus = response.status;
     abort.signal.throwIfAborted();
-    if (response.status === 404) throw new PermanentReplyUnavailableError("Unavailable");
+    if (response.status === 404 || response.status === 410) throw new PermanentReplyUnavailableError("Unavailable");
     if (response.status === 403) throw new PermanentReplyUnavailableError("Revoked");
     if (!response.ok) throw new Error(`Controller message reply returned HTTP ${response.status}`);
     let value: unknown;

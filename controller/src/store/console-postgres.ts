@@ -70,6 +70,14 @@ export async function pgCreateConsoleLinkIfAbsent(
   return mapConsoleLinkRow(selectRes.rows[0]);
 }
 
+export async function pgGetConsoleLink(pool: pg.Pool, tokenHash: string): Promise<ConsoleLinkRecord | null> {
+  const result = await pool.query(
+    "SELECT token_hash, created_at, expires_at, consumed_at FROM console_links WHERE token_hash = $1",
+    [validateConsoleTokenHash(tokenHash)],
+  );
+  return result.rows.length ? mapConsoleLinkRow(result.rows[0]) : null;
+}
+
 export async function pgConsumeConsoleLink(
   pool: pg.Pool,
   tokenHash: string,

@@ -30,9 +30,9 @@ import { goalConfirmation } from "./goals/conversation.js";
 import { traceSpan } from "../runtime/telemetry.js";
 import type { LocalSettingsService, LocalRuntimeSettings } from "../settings/local-service.js";
 import { DIRECT_EXTRA_TOOLS } from "../settings/local-registry.js";
+import { consoleLinkRequestId, redactConsoleLinkSecrets as sanitize, redactIssuedConsoleLink, restoreConsoleLinkReply, type ConsoleLinkResolver, type ConsoleLinkRedactor } from "../console/link-reply.js";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-const sanitize = (text: string) => text.replace(/#login=[A-Za-z0-9_.~%-]+/g, "#login=[REDACTED]");
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, canonical(item)]));
@@ -43,6 +43,8 @@ const CONFIRM = /^(?:请)?(?:确认|执行|开始|开始执行|确认执行|确�
 
 interface LinkContext { requestId: string; cachedLinkPromise?: Promise<ConsoleLinkIssued>; issuedLink?: ConsoleLinkIssued }
 interface Options {
+  consoleLinkResolver?: ConsoleLinkResolver;
+  consoleLinkRedactor?: ConsoleLinkRedactor;
   settings?: LocalSettingsService;
   store: IStore; hub: Hub; now: () => number; isAllowed: (chatId: string) => boolean;
   automations?: AutomationService; background?: BackgroundToolService; goalsAvailable: boolean;
@@ -60,7 +62,11 @@ export class DirectToolExecutor {
   private journal: DirectToolJournal;
   private chats = new Set<string>();
   constructor(private readonly options: Options) {
-    this.journal = new DirectToolJournal(options.store, options.isAllowed);
+    this.journal = new DirectToolJournal(options.store, options.isAllowed, async (request, result) => {
+      const serialized = JSON.stringify(result);
+      return request.name === "get_console_link" && options.consoleLinkRedactor
+        ? options.consoleLinkRedactor(consoleLinkRequestId(request.chatId, request.messageId), serialized) : serialized;
+    });
   }
 
   async list(request: DirectRequest) {
@@ -100,12 +106,15 @@ export class DirectToolExecutor {
     if (this.isReadOnly(request.name)) return this.journal.call(request, () => this.read(request));
     const effect = ["execute_plan", "execute_goal", "confirm_pending"].includes(request.name)
       ? "dispatch" : ["propose_plan", "propose_goal"].includes(request.name) ? "preview" : request.name === "send_session_images" ? "images" : `${request.name}:${JSON.stringify(canonical(request.arguments))}`;
-    return this.journal.call(request, async () => {
+    const result = await this.journal.call(request, async () => {
       if (this.chats.has(request.chatId)) throw new CommandError(409, "Another direct tool is active for this chat");
       this.chats.add(request.chatId);
       try { return await this.run(request); }
       finally { this.chats.delete(request.chatId); }
     }, effect);
+    if (result.reply) return { ...result, reply: { ...result.reply,
+      text: await restoreConsoleLinkReply(result.reply.text, request.chatId, request.messageId, this.options.consoleLinkResolver) } };
+    return result;
   }
 
   private validate(request: DirectCall) {
@@ -273,7 +282,7 @@ export class DirectToolExecutor {
       discoveredRunIds: new Set(data.directContext.discoveredRunIds),
       discoveredSources: new Map(Object.entries(data.directContext.discoveredSources).map(([node, ids]) => [node, new Set(ids)])),
       assertCurrentAuthority: assertAuthority };
-    const link: LinkContext = { requestId: `console_link_${hash([chatId, messageId])}` };
+    const link: LinkContext = { requestId: consoleLinkRequestId(chatId, messageId) };
     const titles = this.titles(data);
     const signal = AbortSignal.timeout(TURN_TIMEOUT_MS);
     let result: unknown, reply: LeaderReply | undefined;
@@ -378,7 +387,8 @@ export class DirectToolExecutor {
       data.inflight = undefined;
       await o.save(chatId, claimed.revision, data);
       if (reply && (name === "list_sessions" && parseSessionDirectoryQuery(request.text) || name === "get_console_link")) {
-        await o.store.recordMessage({ chatId, messageId, text: request.text, replyText: reply.text,
+        await o.store.recordMessage({ chatId, messageId, text: request.text,
+          replyText: redactIssuedConsoleLink(reply.text, link.requestId, link.issuedLink?.url),
           ...(reply.images ? { images: reply.images } : {}), createdAt: new Date().toISOString() });
       }
       return { result, ...(reply ? { reply } : {}) };

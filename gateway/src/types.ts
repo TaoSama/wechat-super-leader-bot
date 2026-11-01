@@ -52,6 +52,7 @@ export interface ReplyDeliveryState {
   acknowledgedChunks: number;
   inFlight: boolean;
   failureReason?: "AttachmentExpired" | "AttachmentUnavailable";
+  renewalRejected?: true;
 }
 
 export interface InboundWeChatMessage {

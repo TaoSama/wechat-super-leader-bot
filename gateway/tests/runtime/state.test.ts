@@ -305,3 +305,56 @@ test("reported remaining budget honors a lowered policy and expired window", t =
   state.contextWindows.chat.refreshedAt -= state.policy.contextWindowMs;
   assert.equal(state.remainingSendBudget("chat"), 0);
 });
+
+test("renewal rejection is one durable transition that blocks replay and rolls back failed checkpoints", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-renewal-rejected-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const credentials = path.join(directory, "account.json"), statePath = path.join(directory, "state.json");
+  fs.writeFileSync(credentials, JSON.stringify({ token: "synthetic", accountId: "fixture" }));
+  const state = new StateManager(credentials, statePath), key = "renewal:rejected", digest = "a".repeat(64);
+  state.prepareRenewalReplyDelivery(key, digest, 1);
+  state.beginReplyChunk(key, 0);
+  const original = structuredClone(state.replyDeliveries[key]);
+  const failure = new Error("renewal checkpoint unavailable");
+  const save = t.mock.method(state, "saveState", () => { throw failure; });
+  assert.throws(() => state.rejectReplyChunk(key, 0, { renewalReminder: true }), error => error === failure);
+  assert.deepEqual(state.replyDeliveries[key], original);
+  assert.deepEqual(new StateManager(credentials, statePath).replyDeliveries[key], original);
+  save.mock.restore();
+  state.rejectReplyChunk(key, 0, { renewalReminder: true });
+  const reloaded = new StateManager(credentials, statePath);
+  assert.deepEqual(reloaded.replyDeliveries[key], { ...original, inFlight: false, renewalRejected: true });
+  assert.equal(reloaded.hasPermanentReplyFailure(key), true);
+  assert.throws(() => reloaded.prepareReplyDelivery(key, digest, 1), /permanently failed/);
+  assert.throws(() => reloaded.prepareRenewalReplyDelivery(key, digest, 1), /permanently failed/);
+  assert.throws(() => reloaded.prepareRenewalReplyDelivery(key, "b".repeat(64), 1), /content or chunk plan changed/);
+  assert.throws(() => reloaded.beginReplyChunk(key, 0), /Invalid/);
+  assert.throws(() => reloaded.recordReplyFailure(key, "AttachmentUnavailable"), /Invalid/);
+  assert.equal(reloaded.replyDeliveries[key].renewalRejected, true);
+  state.prepareReplyDelivery("ordinary", digest, 1);
+  state.beginReplyChunk("ordinary", 0);
+  assert.throws(() => state.rejectReplyChunk("ordinary", 0, { renewalReminder: true }), /Invalid renewal delivery key/);
+  assert.equal(state.replyDeliveries.ordinary.inFlight, true);
+  state.rejectReplyChunk("ordinary", 0);
+  assert.equal(state.prepareReplyDelivery("ordinary", digest, 1).renewalRejected, undefined);
+});
+
+test("invalid renewal rejection markers fail closed without changing attachment failure compatibility", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-invalid-renewal-rejected-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const credentials = path.join(directory, "account.json"), statePath = path.join(directory, "state.json");
+  fs.writeFileSync(credentials, JSON.stringify({ token: "synthetic", accountId: "fixture" }));
+  const state = new StateManager(credentials, statePath);
+  for (const [key, patch] of [
+    ["ordinary", { renewalRejected: true }],
+    ["renewal:invalid", { renewalRejected: false }],
+    ["renewal:invalid", { renewalRejected: "true" }],
+    ["renewal:invalid", { renewalRejected: true, inFlight: true }],
+    ["renewal:invalid", { renewalRejected: true, acknowledgedChunks: 1 }],
+  ] as const) {
+    state.replyDeliveries = { [key]: { digest: "f".repeat(64), totalChunks: 1, acknowledgedChunks: 0, inFlight: false,
+      ...patch } as typeof state.replyDeliveries[string] };
+    state.saveState();
+    assert.throws(() => new StateManager(credentials, statePath), /Failed to load gateway state/);
+  }
+});

@@ -532,7 +532,7 @@ export class ILinkClient {
           } catch (error) {
             if (error instanceof ILinkSendReceiptError &&
                 (error.reason === "RejectedRet" || error.reason === "RejectedErrcode")) {
-              this.stateManager.rejectReplyChunk(deliveryKey, idx);
+              this.stateManager.rejectReplyChunk(deliveryKey, idx, options?.renewalReminder ? { renewalReminder: true } : undefined);
               traceEvent("wechat.chunk.rejected", { chunkIndex: idx });
             }
             traceEvent("wechat.chunk.failed", { chunkIndex: idx,

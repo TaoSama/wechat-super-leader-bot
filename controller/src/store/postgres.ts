@@ -33,6 +33,7 @@ import {
 } from "../console/types.js";
 import {
   pgCreateConsoleLinkIfAbsent,
+  pgGetConsoleLink,
   pgConsumeConsoleLink,
   pgGetConsoleSession,
   pgDeleteConsoleSession,
@@ -478,6 +479,10 @@ export class PostgresStore implements IStore {
   // Console Auth Store
   async createConsoleLinkIfAbsent(record: ConsoleLinkRecord): Promise<ConsoleLinkRecord> {
     return pgCreateConsoleLinkIfAbsent(this.pool, record);
+  }
+
+  async getConsoleLink(tokenHash: string): Promise<ConsoleLinkRecord | null> {
+    return pgGetConsoleLink(this.pool, tokenHash);
   }
 
   async consumeConsoleLink(
