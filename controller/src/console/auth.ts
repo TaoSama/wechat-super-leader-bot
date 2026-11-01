@@ -1,10 +1,13 @@
 import { createHmac, randomBytes } from "node:crypto";
 import {
   ConsoleSessionRecord,
+  ConsoleAuthError,
   IConsoleAuthStore,
   hashConsoleToken,
 } from "./types.js";
 import { validateConsolePublicUrl } from "../runtime/config.js";
+import { redactIssuedConsoleLink } from "./link-reply.js";
+export { ConsoleAuthError } from "./types.js";
 
 export const CONSOLE_LINK_TTL_MS = 3600 * 1000; // 1 hour
 export const CONSOLE_SESSION_TTL_MS = 3600 * 1000; // 1 hour
@@ -17,13 +20,6 @@ export interface ConsoleLinkIssued {
 export interface ConsoleSessionIssued {
   sessionToken: string;
   expiresAt: string;
-}
-
-export class ConsoleAuthError extends Error {
-  constructor(message: string, public readonly statusCode: number = 400) {
-    super(message);
-    this.name = "ConsoleAuthError";
-  }
 }
 
 export class ConsoleAuthService {
@@ -47,15 +43,7 @@ export class ConsoleAuthService {
     if (!this.publicUrlOrigin) {
       throw new ConsoleAuthError("Console public URL is not configured", 503);
     }
-    if (typeof requestId !== "string" || requestId.trim().length === 0 || requestId.length > 256) {
-      throw new ConsoleAuthError("Invalid requestId: must be a non-empty string", 400);
-    }
-
-    // Domain-separated HMAC-SHA256 deterministic token derivation based on requestId
-    const rawToken = createHmac("sha256", this.controllerToken)
-      .update("super-leader:console-link:" + requestId.trim())
-      .digest("base64url");
-
+    const rawToken = this.linkToken(requestId);
     const tokenHash = hashConsoleToken(rawToken);
     const nowMs = this.now();
     const createdAt = new Date(nowMs).toISOString();
@@ -75,6 +63,34 @@ export class ConsoleAuthService {
       url: `${this.publicUrlOrigin}/#login=${rawToken}`,
       expiresAt: record.expiresAt,
     };
+  }
+
+  async recoverLink(requestId: string): Promise<ConsoleLinkIssued | null> {
+    const link = await this.existingLink(requestId);
+    return link && Date.parse(link.expiresAt) > this.now() ? link : null;
+  }
+
+  async redactReply(requestId: string, text: string): Promise<string> {
+    if (!text.includes("#login=")) return text;
+    const link = await this.existingLink(requestId);
+    return redactIssuedConsoleLink(text, requestId, link?.url);
+  }
+
+  private async existingLink(requestId: string): Promise<ConsoleLinkIssued | null> {
+    if (!this.publicUrlOrigin) return null;
+    const rawToken = this.linkToken(requestId);
+    const record = await this.store.getConsoleLink(hashConsoleToken(rawToken));
+    if (!record) return null;
+    return { url: `${this.publicUrlOrigin}/#login=${rawToken}`, expiresAt: record.expiresAt };
+  }
+
+  private linkToken(requestId: string): string {
+    if (typeof requestId !== "string" || requestId.trim().length === 0 || requestId.length > 256) {
+      throw new ConsoleAuthError("Invalid requestId: must be a non-empty string", 400);
+    }
+    return createHmac("sha256", this.controllerToken)
+      .update("super-leader:console-link:" + requestId.trim())
+      .digest("base64url");
   }
 
   async exchangeToken(rawToken: string): Promise<ConsoleSessionIssued | null> {

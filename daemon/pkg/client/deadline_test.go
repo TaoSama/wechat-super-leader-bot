@@ -250,6 +250,10 @@ func serveDeadlineDesktop(conn net.Conn, expiry time.Time, preflights, mutations
 }
 
 func TestDesktopDispatchPreflightCannotWriteAfterCommandExpiry(t *testing.T) {
+	const (
+		desktopExpiryWindow   = 3 * time.Second
+		desktopFixtureTimeout = 10 * time.Second
+	)
 	dir, err := os.MkdirTemp("/tmp", "deadline-test-")
 	if err != nil {
 		t.Fatal(err)
@@ -278,7 +282,9 @@ func TestDesktopDispatchPreflightCannotWriteAfterCommandExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer closeDaemon(t, d)
-	expiry := time.Now().Add(deadlineTestExpiryWindow)
+	// Real Unix preparation and the durable dispatch fsync need setup time on
+	// loaded CI workers. The second preflight still waits for command expiry.
+	expiry := time.Now().Add(desktopExpiryWindow)
 	cmd := persistenceCommand(expiry.UTC().Format(time.RFC3339Nano))
 	cmd.SendRoute = protocol.RouteDesktopOwner
 	var preflights, mutations atomic.Int32
@@ -289,13 +295,13 @@ func TestDesktopDispatchPreflightCannotWriteAfterCommandExpiry(t *testing.T) {
 			done <- err
 			return
 		}
-		if err := conn.SetDeadline(time.Now().Add(deadlineTestTimeout)); err != nil {
+		if err := conn.SetDeadline(time.Now().Add(desktopFixtureTimeout)); err != nil {
 			done <- errors.Join(err, conn.Close())
 			return
 		}
 		done <- errors.Join(serveDeadlineDesktop(conn, expiry, &preflights, &mutations), conn.Close())
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), deadlineTestTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), desktopFixtureTimeout)
 	defer cancel()
 	res := d.ExecuteCommand(ctx, cmd)
 	select {

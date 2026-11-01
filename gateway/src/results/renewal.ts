@@ -68,10 +68,10 @@ export class RenewalNotifier {
     for (const [legacyChat, window] of Object.entries(state.contextWindows)) {
       if (window.refreshedAt !== refreshedAt) continue;
       const legacy = state.replyDeliveries[renewalDeliveryKey(account, legacyChat, refreshedAt)];
-      if (legacy && (legacy.acknowledgedChunks > 0 || legacy.inFlight || legacy.failureReason)) return undefined;
+      if (legacy && (legacy.acknowledgedChunks > 0 || legacy.inFlight || legacy.failureReason || legacy.renewalRejected)) return undefined;
     }
     const prior = state.replyDeliveries[deliveryKey];
-    if (prior && (prior.acknowledgedChunks > 0 || prior.inFlight || prior.failureReason)) return undefined;
+    if (prior && (prior.acknowledgedChunks > 0 || prior.inFlight || prior.failureReason || prior.renewalRejected)) return undefined;
     return { account, token, refreshedAt, lastInboundKey, windowMs, sendBudget: state.policy.sendBudget, deliveryKey };
   }
 

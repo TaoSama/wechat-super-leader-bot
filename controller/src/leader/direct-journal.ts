@@ -19,7 +19,8 @@ const identifier = (kind: string, request: DirectRequest, callId?: string) =>
 /** Durable start and result records make an interrupted mutation non-replayable. */
 export class DirectToolJournal {
   private active = new Map<string, { fingerprint: string; promise: Promise<DirectToolResult> }>();
-  constructor(private readonly store: IStore, private readonly isAllowed: (chatId: string) => boolean) {}
+  constructor(private readonly store: IStore, private readonly isAllowed: (chatId: string) => boolean,
+    private readonly serialize: (request: DirectCall, result: DirectToolResult) => Promise<string> = async (_request, result) => JSON.stringify(result)) {}
 
   async bind(request: DirectRequest): Promise<void> {
     this.assertAllowed(request.chatId);
@@ -100,9 +101,9 @@ export class DirectToolJournal {
     }
   }
 
-  private async complete(request: DirectRequest, messageId: string, fingerprint: string, result: DirectToolResult): Promise<void> {
+  private async complete(request: DirectCall, messageId: string, fingerprint: string, result: DirectToolResult): Promise<void> {
     await this.store.recordMessage({ chatId: request.chatId, messageId, text: fingerprint,
-      replyText: JSON.stringify(result), createdAt: new Date().toISOString() });
+      replyText: await this.serialize(request, result), createdAt: new Date().toISOString() });
     const completed = await this.store.getMessage(request.chatId, messageId);
     if (!completed || completed.text !== fingerprint) throw new ConflictError( "Tool call or effect key reused with different input");
   }

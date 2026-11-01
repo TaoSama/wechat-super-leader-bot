@@ -211,6 +211,21 @@ describe("Console Auth Store Contract (Memory & Postgres)", () => {
 
   for (const backend of backends) {
     describe(backend.name, () => {
+      it("reads an existing link without creating or changing it and returns an isolated record", async () => {
+        const { store, fakePool } = await backend.create();
+        const tokenHash = hashConsoleToken("read-only-link");
+        expect(await store.getConsoleLink(tokenHash)).toBeNull();
+        const record = { tokenHash, createdAt: "2026-10-11T12:00:00.000Z", expiresAt: "2026-10-11T13:00:00.000Z" };
+        await store.createConsoleLinkIfAbsent(record);
+        const queryCount = fakePool?.queries.length;
+        const found = await store.getConsoleLink(tokenHash);
+        expect(found).toEqual(record);
+        found!.expiresAt = "2026-10-11T14:00:00.000Z";
+        expect(await store.getConsoleLink(tokenHash)).toEqual(record);
+        for (const query of fakePool?.queries.slice(queryCount) ?? []) expect(query.sql.trim()).toMatch(/^SELECT /);
+        await expect(store.getConsoleLink("raw-token")).rejects.toThrow(/64-character lowercase hexadecimal/i);
+      });
+
       it("creates a login link and does not overwrite or revive the existing link", async () => {
         const { store } = await backend.create();
         const rawToken = "link_secret_1234567890_test_token";

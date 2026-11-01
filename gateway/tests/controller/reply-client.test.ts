@@ -40,7 +40,7 @@ test("reply lookups validate identity before issuing a request", async () => {
 test("reply lookup rejects HTTP failures and malformed projections without replay or sensitive body output", async () => {
   const failures: (() => Promise<Response>)[] = [
     async () => { throw new Error("network unavailable"); },
-    ...[401, 403, 404, 409, 500, 503].map(status => async () => new Response("sensitive_body", { status })),
+    ...[401, 403, 404, 409, 410, 500, 503].map(status => async () => new Response("sensitive_body", { status })),
     async () => new Response("sensitive_body"),
     ...[{}, { reply: { text: "nested" } }, { text: 123 }, { text: "ok", images: null },
       { text: "ok", images: [{ ...image, url: "https://untrusted.test" }] }].map(body => async () => Response.json(body)),
@@ -56,8 +56,8 @@ test("reply lookup rejects HTTP failures and malformed projections without repla
   }
 });
 
-test("immutable reply 403 and 404 expose permanent typed reasons without reading the body", async t => {
-  for (const [status, reason] of [[403, "Revoked"], [404, "Unavailable"]] as const) {
+test("immutable reply 403, 404 and 410 expose permanent typed reasons without reading the body", async t => {
+  for (const [status, reason] of [[403, "Revoked"], [404, "Unavailable"], [410, "Unavailable"]] as const) {
     let bodyReads = 0;
     const instance = client(async () => {
       const response = new Response("sensitive_body", { status });

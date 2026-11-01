@@ -3,6 +3,13 @@ import { createHash } from "node:crypto";
 export const CONSOLE_TOKEN_HASH_HEX_LENGTH = 64;
 const SHA256_HEX_REGEX = /^[0-9a-f]{64}$/;
 
+export class ConsoleAuthError extends Error {
+  constructor(message: string, public readonly statusCode: number = 400) {
+    super(message);
+    this.name = "ConsoleAuthError";
+  }
+}
+
 export interface ConsoleLinkRecord {
   tokenHash: string;
   createdAt: string;
@@ -19,6 +26,7 @@ export interface ConsoleSessionRecord {
 
 export interface IConsoleAuthStore {
   createConsoleLinkIfAbsent(record: ConsoleLinkRecord): Promise<ConsoleLinkRecord>;
+  getConsoleLink(tokenHash: string): Promise<ConsoleLinkRecord | null>;
   consumeConsoleLink(tokenHash: string, session: ConsoleSessionRecord, now: string): Promise<boolean>;
   getConsoleSession(tokenHash: string, now: string): Promise<ConsoleSessionRecord | null>;
   deleteConsoleSession(tokenHash: string): Promise<void>;

@@ -9,6 +9,7 @@ import { FileResultOutbox, resultIdentity } from "../../src/results/outbox.js";
 import type { ResultDelivery } from "../../src/results/contracts.js";
 import { accountRenewalDeliveryKey } from "../../src/results/renewal.js";
 import { LocalSendDeferredError } from "../../src/runtime/context-policy.js";
+import { ILinkSendReceiptError } from "../../src/wechat/send-receipt.js";
 
 const HOUR = 60 * 60 * 1000;
 const text = (sent: Record<string, unknown>) => (sent.item_list as { text_item: { text: string } }[])[0].text_item.text;
@@ -125,6 +126,61 @@ test("unknown reminder never repeats or blocks a pending ordinary reply after re
   const restarted = new StateManager(f.accountPath, f.statePath);
   await f.create(restarted).deliverNotificationsOnce();
   assert.equal(f.sends.length, 2);
+});
+
+for (const response of [{ ret: -14 }, { ret: 0, errcode: 1 }]) {
+  test(`an explicitly rejected reminder releases priority once per account window: ${JSON.stringify(response)}`, async t => {
+    const f = fixture(t, 10);
+    f.state.setContextToken("peer", "peer-context");
+    f.state.contextWindows.peer = { ...f.state.contextWindows.chat };
+    t.mock.method(f.client, "notificationInterest", async () => ({ chatIds: [], interested: ["chat", "peer"] }));
+    let calls = 0;
+    f.hooks.send = () => ++calls === 1 ? response : { ret: 0 };
+    await assert.rejects(f.gateway.deliverNotificationsOnce(), ILinkSendReceiptError);
+    assert.equal(f.sends.length, 2, "one rejected reminder and one accepted ordinary reply");
+    assert.match(text(f.sends[0]), /主动发一条消息/);
+    assert.equal(text(f.sends[1]), "ordinary");
+    assert.equal(f.state.accountSendBudget!.remaining, 8);
+    assert.equal(f.state.outbox.ordinary, undefined);
+    const key = accountRenewalDeliveryKey(f.state.getLoginFingerprint(), f.state.accountSendBudget!);
+    assert.equal(f.state.replyDeliveries[key].renewalRejected, true);
+    assert.equal(f.state.replyDeliveries[key].inFlight, false);
+    assert.equal(f.state.replyDeliveries[key].acknowledgedChunks, 0);
+    const restarted = new StateManager(f.accountPath, f.statePath);
+    f.hooks.send = () => response;
+    for (let pass = 0; pass < 5; pass++) await f.create(restarted).deliverNotificationsOnce();
+    assert.equal(f.sends.length, 2, "notification passes and restarts cannot retry the rejected reminder");
+    assert.equal(restarted.accountSendBudget!.remaining, 8);
+    assert.equal(restarted.hasPermanentReplyFailure(key), true);
+    restarted.putOutbox({ kind: "reply", source: "engine", chatId: "chat", messageId: "next-message", deliveryKey: "next-ordinary",
+      splitMaxChars: 2_000, status: "pending" });
+    restarted.recordInboundContext("new-window", "chat", Date.now() - 1_000, true, "new-context");
+    restarted.accountSendBudget!.refreshedAt = Date.now() - 22 * HOUR - 1_000;
+    restarted.contextWindows.chat.refreshedAt = restarted.accountSendBudget!.refreshedAt;
+    f.hooks.send = () => ({ ret: 0 });
+    await f.create(restarted).deliverNotificationsOnce();
+    assert.equal(f.sends.length, 4);
+    assert.match(text(f.sends[2]), /主动发一条消息/);
+    assert.equal(text(f.sends[3]), "ordinary");
+    assert.notEqual(accountRenewalDeliveryKey(restarted.getLoginFingerprint(), restarted.accountSendBudget!), key);
+  });
+}
+
+test("an ordinary explicitly rejected reply still retries its original checkpoint", async t => {
+  const f = fixture(t, 10);
+  f.state.accountSendBudget!.refreshedAt = Date.now() - 1_000;
+  f.state.contextWindows.chat.refreshedAt = f.state.accountSendBudget!.refreshedAt;
+  let calls = 0;
+  f.hooks.send = () => ++calls === 1 ? { ret: -14 } : { ret: 0 };
+  await assert.rejects(f.gateway.deliverNotificationsOnce(), ILinkSendReceiptError);
+  assert.equal(f.state.replyDeliveries.ordinary.renewalRejected, undefined);
+  assert.equal(f.state.replyDeliveries.ordinary.inFlight, false);
+  assert.equal(f.state.outbox.ordinary.status, "pending");
+  await f.gateway.deliverNotificationsOnce();
+  assert.equal(f.sends.length, 2);
+  assert.deepEqual(f.sends.map(text), ["ordinary", "ordinary"]);
+  assert.equal(f.state.replyDeliveries.ordinary.acknowledgedChunks, 1);
+  assert.equal(f.state.accountSendBudget!.remaining, 8);
 });
 
 test("local pending reply still receives reminder when Controller interest lookup is unavailable", async t => {

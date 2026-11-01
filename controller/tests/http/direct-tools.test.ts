@@ -83,13 +83,20 @@ describe("direct business tools HTTP boundary", () => {
   });
 
   it("recovers exact directory and console replies under the original message ID", async () => {
-    const { post, origin } = await start();
+    const { post, origin, store } = await start();
+    const writes = vi.spyOn(store, "recordMessage");
     for (const [messageId, text, name] of [["directory", "会话列表", "list_sessions"], ["console", "打开控制台", "get_console_link"], ["mixed-console", "查原会话进度并给我控制台链接", "get_console_link"]]) {
       const response = await post("call", { ...call, messageId, text, name });
       expect(response.status).toBe(200);
       const { reply } = await response.json();
       expect(reply?.text).toBeTruthy();
-      if (name === "get_console_link") expect(reply.text).toContain("https://console.example.test");
+      if (name === "get_console_link") {
+        expect(reply.text).toContain("https://console.example.test");
+        const token = reply.text.split("#login=")[1];
+        expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+        expect(JSON.stringify(writes.mock.calls)).not.toContain(token);
+        expect(JSON.stringify(await store.getLeaderState("private-chat"))).not.toContain(token);
+      }
       const recovered = await fetch(`${origin}/v1/messages/${messageId}/reply?chatId=private-chat`, { headers: { authorization: "Bearer private-token" } });
       expect(recovered.status).toBe(200);
       expect((await recovered.json()).text).toBe(reply.text);

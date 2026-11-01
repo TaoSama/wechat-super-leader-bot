@@ -92,7 +92,7 @@ async function fixture(t: TestContext, status: number | "network") {
     enableFreshInbound: () => { freshInbound = true; } };
 }
 
-for (const status of [403, 404]) test(`HTTP ${status} expires its reply, unblocks same-chat progress and survives restart with acknowledgements`, async t => {
+for (const status of [403, 404, 410]) test(`HTTP ${status} expires its reply, unblocks same-chat progress and survives restart with acknowledgements`, async t => {
   const f = await fixture(t, status);
   for (const key of [f.key, `image-reply:${f.key}`]) {
     f.state.prepareReplyDelivery(key, DIGEST, 2);

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import type { IStore } from "../store/interface.js";
 import { PostMessageRequestSchema } from "../types.js";
+import { restoreConsoleLinkReply, type ConsoleLinkResolver } from "../console/link-reply.js";
 
 const ReplyQuerySchema = PostMessageRequestSchema.pick({ chatId: true }).strict();
 const ReplyParamsSchema = PostMessageRequestSchema.pick({ messageId: true }).strict();
@@ -10,6 +11,7 @@ const INTERNAL_SETTINGS_MESSAGE_PREFIX = "direct_settings_";
 export function createMessageReplyRouter(
   store: Pick<IStore, "getMessage">,
   allowedChatIds: () => ReadonlySet<string>,
+  consoleLinkResolver?: ConsoleLinkResolver,
 ): Router {
   const router = Router();
   router.get("/messages/:messageId/reply", async (req, res) => {
@@ -34,7 +36,7 @@ export function createMessageReplyRouter(
       return;
     }
     res.json({
-      text: message.replyText,
+      text: await restoreConsoleLinkReply(message.replyText, chatId, params.data.messageId, consoleLinkResolver),
       ...(message.commandId !== undefined ? { commandId: message.commandId } : {}),
       ...(message.images ? { images: message.images } : {}),
     });

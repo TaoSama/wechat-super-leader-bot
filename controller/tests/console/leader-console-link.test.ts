@@ -3,6 +3,7 @@ import { acknowledgementFixture } from "../leader/acknowledgement-fixture.js";
 import { describe, expect, it, vi } from "vitest";
 import { LeaderOrchestrator } from "../../src/leader/orchestrator.js";
 import { MemoryStore } from "../../src/store/memory.js";
+import { redactIssuedConsoleLink } from "../../src/console/link-reply.js";
 import type { LeaderModel, ModelMessage, ModelReply } from "../../src/leader/model/contracts.js";
 import type { CommandRecord, PostCommandRequest, ScopedSession } from "../../src/types.js";
 
@@ -57,8 +58,15 @@ function fixture(replies: (ModelReply | (() => never))[] = [], issuer?: (request
       return stored.command;
     }),
   };
-  const create = (nextModel: LeaderModel = model, nextIssuer = issuer) =>
-    new LeaderOrchestrator(store, hub, commands, nextModel, () => clock, nextIssuer);
+  const links = new Map<string, { url: string; expiresAt: string }>();
+  const issue = issuer && (async (requestId: string) => {
+    const link = await issuer(requestId);
+    links.set(requestId, link);
+    return link;
+  });
+  const create = (nextModel: LeaderModel = model) =>
+    new LeaderOrchestrator(store, hub, commands, nextModel, () => clock, issue,
+      undefined, undefined, undefined, undefined, { consoleLinkResolver: async requestId => links.get(requestId) ?? null });
   return { store, model, hub, commands, create, tick: (ms: number) => { clock += ms; } };
 }
 
@@ -84,7 +92,8 @@ describe("Leader console link integration", () => {
     expect(history[1].content).toContain("[控制台登录链接已生成，签发后1小时内可重复登录]");
     expect(JSON.stringify(history)).not.toContain("direct-private-token");
     expect(JSON.stringify(history)).not.toContain("https://leader.taoai.site");
-    expect(state!.data.receipts).toEqual([expect.objectContaining({ messageId, text: reply.text })]);
+    expect(state!.data.receipts).toEqual([expect.objectContaining({ messageId, text: redactIssuedConsoleLink(reply.text, requestId, url) })]);
+    expect(JSON.stringify(state!.data)).not.toContain("direct-private-token");
 
     // A fresh orchestrator must replay the persisted delivery receipt without issuing another token.
     expect(await f.create().handle(chatId, messageId, text)).toEqual(reply);
