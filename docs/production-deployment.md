@@ -102,6 +102,8 @@ SIGKILL、runner 丢失或网络不可达可能阻止日志和清理；不能据
 unavailable；可选观测失败不会取消SCP。SCP结束/取消时停止并等待观测器；若辅助进程停止
 仍未确认，传输阶段以 `process_stop` 失败，禁止进入校验和激活；保留children记录并报告
 清理未确认，不会删除仍可能被使用的stage或虚报清理成功。
+children文件缺失时重新核对同一进程身份：活进程为`children_unavailable`，确认退出为
+`process_exited`，PID/starttime/name/group变化为`process_changed`，不推断内核配置原因。
 
 `scp_finished`记录SCP子进程结果、固定错误分类及从启动到结束的耗时，它仍包含SSH建立、
 认证和SFTP传输，不能称为纯payload吞吐。随后 `transfer_verified`/`diagnostic_success_case`
@@ -170,7 +172,8 @@ backlog/drops，以及匹配进程的CPU ticks、wchar/write_bytes/cancelled_wri
 IO压力。缺失字段保留null；VPS发送cwnd不代表上传发送侧。TCP字节、文件长度和缓存
 写回计数分别解释，不能据此声称已经持久化到磁盘。
 
-每次ss查询上限1500ms、stdout/stderr合计64KiB；最多16条候选连接、64个相关PID、
+接收端分别查询部署端口的ESTAB连接和LISTEN inode，每条ss查询仍限制1500ms及64KiB，
+不读取全主机TCP表；LISTEN结果用于拒绝共享监听器。最多16条候选连接、64个相关PID、
 每PID 128个FD、16层进程树。首次发现阶段最多60秒按1秒查找，正常样本间隔15秒；
 日志最多128条、2MiB。期限取job.started_at后20分钟与可选更短期限的较早值；SIGINT/
 SIGTERM及期限结束只停止采样器自己的helper。TERM/KILL各1秒宽限；只有helper组结束且

@@ -35,7 +35,7 @@ const CATEGORIES = new Set(`probe_failed assertion_failed invalid_json file_miss
   second_upload_not_started deadline_did_not_stop_collector helper_timeout_not_observed ss_helper_survived timeout_case_deadline
   escaped_collector_did_not_exit escaped_false_cleanup_confirmation escaped_not_alive_at_failure escaped_ps_still_running
   escaped_ps_probe_failed escaped_case_deadline test_children_survived total_deadline container_probe_failed invalid_evidence
-  stage_missing stage_invalid stage_changed file_changed socket_changed proc_permission process_exited proc_io proc_invalid proc_limit
+  stage_missing stage_invalid stage_changed file_changed socket_changed proc_permission process_exited children_unavailable proc_io proc_invalid proc_limit
   process_changed owner_shared writer_ambiguous writer_unavailable socket_ambiguous socket_owner_missing ss_missing ss_start ss_timeout
   ss_output_limit ss_failed ss_invalid cleanup_unconfirmed cancelled platform_unsupported unexpected_error tool_missing process_start
   process_stop input_io output_limit timeout remote_command authentication host_key dns network_connect network_closed`.split(/\s+/));
@@ -43,8 +43,15 @@ const CATEGORIES = new Set(`probe_failed assertion_failed invalid_json file_miss
 class ProbeFailure extends Error {
   constructor(category, phase) { super(category); this.category = category; this.phase = phase; }
 }
-function failureFor(error, phase) {
-  if (error instanceof ProbeFailure && PHASES.has(error.phase)) return error;
+export function failureFor(error, phase) {
+  if (error instanceof AggregateError && error.errors.length) {
+    const hasPrimary = Object.hasOwn(error, 'cause');
+    const failure = failureFor(hasPrimary ? error.cause : error.errors[0], phase);
+    const cleanup = hasPrimary && error.errors.find(item => item !== error.cause);
+    if (cleanup) failure.cleanupCategory ??= failureFor(cleanup, 'cleanup').category;
+    return failure;
+  }
+  if (error instanceof ProbeFailure && PHASES.has(error.phase) && CATEGORIES.has(error.category)) return error;
   let category = 'probe_failed';
   if ((error instanceof ProbeFailure || error instanceof TransferFailure) && CATEGORIES.has(error.category)) category = error.category;
   else if (error?.code === 'ERR_ASSERTION') category = 'assertion_failed';

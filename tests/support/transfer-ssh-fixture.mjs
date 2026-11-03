@@ -40,10 +40,14 @@ export async function transferSshFixture({ profile = 'alpine', inspectProcesses 
     { env, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 120_000, ...options });
   let containerCreated = false, imageCreated = false, sequence = 1000;
   const close = async () => {
-    try {
-      if (containerCreated) command('docker', ['rm', '-f', container]);
-      if (imageCreated) command('docker', ['image', 'rm', image]);
-    } finally { await rm(root, { recursive: true, force: true }); }
+    const errors = [];
+    for (const action of [() => { if (containerCreated) command('docker', ['rm', '-f', container]); },
+      () => { if (imageCreated) command('docker', ['image', 'rm', image]); },
+      () => rm(root, { recursive: true, force: true })]) {
+      try { await action(); }
+      catch (error) { errors.push(error); }
+    }
+    if (errors.length) throw new AggregateError(errors, 'Isolated SSH fixture cleanup failed');
   };
   try {
     command('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', join(root, 'client')]);
@@ -83,5 +87,9 @@ export async function transferSshFixture({ profile = 'alpine', inspectProcesses 
       copyToContainer: (source, destination) => command('docker', ['cp', source, `${container}:${destination}`]),
       async privateKey() { return readFile(join(root, 'client'), 'utf8'); },
     };
-  } catch (error) { await close(); throw error; }
+  } catch (error) {
+    try { await close(); }
+    catch (cleanupError) { throw new AggregateError([error, cleanupError], 'Isolated SSH fixture initialization failed', { cause: error }); }
+    throw error;
+  }
 }

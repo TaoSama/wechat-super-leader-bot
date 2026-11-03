@@ -101,16 +101,13 @@ class Fixture:
     def __init__(self):
         self.fs = SyntheticFS()
         self.ss = socket_line()
+        self.listen = "LISTEN 0 128 0.0.0.0:22 0.0.0.0:* ino:900\n"
         self.ss_calls = 0
         self.before_ss = None
         self.fs.stats[STAGE] = inode(500, mode=stat.S_IFDIR | 0o700)
         for index, name in enumerate(NAMES):
             self.fs.stats[f"{STAGE}/{name}"] = inode(1000 + index, size=123)
         self.fs.text[f"{PROC}/pressure/io"] = PRESSURE
-        self.fs.text[f"{PROC}/net/tcp"] = (
-            "sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n"
-            "0: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 900 1\n")
-        self.fs.text[f"{PROC}/net/tcp6"] = ""
         self.fs.dirs[PROC] = []
         self.process(100, "sshd", 1, children=[SESSION])
         self.process(SESSION, "sshd-session", 100, children=[WRITER])
@@ -119,7 +116,7 @@ class Fixture:
         self.socket(SESSION, 3, SOCKET)
         self.file(WRITER, 4)
         self.telemetry = receiver.ReceiverTelemetry(
-            copy.deepcopy(CONFIG), proc_root=PROC, ss_runner=self.run_ss,
+            copy.deepcopy(CONFIG), proc_root=PROC, ss_runner=self.run_ss, listen_runner=self.run_listen,
             filesystem=self.fs, platform="linux")
 
     def process(self, pid, name, parent, *, children=(), start=999):
@@ -150,8 +147,12 @@ class Fixture:
             raise self.ss
         return self.ss
 
+    def run_listen(self):
+        if isinstance(self.listen, BaseException):
+            raise self.listen
+        return self.listen
 
-class ReceiverTelemetryTests(unittest.TestCase):
+class ReceiverAssertions:
     def setUp(self):
         self.f = Fixture()
 
@@ -170,6 +171,7 @@ class ReceiverTelemetryTests(unittest.TestCase):
         self.assertTrue(all(value is None for value in output["tcp"].values()))
         return output
 
+class ReceiverTelemetryTests(ReceiverAssertions, unittest.TestCase):
     def test_writer_and_unique_session_socket_are_bound(self):
         output = self.sample()
         self.assertEqual(output["status"], "available")

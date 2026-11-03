@@ -184,7 +184,16 @@ export function createSenderTelemetry({ processes, platform = process.platform,
       output.io_pressure = await pressure();
       let children;
       try { children = await fs.readFile(`/proc/${processGroupPid}/task/${processGroupPid}/children`, 'utf8'); }
-      catch (error) { throw new ObservationFailure(procCategory(error)); }
+      catch (error) {
+        if (['ENOENT', 'ESRCH'].includes(error?.code)) {
+          const current = await stat(processGroupPid);
+          if (current.startTicks !== root.startTicks || current.name !== root.name || current.group !== root.group) {
+            return unavailable('process_changed');
+          }
+          return unavailable('children_unavailable');
+        }
+        throw new ObservationFailure(procCategory(error));
+      }
       if (children.length > PROC_LIMIT || !/^(?:[1-9][0-9]*\s*)*$/.test(children)) return unavailable('proc_invalid');
       const childIds = children.trim() ? children.trim().split(/\s+/).map(Number) : [];
       if (childIds.length > CHILD_LIMIT || childIds.some(pid => !Number.isSafeInteger(pid))) return unavailable('proc_limit');

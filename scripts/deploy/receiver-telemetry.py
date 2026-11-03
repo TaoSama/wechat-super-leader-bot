@@ -133,14 +133,14 @@ class QueryProcesses:
             children = list(self.children.items())
         return all([self.reap(pid, child) for pid, child in children])
 
-    def query(self, port):
+    def query(self, port, listening=False):
         until = time.monotonic() + QUERY_SECONDS
         with self.lock:
             if self.stop.is_set():
                 raise ObservationFailure('cancelled')
             try:
-                child = subprocess.Popen(['ss', '-Hntipem', 'state', 'established',
-                                          '( sport = :%d )' % port], stdout=subprocess.PIPE,
+                arguments = ['ss', '-Hnlte'] if listening else ['ss', '-Hntipem', 'state', 'established']
+                child = subprocess.Popen(arguments + ['( sport = :%d )' % port], stdout=subprocess.PIPE,
                                          stderr=subprocess.PIPE, start_new_session=True)
             except FileNotFoundError:
                 raise ObservationFailure('ss_missing') from None
@@ -195,24 +195,27 @@ class QueryProcesses:
 def number(text):
     return int(text) if text is not None and re.fullmatch(r'[0-9]+', text) else None
 
-def parse_sockets(text):
+def socket_rows(text, state):
     if not isinstance(text, str):
         raise ObservationFailure('ss_invalid')
     if len(text.encode('utf-8')) > QUERY_LIMIT:
         raise ObservationFailure('ss_output_limit')
     rows = []
     for line in text.splitlines():
-        match = re.match(r'^(?:ESTAB\s+)?([0-9]+)\s+[0-9]+\s+\S+\s+\S+(?:\s|$)', line)
+        match = re.match(r'^(?:' + state + r'\s+)?([0-9]+)\s+[0-9]+\s+\S+\s+\S+(?:\s|$)', line)
         if match:
             rows.append([int(match[1]), line])
+            if len(rows) > CONNECTION_LIMIT:
+                raise ObservationFailure('proc_limit')
         elif line.strip():
             if not rows or not line[0].isspace():
                 raise ObservationFailure('ss_invalid')
             rows[-1][1] += ' ' + line.strip()
-    if len(rows) > CONNECTION_LIMIT:
-        raise ObservationFailure('proc_limit')
+    return rows
+
+def parse_sockets(text):
     records = []
-    for queue, value in rows:
+    for queue, value in socket_rows(text, 'ESTAB'):
         inode = number(re.search(r'\bino:([0-9]+)\b', value)[1]) if re.search(r'\bino:([0-9]+)\b', value) else None
         owners = sorted(set((int(pid), int(fd)) for pid, fd in re.findall(r'\bpid=([1-9][0-9]*),fd=([0-9]+)\b', value)))
         if inode is None or not owners:
@@ -231,13 +234,22 @@ def parse_sockets(text):
         records.append({'inode': inode, 'owners': owners, 'metrics': metrics})
     return records
 
+def parse_listeners(text):
+    inodes = set()
+    for _, value in socket_rows(text, 'LISTEN'):
+        matches = re.findall(r'(?:^|\s)ino:([0-9]+)(?=\s|$)', value)
+        if len(matches) != 1 or int(matches[0]) <= 0:
+            raise ObservationFailure('ss_invalid')
+        inodes.add(int(matches[0]))
+    return inodes
+
 def empty_process(category='not_sampled'):
     return dict(status='unavailable', category=category, cpu_user_ticks=None, cpu_system_ticks=None,
                 wchar=None, write_bytes=None, cancelled_write_bytes=None,
                 io_status='unavailable', io_category=category)
 
 class ReceiverTelemetry:
-    def __init__(self, config, *, proc_root='/proc', ss_runner=None, filesystem=None, platform=None):
+    def __init__(self, config, *, proc_root='/proc', ss_runner=None, listen_runner=None, filesystem=None, platform=None):
         self.config = dict(config) if isinstance(config, dict) else vars(config).copy()
         self.proc_root, self.fs = proc_root, filesystem or FileSystem()
         self.platform = platform or sys.platform
@@ -247,6 +259,7 @@ class ReceiverTelemetry:
         self.started = time.monotonic()
         self.queries = QueryProcesses()
         self.ss_runner = ss_runner or (lambda: self.queries.query(self.config['port']))
+        self.listen_runner = listen_runner or (lambda: self.queries.query(self.config['port'], listening=True))
 
     def read(self, *parts, limit=PROC_LIMIT):
         return self.fs.read_text(os.path.join(self.proc_root, *map(str, parts)), limit=limit)
@@ -342,21 +355,7 @@ class ReceiverTelemetry:
         return True
 
     def listeners(self):
-        result = set()
-        for name in ('tcp', 'tcp6'):
-            try:
-                text = self.read('net', name, limit=QUERY_LIMIT)
-            except FileNotFoundError:
-                if name == 'tcp6':
-                    continue
-                raise
-            for line in text.splitlines()[1:]:
-                fields = line.split()
-                if len(fields) < 10:
-                    raise ObservationFailure('proc_invalid')
-                if fields[3] == '0A':
-                    result.add(int(fields[9]))
-        return result
+        return parse_listeners(self.listen_runner())
 
     def binding(self, targets):
         records, listeners, snapshots, writers = parse_sockets(self.ss_runner()), self.listeners(), {}, {}
@@ -371,13 +370,26 @@ class ReceiverTelemetry:
             try:
                 process = self.process(pid)
                 fds = self.fs.listdir(os.path.join(self.proc_root, str(pid), 'fd'), FD_LIMIT)
-                children = self.read(pid, 'task', pid, 'children').split()
             except (FileNotFoundError, ProcessLookupError):
                 return None
             except ObservationFailure as error:
                 if error.category == 'process_exited':
                     return None
                 raise
+            try:
+                children = self.read(pid, 'task', pid, 'children').split()
+            except (FileNotFoundError, ProcessLookupError):
+                try:
+                    current = self.process(pid)
+                except (FileNotFoundError, ProcessLookupError):
+                    return None
+                except ObservationFailure as error:
+                    if error.category == 'process_exited':
+                        return None
+                    raise
+                if any(current[key] != process[key] for key in ('start', 'ppid', 'name')):
+                    raise ObservationFailure('process_changed')
+                raise ObservationFailure('children_unavailable') from None
             if len(fds) > FD_LIMIT or len(children) > PID_LIMIT:
                 raise ObservationFailure('proc_limit')
             if any(not re.fullmatch(r'[1-9][0-9]*', child) for child in children):

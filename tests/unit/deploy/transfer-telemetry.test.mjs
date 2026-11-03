@@ -217,6 +217,39 @@ test('missing fields, process metadata and permissions are observable without fa
   assert.equal(output.io_pressure.category, 'io_missing');
 });
 
+test('missing children rechecks root liveness and identity before classifying the observation', async t => {
+  for (const code of ['ENOENT', 'ESRCH']) {
+    for (const [name, fresh, category] of [
+      ['same live root', processStat(GROUP, 'scp', GROUP, { user: 31 }), 'children_unavailable'],
+      ['root disappeared', Object.assign(new Error(SECRET), { code: 'ENOENT' }), 'process_exited'],
+      ['root no longer exists', Object.assign(new Error(SECRET), { code: 'ESRCH' }), 'process_exited'],
+      ['root exited as zombie', processStat(GROUP, 'scp', GROUP, { state: 'Z' }), 'process_exited'],
+      ['PID reused', processStat(GROUP, 'scp', GROUP, { start: 1000 }), 'process_changed'],
+      ['process renamed', processStat(GROUP, 'unrelated'), 'process_changed'],
+      ['process group changed', processStat(GROUP, 'scp', 999), 'process_changed'],
+    ]) await t.test(`${code}: ${name}`, async () => {
+      const f = fixture(), abort = new AbortController();
+      let reads = 0;
+      f.files.set(`/proc/${GROUP}/task/${GROUP}/children`, Object.assign(new Error(SECRET), { code }));
+      f.files.set(`/proc/${GROUP}/stat`, () => {
+        if (++reads === 1) return processStat(GROUP, 'scp');
+        if (fresh instanceof Error) throw fresh;
+        return fresh;
+      });
+      const output = await f.telemetry.sample({ processGroupPid: GROUP, signal: abort.signal });
+      assert.equal(reads, 2, 'the root must be checked again after children is unavailable');
+      assert.equal(output.status, 'unavailable');
+      assert.equal(output.category, category);
+      assert.equal(output.processes.scp.cpu_user_ticks, 30);
+      assert.equal(output.ssh_pid, null);
+      assert.ok(Object.values(output.tcp).every(value => value === null));
+      assert.equal(f.calls.length, 0);
+      assert.equal(abort.signal.aborted, false);
+      assert.ok(!JSON.stringify(output).includes(SECRET));
+    });
+  }
+});
+
 test('non-Linux, absent SCP PID and cancellation never start a helper process', async () => {
   for (const [options, args, expected] of [
     [{ platform: 'darwin' }, { processGroupPid: GROUP }, 'platform_unsupported'],
