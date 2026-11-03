@@ -13,6 +13,7 @@ import { createTransferManifest, MANIFEST_FILENAME } from '../../../scripts/depl
 const WATCHDOG_MS = 12_000;
 const POLL_MS = 20;
 const POLL_ATTEMPTS = 100;
+const PROBE_TIMEOUT_MS = 1_500;
 const SSH_PID_OFFSET = 1_000_000;
 const PROC_IO = 'rchar: 42\nread_bytes: 0\n';
 const PRESSURE = 'some avg10=0 total=0\nfull avg10=0 total=0\n';
@@ -76,7 +77,21 @@ class LifecycleProcesses extends TransferProcesses {
   }
 }
 
-async function stopSyntheticProcesses(processes) {
+async function processStopped(pid, probe) {
+  const state = await probe.run('ps', ['-o', 'stat=', '-p', String(pid)], { timeoutMs: PROBE_TIMEOUT_MS });
+  const message = `cleanup probe for synthetic process ${pid} must confirm its state`;
+  assert.ok(!state.reason && !state.signal && (state.code === 0 || state.code === 1), message);
+  assert.equal(state.stderr.trim(), '', message);
+  const status = state.stdout.trim();
+  if (state.code === 1) {
+    assert.equal(status, '', message);
+    return true;
+  }
+  assert.match(status, /^\S+$/, message);
+  return /^Z[<NLsl+]*$/.test(status);
+}
+
+async function stopSyntheticProcesses(processes, probe = new TransferProcesses()) {
   let escaped;
   try { escaped = Number(await readFile(processes.escapedFile, 'utf8')); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -86,12 +101,10 @@ async function stopSyntheticProcesses(processes) {
     try { process.kill(-pid, 'SIGKILL'); }
     catch (error) { if (error.code !== 'ESRCH') throw error; }
   }
-  const probe = new TransferProcesses();
   for (const pid of pids) {
     let stopped = false;
     for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt++) {
-      const state = await probe.run('ps', ['-o', 'stat=', '-p', String(pid)]);
-      if (state.code !== 0 || state.stdout.trim().startsWith('Z')) { stopped = true; break; }
+      if (await processStopped(pid, probe)) { stopped = true; break; }
       await delay(POLL_MS);
     }
     assert.ok(stopped, `synthetic process ${pid} must exit during test cleanup`);
@@ -100,6 +113,61 @@ async function stopSyntheticProcesses(processes) {
   assert.equal(processes.children.size, 0, 'the original registry clears after escaped stdio closes');
   assert.equal(probe.children.size, 0);
 }
+
+test('cleanup rejects real missing and timed-out probes while the target still exists', async () => {
+  const processes = new TransferProcesses();
+  for (const mode of ['missing', 'timeout']) {
+    const probe = { run: (_command, args, options) => mode === 'missing'
+      ? processes.run('ps', args, { ...options, environment: { PATH: '/synthetic/missing-tools' } })
+      : processes.run(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { ...options, timeoutMs: 30 }) };
+    await assert.rejects(processStopped(process.pid, probe), /cleanup probe/);
+    assert.equal(process.kill(process.pid, 0), true, 'the target remains alive despite the probe failure');
+    assert.equal(processes.children.size, 0, 'the failed probe leaves no helper process');
+  }
+});
+
+test('cleanup accepts only completed empty absence or an explicit zombie state', async () => {
+  const outcomes = [
+    [{ code: 1, stdout: '', stderr: '' }, true],
+    [{ code: 0, stdout: ' Zs+\n', stderr: '' }, true],
+    [{ code: 0, stdout: 'Ss\n', stderr: '' }, false],
+  ];
+  for (const [outcome, expected] of outcomes) {
+    assert.equal(await processStopped(process.pid, { run: async () => outcome }), expected);
+  }
+  for (const outcome of [
+    { code: null, reason: 'output_limit' }, { code: null, reason: 'tool_missing' },
+    { code: null, reason: 'timeout' }, { code: null, signal: 'SIGKILL' },
+    { code: 2 }, { code: 1, stdout: 'S' }, { code: 1, stderr: 'ps: Operation not permitted' },
+    { code: 0, stderr: 'ps: Permission denied' }, { code: 0, stdout: '' },
+    { code: 0, stdout: 'Z\nS' }, { code: 0, stdout: 'Z', reason: 'output_limit' },
+  ]) {
+    const probe = { run: async () => ({ stdout: '', stderr: '', ...outcome }) };
+    await assert.rejects(processStopped(process.pid, probe), /cleanup probe/);
+  }
+});
+
+test('an unknown probe result rejects the complete cleanup operation', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'transfer-cleanup-probe-'));
+  const processes = new TransferProcesses(), probe = new TransferProcesses();
+  processes.escapedFile = join(directory, 'escaped.pid');
+  const running = processes.run(process.execPath, ['-e', 'setInterval(()=>{},1000)']);
+  const [{ pid }] = processes.children;
+  const unknown = { children: probe.children, run: (_command, args, options) => probe.run('ps', args,
+    { ...options, environment: { PATH: '/synthetic/missing-tools' } }) };
+  try {
+    await assert.rejects(stopSyntheticProcesses(processes, unknown), /cleanup probe/);
+  } finally {
+    try { process.kill(-pid, 'SIGKILL'); }
+    catch (error) { if (error.code !== 'ESRCH') throw error; }
+    await running;
+    try {
+      assert.equal(await processStopped(pid, probe), true);
+      assert.equal(processes.children.size, 0);
+      assert.equal(probe.children.size, 0);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
 
 async function lifecycle(mode) {
   const directory = await mkdtemp(join(tmpdir(), 'transfer-lifecycle-'));

@@ -176,7 +176,9 @@ IO压力。缺失字段保留null；VPS发送cwnd不代表上传发送侧。TCP�
 
 接收端分别查询部署端口的ESTAB连接和LISTEN inode，每条ss查询仍限制1500ms及64KiB，
 不读取全主机TCP表；LISTEN结果用于拒绝共享监听器。最多16条候选连接、64个相关PID、
-每PID 128个FD、16层进程树。首次发现阶段最多60秒按1秒查找，正常样本间隔15秒；
+每PID 128个FD、16层进程树。任一ESTAB候选缺少可核验owner时，该样本保持
+unavailable/socket_owner_missing；全部候选仍计入16条上限，观测缺口不会中断健康SCP。
+首次发现阶段最多60秒按1秒查找，正常样本间隔15秒；
 日志最多128条、2MiB。期限取job.started_at后20分钟与可选更短期限的较早值；SIGINT/
 SIGTERM及期限结束只停止采样器自己的helper。TERM/KILL各1秒宽限；只有helper组结束且
 两条输出管道均EOF才确认清理。逃逸后代仍持管道时保留记录、非零退出并报告unconfirmed。

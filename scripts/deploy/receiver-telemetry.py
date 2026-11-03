@@ -456,7 +456,7 @@ class ReceiverTelemetry:
         if len({record['inode'] for record, _, _, _ in bindings}) != 1:
             raise ObservationFailure('socket_ambiguous')
         # The closest actual connection owner avoids attributing work to its shared ancestors.
-        binding = next((item for item in bindings if item[1] == writer[0]), bindings[0])
+        binding = min(bindings, key=lambda item: len(item[3]))
         return writer, binding[:3], binding[3]
 
     def sample(self):
