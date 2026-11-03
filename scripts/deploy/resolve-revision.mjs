@@ -72,9 +72,10 @@ export async function resolveRevision({ eventName, event, ref, sha, repository, 
       log(`verified run=${run.id} PR=${pr.number} head=${run.head_sha} merge=${pr.merge_commit_sha}`);
       return pr.merge_commit_sha;
     }
-    if (pr.state !== 'open' || !pr.auto_merge) return skip('PR is not merged or awaiting automatic merge');
+    if (pr.state !== 'open') return skip('PR closed without merging');
+    // Verify can finish before the ready event enables automatic merge.
     if (attempt + 1 < attempts) {
-      log(`waiting for PR #${pr.number} automatic merge (${attempt + 1}/${attempts})`);
+      log(`waiting for PR #${pr.number} to merge (${attempt + 1}/${attempts})`);
       await wait(MERGE_INTERVAL_MS);
     }
   }

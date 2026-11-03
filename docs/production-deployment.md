@@ -1,11 +1,16 @@
 # 生产部署
 
 `.github/workflows/deploy-production.yml` 监听 `Verify` 的 `workflow_run.completed`。
+Verify 保留 PR 的 `opened`、`synchronize`、`reopened` 事件，并监听 `ready_for_review`，
+确保草稿阶段的验证已经结束后，转为 ready 仍会启动一次新验证。
 `GITHUB_TOKEN` 自动合并产生的 `push` 和 `pull_request.closed` 都不会启动后续工作流，
 因此部署以 Verify 完成为入口，再通过 GitHub API 核对成功的同仓库 PR 验证、仓库所有者
-身份、非草稿、当前 PR head、合并状态和实际 merge SHA。自动合并尚未结束时最多等待
-5 分钟；未合并且没有开启自动合并的 PR、失败验证、fork、旧 head、非 main 目标均跳过。
-API 错误和等待超时会失败，不会进入生产发布。
+身份、非草稿、当前 PR head、合并状态和实际 merge SHA。符合条件且仍开放的 PR 沿用
+现有 60 次检查、5 秒间隔的轮询窗口（休眠最多 295 秒，API 耗时另计）；即使
+`auto_merge` 暂为空，也等待实际合并，避免 Verify 先于自动合并启用时漏发。
+未选择自动合并的普通 PR 也会等待至该上限，仍未合并则明确失败。
+失败验证、fork、旧 head、非 main 目标、草稿及关闭未合并的 PR 均跳过；等待期间身份
+变化也立即跳过。API 错误和等待超时会失败，不会进入生产发布。
 
 保留 `pull_request_target.closed` 作为人工合并入口：即使 CI 通过数小时后才合并，
 也会重新查询该 PR head 对应的成功 Verify，再执行相同的合并和当前主干门禁。
