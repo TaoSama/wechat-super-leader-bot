@@ -25,6 +25,7 @@ IDENTIFIERS = ('writer_pid', 'writer_start_ticks', 'file_fd', 'file_inode', 'sta
                'socket_inode', 'owner_pid', 'owner_start_ticks', 'socket_fd')
 PROC_LIMIT, QUERY_LIMIT, PID_LIMIT, FD_LIMIT, CONNECTION_LIMIT = 8192, 65536, 64, 128, 16
 QUERY_SECONDS, STOP_SECONDS, MAX_SECONDS, SAMPLE_SECONDS = 1.5, 1.0, 1200, 15
+SIGNAL_POLL_SECONDS = 0.05
 OUTPUT_COUNT, OUTPUT_BYTES, DEPTH_LIMIT = 128, 2 * 1024 * 1024, 16
 MAX_INTEGER = 2 ** 53 - 1
 
@@ -557,6 +558,7 @@ def main(argv=None):
     collector.queries.stop = stop
     deadline, lock = time.monotonic() + config['deadline_seconds'], threading.RLock()
     state = {'count': 0, 'bytes': 0, 'complete': False, 'reason': 'deadline', 'finalized': False, 'exit_code': 1}
+    signal_requested = False
 
     def emit(value, final=False):
         encoded = json.dumps(value, separators=(',', ':'), allow_nan=False) + '\n'
@@ -590,8 +592,12 @@ def main(argv=None):
             return state['exit_code']
 
     def watchdog():
-        # Signals and normal cleanup wake the same single watchdog as the deadline.
-        stop.wait(max(0, deadline - time.monotonic()))
+        # Observe signals outside their handler, where acquiring Event's lock is safe.
+        while not signal_requested and not stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            stop.wait(min(SIGNAL_POLL_SECONDS, remaining))
         stop.set()
         if not finished.wait(2 * STOP_SECONDS + 1):
             # A blocked filesystem or stdout must not defeat the monotonic deadline.
@@ -603,8 +609,9 @@ def main(argv=None):
             os._exit(1)
 
     def request_stop(_signum, _frame):
+        nonlocal signal_requested
         state['reason'] = 'signal'
-        stop.set()
+        signal_requested = True
 
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, request_stop)

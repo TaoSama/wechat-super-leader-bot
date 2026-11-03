@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -9,6 +9,7 @@ import { TransferProcesses } from '../../../scripts/deploy/transfer-process.mjs'
 import { ReleaseTransfer, transferConfiguration } from '../../../scripts/deploy/transfer-release.mjs';
 import { createSenderTelemetry } from '../../../scripts/deploy/transfer-telemetry.mjs';
 import { createTransferManifest, MANIFEST_FILENAME } from '../../../scripts/deploy/transfer-manifest.mjs';
+import { withTestCleanup } from '../../support/cleanup.mjs';
 
 const WATCHDOG_MS = 12_000;
 const POLL_MS = 20;
@@ -147,27 +148,76 @@ test('cleanup accepts only completed empty absence or an explicit zombie state',
   }
 });
 
-test('an unknown probe result rejects the complete cleanup operation', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'transfer-cleanup-probe-'));
+async function checkUnknownProbeCleanup(directory, { missingProbe = true, kill = process.kill, cleanupCalls = [] } = {}) {
   const processes = new TransferProcesses(), probe = new TransferProcesses();
   processes.escapedFile = join(directory, 'escaped.pid');
-  const running = processes.run(process.execPath, ['-e', 'setInterval(()=>{},1000)']);
+  const running = processes.run(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { timeoutMs: WATCHDOG_MS });
   const [{ pid }] = processes.children;
   const unknown = { children: probe.children, run: (_command, args, options) => probe.run('ps', args,
-    { ...options, environment: { PATH: '/synthetic/missing-tools' } }) };
-  try {
-    await assert.rejects(stopSyntheticProcesses(processes, unknown), /cleanup probe/);
-  } finally {
-    try { process.kill(-pid, 'SIGKILL'); }
-    catch (error) { if (error.code !== 'ESRCH') throw error; }
-    await running;
-    try {
+    { ...options, environment: missingProbe ? { PATH: '/synthetic/missing-tools' } : {} }) };
+  return withTestCleanup(() => assert.rejects(stopSyntheticProcesses(processes, unknown), /cleanup probe/), [
+    { label: 'synthetic process group', cleanup() {
+      cleanupCalls.push('kill');
+      try { kill(-pid, 'SIGKILL'); }
+      catch (error) { if (error.code !== 'ESRCH') throw error; }
+    } },
+    { label: 'synthetic process completion', cleanup() { cleanupCalls.push('await'); return running; } },
+    { label: 'synthetic process exit verification', async cleanup() {
+      cleanupCalls.push('verify');
       assert.equal(await processStopped(pid, probe), true);
       assert.equal(processes.children.size, 0);
       assert.equal(probe.children.size, 0);
-    } finally { await rm(directory, { recursive: true, force: true }); }
-  }
+    } },
+    { label: 'synthetic process directory', cleanup() {
+      cleanupCalls.push('remove');
+      return rm(directory, { recursive: true, force: true });
+    } },
+  ]);
+}
+
+test('an unknown probe result rejects the complete cleanup operation', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'transfer-cleanup-probe-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await checkUnknownProbeCleanup(directory);
 });
+
+for (const [missingProbe, killFails] of [[false, true], [false, false], [true, true]]) {
+  test(`probe assertion failure=${!missingProbe}, kill failure=${killFails} preserves errors and completes cleanup`, async t => {
+    const directory = await mkdtemp(join(tmpdir(), 'transfer-cleanup-errors-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const denied = Object.assign(new Error('synthetic kill permission failure'), { code: 'EPERM' });
+    const cleanupCalls = [];
+    let pid;
+    const kill = (group, signal) => {
+      pid = -group;
+      if (killFails) throw denied;
+      return process.kill(group, signal);
+    };
+    await assert.rejects(checkUnknownProbeCleanup(directory, { missingProbe, kill, cleanupCalls }), error => {
+      if (!missingProbe && killFails) {
+        assert.ok(error instanceof AggregateError);
+        assert.equal(error.errors.length, 2);
+        assert.equal(error.cause, error.errors[0]);
+        assert.ok(error.errors[0] instanceof assert.AssertionError);
+        assert.match(error.errors[0].message, /Missing expected rejection/);
+        assert.equal(error.errors[1].cause, denied);
+      } else if (missingProbe) {
+        assert.ok(error instanceof AggregateError);
+        assert.equal(error.errors.length, 1);
+        assert.equal(error.errors[0].cause, denied);
+      } else {
+        assert.ok(error instanceof assert.AssertionError);
+        assert.match(error.message, /Missing expected rejection/);
+      }
+      return true;
+    });
+    assert.deepEqual(cleanupCalls, ['kill', 'await', 'verify', 'remove']);
+    await assert.rejects(stat(directory), { code: 'ENOENT' }, 'directory cleanup still runs after a kill error');
+    const probe = new TransferProcesses();
+    assert.equal(await processStopped(pid, probe), true);
+    assert.equal(probe.children.size, 0);
+  });
+}
 
 async function lifecycle(mode) {
   const directory = await mkdtemp(join(tmpdir(), 'transfer-lifecycle-'));
