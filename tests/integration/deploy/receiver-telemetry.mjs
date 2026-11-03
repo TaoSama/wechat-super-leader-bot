@@ -25,6 +25,10 @@ const PRESSURE = ['status', 'category', 'some_avg10_percent', 'some_total_us', '
 const PHASES = new Set(['arguments', 'fixture_create', 'receiver_prepare', 'receiver_runtime', 'host_validation',
   'runtime_setup', 'upload_start', 'status_start', 'writer_binding', 'optional_fields', 'writer_exit',
   'normal_stop', 'deadline_helper', 'escaped_helper', 'client_cleanup', 'cleanup']);
+const OPERATIONS = new Set(['process_stat_read', 'escaped_kill', 'escaped_prepare', 'escaped_collector_start',
+  'escaped_collector_wait', 'escaped_collector_finish', 'escaped_identity_read', 'escaped_alive_check',
+  'escaped_helper_stop', 'escaped_ps_probe', 'escaped_budget_check']);
+const ERRNOS = new Set(['ENOENT', 'ESRCH', 'EPERM', 'EACCES', 'EIO', 'ENOTDIR', 'EINVAL', 'EBADF', 'EINTR', 'ETIMEDOUT']);
 const CATEGORIES = new Set(`probe_failed assertion_failed invalid_json file_missing permission_denied io_error
   command_missing command_timeout command_failed invalid_options unsafe_output collector_exit_timeout collector_exit_failed
   collector_output_invalid collector_cleanup_failed escaped_pid_reused escaped_helper_survived_cleanup status_session_misbound
@@ -43,15 +47,35 @@ const CATEGORIES = new Set(`probe_failed assertion_failed invalid_json file_miss
 class ProbeFailure extends Error {
   constructor(category, phase) { super(category); this.category = category; this.phase = phase; }
 }
-export function failureFor(error, phase) {
+function metadataFor(error, operation) {
+  const op = OPERATIONS.has(error?.operation) ? error.operation : operation;
+  const errno = ERRNOS.has(error?.errno) ? error.errno : error?.code;
+  return { ...(OPERATIONS.has(op) ? { operation: op } : {}), ...(ERRNOS.has(errno) ? { errno } : {}) };
+}
+function preserveCleanup(failure, cleanup) {
+  if (failure.cleanupCategory !== undefined) return;
+  failure.cleanupCategory = cleanup.category;
+  const metadata = metadataFor(cleanup);
+  if (metadata.operation) failure.cleanupOperation = metadata.operation;
+  if (metadata.errno) failure.cleanupErrno = metadata.errno;
+}
+export function failureFor(error, phase, operation) {
   if (error instanceof AggregateError && error.errors.length) {
     const hasPrimary = Object.hasOwn(error, 'cause');
-    const failure = failureFor(hasPrimary ? error.cause : error.errors[0], phase);
+    const failure = failureFor(hasPrimary ? error.cause : error.errors[0], phase, operation);
     const cleanup = hasPrimary && error.errors.find(item => item !== error.cause);
-    if (cleanup) failure.cleanupCategory ??= failureFor(cleanup, 'cleanup').category;
+    if (cleanup) preserveCleanup(failure, failureFor(cleanup, 'cleanup'));
     return failure;
   }
-  if (error instanceof ProbeFailure && PHASES.has(error.phase) && CATEGORIES.has(error.category)) return error;
+  if (error instanceof ProbeFailure && PHASES.has(error.phase) && CATEGORIES.has(error.category)) {
+    const { category, phase } = error, metadata = metadataFor(error, operation);
+    const cleanupCategory = CATEGORIES.has(error.cleanupCategory) ? error.cleanupCategory : undefined;
+    const cleanup = metadataFor({ operation: error.cleanupOperation, errno: error.cleanupErrno });
+    for (const key of Object.keys(error)) delete error[key];
+    return Object.assign(error, { category, phase, ...metadata, ...(cleanupCategory ? { cleanupCategory,
+      ...(cleanup.operation ? { cleanupOperation: cleanup.operation } : {}),
+      ...(cleanup.errno ? { cleanupErrno: cleanup.errno } : {}) } : {}) });
+  }
   let category = 'probe_failed';
   if ((error instanceof ProbeFailure || error instanceof TransferFailure) && CATEGORIES.has(error.category)) category = error.category;
   else if (error?.code === 'ERR_ASSERTION') category = 'assertion_failed';
@@ -62,7 +86,27 @@ export function failureFor(error, phase) {
   else if (error?.code === 'ETIMEDOUT') category = 'command_timeout';
   else if (typeof error?.status === 'number') category = 'command_failed';
   else if (['EIO', 'ENOTDIR', 'EEXIST'].includes(error?.code)) category = 'io_error';
-  return new ProbeFailure(category, PHASES.has(phase) ? phase : 'receiver_runtime');
+  return Object.assign(new ProbeFailure(category, PHASES.has(phase) ? phase : 'receiver_runtime'), metadataFor(error, operation));
+}
+export function failureEvent(error) {
+  const failure = failureFor(error, 'receiver_runtime');
+  const cleanup = metadataFor({ operation: failure.cleanupOperation, errno: failure.cleanupErrno });
+  return { event: 'linux_receiver_telemetry_failed', phase: failure.phase, category: failure.category,
+    ...metadataFor(failure), ...(CATEGORIES.has(failure.cleanupCategory) ? { cleanup_category: failure.cleanupCategory,
+      ...(cleanup.operation ? { cleanup_operation: cleanup.operation } : {}),
+      ...(cleanup.errno ? { cleanup_errno: cleanup.errno } : {}) } : {}) };
+}
+export function containerFailure(stderr) {
+  try {
+    const value = JSON.parse(String(stderr ?? '').trim());
+    if (value?.event !== 'linux_receiver_telemetry_failed' || !PHASES.has(value.phase) || !CATEGORIES.has(value.category)) return;
+    const failure = Object.assign(new ProbeFailure(value.category, value.phase),
+      metadataFor({ operation: value.operation, errno: value.errno }));
+    if (CATEGORIES.has(value.cleanup_category)) preserveCleanup(failure,
+      Object.assign(new ProbeFailure(value.cleanup_category, 'cleanup'),
+        metadataFor({ operation: value.cleanup_operation, errno: value.cleanup_errno })));
+    return failure;
+  } catch (error) { if (!(error instanceof SyntaxError)) throw error; }
 }
 async function cleanupActions(actions, primary) {
   let failure;
@@ -71,7 +115,7 @@ async function cleanupActions(actions, primary) {
     catch (error) { failure ??= failureFor(error, 'cleanup'); }
   }
   if (failure) {
-    if (primary) primary.cleanupCategory ??= failure.category;
+    if (primary) preserveCleanup(primary, failure);
     else throw failure;
   }
 }
@@ -202,20 +246,31 @@ async function ancestors(pid) {
   return result;
 }
 
-async function processState(pid) {
+export async function processState(pid, { read = readFile } = {}) {
   try {
-    const text = await readFile(`/proc/${pid}/stat`, 'utf8');
-    const fields = text.slice(text.lastIndexOf(')') + 2).trim().split(/\s+/);
-    return { state: fields[0], start: Number(fields[19]) };
-  } catch (error) { if (error.code !== 'ENOENT') throw error; return null; }
+    const text = await read(`/proc/${pid}/stat`, 'utf8'), separator = text.lastIndexOf(') ');
+    const fields = text.slice(separator + 2).trim().split(/\s+/), start = Number(fields[19]);
+    requireProbe(separator > 0 && /^[RSDZTWtXxKPI]$/.test(fields[0]) && /^\d+$/.test(fields[19] ?? '') &&
+      Number.isSafeInteger(start), 'proc_invalid');
+    return { state: fields[0], start };
+  } catch (error) {
+    if (['ENOENT', 'ESRCH'].includes(error.code)) return null;
+    throw failureFor(error, 'escaped_helper', 'process_stat_read');
+  }
 }
 
-async function stopEscaped(identity) {
-  const current = await processState(identity.pid);
-  if (!current || current.state === 'Z') return;
+export async function stopEscaped(identity, { state = processState, kill = process.kill } = {}) {
+  const current = await state(identity.pid);
+  if (!current) return;
   requireProbe(current.start === identity.start, 'escaped_pid_reused');
-  process.kill(identity.pid, 'SIGKILL');
-  await until(async () => { const value = await processState(identity.pid); return !value || value.state === 'Z'; },
+  if (current.state === 'Z') return;
+  try { kill(identity.pid, 'SIGKILL'); }
+  catch (error) { if (error.code !== 'ESRCH') throw failureFor(error, 'escaped_helper', 'escaped_kill'); }
+  await until(async () => {
+    const value = await state(identity.pid);
+    if (value) requireProbe(value.start === identity.start, 'escaped_pid_reused');
+    return !value || value.state === 'Z';
+  },
     2_000, 'escaped_helper_survived_cleanup');
 }
 
@@ -237,7 +292,7 @@ async function linuxProbe() {
   const started = Date.now(), clients = new TransferProcesses(), abort = new AbortController(), collectors = [];
   const deadline = setTimeout(() => abort.abort(), TOTAL_MS - 5_000);
   const jobs = [], escapedPath = `${ROOT}/escaped.json`;
-  let clientMajor, phase = 'runtime_setup', failure;
+  let clientMajor, phase = 'runtime_setup', operation, failure;
   const key = `${ROOT}/credentials/client`, ssh = sshArguments();
   const start = (tool, args, signal = abort.signal) => {
     const result = clients.run(tool, args, { signal, timeoutMs: CASE_MS })
@@ -319,24 +374,34 @@ async function linuxProbe() {
     }
     requireProbe(Date.now() - timeoutStarted < CASE_MS, 'timeout_case_deadline');
     phase = 'escaped_helper';
+    operation = 'escaped_prepare';
     const escaping = `${ROOT}/escaping`;
     await mkdir(escaping);
     await writeFile(`${escaping}/ss`, `#!/usr/bin/python3\nimport argparse,json,os,signal,time\nargparse.ArgumentParser(add_help=False).parse_known_args()\nif os.fork():os._exit(0)\nos.setsid();signal.signal(signal.SIGTERM,signal.SIG_IGN)\ns=open('/proc/self/stat').read();start=int(s[s.rfind(')')+2:].split()[19])\nwith open(${JSON.stringify(escapedPath)},'w') as f:json.dump({'pid':os.getpid(),'start':start},f)\nwhile True:time.sleep(1)\n`, { mode: 0o700 });
+    operation = 'escaped_collector_start';
     const escapedStarted = Date.now(), escaped = await collector(10, escaping); collectors.push(escaped);
+    operation = 'escaped_collector_wait';
     await until(() => escaped.done, 12_000, 'escaped_collector_did_not_exit');
+    operation = 'escaped_collector_finish';
     const escapedComplete = await escaped.finish('unavailable', false, false);
     requireProbe(escaped.events.some(event => event.category === 'cleanup_unconfirmed'), 'escaped_false_cleanup_confirmation');
+    operation = 'escaped_identity_read';
     const identity = JSON.parse(await readFile(escapedPath, 'utf8'));
+    operation = 'escaped_alive_check';
     const escapedState = await processState(identity.pid);
     requireProbe(escapedState && escapedState.state !== 'Z' && escapedState.start === identity.start, 'escaped_not_alive_at_failure');
+    operation = 'escaped_helper_stop';
     await stopEscaped(identity);
+    operation = 'escaped_ps_probe';
     const ps = await clients.run('ps', ['-o', 'pid,stat'], { timeoutMs: 2_000 });
     if (ps.code === 0 && !ps.reason) {
       const row = ps.stdout.split('\n').map(line => line.trim().split(/\s+/)).find(([pid]) => Number(pid) === identity.pid);
       requireProbe(!row || row[1]?.startsWith('Z'), 'escaped_ps_still_running');
     } else requireProbe(ps.reason === 'tool_missing', 'escaped_ps_probe_failed');
+    operation = 'escaped_budget_check';
     requireProbe(Date.now() - escapedStarted < CASE_MS, 'escaped_case_deadline');
     phase = 'client_cleanup';
+    operation = undefined;
     secondUpload.stop.abort(); await secondUpload.outcome;
     abort.abort(); await Promise.all(jobs);
     requireProbe(clients.children.size === 0 && collectors.every(item => item.processes.children.size === 0), 'test_children_survived');
@@ -348,7 +413,7 @@ async function linuxProbe() {
       escaped_helper_stopped: true, escaped_cleanup_probe: ps.code === 0 ? 'ps' : 'proc_stat',
       helper_queries_killed: helpers.length, children_active: clients.children.size };
   } catch (error) {
-    failure = failureFor(error, phase); throw failure;
+    failure = failureFor(error, phase, operation); throw failure;
   } finally {
     clearTimeout(deadline); abort.abort();
     await cleanupActions([async () => {
@@ -377,14 +442,7 @@ export async function verifyReceiverTelemetry(fixture) {
     let output; phase = 'receiver_runtime';
     try { output = fixture.runInContainer(['node', TEST, '--in-container'], { timeout: TOTAL_MS }); }
     catch (error) {
-      let forwarded;
-      try { const failure = JSON.parse(String(error.stderr ?? '').trim());
-        if (failure.event === 'linux_receiver_telemetry_failed' && PHASES.has(failure.phase) && CATEGORIES.has(failure.category)) {
-          forwarded = new ProbeFailure(failure.category, failure.phase);
-          if (CATEGORIES.has(failure.cleanup_category)) forwarded.cleanupCategory = failure.cleanup_category;
-        }
-      } catch (parseError) { if (!(parseError instanceof SyntaxError)) throw parseError; }
-      throw forwarded ?? failureFor(error, phase);
+      throw containerFailure(error.stderr) ?? failureFor(error, phase);
     }
     phase = 'host_validation';
     safeText(output);
@@ -422,9 +480,7 @@ async function main() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch(error => {
-    const failure = failureFor(error, 'receiver_runtime');
-    console.error(JSON.stringify({ event: 'linux_receiver_telemetry_failed', phase: failure.phase, category: failure.category,
-      ...(failure.cleanupCategory ? { cleanup_category: failure.cleanupCategory } : {}) }));
+    console.error(JSON.stringify(failureEvent(error)));
     process.exitCode = 1;
   });
 }
