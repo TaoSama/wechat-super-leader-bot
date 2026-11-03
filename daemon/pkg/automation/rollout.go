@@ -19,6 +19,9 @@ const (
 	rolloutLineLimit = 2 << 20
 	rolloutTextLimit = 256 << 10
 	rolloutTurnLimit = 8192
+	// Native scheduled heartbeats can be dispatched shortly before their nominal
+	// occurrence. Bound that lead without extending the caller's upper deadline.
+	heartbeatEarlyTolerance = 5 * time.Minute
 )
 
 // Evidence describes one exactly identified scheduled turn, never the latest chat reply.
@@ -73,15 +76,27 @@ type heartbeatEnvelope struct {
 	CurrentTime  string `xml:"current_time_iso"`
 }
 
-func inspectRollout(ctx context.Context, home, path, sessionID, automationID string, expectedAt, notAfter int64, heartbeat bool) (evidence Evidence, retErr error) {
+type rolloutWindow struct {
+	expectedAt    int64
+	notAfter      int64
+	heartbeatLead time.Duration
+}
+
+func inspectRollout(ctx context.Context, home, path, sessionID, automationID string, window rolloutWindow, heartbeat bool) (evidence Evidence, retErr error) {
 	if err := ctx.Err(); err != nil {
 		return Evidence{}, err
 	}
+	expectedAt, notAfter := window.expectedAt, window.notAfter
 	unknown := func(reason string) Evidence {
 		return Evidence{Status: "unknown", Reason: reason, Sources: []string{"rollout:" + sessionID}}
 	}
 	if expectedAt <= 0 || notAfter < expectedAt {
 		return unknown("invalid run time window"), nil
+	}
+	heartbeatLower := expectedAt
+	if heartbeat {
+		lead := max(0, min(window.heartbeatLead, heartbeatEarlyTolerance))
+		heartbeatLower = max(0, expectedAt-lead.Milliseconds())
 	}
 	f, err := openRollout(home, path)
 	if err != nil {
@@ -171,7 +186,7 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 					markTurnInvalid(turns, id)
 					continue
 				}
-				if !inRolloutWindow(at.UnixMilli(), expectedAt, notAfter) {
+				if !inRolloutWindow(at.UnixMilli(), heartbeatLower, notAfter) {
 					continue
 				}
 				if p.Metadata.TurnID == "" {

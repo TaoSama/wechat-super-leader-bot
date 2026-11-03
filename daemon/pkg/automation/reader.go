@@ -302,7 +302,12 @@ func (r Reader) Inspect(ctx context.Context, id string, expectedAt, notAfter int
 	if err = state.QueryRowContext(ctx, "select rollout_path from threads where id=?", sessionID).Scan(&path); err != nil {
 		return fail(errors.New("automation_thread_unavailable"))
 	}
-	evidence, err := inspectRollout(ctx, r.Home, path, sessionID, id, expectedAt, notAfter, config.Kind == "heartbeat")
+	lead, err := heartbeatEarlyAllowance(ctx, db, config)
+	if err != nil {
+		return fail(err)
+	}
+	window := rolloutWindow{expectedAt: expectedAt, notAfter: notAfter, heartbeatLead: lead}
+	evidence, err := inspectRollout(ctx, r.Home, path, sessionID, id, window, config.Kind == "heartbeat")
 	if err != nil {
 		return fail(err)
 	}
