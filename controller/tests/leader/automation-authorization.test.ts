@@ -21,6 +21,16 @@ describe("isolated automation authorization", () => {
     expect(await classifyAutomationAuthorization({ complete }, "有哪些定时任务？", AbortSignal.timeout(1000))).toEqual(new Set());
   });
 
+  it("supports independent prompt edit authorization without borrowing another operation", async () => {
+    const complete = vi.fn<LeaderModel["complete"]>(async () => tool(["edit"]));
+    expect(await classifyAutomationAuthorization({ complete }, "修改后台日报未来汇报格式", AbortSignal.timeout(1000)))
+      .toEqual(new Set(["edit"]));
+    expect(complete.mock.calls[0][0][0].content).toContain("edit：");
+    complete.mockResolvedValueOnce(tool(["create", "pause", "resume", "cancel", "edit"]));
+    expect(await classifyAutomationAuthorization({ complete }, "明确执行五种定时操作", AbortSignal.timeout(1000)))
+      .toEqual(new Set(["create", "pause", "resume", "cancel", "edit"]));
+  });
+
   it.each([
     { content: "可以创建", toolCalls: [] },
     { ...tool(["create"]), content: "额外授权" },

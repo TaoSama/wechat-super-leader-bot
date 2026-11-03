@@ -16,7 +16,7 @@ const WEB_UNIT_STEP_IDS = new Set(['web-tests']);
 const SERIAL_UNIT_STEP_IDS = new Set(['daemon-race', 'terminal-delivery-sample']);
 const POSTGRES_STEP_IDS = new Set([
   'synthetic-integration', 'console-auth-integration', 'console-link-delivery-integration',
-  'task-notifications-postgres', 'scheduled-sessions-postgres',
+  'task-notifications-postgres', 'scheduled-sessions-postgres', 'automation-prompt-postgres',
 ]);
 const WECHAT_STEP_IDS = new Set(['wechat-interaction']);
 const LATENCY_STEP_IDS = new Set(['message-latency', 'direct-directory-latency', 'direct-console-latency']);
@@ -81,6 +81,7 @@ export function verificationPlan(suite = 'all', { skipNativeProgress = false } =
     step('task-notifications-postgres', process.execPath, ['tests/integration/leader/task-notifications.mjs', '--run', '--postgres']),
     step('scheduled-sessions-memory', process.execPath, ['tests/integration/leader/scheduled-sessions.mjs', '--run']),
     step('scheduled-sessions-postgres', process.execPath, ['tests/integration/leader/scheduled-sessions.mjs', '--run', '--postgres']),
+    step('automation-prompt-postgres', process.execPath, ['tests/integration/leader/automation-prompt.mjs', '--run', '--postgres']),
     step('result-gateway-cli', process.execPath, ['tests/integration/leader/result-gateway.mjs', '--run']),
     step('notification-diagnostics-cli', process.execPath, ['tests/integration/leader/notification-diagnostics.mjs', '--run']),
     step('sdk-result-gateway-cli', process.execPath, ['tests/integration/leader/sdk-result-gateway.mjs', '--run']),

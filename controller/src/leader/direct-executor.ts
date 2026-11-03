@@ -5,7 +5,7 @@ import { CommandError } from "../commands/service.js";
 import { type IStore } from "../store/interface.js";
 import type { LeaderState } from "./state.js";
 import type { ModelToolCall } from "./model/contracts.js";
-import { AUTOMATION_ARGUMENTS, AUTOMATION_TOOLS, AUTOMATION_TOOL_NAMES, executeAutomationTool } from "../automations/tools.js";
+import { AUTOMATION_ARGUMENTS, AUTOMATION_TOOLS, AUTOMATION_TOOL_NAMES, executeAutomationTool, UpdateAutomationSchema } from "../automations/tools.js";
 import type { AutomationService } from "../automations/service.js";
 import { BackgroundSpecSchema } from "../background/contracts.js";
 import { BACKGROUND_ARGUMENTS, BACKGROUND_TOOLS, BACKGROUND_TOOL_NAMES, assertBackgroundSourcesDiscovered,
@@ -422,9 +422,11 @@ export class DirectToolExecutor {
       if (kind === "session") require(auth.intent !== "isolated_background");
     }
     if (name === "update_automation") {
-      const args = request.arguments;
-      const status = args !== null && typeof args === "object" && "status" in args ? args.status : undefined;
-      const operation = status === "paused" ? "pause" : status === "active" ? "resume" : status === "cancelled" ? "cancel" : undefined;
+      const parsed = UpdateAutomationSchema.safeParse(request.arguments);
+      const args = parsed.success ? parsed.data : undefined;
+      const status = args && "status" in args ? args.status : undefined;
+      const editingPrompt = args !== undefined && "prompt" in args;
+      const operation = editingPrompt ? "edit" : status === "paused" ? "pause" : status === "active" ? "resume" : status === "cancelled" ? "cancel" : undefined;
       require(operation !== undefined && auth.automationOperations.includes(operation));
     }
   }

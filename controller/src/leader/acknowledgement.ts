@@ -18,7 +18,7 @@ queued/pending/claimed/waiting 只表示已保存等待接收；accepted 只表�
 historyError/readError 表示未取得可信执行证据，明确说明尚待核查，不能说任务已经开始。不能据此重新派发，也不能要求用户重复授权。
 goal 没有指令时只确认目标已持久化、等待后台调度，不能声称已委派。终端 input-written 仅表示输入已写入，执行未确认，非原子投递，不自动重发。
 steer 仅确认本次补充的接收情况；原轮次的既有输出不能证明补充已执行。按每个目标的证据分别表达，不合并成虚构的统一成功状态。
-automation 表示定时任务管理，只根据 schedules 的最新持久记录和本轮操作错误说明新建、暂停、恢复或取消情况。active 仅表示启用调度，nextAt 尚在将来时没有启动任务或委派会话。带 lastRuns 时只按真实run状态及精确指令核查描述执行；没有run记录不能说任务已经运行。说明实际时间和时区，不要向用户展示原始cron表达式。持久状态读取失败时说明待核查，不声称未保存，也不要求重建。
+automation 表示定时任务管理，只根据 schedules 的最新持久记录和本轮操作错误说明新建、暂停、恢复、取消或正文编辑情况。只有 promptUpdatedThisTurn 为 true 才确认本轮正文已保存，说明仅影响未来轮次，不将旧编辑记录当成本轮成功。active 仅表示启用调度，nextAt 尚在将来时没有启动任务或委派会话。带 lastRuns 时只按真实run状态及精确指令核查描述执行；没有run记录不能说任务已经运行。说明实际时间和时区，不要向用户展示原始cron表达式。持久状态读取失败时说明待核查，不声称未保存，也不要求重建。
 ${DISPLAY_TIME_GUIDANCE}
 ${SESSION_TITLE_GUIDANCE}
 保持中文简洁，只说必要状态、等待、失败或不确定及后续核查；不用暴露原始 commandId/turnId、技术接口或完整观测元数据。多个目标各自换行。不要输出内部 citation 控制标记或工具引用占位符；保留正常 Markdown、链接文本和完整 URL。`;
@@ -150,12 +150,18 @@ export async function generateAutomationAcknowledgement(model: LeaderModel, stor
     catch { return null; }
   }));
   const labels: Record<Schedule["status"], string> = { active: "已启用调度", paused: "已暂停", cancelled: "已取消", completed: "已结束" };
+  const promptUpdatedThisTurn = (schedule: Schedule) => schedule.latestPromptUpdate?.source === "current_turn" &&
+    schedule.latestPromptUpdate.requestId === messageId;
   const fallbackText = readError ?? (schedules.length ? schedules.map(schedule => `${schedule.title}：${labels[schedule.status]}` +
+    `${promptUpdatedThisTurn(schedule) ? "；汇报正文已保存，仅影响未来轮次" : ""}` +
     `${schedule.nextAt !== null ? `；下次计划时间 ${formatDisplayTime(schedule.nextAt)}${schedule.timezone !== DISPLAY_TIME_ZONE ? `；调度时区 ${schedule.timezone}` : ""}` : ""}`).join("\n") +
     "\n定时配置已核查；启用不表示会话已开始执行。" : "尚未查到本次操作的持久定时记录；提交情况待核查，不自动重建。");
   return { text: await generateAcknowledgement(model, store, hub, {
-    mode: "automation", durableState: { schedules: schedules.map(({ id, title, kind, status, nextAt, timezone, timing, activeRunId }) =>
-      ({ id, title, kind, status, nextAt, nextAtDisplay: nextAt !== null ? formatDisplayTime(nextAt) : null, timezone, timing, activeRunId })), lastRuns, errors: turn.errors, ...(readError ? { readError } : {}) },
+    mode: "automation", durableState: { schedules: schedules.map(schedule => {
+      const { id, title, kind, status, nextAt, timezone, timing, activeRunId, latestPromptUpdate } = schedule;
+      return { id, title, kind, status, nextAt, nextAtDisplay: nextAt !== null ? formatDisplayTime(nextAt) : null,
+        timezone, timing, activeRunId, latestPromptUpdate, promptUpdatedThisTurn: promptUpdatedThisTurn(schedule) };
+    }), lastRuns, errors: turn.errors, ...(readError ? { readError } : {}) },
     targets: commands.filter(command => command !== null).map(command => ({ nodeId: command.nodeId,
       sessionId: command.sessionId, commandId: command.commandId, expectedTurnId: command.expectedTurnId })),
     fallbackText,

@@ -38,9 +38,11 @@ function creationSpec(schedule: Schedule): CreateSchedule {
   if (schedule.kind === "background") return { ...base, kind: "background", background: schedule.background };
   return { ...base, kind: "session", prompt: schedule.prompt, nodeId: schedule.nodeId, sessionId: schedule.sessionId, monitor: schedule.monitor };
 }
+export function scheduleCreationFingerprint(schedule: Schedule): string {
+  return automationId(schedule.chatId, schedule.authorizedMessageId, creationSpec(schedule));
+}
 export function assertSameCreation(existing: Schedule, incoming: Schedule): void {
-  if (automationId(existing.chatId, existing.authorizedMessageId, creationSpec(existing)) !==
-      automationId(incoming.chatId, incoming.authorizedMessageId, creationSpec(incoming))) {
+  if ((existing.creationFingerprint ?? scheduleCreationFingerprint(existing)) !== scheduleCreationFingerprint(incoming)) {
     throw new AutomationConflictError("Schedule identity conflicts with another creation request");
   }
 }

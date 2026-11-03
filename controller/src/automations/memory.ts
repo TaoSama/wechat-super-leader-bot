@@ -1,4 +1,4 @@
-import type { AutomationOutbox, AutomationRepository, AutomationRun, AutomationSupplement, RunnerOutcome, Schedule } from "./contracts.js";
+import type { AutomationOutbox, AutomationRepository, AutomationRun, AutomationSupplement, PromptUpdateAuthority, RunnerOutcome, Schedule, UpdateBackgroundPrompt } from "./contracts.js";
 import { CLAIM_LEASE_MS } from "./contracts.js";
 import { assertSameCreation } from "./identity.js";
 import { finishRun, newRun } from "./state.js";
@@ -6,6 +6,7 @@ import { supplementOutbox, assertSameSupplement } from "./supplements.js";
 import { alignHashedCronNextAt, dueOccurrence } from "./timing.js";
 import { clearRunBody, validateBodyRetention } from "./retention.js";
 import { AutomationConflictError } from "./errors.js";
+import { applyPromptUpdate } from "./prompt-update.js";
 
 const copy = <T>(value: T): T => structuredClone(value);
 export class MemoryAutomationRepository implements AutomationRepository {
@@ -39,6 +40,15 @@ export class MemoryAutomationRepository implements AutomationRepository {
   async listRuns(id: string, chatId: string, limit = 50): Promise<AutomationRun[]> {
     if (!(await this.get(id, chatId))) return [];
     return [...this.runs.values()].filter(run => run.scheduleId === id).sort((a, b) => b.scheduledAt - a.scheduledAt).slice(0, limit).map(copy);
+  }
+  async updatePrompt(id: string, chatId: string, input: UpdateBackgroundPrompt, authority: PromptUpdateAuthority, now: number,
+    assertCurrentAuthority?: () => Promise<void>): Promise<Schedule | null> {
+    await assertCurrentAuthority?.();
+    const schedule = this.schedules.get(id);
+    if (!schedule || schedule.chatId !== chatId) return null;
+    const updated = applyPromptUpdate(schedule, input, authority, now);
+    if (updated !== schedule) this.schedules.set(id, updated);
+    return copy(updated);
   }
   async claimDue(now: number, owner: string, limit: number): Promise<{ schedule: Schedule; run: AutomationRun }[]> {
     const result: { schedule: Schedule; run: AutomationRun }[] = [];
