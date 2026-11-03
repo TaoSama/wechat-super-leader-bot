@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -228,7 +229,12 @@ async function lifecycle(mode) {
   const config = transferConfiguration({ 'release-root': root, 'manifest-file': manifestFile, 'manifest-artifact-id': '456',
     'key-file': '/tmp/synthetic-key', 'known-hosts-file': '/tmp/synthetic-known-hosts' }, ENV);
   const transfer = new ReleaseTransfer(config, { processes, signal: abort.signal,
-    log: value => logs.push(JSON.parse(value)), beforeActivate: async () => { gateCalls++; } });
+    log: value => {
+      const event = JSON.parse(value);
+      logs.push(event);
+      // SCP completion aborts sampling, so publish its exit marker only after the observation is logged.
+      if (event.event === 'sender_telemetry') writeFileSync(processes.finishedFile, 'done');
+    }, beforeActivate: async () => { gateCalls++; } });
   transfer.remote = async (operation, files = transfer.files) => {
     remoteOperations.push(operation);
     if (operation === 'create') return { owned: true };
@@ -237,12 +243,7 @@ async function lifecycle(mode) {
     assert.equal(operation, 'cleanup');
     return { cleanup: 'confirmed' };
   };
-  const telemetry = createSenderTelemetry({ processes, platform: 'linux', fs: telemetryFiles(processes) });
-  transfer.telemetry = { async sample(options) {
-    const observation = await telemetry.sample(options);
-    await writeFile(processes.finishedFile, 'done');
-    return observation;
-  } };
+  transfer.telemetry = createSenderTelemetry({ processes, platform: 'linux', fs: telemetryFiles(processes) });
   try {
     await mkdir(root);
     for (const name of RELEASE_FILES) await writeFile(join(root, name), 'synthetic');
@@ -253,6 +254,10 @@ async function lifecycle(mode) {
     execution = transfer.execute().then(() => ({ passed: true }), error => ({ error }));
     const outcome = await execution;
     assert.equal(watchdogFired, false, 'the lifecycle completes without the test watchdog');
+    const telemetryIndex = logs.findIndex(event => event.event === 'sender_telemetry');
+    const scpFinishedIndex = logs.findIndex(event => event.event === 'scp_finished');
+    assert.ok(telemetryIndex >= 0 && scpFinishedIndex > telemetryIndex,
+      'the telemetry observation is logged before synthetic SCP completion');
     return { ...outcome, logs, remoteOperations, gateCalls, activationStarted: transfer.activationStarted,
       childrenActive: processes.children.size, commands: processes.commands };
   } finally {
