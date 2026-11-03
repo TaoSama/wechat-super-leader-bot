@@ -19,6 +19,9 @@ const (
 	rolloutLineLimit = 2 << 20
 	rolloutTextLimit = 256 << 10
 	rolloutTurnLimit = 8192
+	// Native scheduled heartbeats can be dispatched shortly before their nominal
+	// occurrence. Bound that lead without extending the caller's upper deadline.
+	heartbeatEarlyTolerance = 5 * time.Minute
 )
 
 // Evidence describes one exactly identified scheduled turn, never the latest chat reply.
@@ -171,7 +174,7 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 					markTurnInvalid(turns, id)
 					continue
 				}
-				if !inRolloutWindow(at.UnixMilli(), expectedAt, notAfter) {
+				if !inHeartbeatWindow(at.UnixMilli(), expectedAt, notAfter) {
 					continue
 				}
 				if p.Metadata.TurnID == "" {
@@ -295,6 +298,10 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 func isFinalPhase(phase string) bool { return phase == "final" || phase == "final_answer" }
 
 func inRolloutWindow(at, expected, until int64) bool { return at >= expected && at <= until }
+
+func inHeartbeatWindow(at, expected, until int64) bool {
+	return inRolloutWindow(at, max(0, expected-heartbeatEarlyTolerance.Milliseconds()), until)
+}
 
 func cronTrigger(trigger string) bool {
 	return trigger == "automation_cron_scheduled" || trigger == "automation_scheduled"

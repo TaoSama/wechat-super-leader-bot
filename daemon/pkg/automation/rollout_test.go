@@ -265,7 +265,11 @@ func TestBoundedTailMissingRunIsUnknown(t *testing.T) {
 	if evidence.Status != "unknown" || !strings.Contains(evidence.Reason, "tail") {
 		t.Fatalf("missing tail evidence treated as waiting: %+v", evidence)
 	}
-	text += fixtureHeartbeat("new", "target", fixtureTime) + fixtureFinal("new", "found in tail") + fixtureComplete("new")
+	at, err := time.Parse(time.RFC3339, fixtureTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text += fixtureHeartbeat("new", "target", at.Add(-3*time.Minute).Format(time.RFC3339)) + fixtureFinal("new", "found in tail") + fixtureComplete("new")
 	evidence = inspectFixture(t, text, true)
 	if evidence.Status != "completed" || evidence.TurnID != "new" {
 		t.Fatalf("bounded tail did not recover exact evidence: %+v", evidence)
