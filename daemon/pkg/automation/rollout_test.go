@@ -66,7 +66,8 @@ func inspectFixtureResult(t *testing.T, text string, heartbeat bool) (Evidence, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return inspectRollout(context.Background(), home, path, "thread", "target", at.Add(-time.Minute).UnixMilli(), at.Add(time.Minute).UnixMilli(), heartbeat)
+	window := rolloutWindow{expectedAt: at.Add(-time.Minute).UnixMilli(), notAfter: at.Add(time.Minute).UnixMilli(), heartbeatLead: heartbeatEarlyTolerance}
+	return inspectRollout(context.Background(), home, path, "thread", "target", window, heartbeat)
 }
 
 func TestHeartbeatResultUsesExactTurnAndAutomation(t *testing.T) {
@@ -234,7 +235,7 @@ func TestRolloutTurnLimit(t *testing.T) {
 func TestRolloutCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := inspectRollout(ctx, t.TempDir(), "/missing", "thread", "target", 1, 2, true); !errors.Is(err, context.Canceled) {
+	if _, err := inspectRollout(ctx, t.TempDir(), "/missing", "thread", "target", rolloutWindow{expectedAt: 1, notAfter: 2}, true); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled error = %v", err)
 	}
 }

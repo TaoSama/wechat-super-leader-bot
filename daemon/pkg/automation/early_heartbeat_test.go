@@ -20,7 +20,8 @@ func inspectWindowFixture(t *testing.T, text string, expected, until int64, hear
 	if err := os.WriteFile(path, []byte(text), 0600); err != nil {
 		t.Fatal(err)
 	}
-	out, err := inspectRollout(context.Background(), home, path, "thread", "target", expected, until, heartbeat)
+	window := rolloutWindow{expectedAt: expected, notAfter: until, heartbeatLead: heartbeatEarlyTolerance}
+	out, err := inspectRollout(context.Background(), home, path, "thread", "target", window, heartbeat)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +35,10 @@ func completedHeartbeatAt(turn, automation string, at int64) string {
 }
 
 func TestReaderMatchesEarlyNativeHeartbeatWithoutChangingRequestedWindow(t *testing.T) {
-	r, _ := readerFixture(t, "heartbeat")
+	r, native := readerFixture(t, "heartbeat")
+	if _, err := native.Exec("alter table automations add column rrule text not null default 'FREQ=DAILY'"); err != nil {
+		t.Fatal(err)
+	}
 	expected := time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC).UnixMilli()
 	until := expected + int64(2*time.Hour/time.Millisecond)
 	turn := "01a19eb2-972e-75b0-a484-55922f14735c"
