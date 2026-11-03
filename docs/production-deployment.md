@@ -111,6 +111,42 @@ unavailable；可选观测失败不会取消SCP。SCP结束/取消时停止并�
 以上只补齐下一次同路径传输的证据，不能补回历史runner的TCP状态，也不证明持续慢传已
 修复。1MiB有界诊断成功仍不能代替完整镜像传输或生产部署验收。
 
+### 接收端只读采样
+
+`scripts/deploy/receiver-telemetry.py`是独立的Python 3.10+只读采样器，供一次已批准发布
+通过严格host-key SSH的标准输入执行。正式CD不会自动启动它。运行前须固定实际merge
+revision、run、attempt、部署目录、端口、job.started_at以及该run的十份文件manifest；
+使用 `--help` 查看标准参数。manifest必须来自本次构建的真实清单，不能复用旧包大小。
+当前完整清单仅输出到sender的`transfer_manifest`日志，尚无独立的实时清单发布入口；
+不能假设未结束job的日志下载可用。正式取证前必须验证同run清单的读取方式，否则接收端
+准备仍不完整；本改动未新增artifact或远端清单文件。
+
+采样器只在唯一stage内寻找两份归档的可写文件FD，核对八进制访问模式、普通文件的
+device/inode及目录身份，再沿专属SFTP/SSH进程链绑定唯一ESTAB socket。采样前后重查
+PID/starttime/PPID、文件FD及socket FD/inode；共享监听器、只读status/verify和采样器
+自己的观察SSH不能冒充上传连接。多个writer/socket、归属变化或权限不足均明确
+unavailable；无关短会话或已关闭的扫描FD退出不会让另一条有效上传流失效。
+
+接收侧记录bytes_received、Recv-Q、rcv_space/rcv_ssthresh、内核提供的接收memory/buffer/
+backlog/drops，以及匹配进程的CPU ticks、wchar/write_bytes/cancelled_write_bytes和宿主
+IO压力。缺失字段保留null；VPS发送cwnd不代表上传发送侧。TCP字节、文件长度和缓存
+写回计数分别解释，不能据此声称已经持久化到磁盘。
+
+每次ss查询上限1500ms、stdout/stderr合计64KiB；最多16条候选连接、64个相关PID、
+每PID 128个FD、16层进程树。首次发现阶段最多60秒按1秒查找，正常样本间隔15秒；
+日志最多128条、2MiB。期限取job.started_at后20分钟与可选更短期限的较早值；SIGINT/
+SIGTERM及期限结束只停止采样器自己的helper。TERM/KILL各1秒宽限；只有helper组结束且
+两条输出管道均EOF才确认清理。逃逸后代仍持管道时保留记录、非零退出并报告unconfirmed。
+若文件读取或输出阻塞，独立watchdog在停止请求后最多另6秒强制非零退出；输出完全阻塞
+时可能没有最终JSON，必须保留清理证据缺口，不能按缺失的日志宣称confirmed。
+
+该程序不删除stage、不发起上传、不取消CD、不调用Docker/Compose或回滚，也不改配置。
+下一次真实发布仍须另行确认取证准备和取消预算，收到取消请求不等于已经停止或未激活。
+隔离回归覆盖较新OpenSSH internal-sftp和Ubuntu 22.04的OpenSSH 8.9外部sftp-server，
+使用独立合成密钥与限速文件；本地fixture按需要获得SYS_PTRACE以读取其自有sshd进程，
+不放宽生产权限。标准Verify integration-core复用现有发布传输入口执行这些检查。
+8.9隔离客户端显式启用SFTP并省略其不支持的现代SCP参数；较新客户端回归保留这些参数。
+
 ### Diagnostic-only 验证边界
 
 诊断只生成一份 1 MiB 成功样本和一份 256 KiB 限速取消样本，整个运行的文件 payload

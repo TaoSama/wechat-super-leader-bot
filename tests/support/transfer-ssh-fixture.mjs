@@ -8,12 +8,30 @@ import { localDockerEnvironment, verificationEnvironment } from '../../scripts/v
 import { transferConfiguration } from '../../scripts/deploy/transfer-release.mjs';
 import { TransferProcesses } from '../../scripts/deploy/transfer-process.mjs';
 
-const SERVER_IMAGE = `FROM node:24-alpine3.22
+const SERVER_IMAGES = {
+  alpine: `FROM node:24-alpine3.22
 RUN apk add --no-cache openssh-server openssh-client iproute2 python3 && ssh-keygen -A && passwd -d root && mkdir /fixture
-CMD ["/usr/sbin/sshd","-D","-e","-f","/dev/null","-p","2222","-h","/etc/ssh/ssh_host_ed25519_key","-o","PermitRootLogin=prohibit-password","-o","PasswordAuthentication=no","-o","AuthorizedKeysFile=/fixture/client.pub","-o","StrictModes=no","-o","Subsystem=sftp internal-sftp"]
-`;
+`,
+  ubuntu22: `FROM node:24-bookworm-slim AS node
+FROM ubuntu:22.04
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends openssh-server openssh-client iproute2 python3 libstdc++6 && rm -rf /var/lib/apt/lists/* && ssh-keygen -A && passwd -d root && mkdir -p /fixture /run/sshd
+`,
+};
 
-export async function transferSshFixture() {
+function serverImage(profile) {
+  if (!Object.hasOwn(SERVER_IMAGES, profile)) throw new Error('Unknown isolated SSH fixture profile');
+  const subsystem = profile === 'ubuntu22' ? '/usr/lib/openssh/sftp-server' : 'internal-sftp';
+  const args = ['/usr/sbin/sshd', '-D', '-e', '-f', '/dev/null', '-p', '2222',
+    '-h', '/etc/ssh/ssh_host_ed25519_key', '-o', 'PermitRootLogin=prohibit-password',
+    '-o', 'PasswordAuthentication=no', '-o', 'AuthorizedKeysFile=/fixture/client.pub',
+    '-o', 'StrictModes=no', '-o', `Subsystem=sftp ${subsystem}`];
+  return `${SERVER_IMAGES[profile]}CMD ${JSON.stringify(args)}\n`;
+}
+
+export async function transferSshFixture({ profile = 'alpine', inspectProcesses = false } = {}) {
+  const dockerfile = serverImage(profile);
+  if (typeof inspectProcesses !== 'boolean') throw new Error('Invalid isolated SSH inspection option');
   const env = localDockerEnvironment(verificationEnvironment());
   const root = await realpath(await mkdtemp(join(tmpdir(), 'release-transfer-ssh-')));
   const suffix = randomUUID().slice(0, 8);
@@ -29,9 +47,10 @@ export async function transferSshFixture() {
   };
   try {
     command('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', join(root, 'client')]);
-    command('docker', ['build', '-t', image, '-'], { input: SERVER_IMAGE });
+    command('docker', ['build', '-t', image, '-'], { input: dockerfile });
     imageCreated = true;
     command('docker', ['create', '--name', container, '--security-opt', 'no-new-privileges',
+      ...(inspectProcesses ? ['--cap-add', 'SYS_PTRACE'] : []),
       '-p', '127.0.0.1::2222', image]);
     containerCreated = true;
     command('docker', ['cp', join(root, 'client.pub'), `${container}:/fixture/client.pub`]);

@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createServer, connect } from 'node:net';
 import { transferSshFixture } from '../../support/transfer-ssh-fixture.mjs';
 import { verifySenderTelemetry } from './transfer-telemetry.mjs';
+import { verifyReceiverTelemetry } from './receiver-telemetry.mjs';
 import { ReleaseTransfer, transferConfiguration } from '../../../scripts/deploy/transfer-release.mjs';
 import { TransferFailure } from '../../../scripts/deploy/transfer-process.mjs';
 import { RELEASE_FILES } from '../../../scripts/deploy/transfer-files.mjs';
@@ -16,7 +17,7 @@ const CLI = fileURLToPath(new URL('../../../scripts/deploy/transfer-release.mjs'
 const { values } = parseArgs({ options: { run: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } });
 if (!values.run || values.help) { console.log('Usage: node tests/integration/deploy/release-transfer.mjs --run'); process.exit(0); }
 
-const fixture = await transferSshFixture();
+const fixture = await transferSshFixture({ inspectProcesses: true });
 const workflow = await readFile(new URL('../../../.github/workflows/deploy-production.yml', import.meta.url), 'utf8');
 const lines = text => text.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
 const absent = stage => assert.equal(fixture.python(`import os; print(os.path.exists(${JSON.stringify(stage)}))`).trim(), 'False');
@@ -129,6 +130,10 @@ async function cli(env, { interrupt, args = [], wrapper = false, production = fa
 
 try {
   await verifySenderTelemetry(fixture);
+  await verifyReceiverTelemetry(fixture);
+  const legacySsh = await transferSshFixture({ profile: 'ubuntu22', inspectProcesses: true });
+  try { await verifyReceiverTelemetry(legacySsh); }
+  finally { await legacySsh.close(); }
   const env = fixture.environment(), config = transferConfiguration(fixture.values, env);
   const diagnostic = await cli(env);
   assert.equal(diagnostic.code, 0);
