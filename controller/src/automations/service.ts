@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { CreateScheduleSchema, type AutomationRepository, type AutomationRun, type AutomationRunner, type CreateSchedule, type FrozenTarget, type RunnerOutcome, type Schedule } from "./contracts.js";
+import { CreateScheduleSchema, UpdateBackgroundPromptSchema, type AutomationRepository, type AutomationRun, type AutomationRunner, type CreateSchedule, type FrozenTarget, type RunnerOutcome, type Schedule, type UpdateBackgroundPrompt } from "./contracts.js";
 import type { BackgroundSpec } from "../background/contracts.js";
 import { validateTiming } from "./timing.js";
 import { assertSameCreation, automationId, automationRequestId } from "./identity.js";
@@ -8,6 +8,8 @@ import { AutomationValidationError } from "./errors.js";
 export interface CreationAuthority {
   chatId: string;
   currentMessageId: string;
+  /** Set by the trusted entry point; model arguments cannot select an authorization source. */
+  source?: "current_turn" | "admin_api";
   /** HTTP-only stable creation key; model tools may create distinct tasks in one user turn. */
   idempotencyKey?: string;
   /** Trusted caller derives this from the current user turn, never from a model tool argument. */
@@ -98,6 +100,16 @@ export class AutomationService {
         await this.finish(run, schedule, owner, outcome);
       }));
     } finally { this.ticking = false; }
+  }
+  async updatePrompt(id: string, input: UpdateBackgroundPrompt, authority: CreationAuthority, now = this.now()): Promise<Schedule | null> {
+    if (!authority.explicitCurrentTurnAuthorization || !authority.currentMessageId.trim() || !authority.chatId.trim()) {
+      throw new Error("Updating a prompt requires explicit authorization in the current user turn or authenticated management request");
+    }
+    const parsed = UpdateBackgroundPromptSchema.parse(input);
+    await authority.assertCurrentAuthority?.();
+    return this.repository.updatePrompt(id, authority.chatId, parsed, {
+      source: authority.source ?? "current_turn", requestId: authority.currentMessageId,
+    }, now, authority.assertCurrentAuthority);
   }
   private async finish(run: AutomationRun, schedule: Schedule, owner: string, outcome: RunnerOutcome): Promise<void> {
     if (!await this.repository.finish(run.id, owner, outcome, this.now()) || !this.options.onFinished) return;

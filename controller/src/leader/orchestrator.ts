@@ -37,7 +37,8 @@ import { generateAcknowledgement, generateAutomationAcknowledgement, type Automa
 import type { GoalProposal } from "./goals/goal.js";
 import { readGoalView } from "./goals/view.js";
 import type { AutomationService } from "../automations/service.js";
-import { AUTOMATION_TOOLS, AUTOMATION_TOOL_NAMES, executeAutomationTool } from "../automations/tools.js";
+import { AUTOMATION_TOOLS, AUTOMATION_TOOL_NAMES, executeAutomationTool, UpdateAutomationSchema } from "../automations/tools.js";
+import { formatAutomationToolResult } from "../automations/tool-results.js";
 import { classifyAutomationAuthorization, type AutomationOperation } from "./model/automation-authorization.js";
 import { BackgroundSpecSchema } from "../background/contracts.js";
 import { classifyBackgroundAuthorization } from "./model/background-authorization.js";
@@ -545,10 +546,13 @@ export class LeaderOrchestrator {
         if (this.automations && AUTOMATION_TOOL_NAMES.has(call.function.name)) {
           trace.lastTool = call.function.name;
           let raw: unknown;
+          let editingPrompt = false;
           try {
             raw = call.function.arguments.length <= MAX_BACKGROUND_TOOL_ARGUMENT_CHARS ? JSON.parse(call.function.arguments) : undefined;
             const backgroundInput = raw !== null && typeof raw === "object" && "kind" in raw && raw.kind === "background";
-            if (!backgroundInput && call.function.arguments.length > MAX_STANDARD_TOOL_ARGUMENT_CHARS) raw = undefined;
+            const update = call.function.name === "update_automation" ? UpdateAutomationSchema.safeParse(raw) : undefined;
+            editingPrompt = update?.success === true && "prompt" in update.data;
+            if (!backgroundInput && !editingPrompt && call.function.arguments.length > MAX_STANDARD_TOOL_ARGUMENT_CHARS) raw = undefined;
           }
           catch { raw = undefined; }
           const mutating = call.function.name === "create_automation" || call.function.name === "update_automation";
@@ -563,7 +567,7 @@ export class LeaderOrchestrator {
           }
           const status = raw && typeof raw === "object" && "status" in raw ? raw.status : undefined;
           const required: AutomationOperation | undefined = call.function.name === "create_automation" ? "create"
-            : status === "paused" ? "pause" : status === "active" ? "resume" : status === "cancelled" ? "cancel" : undefined;
+            : editingPrompt ? "edit" : status === "paused" ? "pause" : status === "active" ? "resume" : status === "cancelled" ? "cancel" : undefined;
           if (backgroundCreation && !backgroundAuthorization) backgroundAuthorization = classifyBackgroundAuthorization(this.model, sanitizedUserPrompt, signal);
           if (mutating && !backgroundCreation && !automationAuthorization) automationAuthorization = classifyAutomationAuthorization(this.model, sanitizedUserPrompt, signal);
           const authorized = backgroundCreation ? !!this.background && (await backgroundAuthorization!).has("create")
@@ -605,9 +609,7 @@ export class LeaderOrchestrator {
               output = { error: notice };
             }
           }
-          const content = JSON.stringify(output);
-          messages.push({ role: "tool", tool_call_id: call.id, content: content.length > 12000
-            ? JSON.stringify({ truncated: true, data: clip(content, 12000) }) : content });
+          messages.push({ role: "tool", tool_call_id: call.id, content: formatAutomationToolResult(output) });
           continue;
         }
         if ((automationTurn.attempted || backgroundTurn.mutations.length) && ["execute_plan", "execute_goal", "propose_plan", "propose_goal", "send_session_images"].includes(call.function.name)) {

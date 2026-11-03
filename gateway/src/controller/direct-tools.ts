@@ -13,7 +13,7 @@ export interface ControllerTool {
 }
 export interface ToolAuthorization {
   intent: "task" | "goal" | "preview" | "query" | "isolated_background" | "unclear";
-  automationOperations?: ("create" | "pause" | "resume" | "cancel")[];
+  automationOperations?: ("create" | "pause" | "resume" | "cancel" | "edit")[];
   backgroundOperations?: ("create" | "follow_up" | "extend")[];
   sendImages?: boolean;
   memoryOperations?: ("remember" | "forget")[];

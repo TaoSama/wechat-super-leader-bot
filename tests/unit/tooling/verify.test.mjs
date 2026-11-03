@@ -41,14 +41,17 @@ test('plans build prerequisites once, include all components, and never invoke l
     const integration = plan.findIndex(step => step.id === 'synthetic-integration');
     const consoleAuth = plan.find(step => step.id === 'console-auth-integration');
     const wechat = plan.find(step => step.id === 'wechat-interaction');
+    const automationPrompt = plan.find(step => step.id === 'automation-prompt-postgres');
     if (suite === 'unit') {
       assert.equal(integration, -1);
       assert.equal(consoleAuth, undefined);
       assert.equal(wechat, undefined);
+      assert.equal(automationPrompt, undefined);
     } else {
       for (const id of ['controller-build', 'gateway-build', 'web-build']) assert(plan.findIndex(step => step.id === id) < integration);
       assert.deepEqual(consoleAuth.args, ['tests/integration/console-auth.mjs', '--run']);
       assert.deepEqual(wechat.args, ['tests/integration/leader/wechat-interaction.mjs', '--run']);
+      assert.deepEqual(automationPrompt.args, ['tests/integration/leader/automation-prompt.mjs', '--run', '--postgres']);
     }
   }
   const unit = verificationPlan('unit');

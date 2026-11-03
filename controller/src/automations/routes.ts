@@ -1,6 +1,6 @@
 import { Router, type ErrorRequestHandler, type Request, type Response } from "express";
 import { z } from "zod";
-import { CreateScheduleSchema } from "./contracts.js";
+import { CreateScheduleSchema, UpdateBackgroundPromptSchema } from "./contracts.js";
 import type { AutomationRun, RunResult } from "./contracts.js";
 import type { AutomationService, CreationAuthority } from "./service.js";
 import { AutomationConflictError, AutomationValidationError } from "./errors.js";
@@ -9,6 +9,7 @@ const chatSchema = z.string().trim().min(1).max(64);
 const QuerySchema = z.object({ chatId: chatSchema }).strict();
 const CreateSchema = z.object({ chatId: chatSchema, input: CreateScheduleSchema }).strict();
 const UpdateSchema = z.object({ chatId: chatSchema, status: z.enum(["active", "paused", "cancelled"]) }).strict();
+const UpdatePromptSchema = UpdateBackgroundPromptSchema.extend({ chatId: chatSchema }).strict();
 const IdSchema = z.string().uuid();
 const IdempotencyKeySchema = z.string().min(1).max(256).regex(/^[\x21-\x7e]+$/);
 export interface AutomationRouterOptions {
@@ -85,6 +86,19 @@ export function createAutomationRouter(service: AutomationService, options: Auto
     if (!req.is("application/json") || !body.success || !id.success) { res.status(400).json({ error: "Invalid schedule status request" }); return; }
     if (!allowed(body.data.chatId, res) || !await authority(req, res, body.data.chatId)) return;
     const schedule = await service.repository.setStatus(id.data, body.data.chatId, body.data.status, (options.now ?? Date.now)());
+    if (schedule) res.json({ schedule }); else res.status(404).json({ error: "Schedule not found" });
+  });
+  router.post("/:id/prompt", async (req, res) => {
+    const body = UpdatePromptSchema.safeParse(req.body), id = IdSchema.safeParse(req.params.id);
+    if (!req.is("application/json") || !body.success || !id.success) { res.status(400).json({ error: "Invalid schedule prompt request" }); return; }
+    if (!allowed(body.data.chatId, res)) return;
+    const key = IdempotencyKeySchema.safeParse(req.headers["idempotency-key"]);
+    if (!key.success) { res.status(400).json({ error: "A stable Idempotency-Key of 1–256 visible ASCII characters is required" }); return; }
+    const consent = await authority(req, res, body.data.chatId);
+    if (!consent) return;
+    const schedule = await service.updatePrompt(id.data, {
+      prompt: body.data.prompt, expectedPromptRevision: body.data.expectedPromptRevision,
+    }, { ...consent, idempotencyKey: key.data }, (options.now ?? Date.now)());
     if (schedule) res.json({ schedule }); else res.status(404).json({ error: "Schedule not found" });
   });
   const clientErrors: ErrorRequestHandler = (error: unknown, _req, res, next) => {

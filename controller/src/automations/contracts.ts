@@ -24,6 +24,13 @@ export const CreateScheduleSchema = z.discriminatedUnion("kind", [
   z.object({ ...base, kind: z.literal("background"), background: BackgroundSpecSchema }).strict(),
 ]);
 export type CreateSchedule = z.infer<typeof CreateScheduleSchema>;
+export const UpdateBackgroundPromptSchema = z.object({
+  prompt: z.string().trim().min(1).max(MAX_AUTOMATION_TEXT),
+  expectedPromptRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+}).strict();
+export type UpdateBackgroundPrompt = z.infer<typeof UpdateBackgroundPromptSchema>;
+export type PromptUpdateAuthority = { source: "current_turn" | "admin_api"; requestId: string };
+export type PromptUpdateReceipt = PromptUpdateAuthority & { revision: number; updatedAt: number };
 export type FrozenTarget = { nodeId: string; sessionId: string; sendRoute: SendRoute };
 export type Schedule = CreateSchedule & {
   id: string; chatId: string; authorizedMessageId: string;
@@ -31,6 +38,8 @@ export type Schedule = CreateSchedule & {
   nextAt: number | null; createdAt: number; updatedAt: number;
   activeRunId?: string; target?: FrozenTarget;
   lastFingerprint?: string; lastOutcome?: "completed" | "failed";
+  creationFingerprint?: string;
+  latestPromptUpdate?: PromptUpdateReceipt;
 };
 export type RunStatus = "dispatching" | "running" | "completed" | "failed" | "unknown" | "expired" | "skipped";
 export type RunResult = { text: string; meaningful?: boolean; fingerprint?: string; error?: string };
@@ -66,6 +75,8 @@ export interface AutomationRepository {
   get(id: string, chatId: string): Promise<Schedule | null>;
   list(chatId: string): Promise<Schedule[]>;
   setStatus(id: string, chatId: string, status: "active" | "paused" | "cancelled", now: number): Promise<Schedule | null>;
+  updatePrompt(id: string, chatId: string, input: UpdateBackgroundPrompt, authority: PromptUpdateAuthority, now: number,
+    assertCurrentAuthority?: () => Promise<void>): Promise<Schedule | null>;
   listRuns(id: string, chatId: string, limit?: number): Promise<AutomationRun[]>;
   claimDue(now: number, owner: string, limit: number): Promise<{ schedule: Schedule; run: AutomationRun }[]>;
   claimRunning(now: number, owner: string, limit: number): Promise<{ schedule: Schedule; run: AutomationRun }[]>;

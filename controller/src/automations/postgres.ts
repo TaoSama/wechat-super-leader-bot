@@ -1,11 +1,12 @@
 import type pg from "pg";
-import { CLAIM_LEASE_MS, type AutomationOutbox, type AutomationRepository, type AutomationRun, type AutomationSupplement, type RunnerOutcome, type Schedule } from "./contracts.js";
+import { CLAIM_LEASE_MS, type AutomationOutbox, type AutomationRepository, type AutomationRun, type AutomationSupplement, type PromptUpdateAuthority, type RunnerOutcome, type Schedule, type UpdateBackgroundPrompt } from "./contracts.js";
 import { assertSameCreation } from "./identity.js";
 import { finishRun, newRun } from "./state.js";
 import { supplementOutbox, assertSameSupplement } from "./supplements.js";
 import { alignHashedCronNextAt, dueOccurrence } from "./timing.js";
 import { validateBodyRetention } from "./retention.js";
 import { AutomationConflictError } from "./errors.js";
+import { applyPromptUpdate } from "./prompt-update.js";
 
 type Queryable = Pick<pg.PoolClient, "query">;
 export async function initAutomationTables(client: Queryable): Promise<void> {
@@ -81,6 +82,18 @@ export class PostgresAutomationRepository implements AutomationRepository {
     const result = await this.pool.query<{ data: AutomationRun }>(`SELECT r.data FROM automation_runs r
       JOIN automation_schedules s ON s.id=r.schedule_id WHERE s.id=$1 AND s.chat_id=$2 ORDER BY scheduled_at DESC LIMIT $3`, [id, chatId, limit]);
     return result.rows.map(row => row.data);
+  }
+  async updatePrompt(id: string, chatId: string, input: UpdateBackgroundPrompt, authority: PromptUpdateAuthority, now: number,
+    assertCurrentAuthority?: () => Promise<void>): Promise<Schedule | null> {
+    return this.transaction(async client => {
+      const selected = await client.query<{ data: Schedule }>("SELECT data FROM automation_schedules WHERE id=$1 AND chat_id=$2 FOR UPDATE", [id, chatId]);
+      const schedule = selected.rows[0]?.data;
+      if (!schedule) return null;
+      await assertCurrentAuthority?.();
+      const updated = applyPromptUpdate(schedule, input, authority, now);
+      if (updated !== schedule) await saveSchedule(client, updated);
+      return updated;
+    });
   }
   async claimDue(now: number, owner: string, limit: number): Promise<{ schedule: Schedule; run: AutomationRun }[]> {
     return this.transaction(async client => {
