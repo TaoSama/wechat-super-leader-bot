@@ -80,6 +80,37 @@ SIGKILL、runner 丢失或网络不可达可能阻止日志和清理；不能据
 不回显连接目标、命令、私钥、token 或原始 SSH 错误。保留现有严格 host key 校验。
 事后 artifact 上传包含 cancelled 情况，但只是 best effort；关键证据依赖运行中日志。
 
+### 上传端被动指标与阶段耗时
+
+传输启动约1秒后首次记录 `sender_telemetry`，之后约每15秒采样；它与远端文件长度采样
+独立执行，避免一次慢状态查询阻塞上传端取证。Linux下先确认SCP进程组，再从直接SSH
+子进程的 `/proc` 身份、starttime、socket FD与 `ss` 所属PID绑定实际上传连接，避免把
+周期status的另一条SSH连接混入。确认过的组PID/SSH PID/FD用于本次runner内关联，不输出
+地址、端口、命令、环境、私钥或原始工具输出；进程退出、PID重用、多个候选socket均明确
+记录不可用，不能把不同连接的指标合并。
+
+固定字段包括发送侧 `rtt_ms`/`rtt_variance_ms`、独立 `min_rtt_ms`、cwnd、发送/确认/重传
+字节、重传计数、发送窗口及接收窗口受限时间。`rtt_variance_ms`记录内核rttvar的平均偏差，
+单位为毫秒，不是统计方差。RTT按完整token解析，不把 `minrtt` 或
+`rcv_rtt` 当作平滑RTT。未出现的字段为null，和内核实际报告零有区别。这些指标来自runner
+向VPS发送的socket，不能用VPS的发送侧cwnd替代。SCP/SSH CPU以原始user/system ticks记录，
+不假设每秒tick数；`rchar`含缓存/管道读取，`read_bytes`受page cache/readahead影响，均不是
+文件传输进度。`io_pressure`是runner宿主的I/O压力上下文，不能归属于某一进程或磁盘。
+
+每次 `ss` 查询使用既有进程管理器，1500ms查询时限，沿用原1秒TERM/1秒KILL停止宽限及
+64KiB输出上限。查询失败、缺工具、权限不足、非Linux或进程已结束均输出固定分类的
+unavailable；可选观测失败不会取消SCP。SCP结束/取消时停止并等待观测器；若辅助进程停止
+仍未确认，传输阶段以 `process_stop` 失败，禁止进入校验和激活；保留children记录并报告
+清理未确认，不会删除仍可能被使用的stage或虚报清理成功。
+
+`scp_finished`记录SCP子进程结果、固定错误分类及从启动到结束的耗时，它仍包含SSH建立、
+认证和SFTP传输，不能称为纯payload吞吐。随后 `transfer_verified`/`diagnostic_success_case`
+增加独立 `verification_elapsed_ms`，表示远端hash校验SSH调用的总耗时。它也包含建连，
+不能把这项全算作hash CPU。最终远端状态、完整性、当前main与激活门禁继续严格执行。
+
+以上只补齐下一次同路径传输的证据，不能补回历史runner的TCP状态，也不证明持续慢传已
+修复。1MiB有界诊断成功仍不能代替完整镜像传输或生产部署验收。
+
 ### Diagnostic-only 验证边界
 
 诊断只生成一份 1 MiB 成功样本和一份 256 KiB 限速取消样本，整个运行的文件 payload

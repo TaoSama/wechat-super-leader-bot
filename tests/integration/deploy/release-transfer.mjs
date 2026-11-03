@@ -7,6 +7,7 @@ import { parseArgs } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createServer, connect } from 'node:net';
 import { transferSshFixture } from '../../support/transfer-ssh-fixture.mjs';
+import { verifySenderTelemetry } from './transfer-telemetry.mjs';
 import { ReleaseTransfer, transferConfiguration } from '../../../scripts/deploy/transfer-release.mjs';
 import { TransferFailure } from '../../../scripts/deploy/transfer-process.mjs';
 import { RELEASE_FILES } from '../../../scripts/deploy/transfer-files.mjs';
@@ -127,6 +128,7 @@ async function cli(env, { interrupt, args = [], wrapper = false, production = fa
 }
 
 try {
+  await verifySenderTelemetry(fixture);
   const env = fixture.environment(), config = transferConfiguration(fixture.values, env);
   const diagnostic = await cli(env);
   assert.equal(diagnostic.code, 0);

@@ -6,9 +6,11 @@ import { parseArgs } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { TransferFailure, TransferProcesses, errorCategory } from './transfer-process.mjs';
+import { createSenderTelemetry } from './transfer-telemetry.mjs';
 import { RELEASE_FILES, DIAGNOSTIC_FILES, DIAGNOSTIC_PAYLOAD_LIMIT, REMOTE_FILES, manifestFor, quoteShell } from './transfer-files.mjs';
 
 const PROGRESS_MS = 15_000;
+const FIRST_TELEMETRY_MS = 1_000;
 const PROGRESS_UNAVAILABLE_CATEGORIES = new Set(['dns', 'timeout', 'network_connect', 'network_closed']);
 const REMOTE_OPERATION_MS = 30_000;
 const CLEANUP_MS = 8_000;
@@ -46,6 +48,7 @@ export class ReleaseTransfer {
   constructor(config, { signal, log = console.log, processes = new TransferProcesses(), beforeActivate } = {}) {
     this.config = config;
     this.processes = processes;
+    this.telemetry = createSenderTelemetry({ processes });
     this.beforeActivate = beforeActivate ?? (() => this.processes.checked(process.execPath,
       [fileURLToPath(new URL('./resolve-revision.mjs', import.meta.url)), '--assert-current', config.revision], {
         signal: this.signal, timeoutMs: REMOTE_OPERATION_MS,
@@ -110,6 +113,20 @@ export class ReleaseTransfer {
       ...(limited ? ['-l', '64', '-X', 'nrequests=1', '-X', 'buffer=16384'] : []),
       ...files.map(file => join(c.root, file.name)), `${c.user}@${c.host}:${c.stage}/`], { signal });
     const sampling = new AbortController();
+    const observerSignal = AbortSignal.any([signal, sampling.signal]);
+    const processGroupPid = [...(this.processes.children ?? [])].find(child => child.spawnfile === 'scp')?.pid;
+    const telemetrySampler = (async () => {
+      let interval = FIRST_TELEMETRY_MS;
+      while (!observerSignal.aborted) {
+        try { await delay(interval, undefined, { signal: observerSignal }); }
+        catch (error) { if (observerSignal.aborted && error.name === 'AbortError') break; throw error; }
+        const observation = await this.telemetry.sample({ processGroupPid, signal: observerSignal });
+        if (!observerSignal.aborted) this.log('sender_telemetry', { transfer_elapsed_ms: Date.now() - this.copyStarted, ...observation });
+        interval = PROGRESS_MS;
+      }
+    })().catch(() => {
+      if (!observerSignal.aborted) this.log('sender_telemetry', { status: 'unavailable', category: 'observer_error' });
+    });
     let samplingFailure;
     const sampler = (async () => {
       while (!sampling.signal.aborted) {
@@ -126,9 +143,14 @@ export class ReleaseTransfer {
       }
     })().catch(error => { samplingFailure = error; this.abort.abort(); });
     let result;
-    try { result = await scp; }
-    finally { sampling.abort(); await sampler; }
+    try {
+      result = await scp;
+      this.log('scp_finished', { transfer_elapsed_ms: Date.now() - this.copyStarted,
+        exit_code: Number.isInteger(result.code) ? result.code : null,
+        category: result.code === 0 && !result.reason ? 'ok' : errorCategory(result) });
+    } finally { sampling.abort(); await Promise.all([sampler, telemetrySampler]); }
     if (samplingFailure) throw samplingFailure;
+    if (this.processes.children?.size > 0) throw new TransferFailure('process_stop');
     return result;
   }
 
@@ -136,8 +158,9 @@ export class ReleaseTransfer {
     const result = await this.copy(this.files);
     if (result.code !== 0 || result.reason) throw new TransferFailure(errorCategory(result));
     await this.progress(this.files);
+    const verificationStarted = Date.now();
     if ((await this.remote('verify')).verified !== true) throw new TransferFailure('integrity');
-    this.log('transfer_verified');
+    this.log('transfer_verified', { verification_elapsed_ms: Date.now() - verificationStarted });
     try { await this.beforeActivate(); }
     catch { throw new TransferFailure(this.signal.aborted ? 'cancelled' : 'revision_gate'); }
     this.signal.throwIfAborted();
@@ -162,8 +185,10 @@ export class ReleaseTransfer {
     const [success, cancel] = this.files;
     const result = await this.copy([success]);
     if (result.code !== 0 || result.reason) throw new TransferFailure(errorCategory(result));
+    const verificationStarted = Date.now();
     if ((await this.remote('verify', [success])).verified !== true) throw new TransferFailure('integrity');
-    this.log('diagnostic_success_case', { bytes: success.bytes, sha256: success.sha256 });
+    this.log('diagnostic_success_case', { bytes: success.bytes, sha256: success.sha256,
+      verification_elapsed_ms: Date.now() - verificationStarted });
     const cancelCase = new AbortController();
     let settled = false;
     const copying = this.copy([cancel], { signal: AbortSignal.any([this.signal, cancelCase.signal]), limited: true })

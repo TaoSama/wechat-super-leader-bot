@@ -8,8 +8,8 @@ import { localDockerEnvironment, verificationEnvironment } from '../../scripts/v
 import { transferConfiguration } from '../../scripts/deploy/transfer-release.mjs';
 import { TransferProcesses } from '../../scripts/deploy/transfer-process.mjs';
 
-const SERVER_IMAGE = `FROM alpine:3.22
-RUN apk add --no-cache openssh-server python3 && ssh-keygen -A && passwd -d root && mkdir /fixture
+const SERVER_IMAGE = `FROM node:24-alpine3.22
+RUN apk add --no-cache openssh-server openssh-client iproute2 python3 && ssh-keygen -A && passwd -d root && mkdir /fixture
 CMD ["/usr/sbin/sshd","-D","-e","-f","/dev/null","-p","2222","-h","/etc/ssh/ssh_host_ed25519_key","-o","PermitRootLogin=prohibit-password","-o","PasswordAuthentication=no","-o","AuthorizedKeysFile=/fixture/client.pub","-o","StrictModes=no","-o","Subsystem=sftp internal-sftp"]
 `;
 
@@ -60,6 +60,8 @@ export async function transferSshFixture() {
     if (!connected) throw new Error('Isolated SSH fixture did not become ready');
     return { root, env, values, environment, close,
       python: source => command('docker', ['exec', container, 'python3', '-c', source]),
+      runInContainer: (args, options = {}) => command('docker', ['exec', container, ...args], options),
+      copyToContainer: (source, destination) => command('docker', ['cp', source, `${container}:${destination}`]),
       async privateKey() { return readFile(join(root, 'client'), 'utf8'); },
     };
   } catch (error) { await close(); throw error; }
