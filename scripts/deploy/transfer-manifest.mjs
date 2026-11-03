@@ -66,7 +66,7 @@ export function validateTransferManifest(value, identity) {
 
 export async function readTransferManifest(path, identity) {
   if (typeof path !== 'string' || basename(path) !== MANIFEST_FILENAME) throw new TransferFailure('manifest_file');
-  let handle, text;
+  let handle, text, closeFailed = false;
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const before = await handle.stat();
@@ -87,9 +87,10 @@ export async function readTransferManifest(path, identity) {
   } finally {
     if (handle) {
       try { await handle.close(); }
-      catch { throw new TransferFailure('manifest_file'); }
+      catch { closeFailed = true; }
     }
   }
+  if (closeFailed) throw new TransferFailure('manifest_file');
   let value;
   try { value = JSON.parse(text); }
   catch { throw new TransferFailure('manifest_invalid'); }

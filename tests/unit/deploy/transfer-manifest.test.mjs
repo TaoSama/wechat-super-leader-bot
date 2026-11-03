@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs/promises';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { RELEASE_FILES } from '../../../scripts/deploy/transfer-files.mjs';
+import { TransferFailure } from '../../../scripts/deploy/transfer-process.mjs';
 import { ReleaseTransfer, transferConfiguration } from '../../../scripts/deploy/transfer-release.mjs';
 import { MANIFEST_MAX_BYTES, MANIFEST_FILENAME, manifestIdentity, validateTransferManifest,
   readTransferManifest, createTransferManifest, verifyLocalManifest,
@@ -121,6 +124,45 @@ test('creation hashes the exact ten local files and reading preserves the frozen
   assert.deepEqual(f.manifest, wire());
   assert.deepEqual(await readTransferManifest(f.path, IDENTITY), wire());
   await verifyLocalManifest(f.root, f.manifest);
+});
+
+test('manifest reader closes once and preserves read failures when closing also fails', { concurrency: false }, async t => {
+  const primary = new TransferFailure('manifest_file');
+  const plainReadFailure = Object.assign(new Error(SECRET), { code: 'EIO' });
+  const closeFailure = Object.assign(new Error(SECRET), { code: 'EBADF' });
+  for (const { name, readFailure, closeFails, preserveIdentity } of [
+    { name: 'successful read rejects a close failure', closeFails: true },
+    { name: 'original read failure survives a successful close', readFailure: primary, preserveIdentity: true },
+    { name: 'original read failure survives a failing close', readFailure: primary, closeFails: true, preserveIdentity: true },
+    { name: 'ordinary read errors map to manifest_file', readFailure: plainReadFailure },
+    { name: 'ordinary read errors map to manifest_file when close fails', readFailure: plainReadFailure, closeFails: true },
+  ]) {
+    await t.test(name, async t => {
+      const contents = Buffer.from(JSON.stringify(wire()));
+      let closeCalls = 0;
+      const handle = {
+        async stat() { return { isFile: () => true, size: contents.length, mtimeMs: 0, ctimeMs: 0 }; },
+        async read(buffer, offset, length, position) {
+          if (readFailure) throw readFailure;
+          return { bytesRead: contents.copy(buffer, offset, position, Math.min(position + length, contents.length)) };
+        },
+        async close() { closeCalls++; if (closeFails) throw closeFailure; },
+      };
+      t.mock.method(fs, 'open', async () => handle);
+      syncBuiltinESMExports();
+      t.after(() => {
+        t.mock.restoreAll(); syncBuiltinESMExports();
+        assert.equal(closeCalls, 1, 'every opened manifest handle is closed exactly once');
+      });
+      await assert.rejects(readTransferManifest(join(tmpdir(), MANIFEST_FILENAME), IDENTITY), error => {
+        if (preserveIdentity) assert.equal(error, readFailure);
+        assert.ok(error instanceof TransferFailure);
+        assert.equal(error.category, 'manifest_file');
+        assert.ok(!error.stack.includes(SECRET));
+        return true;
+      });
+    });
+  }
 });
 
 test('manifest reader rejects oversized, malformed and symbolic-link input', async t => {
