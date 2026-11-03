@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, writeFile, readFile, symlink, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile, readFile, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay, setImmediate as flush } from 'node:timers/promises';
@@ -8,15 +8,18 @@ import test from 'node:test';
 import { ReleaseTransfer, transferConfiguration } from '../../../scripts/deploy/transfer-release.mjs';
 import { TransferFailure, TransferProcesses, errorCategory } from '../../../scripts/deploy/transfer-process.mjs';
 import { manifestFor, RELEASE_FILES, quoteShell } from '../../../scripts/deploy/transfer-files.mjs';
+import { createTransferManifest, MANIFEST_FILENAME } from '../../../scripts/deploy/transfer-manifest.mjs';
 
 const env = { DEPLOY_HOST: 'fixture.example', DEPLOY_USER: 'fixture', DEPLOY_PATH: '/tmp/fixture',
   REVISION: 'a'.repeat(40), GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '2' };
-const values = { 'key-file': '/tmp/synthetic-key', 'known-hosts-file': '/tmp/synthetic-known-hosts', 'release-root': '/tmp/bundle' };
+const values = { 'key-file': '/tmp/synthetic-key', 'known-hosts-file': '/tmp/synthetic-known-hosts',
+  'release-root': '/tmp/bundle', 'manifest-file': '/tmp/transfer-manifest.json', 'manifest-artifact-id': '456' };
 
 test('stage identity contains revision, run and attempt; malformed inputs fail closed', () => {
   const normal = transferConfiguration(values, env);
   assert.equal(normal.stage, `/tmp/fixture/.runtime/releases/${env.REVISION}-123-2`);
-  const diagnostic = transferConfiguration({ ...values, 'release-root': undefined, diagnostic: true }, env);
+  const diagnostic = transferConfiguration({ ...values, 'release-root': undefined,
+    'manifest-file': undefined, 'manifest-artifact-id': undefined, diagnostic: true }, env);
   assert.equal(diagnostic.stage, `/tmp/fixture/.runtime/releases/diagnostic-${env.REVISION}-123-2`);
   for (const patch of [{ DEPLOY_HOST: 'x;echo secret' }, { DEPLOY_USER: '-oProxyCommand=x' },
     { DEPLOY_PATH: '/tmp/../production' }, { DEPLOY_PATH: '/' }, { GITHUB_RUN_ID: '0' },
@@ -101,6 +104,7 @@ test('timeouts and missing tools remain nonzero; subprocesses do not inherit cre
 
 test('escaped descendant holding stdio lets an independent CLI fail naturally without claiming cleanup', async () => {
   const root = await mkdtemp(join(tmpdir(), 'transfer-escaped-'));
+  const releaseRoot = join(root, 'payload'), manifestFile = join(root, MANIFEST_FILENAME);
   const pidFile = join(root, 'escaped.pid');
   const code = `const{spawn}=require('node:child_process');const fs=require('node:fs');
     const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],
@@ -118,7 +122,7 @@ test('escaped descendant holding stdio lets an independent CLI fail naturally wi
       }
       copy() { return this.processes.run(process.execPath, ['-e', ${JSON.stringify(code)}], { signal: this.signal }); }
     }
-    const transfer = new EscapedTransfer(transferConfiguration(${JSON.stringify({ ...values, 'release-root': root })}, ${JSON.stringify(env)}), {signal: abort.signal});
+    const transfer = new EscapedTransfer(transferConfiguration(${JSON.stringify({ ...values, 'release-root': releaseRoot, 'manifest-file': manifestFile })}, ${JSON.stringify(env)}), {signal: abort.signal});
     const running = transfer.execute().catch(error => {
       console.log(JSON.stringify({caught:error.category,children_active:transfer.processes.children.size}));
       process.exitCode=1;
@@ -130,7 +134,11 @@ test('escaped descendant holding stdio lets an independent CLI fail naturally wi
     abort.abort(); await running;`;
   let escaped, child, timeout;
   try {
-    for (const name of RELEASE_FILES) await writeFile(join(root, name), 'synthetic');
+    await mkdir(releaseRoot);
+    for (const name of RELEASE_FILES) await writeFile(join(releaseRoot, name), 'synthetic');
+    const frozen = await createTransferManifest(releaseRoot, { revision: env.REVISION,
+      run: env.GITHUB_RUN_ID, attempt: env.GITHUB_RUN_ATTEMPT });
+    await writeFile(manifestFile, JSON.stringify(frozen), { flag: 'wx' });
     const started = Date.now();
     child = spawn(process.execPath, ['--input-type=module', '-e', cli], { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '', forced = false;
@@ -260,4 +268,58 @@ test('cleanup allows connection plus execution and shrinks to the diagnostic dea
   assert.ok(transfer.timeout(true) <= 4500);
   transfer.deadline = Date.now() + 3500;
   assert.throws(() => transfer.timeout(true), { category: 'diagnostic_deadline' });
+});
+
+for (const observerFails of [false, true]) {
+  test(`sender sampling ${observerFails ? 'failure stays optional and private' : 'binds the SCP group, not status SSH'}`, async () => {
+    let firstSample, finish, sampledGroup;
+    const logs = [], sampled = new Promise(resolve => { firstSample = resolve; });
+    const processes = { children: new Set([{ spawnfile: 'ssh', pid: 101 }, { spawnfile: 'scp', pid: 202 }]),
+      run: () => new Promise(resolve => { finish = () => { processes.children.clear(); resolve({ code: 0 }); }; }) };
+    const transfer = new ReleaseTransfer(transferConfiguration(values, env), { processes,
+      log: line => logs.push(JSON.parse(line)) });
+    transfer.progress = async () => {};
+    transfer.telemetry = { sample: async ({ processGroupPid }) => {
+      sampledGroup = processGroupPid;
+      firstSample();
+      if (observerFails) throw new Error('SYNTHETIC_PRIVATE_OBSERVER_ERROR');
+      return { status: 'available', category: 'ok', tcp: { bytes_sent: 8192 } };
+    } };
+    const copying = transfer.copy([{ name: 'controller.tar' }]);
+    try {
+      await sampled;
+      await flush();
+      finish();
+      assert.equal((await copying).code, 0);
+      assert.equal(sampledGroup, 202);
+      assert.equal(transfer.signal.aborted, false);
+      const event = logs.find(e => e.event === 'sender_telemetry');
+      assert.equal(event.status, observerFails ? 'unavailable' : 'available');
+      assert.ok(logs.some(e => e.event === 'scp_finished' && e.category === 'ok' && e.exit_code === 0));
+      assert.ok(!JSON.stringify(logs).includes('SYNTHETIC_PRIVATE_OBSERVER_ERROR'));
+    } finally { finish(); await copying; }
+  });
+}
+
+test('SCP completion aborts and awaits the in-flight sender observer before returning', async () => {
+  let firstSample, finish, observerStopped = false;
+  const sampled = new Promise(resolve => { firstSample = resolve; });
+  const processes = { children: new Set([{ spawnfile: 'scp', pid: 202 }]),
+    run: () => new Promise(resolve => { finish = () => { processes.children.clear(); resolve({ code: 0 }); }; }) };
+  const transfer = new ReleaseTransfer(transferConfiguration(values, env), { processes, log: () => {} });
+  transfer.progress = async () => {};
+  transfer.telemetry = { sample: async ({ signal }) => {
+    firstSample();
+    await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+    await flush();
+    observerStopped = true;
+    return { status: 'unavailable', category: 'cancelled' };
+  } };
+  const copying = transfer.copy([{ name: 'controller.tar' }]);
+  try {
+    await sampled;
+    finish();
+    assert.equal((await copying).code, 0);
+    assert.equal(observerStopped, true);
+  } finally { finish(); await copying; }
 });

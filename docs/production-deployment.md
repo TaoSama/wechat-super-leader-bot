@@ -80,6 +80,118 @@ SIGKILL、runner 丢失或网络不可达可能阻止日志和清理；不能据
 不回显连接目标、命令、私钥、token 或原始 SSH 错误。保留现有严格 host key 校验。
 事后 artifact 上传包含 cancelled 情况，但只是 best effort；关键证据依赖运行中日志。
 
+### 上传端被动指标与阶段耗时
+
+传输启动约1秒后首次记录 `sender_telemetry`，之后约每15秒采样；它与远端文件长度采样
+独立执行，避免一次慢状态查询阻塞上传端取证。Linux下先确认SCP进程组，再从直接SSH
+子进程的 `/proc` 身份、starttime、socket FD与 `ss` 所属PID绑定实际上传连接，避免把
+周期status的另一条SSH连接混入。确认过的组PID/SSH PID/FD用于本次runner内关联，不输出
+地址、端口、命令、环境、私钥或原始工具输出；进程退出、PID重用、多个候选socket均明确
+记录不可用，不能把不同连接的指标合并。
+
+固定字段包括发送侧 `rtt_ms`/`rtt_variance_ms`、独立 `min_rtt_ms`、cwnd、发送/确认/重传
+字节、重传计数、发送窗口及接收窗口受限时间。`rtt_variance_ms`记录内核rttvar的平均偏差，
+单位为毫秒，不是统计方差。RTT按完整token解析，不把 `minrtt` 或
+`rcv_rtt` 当作平滑RTT。未出现的字段为null，和内核实际报告零有区别。这些指标来自runner
+向VPS发送的socket，不能用VPS的发送侧cwnd替代。SCP/SSH CPU以原始user/system ticks记录，
+不假设每秒tick数；`rchar`含缓存/管道读取，`read_bytes`受page cache/readahead影响，均不是
+文件传输进度。`io_pressure`是runner宿主的I/O压力上下文，不能归属于某一进程或磁盘。
+
+每次 `ss` 查询使用既有进程管理器，1500ms查询时限，沿用原1秒TERM/1秒KILL停止宽限及
+64KiB输出上限。查询失败、缺工具、权限不足、非Linux或进程已结束均输出固定分类的
+unavailable；可选观测失败不会取消SCP。SCP结束/取消时停止并等待观测器；若辅助进程停止
+仍未确认，传输阶段以 `process_stop` 失败，禁止进入校验和激活；保留children记录并报告
+清理未确认，不会删除仍可能被使用的stage或虚报清理成功。
+children文件缺失时重新核对同一进程身份：活进程为`children_unavailable`，确认退出为
+`process_exited`，PID/starttime/name/group变化为`process_changed`，不推断内核配置原因。
+
+`scp_finished`记录SCP子进程结果、固定错误分类及从启动到结束的耗时，它仍包含SSH建立、
+认证和SFTP传输，不能称为纯payload吞吐。随后 `transfer_verified`/`diagnostic_success_case`
+增加独立 `verification_elapsed_ms`，表示远端hash校验SSH调用的总耗时。它也包含建连，
+不能把这项全算作hash CPU。最终远端状态、完整性、当前main与激活门禁继续严格执行。
+
+以上只补齐下一次同路径传输的证据，不能补回历史runner的TCP状态，也不证明持续慢传已
+修复。1MiB有界诊断成功仍不能代替完整镜像传输或生产部署验收。
+
+### 上传前的冻结清单
+
+构建后的current-main检查通过后，`prepare-transfer-manifest.mjs`复用固定十文件与流式
+SHA256规则，生成至runner本次独立临时目录的`transfer-manifest.json`（最多16KiB）。
+内容为schema、resolver实际选出的revision M、run R、attempt A、每份文件name/bytes/sha256
+及total_bytes；不含端点、凭证或stage owner token，也不加入十文件payload。
+工作流用固定commit的upload-artifact v4提前发布
+`release-transfer-manifest-M-R-A`；上传失败或文件缺失会阻止后续传输步骤。
+
+生产sender要求`--manifest-file`与上传成功返回的`--manifest-artifact-id`。在任何SSH
+操作前检查身份、schema、十个唯一固定名称、安全整数、hash和总量，再重算本地文件核对；
+实际包变化立即失败，不重新生成另一份清单继续。这个第二遍hash用于确认冻结后的包未变。
+Diagnostic-only仍使用原有有界合成样本。
+
+取证端在已有只读`GH_TOKEN`的环境中，先定位指定attempt的唯一部署job，再用小入口读取：
+
+```sh
+gh api "repos/$DEPLOY_REPO/actions/runs/$DEPLOY_RUN/attempts/$DEPLOY_ATTEMPT/jobs?per_page=100" \
+  --jq '.jobs[] | select(.name == "Build and deploy linux/amd64 images") | {id,run_id,run_attempt,name,status,started_at}'
+node scripts/deploy/fetch-transfer-manifest.mjs \
+  --repository "$DEPLOY_REPO" --revision "$DEPLOY_REVISION" \
+  --run-id "$DEPLOY_RUN" --attempt "$DEPLOY_ATTEMPT" --job-id "$DEPLOY_JOB" \
+  --output-dir "$OBSERVER_DIRECTORY"
+```
+
+这些变量须固定为本次已核对的repository/M/R/A/J，`OBSERVER_DIRECTORY`为父目录已存在的
+新绝对目录；不能用Actions run/job的head_sha替代resolver的M。入口核对当前run/attempt、
+工作流、唯一job与started_at，以及artifact名称、同run/仓库归属、job起止时间、过期状态。
+重名、跨run、过期或超过100条的列表均拒绝；若API提供artifact digest，也核对下载SHA256。
+
+每个HTTP请求最多15秒、总网络期限60秒、API JSON最多2MiB；下载ZIP最多64KiB，使用本地
+Python 3标准库只读取唯一的`transfer-manifest.json`成员，拒绝路径、symlink、多成员和
+超过16KiB的解压内容，不执行extractall。重新通过共享清单校验后，仅向新目录写入
+`transfer-manifest.json`及`observation.json`；后者保存同job的job_started_at和artifact身份。
+receiver的`--manifest-json`取前者的files，revision/run/attempt也从同一文件取得，
+`--job-started-at`取后者。读取失败保留证据缺口，不从旧包或未结束job日志补猜。
+
+v4 artifact上传完成即可通过API读取，独立于job是否结束；这不等于当前代码已在正式CD
+验证。回滚本入口仅撤回runner侧prepare/publish/消费代码，不修改VPS stage或历史状态。
+
+### 接收端只读采样
+
+`scripts/deploy/receiver-telemetry.py`是独立的Python 3.10+只读采样器，供一次已批准发布
+通过严格host-key SSH的标准输入执行。正式CD不会自动启动它。运行前须固定实际merge
+revision、run、attempt、部署目录、端口、job.started_at以及该run的十份文件manifest；
+使用 `--help` 查看标准参数。manifest必须来自本次构建的真实清单，不能复用旧包大小。
+同run清单按上一节的独立artifact入口取得；不依赖未结束job日志下载，也不新增远端清单文件。
+
+采样器只在唯一stage内寻找两份归档的可写文件FD，核对八进制访问模式、普通文件的
+device/inode及目录身份，再沿专属SFTP/SSH进程链绑定唯一ESTAB socket。采样前后重查
+PID/starttime/PPID、文件FD及socket FD/inode；共享监听器、只读status/verify和采样器
+自己的观察SSH不能冒充上传连接。多个writer/socket、归属变化或权限不足均明确
+unavailable；无关短会话或已关闭的扫描FD退出不会让另一条有效上传流失效。
+目标FD的同一份fdinfo必须可读且同时提供flags与ino；上游Linux自5.14提供该ino字段，
+厂商回补或裁剪内核以实际能力为准，缺失时保持unavailable/proc_invalid，不以独立fstat替代读取flags时的身份核验。
+
+接收侧记录bytes_received、Recv-Q、rcv_space/rcv_ssthresh、内核提供的接收memory/buffer/
+backlog/drops，以及匹配进程的CPU ticks、wchar/write_bytes/cancelled_write_bytes和宿主
+IO压力。缺失字段保留null；VPS发送cwnd不代表上传发送侧。TCP字节、文件长度和缓存
+写回计数分别解释，不能据此声称已经持久化到磁盘。
+
+接收端分别查询部署端口的ESTAB连接和LISTEN inode，每条ss查询仍限制1500ms及64KiB，
+不读取全主机TCP表；LISTEN结果用于拒绝共享监听器。最多16条候选连接、64个相关PID、
+每PID 128个FD、16层进程树。任一ESTAB候选缺少可核验owner时，该样本保持
+unavailable/socket_owner_missing；全部候选仍计入16条上限，观测缺口不会中断健康SCP。
+首次发现阶段最多60秒按1秒查找，正常样本间隔15秒；
+日志最多128条、2MiB。期限取job.started_at后20分钟与可选更短期限的较早值；SIGINT/
+SIGTERM及期限结束只停止采样器自己的helper。TERM/KILL各1秒宽限；只有helper组结束且
+两条输出管道均EOF才确认清理。逃逸后代仍持管道时保留记录、非零退出并报告unconfirmed。
+若文件读取或输出阻塞，独立watchdog在停止请求后最多另6秒强制非零退出；输出完全阻塞
+时可能没有最终JSON，必须保留清理证据缺口，不能按缺失的日志宣称confirmed。
+
+该程序不删除stage、不发起上传、不取消CD、不调用Docker/Compose或回滚，也不改配置。
+下一次真实发布仍须另行确认取证准备和取消预算，收到取消请求不等于已经停止或未激活。
+隔离回归覆盖较新OpenSSH internal-sftp和Ubuntu 22.04的OpenSSH 8.9外部sftp-server，
+使用独立合成密钥与限速文件；本地fixture按需要获得SYS_PTRACE以读取其自有sshd进程，
+不放宽生产权限。标准Verify integration-core复用现有发布传输入口执行这些检查。
+8.9隔离客户端显式启用SFTP并省略其不支持的现代SCP参数；较新客户端回归保留这些参数。
+
 ### Diagnostic-only 验证边界
 
 诊断只生成一份 1 MiB 成功样本和一份 256 KiB 限速取消样本，整个运行的文件 payload

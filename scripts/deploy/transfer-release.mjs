@@ -6,9 +6,12 @@ import { parseArgs } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { TransferFailure, TransferProcesses, errorCategory } from './transfer-process.mjs';
-import { RELEASE_FILES, DIAGNOSTIC_FILES, DIAGNOSTIC_PAYLOAD_LIMIT, REMOTE_FILES, manifestFor, quoteShell } from './transfer-files.mjs';
+import { createSenderTelemetry } from './transfer-telemetry.mjs';
+import { DIAGNOSTIC_FILES, DIAGNOSTIC_PAYLOAD_LIMIT, REMOTE_FILES, manifestFor, quoteShell } from './transfer-files.mjs';
+import { manifestArtifactName, manifestIdentity, readTransferManifest, verifyLocalManifest } from './transfer-manifest.mjs';
 
 const PROGRESS_MS = 15_000;
+const FIRST_TELEMETRY_MS = 1_000;
 const PROGRESS_UNAVAILABLE_CATEGORIES = new Set(['dns', 'timeout', 'network_connect', 'network_closed']);
 const REMOTE_OPERATION_MS = 30_000;
 const CLEANUP_MS = 8_000;
@@ -27,6 +30,7 @@ export function transferConfiguration(values, env = process.env) {
     key: values['key-file'], knownHosts: values['known-hosts-file'], host: env.DEPLOY_HOST,
     user: env.DEPLOY_USER, port: Number(env.DEPLOY_PORT || 22), path: env.DEPLOY_PATH,
     revision: env.REVISION, run: env.GITHUB_RUN_ID, attempt: env.GITHUB_RUN_ATTEMPT,
+    manifestFile: values['manifest-file'], manifestArtifactId: Number(values['manifest-artifact-id']),
     envFile: env.DEPLOY_ENV_FILE || '.runtime/controller.env', repository: env.GITHUB_REPOSITORY, githubToken: env.GH_TOKEN };
   const validPath = value => typeof value === 'string' && /^\/[A-Za-z0-9._/-]+$/.test(value) &&
     value !== '/' && posix.normalize(value) === value && !value.split('/').includes('..');
@@ -35,9 +39,14 @@ export function transferConfiguration(values, env = process.env) {
     !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(config.user ?? '') || !Number.isInteger(config.port) ||
     config.port < 1 || config.port > 65535 || !validPath(config.path) ||
     !config.key || !config.knownHosts || (config.diagnostic ? config.root !== undefined : !config.root) ||
+    (config.diagnostic ? values['manifest-file'] !== undefined || values['manifest-artifact-id'] !== undefined :
+      !config.manifestFile || !/^[1-9][0-9]*$/.test(values['manifest-artifact-id'] ?? '') ||
+      !Number.isSafeInteger(config.manifestArtifactId) || config.manifestArtifactId <= 0) ||
     !/^[A-Za-z0-9._/-]+$/.test(config.envFile) || config.envFile.split('/').includes('..')) {
     throw new TransferFailure('configuration');
   }
+  try { manifestIdentity(config); }
+  catch { throw new TransferFailure('configuration'); }
   config.stage = `${config.path}/.runtime/releases/${config.diagnostic ? 'diagnostic-' : ''}${config.revision}-${config.run}-${config.attempt}`;
   return config;
 }
@@ -46,6 +55,7 @@ export class ReleaseTransfer {
   constructor(config, { signal, log = console.log, processes = new TransferProcesses(), beforeActivate } = {}) {
     this.config = config;
     this.processes = processes;
+    this.telemetry = createSenderTelemetry({ processes });
     this.beforeActivate = beforeActivate ?? (() => this.processes.checked(process.execPath,
       [fileURLToPath(new URL('./resolve-revision.mjs', import.meta.url)), '--assert-current', config.revision], {
         signal: this.signal, timeoutMs: REMOTE_OPERATION_MS,
@@ -110,6 +120,20 @@ export class ReleaseTransfer {
       ...(limited ? ['-l', '64', '-X', 'nrequests=1', '-X', 'buffer=16384'] : []),
       ...files.map(file => join(c.root, file.name)), `${c.user}@${c.host}:${c.stage}/`], { signal });
     const sampling = new AbortController();
+    const observerSignal = AbortSignal.any([signal, sampling.signal]);
+    const processGroupPid = [...(this.processes.children ?? [])].find(child => child.spawnfile === 'scp')?.pid;
+    const telemetrySampler = (async () => {
+      let interval = FIRST_TELEMETRY_MS;
+      while (!observerSignal.aborted) {
+        try { await delay(interval, undefined, { signal: observerSignal }); }
+        catch (error) { if (observerSignal.aborted && error.name === 'AbortError') break; throw error; }
+        const observation = await this.telemetry.sample({ processGroupPid, signal: observerSignal });
+        if (!observerSignal.aborted) this.log('sender_telemetry', { transfer_elapsed_ms: Date.now() - this.copyStarted, ...observation });
+        interval = PROGRESS_MS;
+      }
+    })().catch(() => {
+      if (!observerSignal.aborted) this.log('sender_telemetry', { status: 'unavailable', category: 'observer_error' });
+    });
     let samplingFailure;
     const sampler = (async () => {
       while (!sampling.signal.aborted) {
@@ -126,9 +150,14 @@ export class ReleaseTransfer {
       }
     })().catch(error => { samplingFailure = error; this.abort.abort(); });
     let result;
-    try { result = await scp; }
-    finally { sampling.abort(); await sampler; }
+    try {
+      result = await scp;
+      this.log('scp_finished', { transfer_elapsed_ms: Date.now() - this.copyStarted,
+        exit_code: Number.isInteger(result.code) ? result.code : null,
+        category: result.code === 0 && !result.reason ? 'ok' : errorCategory(result) });
+    } finally { sampling.abort(); await Promise.all([sampler, telemetrySampler]); }
     if (samplingFailure) throw samplingFailure;
+    if (this.processes.children?.size > 0) throw new TransferFailure('process_stop');
     return result;
   }
 
@@ -136,8 +165,9 @@ export class ReleaseTransfer {
     const result = await this.copy(this.files);
     if (result.code !== 0 || result.reason) throw new TransferFailure(errorCategory(result));
     await this.progress(this.files);
+    const verificationStarted = Date.now();
     if ((await this.remote('verify')).verified !== true) throw new TransferFailure('integrity');
-    this.log('transfer_verified');
+    this.log('transfer_verified', { verification_elapsed_ms: Date.now() - verificationStarted });
     try { await this.beforeActivate(); }
     catch { throw new TransferFailure(this.signal.aborted ? 'cancelled' : 'revision_gate'); }
     this.signal.throwIfAborted();
@@ -162,8 +192,10 @@ export class ReleaseTransfer {
     const [success, cancel] = this.files;
     const result = await this.copy([success]);
     if (result.code !== 0 || result.reason) throw new TransferFailure(errorCategory(result));
+    const verificationStarted = Date.now();
     if ((await this.remote('verify', [success])).verified !== true) throw new TransferFailure('integrity');
-    this.log('diagnostic_success_case', { bytes: success.bytes, sha256: success.sha256 });
+    this.log('diagnostic_success_case', { bytes: success.bytes, sha256: success.sha256,
+      verification_elapsed_ms: Date.now() - verificationStarted });
     const cancelCase = new AbortController();
     let settled = false;
     const copying = this.copy([cancel], { signal: AbortSignal.any([this.signal, cancelCase.signal]), limited: true })
@@ -202,10 +234,20 @@ export class ReleaseTransfer {
         await writeFile(join(localRoot, DIAGNOSTIC_FILES[0]), randomBytes(DIAGNOSTIC_SUCCESS_BYTES));
         await writeFile(join(localRoot, DIAGNOSTIC_FILES[1]), randomBytes(DIAGNOSTIC_CANCEL_BYTES));
       }
-      this.files = await manifestFor(this.config.root, this.config.diagnostic ? DIAGNOSTIC_FILES : RELEASE_FILES, this.signal);
+      let artifact = {};
+      if (this.config.diagnostic) {
+        this.files = await manifestFor(this.config.root, DIAGNOSTIC_FILES, this.signal);
+      } else {
+        if (!Number.isSafeInteger(this.config.manifestArtifactId) || this.config.manifestArtifactId <= 0) throw new TransferFailure('configuration');
+        this.manifest = await readTransferManifest(this.config.manifestFile, this.config);
+        await verifyLocalManifest(this.config.root, this.manifest, this.signal);
+        this.files = this.manifest.files;
+        artifact = { manifest_artifact_id: this.config.manifestArtifactId,
+          manifest_artifact_name: manifestArtifactName(this.config) };
+      }
       const total = this.files.reduce((sum, file) => sum + file.bytes, 0);
       if (!Number.isSafeInteger(total) || (this.config.diagnostic && total > DIAGNOSTIC_PAYLOAD_LIMIT)) throw new TransferFailure('payload_limit');
-      this.log('transfer_manifest', { files: this.files, total_bytes: total });
+      this.log('transfer_manifest', { files: this.files, total_bytes: total, ...artifact });
       const version = await this.processes.checked('ssh', ['-V'], { signal: this.signal, timeoutMs: this.timeout() });
       this.log('ssh_version', { version: /OpenSSH_[A-Za-z0-9_.]+/.exec(version.stderr)?.[0] ?? 'unknown' });
       stageAttempted = true;
@@ -236,18 +278,21 @@ export class ReleaseTransfer {
       if (localRoot) await rm(localRoot, { recursive: true, force: true });
     }
     if (failure) throw failure;
-    this.log(this.config.diagnostic ? 'diagnostic_passed' : 'release_complete', { children_active: this.processes.children.size });
+    this.log(this.config.diagnostic ? 'diagnostic_passed' : 'release_complete', { children_active: this.processes.children.size,
+      ...(this.config.diagnostic ? {} : { manifest_artifact_id: this.config.manifestArtifactId,
+        manifest_artifact_name: manifestArtifactName(this.config) }) });
   }
 }
 
 async function main() {
   const { values } = parseArgs({ options: { diagnostic: { type: 'boolean' }, 'release-root': { type: 'string' },
     'key-file': { type: 'string' }, 'known-hosts-file': { type: 'string' }, 'credentials-root': { type: 'string' },
+    'manifest-file': { type: 'string' }, 'manifest-artifact-id': { type: 'string' },
     help: { type: 'boolean', short: 'h' } } });
   if (values.help) {
     console.log('Usage: node scripts/deploy/transfer-release.mjs\n' +
       '  (--credentials-root PATH | --key-file PATH --known-hosts-file PATH)\n' +
-      '  (--release-root PATH | --diagnostic)\nUses existing DEPLOY_*, REVISION and GITHUB_RUN_ID/GITHUB_RUN_ATTEMPT inputs.');
+      '  (--release-root PATH --manifest-file PATH --manifest-artifact-id ID | --diagnostic)\nUses existing DEPLOY_*, REVISION and GITHUB_RUN_ID/GITHUB_RUN_ATTEMPT inputs.');
     return;
   }
   const abort = new AbortController();
