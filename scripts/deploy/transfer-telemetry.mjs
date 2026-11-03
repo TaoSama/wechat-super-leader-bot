@@ -194,7 +194,7 @@ export function createSenderTelemetry({ processes, platform = process.platform,
         }
         throw new ObservationFailure(procCategory(error));
       }
-      if (children.length > PROC_LIMIT || !/^(?:[1-9][0-9]*\s*)*$/.test(children)) return unavailable('proc_invalid');
+      if (children.length > PROC_LIMIT || !/^(?:[1-9][0-9]*(?:\s+|$))*$/.test(children)) return unavailable('proc_invalid');
       const childIds = children.trim() ? children.trim().split(/\s+/).map(Number) : [];
       if (childIds.length > CHILD_LIMIT || childIds.some(pid => !Number.isSafeInteger(pid))) return unavailable('proc_limit');
       const ssh = new Map();

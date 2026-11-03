@@ -15,15 +15,18 @@ from unittest.mock import patch
 from receiver_telemetry_test import CONFIG, ROOT, receiver
 
 
-CHILD_TIMEOUT_SECONDS = 2
+CHILD_HANG_TIMEOUT_SECONDS = 10
+LIFECYCLE_LIMIT_SECONDS = 2
+STARTUP_EXIT_DELAY_SECONDS = 1.1
 
 
 class ReceiverSignalTests(unittest.TestCase):
-    def signal_child(self, signals, *, seconds=30):
+    def signal_child(self, signals, *, seconds=30, startup_delay=0, exit_delay=0):
         script = ROOT / "scripts/deploy/receiver-telemetry.py"
         launcher = textwrap.dedent(f"""
             import importlib.util, json, signal, sys, threading, time
             from types import SimpleNamespace
+            time.sleep({startup_delay!r})
             spec = importlib.util.spec_from_file_location('receiver_child', {str(script)!r})
             m = importlib.util.module_from_spec(spec)
             sys.modules[spec.name] = m
@@ -57,15 +60,18 @@ class ReceiverSignalTests(unittest.TestCase):
                 queries=SimpleNamespace(cleanup=lambda: True, children_active=lambda: 0),
                 sample=lambda: {{'status': 'available', 'category': 'ok'}})
             m.ReceiverTelemetry = lambda config: collector
+            began = time.monotonic()
             code = m.main([])
-            print(json.dumps({{'threads': threads, 'returned': returned}}), file=sys.stderr)
+            elapsed = time.monotonic() - began
+            time.sleep({exit_delay!r})
+            print(json.dumps({{'threads': threads, 'returned': returned,
+                               'elapsed': elapsed}}), file=sys.stderr)
             raise SystemExit(code)
         """)
         child = subprocess.Popen([sys.executable, "-B", "-c", launcher], cwd=ROOT,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        started = time.monotonic()
         try:
-            stdout, stderr = child.communicate(timeout=CHILD_TIMEOUT_SECONDS)
+            stdout, stderr = child.communicate(timeout=CHILD_HANG_TIMEOUT_SECONDS)
             self.assertEqual(child.returncode, 0, stderr)
             rows = [json.loads(line) for line in stdout.splitlines()]
             metadata = json.loads(stderr)
@@ -75,25 +81,33 @@ class ReceiverSignalTests(unittest.TestCase):
             self.assertEqual(len(completions), 1)
             self.assertEqual(completions[0]["cleanup"], "confirmed")
             self.assertEqual(completions[0]["children_active"], 0)
-            return completions[0], time.monotonic() - started
+            return completions[0], metadata["elapsed"]
         finally:
             if child.poll() is None:
                 child.kill()
-            child.communicate(timeout=CHILD_TIMEOUT_SECONDS)
+            child.communicate(timeout=CHILD_HANG_TIMEOUT_SECONDS)
 
     def test_sigterm_returns_while_main_thread_holds_stop_condition(self):
         completion, elapsed = self.signal_child([int(signal.SIGTERM)])
         self.assertEqual(completion["reason"], "signal")
-        self.assertLess(elapsed, CHILD_TIMEOUT_SECONDS)
+        self.assertLess(elapsed, LIFECYCLE_LIMIT_SECONDS)
 
     def test_repeated_sigterm_and_sigint_do_not_reenter_locks_or_start_threads(self):
         signals = [int(signal.SIGTERM), int(signal.SIGINT)] * 32
         completion, elapsed = self.signal_child(signals)
         self.assertEqual(completion["reason"], "signal")
-        self.assertLess(elapsed, CHILD_TIMEOUT_SECONDS)
+        self.assertLess(elapsed, LIFECYCLE_LIMIT_SECONDS)
 
     def test_watchdog_polling_preserves_absolute_deadline(self):
         completion, elapsed = self.signal_child([], seconds=0.15)
+        self.assertEqual(completion["reason"], "deadline")
+        self.assertLess(elapsed, 1)
+
+    def test_slow_startup_and_exit_do_not_consume_deadline_lifecycle_budget(self):
+        began = time.monotonic()
+        completion, elapsed = self.signal_child([], seconds=0.15,
+            startup_delay=STARTUP_EXIT_DELAY_SECONDS, exit_delay=STARTUP_EXIT_DELAY_SECONDS)
+        self.assertGreaterEqual(time.monotonic() - began, 2 * STARTUP_EXIT_DELAY_SECONDS)
         self.assertEqual(completion["reason"], "deadline")
         self.assertLess(elapsed, 1)
 
@@ -149,7 +163,7 @@ class ReceiverSignalTests(unittest.TestCase):
                     for child in helpers:
                         if child.poll() is None:
                             child.kill()
-                        child.communicate(timeout=CHILD_TIMEOUT_SECONDS)
+                        child.communicate(timeout=CHILD_HANG_TIMEOUT_SECONDS)
                 finally:
                     for signum, handler in handlers.items():
                         signal.signal(signum, handler)

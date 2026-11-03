@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { createSenderTelemetry, parseTcpSockets, parseProcessStat, parseProcessIo,
   parseIoPressure } from '../../../scripts/deploy/transfer-telemetry.mjs';
+import { verificationEnvironment } from '../../../scripts/verify.mjs';
 
 const GROUP = 101;
 const SSH = 202;
+const PROC_BYTES = 8 * 1024;
+const CHILD_LIMIT = 16;
+const CHILD_PROBE_MS = 3_000;
 const SECRET = 'SYNTHETIC_TOKEN_https://secret.invalid/credential';
 const PROC_IO = 'rchar: 42000\nwchar: 123\nsyscr: 10\nsyscw: 1\nread_bytes: 8192\nwrite_bytes: 0\n';
 const PRESSURE = 'some avg10=1.25 avg60=0.30 avg300=0.10 total=1234\nfull avg10=0.25 avg60=0.10 avg300=0.01 total=321\n';
@@ -248,6 +253,92 @@ test('missing children rechecks root liveness and identity before classifying th
       assert.ok(!JSON.stringify(output).includes(SECRET));
     });
   }
+});
+
+test('children PID separators preserve valid lists, empty input and existing rejection categories', async t => {
+  const otherPids = Array.from({ length: CHILD_LIMIT }, (_, index) => 303 + index);
+  for (const [name, children, category] of [
+    ['single PID at EOF', String(SSH), 'ok'],
+    ['kernel trailing space', `${SSH} `, 'ok'],
+    ['multiple PIDs and whitespace', `${SSH}\t303\r\n404  `, 'ok'],
+    ['child count limit', `${SSH} ${otherPids.slice(0, CHILD_LIMIT - 1).join(' ')} `, 'ok'],
+    ['maximum safe PID integer', `${SSH} ${Number.MAX_SAFE_INTEGER}`, 'ok'],
+    ['empty file', '', 'ssh_unavailable'],
+    ['spaces only', '  ', 'proc_invalid'],
+    ['other whitespace only', '\t\r\n', 'proc_invalid'],
+    ['leading whitespace', ` ${SSH}`, 'proc_invalid'],
+    ['zero PID', '0', 'proc_invalid'],
+    ['leading zero PID', `0${SSH}`, 'proc_invalid'],
+    ['later leading zero PID', `${SSH} 0303`, 'proc_invalid'],
+    ['invalid separator', `${SSH},303`, 'proc_invalid'],
+    ['child count overflow', `${SSH} ${otherPids.join(' ')} `, 'proc_limit'],
+    ['unsafe PID integer', String(Number.MAX_SAFE_INTEGER + 1), 'proc_limit'],
+  ]) await t.test(name, async () => {
+    const f = fixture(), abort = new AbortController();
+    f.files.set(`/proc/${GROUP}/task/${GROUP}/children`, children);
+    for (const pid of [...otherPids, 404, Number.MAX_SAFE_INTEGER]) f.files.set(`/proc/${pid}/stat`, processStat(pid, 'unrelated'));
+    const output = await f.telemetry.sample({ processGroupPid: GROUP, signal: abort.signal });
+    assert.equal(output.status, category === 'ok' ? 'available' : 'unavailable');
+    assert.equal(output.category, category);
+    assert.equal(output.processes.scp.cpu_user_ticks, 30);
+    assert.equal(output.processes.scp.read_bytes, 8192);
+    assert.equal(f.calls.length, category === 'ok' ? 1 : 0);
+    assert.equal(abort.signal.aborted, false);
+    if (category !== 'ok') {
+      assert.equal(output.ssh_pid, null);
+      assert.ok(Object.values(output.tcp).every(value => value === null));
+    }
+  });
+});
+
+test('malformed long children input returns promptly without blocking the sampler', t => {
+  const cases = [
+    { name: 'long digit run with invalid tail', children: `${'1'.repeat(PROC_BYTES - 1)}!`, category: 'proc_invalid' },
+    { name: 'long whitespace run with invalid tail', children: `${SSH}${' '.repeat(PROC_BYTES - 4)}!`, category: 'proc_invalid' },
+    { name: 'over size limit', children: '1'.repeat(PROC_BYTES + 1), category: 'proc_invalid' },
+    { name: 'over size limit and malformed', children: `${'1'.repeat(PROC_BYTES)}!`, category: 'proc_invalid' },
+    { name: 'size limit with unsafe PID', children: '1'.repeat(PROC_BYTES), category: 'proc_limit' },
+  ];
+  const moduleUrl = new URL('../../../scripts/deploy/transfer-telemetry.mjs', import.meta.url).href;
+  // A parent-enforced process timeout also catches regressions that block the child's event loop.
+  const source = `import { readFileSync } from 'node:fs';
+    import { createSenderTelemetry } from ${JSON.stringify(moduleUrl)};
+    const { files, cases, group } = JSON.parse(readFileSync(0, 'utf8'));
+    const rows = [];
+    for (const item of cases) {
+      const values = new Map(files), abort = new AbortController();
+      values.set('/proc/' + group + '/task/' + group + '/children', item.children);
+      let queries = 0;
+      const telemetry = createSenderTelemetry({ platform: 'linux',
+        fs: { readFile: async path => values.get(path) },
+        processes: { run() { queries++; throw new Error('Unexpected socket query'); } } });
+      const started = performance.now();
+      const output = await telemetry.sample({ processGroupPid: group, signal: abort.signal });
+      rows.push({ name: item.name, category: output.category, status: output.status,
+        elapsed_ms: performance.now() - started, queries, aborted: abort.signal.aborted,
+        cpu: output.processes.scp.cpu_user_ticks, bytes: output.processes.scp.read_bytes,
+        ssh_pid: output.ssh_pid, tcp_missing: Object.values(output.tcp).every(value => value === null) });
+    }
+    console.log(JSON.stringify(rows));`;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+    input: JSON.stringify({ files: [...fixture().files], cases, group: GROUP }),
+    env: verificationEnvironment(), encoding: 'utf8', timeout: CHILD_PROBE_MS, killSignal: 'SIGKILL',
+  });
+  assert.equal(result.error, undefined, 'the sampler must complete inside its parent-enforced timeout');
+  assert.equal(result.status, 0, result.stderr);
+  const rows = JSON.parse(result.stdout);
+  assert.equal(rows.length, cases.length);
+  for (const [index, row] of rows.entries()) {
+    assert.equal(row.category, cases[index].category, row.name);
+    assert.equal(row.status, 'unavailable', row.name);
+    assert.equal(row.queries, 0, row.name);
+    assert.equal(row.aborted, false, row.name);
+    assert.equal(row.cpu, 30, row.name);
+    assert.equal(row.bytes, 8192, row.name);
+    assert.equal(row.ssh_pid, null, row.name);
+    assert.equal(row.tcp_missing, true, row.name);
+  }
+  t.diagnostic(JSON.stringify(rows.map(({ name, category, elapsed_ms }) => ({ name, category, elapsed_ms }))));
 });
 
 test('non-Linux, absent SCP PID and cancellation never start a helper process', async () => {
