@@ -166,6 +166,8 @@ device/inode及目录身份，再沿专属SFTP/SSH进程链绑定唯一ESTAB soc
 PID/starttime/PPID、文件FD及socket FD/inode；共享监听器、只读status/verify和采样器
 自己的观察SSH不能冒充上传连接。多个writer/socket、归属变化或权限不足均明确
 unavailable；无关短会话或已关闭的扫描FD退出不会让另一条有效上传流失效。
+目标FD的同一份fdinfo必须可读且同时提供flags与ino；上游Linux自5.14提供该ino字段，
+厂商回补或裁剪内核以实际能力为准，缺失时保持unavailable/proc_invalid，不以独立fstat替代读取flags时的身份核验。
 
 接收侧记录bytes_received、Recv-Q、rcv_space/rcv_ssthresh、内核提供的接收memory/buffer/
 backlog/drops，以及匹配进程的CPU ticks、wchar/write_bytes/cancelled_write_bytes和宿主
