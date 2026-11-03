@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
-import { TransferProcesses } from '../../../scripts/deploy/transfer-process.mjs';
+import { TransferFailure, TransferProcesses } from '../../../scripts/deploy/transfer-process.mjs';
 import { RELEASE_FILES, quoteShell } from '../../../scripts/deploy/transfer-files.mjs';
 
 const ROOT = '/fixture/receiver-telemetry';
@@ -22,9 +22,51 @@ const TCP = ['bytes_received', 'recv_queue_bytes', 'rcv_space_bytes', 'rcv_ssthr
 const PROCESS = ['status', 'category', 'cpu_user_ticks', 'cpu_system_ticks', 'wchar',
   'write_bytes', 'cancelled_write_bytes', 'io_status', 'io_category'];
 const PRESSURE = ['status', 'category', 'some_avg10_percent', 'some_total_us', 'full_avg10_percent', 'full_total_us'];
+const PHASES = new Set(['arguments', 'fixture_create', 'receiver_prepare', 'receiver_runtime', 'host_validation',
+  'runtime_setup', 'upload_start', 'status_start', 'writer_binding', 'optional_fields', 'writer_exit',
+  'normal_stop', 'deadline_helper', 'escaped_helper', 'client_cleanup', 'cleanup']);
+const CATEGORIES = new Set(`probe_failed assertion_failed invalid_json file_missing permission_denied io_error
+  command_missing command_timeout command_failed invalid_options unsafe_output collector_exit_timeout collector_exit_failed
+  collector_output_invalid collector_cleanup_failed escaped_pid_reused escaped_helper_survived_cleanup status_session_misbound
+  observer_session_misbound writer_owner_not_related writer_fd_not_writable archive_inode_mismatch socket_inode_mismatch
+  linux_required inspection_capability_missing ssh_version_unavailable upload_not_started status_not_started
+  receiver_binding_unavailable receive_bytes_not_increasing binding_changed payload_progress_invalid optional_fields_binding_unavailable
+  missing_fields_not_null upload_cancel_failed writer_exit_not_observed status_session_used_after_writer_exit normal_case_deadline
+  second_upload_not_started deadline_did_not_stop_collector helper_timeout_not_observed ss_helper_survived timeout_case_deadline
+  escaped_collector_did_not_exit escaped_false_cleanup_confirmation escaped_not_alive_at_failure escaped_ps_still_running
+  escaped_ps_probe_failed escaped_case_deadline test_children_survived total_deadline container_probe_failed invalid_evidence
+  stage_missing stage_invalid stage_changed file_changed socket_changed proc_permission process_exited proc_io proc_invalid proc_limit
+  process_changed owner_shared writer_ambiguous writer_unavailable socket_ambiguous socket_owner_missing ss_missing ss_start ss_timeout
+  ss_output_limit ss_failed ss_invalid cleanup_unconfirmed cancelled platform_unsupported unexpected_error tool_missing process_start
+  process_stop input_io output_limit timeout remote_command authentication host_key dns network_connect network_closed`.split(/\s+/));
 
 class ProbeFailure extends Error {
-  constructor(category) { super(category); this.category = category; }
+  constructor(category, phase) { super(category); this.category = category; this.phase = phase; }
+}
+function failureFor(error, phase) {
+  if (error instanceof ProbeFailure && PHASES.has(error.phase)) return error;
+  let category = 'probe_failed';
+  if ((error instanceof ProbeFailure || error instanceof TransferFailure) && CATEGORIES.has(error.category)) category = error.category;
+  else if (error?.code === 'ERR_ASSERTION') category = 'assertion_failed';
+  else if (error instanceof SyntaxError) category = 'invalid_json';
+  else if (typeof error?.code === 'string' && error.code.startsWith('ERR_PARSE_ARGS')) category = 'invalid_options';
+  else if (error?.code === 'ENOENT') category = 'file_missing';
+  else if (['EACCES', 'EPERM'].includes(error?.code)) category = 'permission_denied';
+  else if (error?.code === 'ETIMEDOUT') category = 'command_timeout';
+  else if (typeof error?.status === 'number') category = 'command_failed';
+  else if (['EIO', 'ENOTDIR', 'EEXIST'].includes(error?.code)) category = 'io_error';
+  return new ProbeFailure(category, PHASES.has(phase) ? phase : 'receiver_runtime');
+}
+async function cleanupActions(actions, primary) {
+  let failure;
+  for (const action of actions) {
+    try { await action(); }
+    catch (error) { failure ??= failureFor(error, 'cleanup'); }
+  }
+  if (failure) {
+    if (primary) primary.cleanupCategory ??= failure.category;
+    else throw failure;
+  }
 }
 function requireProbe(condition, category) { if (!condition) throw new ProbeFailure(category); }
 function keys(value, allowed) { assert.deepEqual(Object.keys(value).sort(), [...allowed].sort()); }
@@ -188,7 +230,7 @@ async function linuxProbe() {
   const started = Date.now(), clients = new TransferProcesses(), abort = new AbortController(), collectors = [];
   const deadline = setTimeout(() => abort.abort(), TOTAL_MS - 5_000);
   const jobs = [], escapedPath = `${ROOT}/escaped.json`;
-  let clientMajor;
+  let clientMajor, phase = 'runtime_setup', failure;
   const key = `${ROOT}/credentials/client`, ssh = sshArguments();
   const start = (tool, args, signal = abort.signal) => {
     const result = clients.run(tool, args, { signal, timeoutMs: CASE_MS })
@@ -212,22 +254,29 @@ async function linuxProbe() {
     await mkdir(`${ROOT}/payload`, { recursive: true }); await mkdir(STAGE, { recursive: true });
     await chmod(key, 0o600);
     for (const file of MANIFEST) await writeFile(`${ROOT}/payload/${file.name}`, Buffer.alloc(file.bytes, 't'));
+    phase = 'upload_start';
     const firstUpload = upload('controller.tar');
     await until(async () => { try { return (await stat(`${STAGE}/controller.tar`)).size > 0; }
       catch (error) { if (error.code !== 'ENOENT') throw error; return false; } }, 6_000, 'upload_not_started');
+    phase = 'status_start';
     const statusPath = `${ROOT}/status.json`;
     const statusCode = `import json,os,time\np=${JSON.stringify(`${STAGE}/controller.tar`)}\nf=os.open(p,os.O_RDONLY)\na=[];i=os.getpid()\nwhile i>0 and len(a)<16:\n a.append(i);s=open('/proc/%s/stat'%i).read();i=int(s[s.rfind(')')+2:].split()[1])\nwith open(${JSON.stringify(statusPath)},'w') as o:json.dump({'pid':os.getpid(),'ancestors':a,'fd':f},o)\nu=time.monotonic()+25\nwhile time.monotonic()<u:\n os.stat(p);os.fstat(f);time.sleep(.1)\n`;
     const statusStop = new AbortController();
     start('ssh', [...ssh, '-p', '2222', 'root@127.0.0.1', `exec python3 -c ${quoteShell(statusCode)}`], AbortSignal.any([abort.signal, statusStop.signal]));
     const status = await until(async () => { try { return JSON.parse(await readFile(statusPath, 'utf8')); }
       catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; return false; } }, 4_000, 'status_not_started');
+    phase = 'writer_binding';
     const normal = await collector(20, undefined, true); collectors.push(normal);
     const first = await until(() => normal.events.find(event => event.status === 'available'), 6_000,
-      () => `receiver_binding_${normal.events.filter(event => event.event === 'receiver_telemetry').at(-1)?.category ?? 'unavailable'}`);
+      () => {
+        const category = normal.events.filter(event => event.event === 'receiver_telemetry').at(-1)?.category;
+        return CATEGORIES.has(category) ? category : 'receiver_binding_unavailable';
+      });
     const second = await until(() => normal.events.find(event => event.status === 'available' && event.tcp.bytes_received > first.tcp.bytes_received), 5_000, 'receive_bytes_not_increasing');
     await verifyBinding(second, status, await normal.observerPid());
     requireProbe(first.identifiers.socket_inode === second.identifiers.socket_inode, 'binding_changed');
     requireProbe(second.received_bytes > 0 && second.remaining_bytes === second.total_bytes - second.received_bytes, 'payload_progress_invalid');
+    phase = 'optional_fields';
     const realSs = (await clients.checked('sh', ['-c', 'command -v ss'], { timeoutMs: 2_000 })).stdout.trim();
     const missing = `${ROOT}/missing`, hanging = `${ROOT}/hanging`, helperPids = `${ROOT}/helper-pids.jsonl`;
     await mkdir(missing); await mkdir(hanging);
@@ -236,15 +285,18 @@ async function linuxProbe() {
     const absent = await until(() => optional.events.find(event => event.status === 'available'), 4_000, 'optional_fields_binding_unavailable');
     requireProbe(absent.tcp.rcv_space_bytes === null && absent.tcp.rcv_ssthresh_bytes === null && absent.tcp.bytes_received > 0, 'missing_fields_not_null');
     await optional.finish('signal');
+    phase = 'writer_exit';
     firstUpload.stop.abort(); const cancelled = await firstUpload.outcome;
     requireProbe(!cancelled.error && cancelled.value.reason === 'cancelled', 'upload_cancel_failed');
     const sampleCount = normal.events.length;
     const gap = await until(() => normal.events.slice(sampleCount).find(event => event.status === 'unavailable'), 4_000, 'writer_exit_not_observed');
     requireProbe(gap.identifiers.writer_pid === null && gap.tcp.bytes_received === null, 'status_session_used_after_writer_exit');
     await stat(`/proc/${status.pid}/fd/${status.fd}`);
+    phase = 'normal_stop';
     const complete = await normal.finish('signal');
     statusStop.abort();
     requireProbe(Date.now() - started < CASE_MS, 'normal_case_deadline');
+    phase = 'deadline_helper';
     await writeFile(`${hanging}/ss`, `#!/usr/bin/python3\nimport argparse,json,os,signal,time\nargparse.ArgumentParser(add_help=False).parse_known_args()\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\nwith open(${JSON.stringify(helperPids)},'a') as f:f.write(json.dumps({'pid':os.getpid()})+'\\n')\nprint('SYNTHETIC_RAW_SS_SECRET https://198.51.100.77/private',flush=True)\nwhile True:time.sleep(1)\n`, { mode: 0o700 });
     const secondUpload = upload('gateway.tar');
     await until(async () => { try { return (await stat(`${STAGE}/gateway.tar`)).size > 0; }
@@ -259,6 +311,7 @@ async function linuxProbe() {
       catch (error) { if (error.code !== 'ENOENT') throw error; }
     }
     requireProbe(Date.now() - timeoutStarted < CASE_MS, 'timeout_case_deadline');
+    phase = 'escaped_helper';
     const escaping = `${ROOT}/escaping`;
     await mkdir(escaping);
     await writeFile(`${escaping}/ss`, `#!/usr/bin/python3\nimport argparse,json,os,signal,time\nargparse.ArgumentParser(add_help=False).parse_known_args()\nif os.fork():os._exit(0)\nos.setsid();signal.signal(signal.SIGTERM,signal.SIG_IGN)\ns=open('/proc/self/stat').read();start=int(s[s.rfind(')')+2:].split()[19])\nwith open(${JSON.stringify(escapedPath)},'w') as f:json.dump({'pid':os.getpid(),'start':start},f)\nwhile True:time.sleep(1)\n`, { mode: 0o700 });
@@ -276,6 +329,7 @@ async function linuxProbe() {
       requireProbe(!row || row[1]?.startsWith('Z'), 'escaped_ps_still_running');
     } else requireProbe(ps.reason === 'tool_missing', 'escaped_ps_probe_failed');
     requireProbe(Date.now() - escapedStarted < CASE_MS, 'escaped_case_deadline');
+    phase = 'client_cleanup';
     secondUpload.stop.abort(); await secondUpload.outcome;
     abort.abort(); await Promise.all(jobs);
     requireProbe(clients.children.size === 0 && collectors.every(item => item.processes.children.size === 0), 'test_children_survived');
@@ -286,21 +340,23 @@ async function linuxProbe() {
       timeout_complete: timeoutComplete, escaped_complete: escapedComplete,
       escaped_helper_stopped: true, escaped_cleanup_probe: ps.code === 0 ? 'ps' : 'proc_stat',
       helper_queries_killed: helpers.length, children_active: clients.children.size };
+  } catch (error) {
+    failure = failureFor(error, phase); throw failure;
   } finally {
     clearTimeout(deadline); abort.abort();
-    let cleanupFailure;
-    try { await stopEscaped(JSON.parse(await readFile(escapedPath, 'utf8'))); }
-    catch (error) { if (error.code !== 'ENOENT') cleanupFailure = error; }
-    await Promise.all(collectors.map(item => item.stop()));
-    for (const item of collectors) item.abort.abort();
-    await Promise.all([...jobs, ...collectors.map(item => item.outcome)]);
-    if (cleanupFailure) throw cleanupFailure;
+    await cleanupActions([async () => {
+      try { await stopEscaped(JSON.parse(await readFile(escapedPath, 'utf8'))); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }, ...collectors.map(item => () => item.stop()), () => {
+      for (const item of collectors) item.abort.abort();
+    }, () => Promise.all([...jobs, ...collectors.map(item => item.outcome)])], failure);
   }
 }
 
 export async function verifyReceiverTelemetry(fixture) {
-  const temporary = await mkdtemp(join(fixture.root, 'receiver-telemetry-'));
+  let temporary, phase = 'receiver_prepare', failure;
   try {
+    temporary = await mkdtemp(join(fixture.root, 'receiver-telemetry-'));
     fixture.runInContainer(['mkdir', '-p', `${ROOT}/scripts/deploy`, `${ROOT}/tests/integration/deploy`, `${ROOT}/credentials`]);
     for (const name of ['transfer-files.mjs', 'transfer-process.mjs', 'receiver-telemetry.py']) {
       fixture.copyToContainer(fileURLToPath(new URL(`../../../scripts/deploy/${name}`, import.meta.url)), `${ROOT}/scripts/deploy/${name}`);
@@ -311,43 +367,57 @@ export async function verifyReceiverTelemetry(fixture) {
     const knownHosts = join(temporary, 'known_hosts');
     await writeFile(knownHosts, `[127.0.0.1]:2222 ${publicKey}\n`, { mode: 0o600 });
     fixture.copyToContainer(knownHosts, `${ROOT}/credentials/known_hosts`);
-    let output;
+    let output; phase = 'receiver_runtime';
     try { output = fixture.runInContainer(['node', TEST, '--in-container'], { timeout: TOTAL_MS }); }
     catch (error) {
-      let category = 'container_probe_failed';
+      let forwarded;
       try { const failure = JSON.parse(String(error.stderr ?? '').trim());
-        if (failure.event === 'linux_receiver_telemetry_failed' && /^[a-z_]+$/.test(failure.category ?? '')) category = failure.category;
-      } catch { category = 'container_probe_failed'; }
-      throw new ProbeFailure(category);
+        if (failure.event === 'linux_receiver_telemetry_failed' && PHASES.has(failure.phase) && CATEGORIES.has(failure.category)) {
+          forwarded = new ProbeFailure(failure.category, failure.phase);
+          if (CATEGORIES.has(failure.cleanup_category)) forwarded.cleanupCategory = failure.cleanup_category;
+        }
+      } catch (parseError) { if (!(parseError instanceof SyntaxError)) throw parseError; }
+      throw forwarded ?? failureFor(error, phase);
     }
+    phase = 'host_validation';
     safeText(output);
     const evidence = JSON.parse(output.trim());
     requireProbe(evidence.event === 'linux_receiver_telemetry_verified' && evidence.children_active === 0, 'invalid_evidence');
     console.log(`PASS real Linux receiver OpenSSH ${evidence.ssh_version}/Python ${evidence.python_version.join('.')}: SSH-stdin observer/status excluded; writable archive FD/inode -> upload socket; bytes_received ${evidence.first.tcp.bytes_received}->${evidence.second.tcp.bytes_received}; missing=null; writer-exit gap; SIGTERM/deadline clean; escaped helper correctly unconfirmed then stopped (${evidence.elapsed_ms}ms)`);
     return evidence;
+  } catch (error) {
+    failure = failureFor(error, phase); throw failure;
   } finally {
-    try { fixture.runInContainer(['rm', '-rf', ROOT]); }
-    finally { await rm(temporary, { recursive: true, force: true }); }
+    await cleanupActions([() => fixture.runInContainer(['rm', '-rf', ROOT]),
+      async () => { if (temporary) await rm(temporary, { recursive: true, force: true }); }], failure);
   }
 }
 
 async function main() {
-  const { values } = parseArgs({ options: { run: { type: 'boolean' }, 'in-container': { type: 'boolean' },
-    profile: { type: 'string' }, help: { type: 'boolean', short: 'h' } } });
-  if (values.help || (!values.run && !values['in-container'])) {
-    console.log('Usage: node tests/integration/deploy/receiver-telemetry.mjs --run [--profile alpine|ubuntu22]'); return;
-  }
-  requireProbe(!(values.run && values['in-container']) && ['alpine', 'ubuntu22'].includes(values.profile ?? 'alpine'), 'invalid_options');
-  if (values['in-container']) { console.log(JSON.stringify(await linuxProbe())); return; }
-  const { transferSshFixture } = await import('../../support/transfer-ssh-fixture.mjs');
-  const fixture = await transferSshFixture({ profile: values.profile ?? 'alpine', inspectProcesses: true });
-  try { await verifyReceiverTelemetry(fixture); }
-  finally { await fixture.close(); }
+  let phase = 'arguments', fixture, failure;
+  try {
+    const { values } = parseArgs({ options: { run: { type: 'boolean' }, 'in-container': { type: 'boolean' },
+      profile: { type: 'string' }, help: { type: 'boolean', short: 'h' } } });
+    if (values.help || (!values.run && !values['in-container'])) {
+      console.log('Usage: node tests/integration/deploy/receiver-telemetry.mjs --run [--profile alpine|ubuntu22]'); return;
+    }
+    requireProbe(!(values.run && values['in-container']) && ['alpine', 'ubuntu22'].includes(values.profile ?? 'alpine'), 'invalid_options');
+    if (values['in-container']) { console.log(JSON.stringify(await linuxProbe())); return; }
+    const { transferSshFixture } = await import('../../support/transfer-ssh-fixture.mjs');
+    phase = 'fixture_create';
+    fixture = await transferSshFixture({ profile: values.profile ?? 'alpine', inspectProcesses: true });
+    phase = 'receiver_runtime';
+    await verifyReceiverTelemetry(fixture);
+  } catch (error) {
+    failure = failureFor(error, phase); throw failure;
+  } finally { if (fixture) await cleanupActions([() => fixture.close()], failure); }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch(error => {
-    console.error(JSON.stringify({ event: 'linux_receiver_telemetry_failed', category: error instanceof ProbeFailure ? error.category : 'probe_failed' }));
+    const failure = failureFor(error, 'receiver_runtime');
+    console.error(JSON.stringify({ event: 'linux_receiver_telemetry_failed', phase: failure.phase, category: failure.category,
+      ...(failure.cleanupCategory ? { cleanup_category: failure.cleanupCategory } : {}) }));
     process.exitCode = 1;
   });
 }

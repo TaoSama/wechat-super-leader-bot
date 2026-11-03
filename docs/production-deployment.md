@@ -111,15 +111,53 @@ unavailable；可选观测失败不会取消SCP。SCP结束/取消时停止并�
 以上只补齐下一次同路径传输的证据，不能补回历史runner的TCP状态，也不证明持续慢传已
 修复。1MiB有界诊断成功仍不能代替完整镜像传输或生产部署验收。
 
+### 上传前的冻结清单
+
+构建后的current-main检查通过后，`prepare-transfer-manifest.mjs`复用固定十文件与流式
+SHA256规则，生成至runner本次独立临时目录的`transfer-manifest.json`（最多16KiB）。
+内容为schema、resolver实际选出的revision M、run R、attempt A、每份文件name/bytes/sha256
+及total_bytes；不含端点、凭证或stage owner token，也不加入十文件payload。
+工作流用固定commit的upload-artifact v4提前发布
+`release-transfer-manifest-M-R-A`；上传失败或文件缺失会阻止后续传输步骤。
+
+生产sender要求`--manifest-file`与上传成功返回的`--manifest-artifact-id`。在任何SSH
+操作前检查身份、schema、十个唯一固定名称、安全整数、hash和总量，再重算本地文件核对；
+实际包变化立即失败，不重新生成另一份清单继续。这个第二遍hash用于确认冻结后的包未变。
+Diagnostic-only仍使用原有有界合成样本。
+
+取证端在已有只读`GH_TOKEN`的环境中，先定位指定attempt的唯一部署job，再用小入口读取：
+
+```sh
+gh api "repos/$DEPLOY_REPO/actions/runs/$DEPLOY_RUN/attempts/$DEPLOY_ATTEMPT/jobs?per_page=100" \
+  --jq '.jobs[] | select(.name == "Build and deploy linux/amd64 images") | {id,run_id,run_attempt,name,status,started_at}'
+node scripts/deploy/fetch-transfer-manifest.mjs \
+  --repository "$DEPLOY_REPO" --revision "$DEPLOY_REVISION" \
+  --run-id "$DEPLOY_RUN" --attempt "$DEPLOY_ATTEMPT" --job-id "$DEPLOY_JOB" \
+  --output-dir "$OBSERVER_DIRECTORY"
+```
+
+这些变量须固定为本次已核对的repository/M/R/A/J，`OBSERVER_DIRECTORY`为父目录已存在的
+新绝对目录；不能用Actions run/job的head_sha替代resolver的M。入口核对当前run/attempt、
+工作流、唯一job与started_at，以及artifact名称、同run/仓库归属、job起止时间、过期状态。
+重名、跨run、过期或超过100条的列表均拒绝；若API提供artifact digest，也核对下载SHA256。
+
+每个HTTP请求最多15秒、总网络期限60秒、API JSON最多2MiB；下载ZIP最多64KiB，使用本地
+Python 3标准库只读取唯一的`transfer-manifest.json`成员，拒绝路径、symlink、多成员和
+超过16KiB的解压内容，不执行extractall。重新通过共享清单校验后，仅向新目录写入
+`transfer-manifest.json`及`observation.json`；后者保存同job的job_started_at和artifact身份。
+receiver的`--manifest-json`取前者的files，revision/run/attempt也从同一文件取得，
+`--job-started-at`取后者。读取失败保留证据缺口，不从旧包或未结束job日志补猜。
+
+v4 artifact上传完成即可通过API读取，独立于job是否结束；这不等于当前代码已在正式CD
+验证。回滚本入口仅撤回runner侧prepare/publish/消费代码，不修改VPS stage或历史状态。
+
 ### 接收端只读采样
 
 `scripts/deploy/receiver-telemetry.py`是独立的Python 3.10+只读采样器，供一次已批准发布
 通过严格host-key SSH的标准输入执行。正式CD不会自动启动它。运行前须固定实际merge
 revision、run、attempt、部署目录、端口、job.started_at以及该run的十份文件manifest；
 使用 `--help` 查看标准参数。manifest必须来自本次构建的真实清单，不能复用旧包大小。
-当前完整清单仅输出到sender的`transfer_manifest`日志，尚无独立的实时清单发布入口；
-不能假设未结束job的日志下载可用。正式取证前必须验证同run清单的读取方式，否则接收端
-准备仍不完整；本改动未新增artifact或远端清单文件。
+同run清单按上一节的独立artifact入口取得；不依赖未结束job日志下载，也不新增远端清单文件。
 
 采样器只在唯一stage内寻找两份归档的可写文件FD，核对八进制访问模式、普通文件的
 device/inode及目录身份，再沿专属SFTP/SSH进程链绑定唯一ESTAB socket。采样前后重查

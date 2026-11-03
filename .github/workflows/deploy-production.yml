@@ -172,6 +172,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/deploy/resolve-revision.mjs --assert-current "$REVISION"
 
+      - name: Prepare release transfer manifest
+        run: |
+          node scripts/deploy/prepare-transfer-manifest.mjs \
+            --release-root "$RUNNER_TEMP/super-leader-release-$REVISION" \
+            --output "$RUNNER_TEMP/super-leader-transfer-manifest-$REVISION-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/transfer-manifest.json"
+
+      - name: Publish release transfer manifest
+        id: publish-transfer-manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-transfer-manifest-${{ env.REVISION }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/super-leader-transfer-manifest-${{ env.REVISION }}-${{ github.run_id }}-${{ github.run_attempt }}/transfer-manifest.json
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Transfer and activate the release on the VPS
         env:
           GH_TOKEN: ${{ github.token }}
@@ -184,7 +199,9 @@ jobs:
           DEPLOY_ENV_FILE: ${{ vars.DEPLOY_ENV_FILE }}
         run: |
           exec node scripts/deploy/transfer-release.mjs \
-            --release-root "$RUNNER_TEMP/super-leader-release-$REVISION" --credentials-root "$RUNNER_TEMP"
+            --release-root "$RUNNER_TEMP/super-leader-release-$REVISION" --credentials-root "$RUNNER_TEMP" \
+            --manifest-file "$RUNNER_TEMP/super-leader-transfer-manifest-$REVISION-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/transfer-manifest.json" \
+            --manifest-artifact-id '${{ steps.publish-transfer-manifest.outputs.artifact-id }}'
 
       - name: Retain bounded build diagnostics on failure
         if: ${{ failure() || cancelled() }}

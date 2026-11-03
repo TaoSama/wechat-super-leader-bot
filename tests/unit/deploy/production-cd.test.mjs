@@ -7,6 +7,13 @@ const releaseScript = readFileSync(new URL('../../../scripts/deploy/remote-relea
 const overlay = readFileSync(new URL('../../../deploy/compose.release.yaml', import.meta.url), 'utf8');
 const transfer = readFileSync(new URL('../../../scripts/deploy/transfer-release.mjs', import.meta.url), 'utf8');
 const files = readFileSync(new URL('../../../scripts/deploy/transfer-files.mjs', import.meta.url), 'utf8');
+const productionSteps = workflow.split('\n  diagnostic-only:')[0].split('\n      - ').slice(1);
+
+function productionStep(name) {
+  const step = productionSteps.find(value => value.startsWith(`name: ${name}\n`));
+  assert.ok(step, `Missing production step: ${name}`);
+  return step;
+}
 
 test('Node-only deployment and diagnostic setup do not require package-manager caching or installation', () => {
   const setups = [...workflow.matchAll(/uses: actions\/setup-node@[^\n]+\n        with:\n((?:          [^\n]*\n)+)/g)];
@@ -67,9 +74,42 @@ test('diagnostic-only is manual trusted-main, mutually exclusive with deploy, an
   assert.match(diagnostic, /ref: refs\/heads\/main/);
   assert.match(diagnostic, /transfer-release.mjs --diagnostic/);
   assert.doesNotMatch(diagnostic, /docker load|docker compose|remote-release.sh|--release-root/);
+  assert.doesNotMatch(diagnostic, /prepare-transfer-manifest|publish-transfer-manifest|--manifest-file|--manifest-artifact-id/);
   assert.match(diagnostic, /does not establish a deployed runtime revision/);
   assert.match(workflow, /timeout-minutes: 20/);
   assert.match(workflow, /failure\(\) \|\| cancelled\(\)/);
+});
+
+test('production publishes one run-specific manifest before transfer and consumes its artifact ID', () => {
+  const ordered = ['Build controller and Gateway archives in parallel', 'Reject a superseded built release',
+    'Prepare release transfer manifest', 'Publish release transfer manifest', 'Transfer and activate the release on the VPS']
+    .map(name => productionSteps.indexOf(productionStep(name)));
+  assert.ok(ordered.every((position, index) => index === 0 || position > ordered[index - 1]));
+  const prepare = productionStep('Prepare release transfer manifest');
+  const publish = productionStep('Publish release transfer manifest');
+  const activate = productionStep('Transfer and activate the release on the VPS');
+  const localManifest = '"$RUNNER_TEMP/super-leader-transfer-manifest-$REVISION-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/transfer-manifest.json"';
+  assert.match(prepare, /node scripts\/deploy\/prepare-transfer-manifest\.mjs/);
+  assert.ok(prepare.includes('--release-root "$RUNNER_TEMP/super-leader-release-$REVISION"'));
+  assert.ok(prepare.includes(`--output ${localManifest}`));
+  assert.match(publish, /id: publish-transfer-manifest/);
+  assert.match(publish, /uses: actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02/);
+  assert.ok(publish.includes('name: release-transfer-manifest-${{ env.REVISION }}-${{ github.run_id }}-${{ github.run_attempt }}'));
+  const paths = [...publish.matchAll(/^          path: (.+)$/gm)].map(match => match[1]);
+  assert.deepEqual(paths, ['${{ runner.temp }}/super-leader-transfer-manifest-${{ env.REVISION }}-${{ github.run_id }}-${{ github.run_attempt }}/transfer-manifest.json']);
+  assert.match(publish, /if-no-files-found: error/);
+  assert.match(publish, /retention-days: 7/);
+  assert.ok(activate.includes(`--manifest-file ${localManifest}`));
+  assert.ok(activate.includes("--manifest-artifact-id '${{ steps.publish-transfer-manifest.outputs.artifact-id }}'"));
+  assert.doesNotMatch(prepare + publish, /github\.(?:sha|event)/);
+});
+
+test('manifest preparation and publication failures block the default production transfer path', () => {
+  for (const name of ['Prepare release transfer manifest', 'Publish release transfer manifest', 'Transfer and activate the release on the VPS']) {
+    assert.doesNotMatch(productionStep(name), /continue-on-error:|^\s*if:|always\(|\|\|\s*(?:true|:)|\bset\s+\+e\b/m);
+  }
+  assert.doesNotMatch(workflow.split('\n  diagnostic-only:')[0], /continue-on-error:/);
+  assert.doesNotMatch(workflow, /actions:\s*write/);
 });
 
 test('remote release verifies before switching and keeps a bounded rollback path', () => {

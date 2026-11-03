@@ -7,7 +7,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { TransferFailure, TransferProcesses, errorCategory } from './transfer-process.mjs';
 import { createSenderTelemetry } from './transfer-telemetry.mjs';
-import { RELEASE_FILES, DIAGNOSTIC_FILES, DIAGNOSTIC_PAYLOAD_LIMIT, REMOTE_FILES, manifestFor, quoteShell } from './transfer-files.mjs';
+import { DIAGNOSTIC_FILES, DIAGNOSTIC_PAYLOAD_LIMIT, REMOTE_FILES, manifestFor, quoteShell } from './transfer-files.mjs';
+import { manifestArtifactName, manifestIdentity, readTransferManifest, verifyLocalManifest } from './transfer-manifest.mjs';
 
 const PROGRESS_MS = 15_000;
 const FIRST_TELEMETRY_MS = 1_000;
@@ -29,6 +30,7 @@ export function transferConfiguration(values, env = process.env) {
     key: values['key-file'], knownHosts: values['known-hosts-file'], host: env.DEPLOY_HOST,
     user: env.DEPLOY_USER, port: Number(env.DEPLOY_PORT || 22), path: env.DEPLOY_PATH,
     revision: env.REVISION, run: env.GITHUB_RUN_ID, attempt: env.GITHUB_RUN_ATTEMPT,
+    manifestFile: values['manifest-file'], manifestArtifactId: Number(values['manifest-artifact-id']),
     envFile: env.DEPLOY_ENV_FILE || '.runtime/controller.env', repository: env.GITHUB_REPOSITORY, githubToken: env.GH_TOKEN };
   const validPath = value => typeof value === 'string' && /^\/[A-Za-z0-9._/-]+$/.test(value) &&
     value !== '/' && posix.normalize(value) === value && !value.split('/').includes('..');
@@ -37,9 +39,14 @@ export function transferConfiguration(values, env = process.env) {
     !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(config.user ?? '') || !Number.isInteger(config.port) ||
     config.port < 1 || config.port > 65535 || !validPath(config.path) ||
     !config.key || !config.knownHosts || (config.diagnostic ? config.root !== undefined : !config.root) ||
+    (config.diagnostic ? values['manifest-file'] !== undefined || values['manifest-artifact-id'] !== undefined :
+      !config.manifestFile || !/^[1-9][0-9]*$/.test(values['manifest-artifact-id'] ?? '') ||
+      !Number.isSafeInteger(config.manifestArtifactId) || config.manifestArtifactId <= 0) ||
     !/^[A-Za-z0-9._/-]+$/.test(config.envFile) || config.envFile.split('/').includes('..')) {
     throw new TransferFailure('configuration');
   }
+  try { manifestIdentity(config); }
+  catch { throw new TransferFailure('configuration'); }
   config.stage = `${config.path}/.runtime/releases/${config.diagnostic ? 'diagnostic-' : ''}${config.revision}-${config.run}-${config.attempt}`;
   return config;
 }
@@ -227,10 +234,20 @@ export class ReleaseTransfer {
         await writeFile(join(localRoot, DIAGNOSTIC_FILES[0]), randomBytes(DIAGNOSTIC_SUCCESS_BYTES));
         await writeFile(join(localRoot, DIAGNOSTIC_FILES[1]), randomBytes(DIAGNOSTIC_CANCEL_BYTES));
       }
-      this.files = await manifestFor(this.config.root, this.config.diagnostic ? DIAGNOSTIC_FILES : RELEASE_FILES, this.signal);
+      let artifact = {};
+      if (this.config.diagnostic) {
+        this.files = await manifestFor(this.config.root, DIAGNOSTIC_FILES, this.signal);
+      } else {
+        if (!Number.isSafeInteger(this.config.manifestArtifactId) || this.config.manifestArtifactId <= 0) throw new TransferFailure('configuration');
+        this.manifest = await readTransferManifest(this.config.manifestFile, this.config);
+        await verifyLocalManifest(this.config.root, this.manifest, this.signal);
+        this.files = this.manifest.files;
+        artifact = { manifest_artifact_id: this.config.manifestArtifactId,
+          manifest_artifact_name: manifestArtifactName(this.config) };
+      }
       const total = this.files.reduce((sum, file) => sum + file.bytes, 0);
       if (!Number.isSafeInteger(total) || (this.config.diagnostic && total > DIAGNOSTIC_PAYLOAD_LIMIT)) throw new TransferFailure('payload_limit');
-      this.log('transfer_manifest', { files: this.files, total_bytes: total });
+      this.log('transfer_manifest', { files: this.files, total_bytes: total, ...artifact });
       const version = await this.processes.checked('ssh', ['-V'], { signal: this.signal, timeoutMs: this.timeout() });
       this.log('ssh_version', { version: /OpenSSH_[A-Za-z0-9_.]+/.exec(version.stderr)?.[0] ?? 'unknown' });
       stageAttempted = true;
@@ -261,18 +278,21 @@ export class ReleaseTransfer {
       if (localRoot) await rm(localRoot, { recursive: true, force: true });
     }
     if (failure) throw failure;
-    this.log(this.config.diagnostic ? 'diagnostic_passed' : 'release_complete', { children_active: this.processes.children.size });
+    this.log(this.config.diagnostic ? 'diagnostic_passed' : 'release_complete', { children_active: this.processes.children.size,
+      ...(this.config.diagnostic ? {} : { manifest_artifact_id: this.config.manifestArtifactId,
+        manifest_artifact_name: manifestArtifactName(this.config) }) });
   }
 }
 
 async function main() {
   const { values } = parseArgs({ options: { diagnostic: { type: 'boolean' }, 'release-root': { type: 'string' },
     'key-file': { type: 'string' }, 'known-hosts-file': { type: 'string' }, 'credentials-root': { type: 'string' },
+    'manifest-file': { type: 'string' }, 'manifest-artifact-id': { type: 'string' },
     help: { type: 'boolean', short: 'h' } } });
   if (values.help) {
     console.log('Usage: node scripts/deploy/transfer-release.mjs\n' +
       '  (--credentials-root PATH | --key-file PATH --known-hosts-file PATH)\n' +
-      '  (--release-root PATH | --diagnostic)\nUses existing DEPLOY_*, REVISION and GITHUB_RUN_ID/GITHUB_RUN_ATTEMPT inputs.');
+      '  (--release-root PATH --manifest-file PATH --manifest-artifact-id ID | --diagnostic)\nUses existing DEPLOY_*, REVISION and GITHUB_RUN_ID/GITHUB_RUN_ATTEMPT inputs.');
     return;
   }
   const abort = new AbortController();

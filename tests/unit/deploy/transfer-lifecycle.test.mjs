@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -8,6 +8,7 @@ import { RELEASE_FILES } from '../../../scripts/deploy/transfer-files.mjs';
 import { TransferProcesses } from '../../../scripts/deploy/transfer-process.mjs';
 import { ReleaseTransfer, transferConfiguration } from '../../../scripts/deploy/transfer-release.mjs';
 import { createSenderTelemetry } from '../../../scripts/deploy/transfer-telemetry.mjs';
+import { createTransferManifest, MANIFEST_FILENAME } from '../../../scripts/deploy/transfer-manifest.mjs';
 
 const WATCHDOG_MS = 12_000;
 const POLL_MS = 20;
@@ -101,11 +102,12 @@ async function stopSyntheticProcesses(processes) {
 }
 
 async function lifecycle(mode) {
-  const root = await mkdtemp(join(tmpdir(), 'transfer-lifecycle-'));
-  const processes = new LifecycleProcesses(mode, root), abort = new AbortController();
+  const directory = await mkdtemp(join(tmpdir(), 'transfer-lifecycle-'));
+  const root = join(directory, 'payload'), manifestFile = join(directory, MANIFEST_FILENAME);
+  const processes = new LifecycleProcesses(mode, directory), abort = new AbortController();
   const logs = [], remoteOperations = [];
   let gateCalls = 0, watchdog, execution, watchdogFired = false;
-  const config = transferConfiguration({ 'release-root': root,
+  const config = transferConfiguration({ 'release-root': root, 'manifest-file': manifestFile, 'manifest-artifact-id': '456',
     'key-file': '/tmp/synthetic-key', 'known-hosts-file': '/tmp/synthetic-known-hosts' }, ENV);
   const transfer = new ReleaseTransfer(config, { processes, signal: abort.signal,
     log: value => logs.push(JSON.parse(value)), beforeActivate: async () => { gateCalls++; } });
@@ -124,7 +126,11 @@ async function lifecycle(mode) {
     return observation;
   } };
   try {
+    await mkdir(root);
     for (const name of RELEASE_FILES) await writeFile(join(root, name), 'synthetic');
+    const frozen = await createTransferManifest(root, { revision: ENV.REVISION,
+      run: ENV.GITHUB_RUN_ID, attempt: ENV.GITHUB_RUN_ATTEMPT });
+    await writeFile(manifestFile, JSON.stringify(frozen), { flag: 'wx' });
     watchdog = setTimeout(() => { watchdogFired = true; abort.abort(); }, WATCHDOG_MS);
     execution = transfer.execute().then(() => ({ passed: true }), error => ({ error }));
     const outcome = await execution;
@@ -136,7 +142,7 @@ async function lifecycle(mode) {
     abort.abort();
     if (execution) await execution;
     try { await stopSyntheticProcesses(processes); }
-    finally { await rm(root, { recursive: true, force: true }); }
+    finally { await rm(directory, { recursive: true, force: true }); }
   }
 }
 

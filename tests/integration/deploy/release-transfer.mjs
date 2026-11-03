@@ -12,8 +12,11 @@ import { verifyReceiverTelemetry } from './receiver-telemetry.mjs';
 import { ReleaseTransfer, transferConfiguration } from '../../../scripts/deploy/transfer-release.mjs';
 import { TransferFailure } from '../../../scripts/deploy/transfer-process.mjs';
 import { RELEASE_FILES } from '../../../scripts/deploy/transfer-files.mjs';
+import { prepareTransferManifest } from '../../../scripts/deploy/prepare-transfer-manifest.mjs';
+import { MANIFEST_FILENAME, readTransferManifest } from '../../../scripts/deploy/transfer-manifest.mjs';
 
 const CLI = fileURLToPath(new URL('../../../scripts/deploy/transfer-release.mjs', import.meta.url));
+const MANIFEST_ARTIFACT_ID = 12345;
 const { values } = parseArgs({ options: { run: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } });
 if (!values.run || values.help) { console.log('Usage: node tests/integration/deploy/release-transfer.mjs --run'); process.exit(0); }
 
@@ -25,6 +28,20 @@ const safeLogs = async output => {
   for (const secret of [await fixture.privateKey(), 'SYNTHETIC_TOKEN_MUST_NOT_LEAK', 'SYNTHETIC_KEY_MUST_NOT_LEAK',
     'SYNTHETIC_REMOTE_STDERR_MUST_NOT_LEAK', fixture.root]) assert.ok(!output.includes(secret));
 };
+
+const manifestFileFor = env => join(fixture.root,
+  `super-leader-transfer-manifest-${env.REVISION}-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`, MANIFEST_FILENAME);
+const productionConfig = (root, env = fixture.environment()) => transferConfiguration({ ...fixture.values,
+  diagnostic: false, 'release-root': root, 'manifest-file': manifestFileFor(env),
+  'manifest-artifact-id': String(MANIFEST_ARTIFACT_ID) }, env);
+async function freezeConfig(config) {
+  await prepareTransferManifest({ releaseRoot: config.root, output: config.manifestFile }, {
+    REVISION: config.revision, GITHUB_RUN_ID: config.run, GITHUB_RUN_ATTEMPT: config.attempt,
+  });
+  const frozen = await readTransferManifest(config.manifestFile, config);
+  assert.deepEqual(frozen.files.map(file => file.name), RELEASE_FILES);
+  return config;
+}
 
 // Hold the first successful file open independently of the CLI's own cancellation
 // case. Observing that case's partial-byte log races its immediate self-cancel.
@@ -66,7 +83,7 @@ async function uploadProxy(env, onPartial) {
   } };
 }
 
-async function cli(env, { interrupt, args = [], wrapper = false, production = false } = {}) {
+async function cli(env, { interrupt, args = [], wrapper = false, production = false, releaseRoot } = {}) {
   let child, stdout = '', stderr = '', signalled = false, groups = [], observerFailure;
   const signalEntry = () => {
     if (!interrupt || signalled || observerFailure) return;
@@ -85,7 +102,9 @@ async function cli(env, { interrupt, args = [], wrapper = false, production = fa
   const proxy = interrupt && !production ? await uploadProxy(env, signalEntry) : undefined;
   const knownHosts = proxy?.knownHosts ?? fixture.values['known-hosts-file'];
   if (proxy) env = { ...env, DEPLOY_PORT: String(proxy.port) };
-  let command = process.execPath, commandArgs = [CLI, '--diagnostic', '--key-file', fixture.values['key-file'],
+  const modeArgs = production ? ['--release-root', releaseRoot ?? join(fixture.root, `super-leader-release-${env.REVISION}`),
+    '--manifest-file', manifestFileFor(env), '--manifest-artifact-id', String(MANIFEST_ARTIFACT_ID)] : ['--diagnostic'];
+  let command = process.execPath, commandArgs = [CLI, ...modeArgs, '--key-file', fixture.values['key-file'],
     '--known-hosts-file', knownHosts, ...args];
   if (wrapper) {
     const name = production ? 'Transfer and activate the release on the VPS' : 'Diagnostic-only transfer and cancellation;';
@@ -93,7 +112,10 @@ async function cli(env, { interrupt, args = [], wrapper = false, production = fa
     const block = /^        run: \|\n((?:          [^\n]*\n)+)/m.exec(section)?.[1];
     assert.ok(block?.includes('exec node scripts/deploy/transfer-release.mjs'));
     const script = join(fixture.root, 'actions-entry.sh');
-    await writeFile(script, block.split('\n').map(line => line.slice(10)).join('\n'));
+    const body = block.split('\n').map(line => line.slice(10)).join('\n')
+      .replaceAll('${{ steps.publish-transfer-manifest.outputs.artifact-id }}', String(MANIFEST_ARTIFACT_ID));
+    assert.ok(!body.includes('${{'), 'all external Actions expressions are replaced with synthetic fixture values');
+    await writeFile(script, body);
     command = '/bin/bash'; commandArgs = ['--noprofile', '--norc', '-e', '-o', 'pipefail', script];
     env = { ...env, RUNNER_TEMP: fixture.root, DEPLOY_SSH_PRIVATE_KEY: (await fixture.privateKey()).trimEnd(),
       DEPLOY_KNOWN_HOSTS: await readFile(knownHosts, 'utf8') };
@@ -175,18 +197,31 @@ try {
   await mkdir(root);
   for (const name of RELEASE_FILES) await writeFile(join(root, name), name === 'remote-release.sh'
     ? '#!/bin/sh\nprintf active > /tmp/activation-sentinel\nprintf SYNTHETIC_REMOTE_STDERR_MUST_NOT_LEAK >&2\nexit 0\n' : `synthetic ${name}\n`);
-  const configFor = () => transferConfiguration({ ...fixture.values, diagnostic: false, 'release-root': root }, fixture.environment());
+  const configFor = () => freezeConfig(productionConfig(root));
   const productionEnv = fixture.environment();
   const productionRoot = join(fixture.root, `super-leader-release-${productionEnv.REVISION}`);
   await mkdir(productionRoot);
   for (const name of RELEASE_FILES) await writeFile(join(productionRoot, name), await readFile(join(root, name)));
+  await freezeConfig(productionConfig(productionRoot, productionEnv));
   const wrappedProduction = await cli(productionEnv, { interrupt: 'SIGTERM', wrapper: true, production: true });
   assert.notEqual(wrappedProduction.code, 0);
   assert.ok(wrappedProduction.events.some(event => event.event === 'transfer_failed' && event.category === 'cancelled'));
   console.log('PASS actual production Actions bash wrapper SIGTERM: nonzero, authentication retained through cleanup, no activation');
   const captured = [];
   let gated = 0;
-  const rejected = new ReleaseTransfer(configFor(), { log: value => captured.push(value), beforeActivate: async () => {
+  const changedRoot = join(fixture.root, 'changed-bundle');
+  await mkdir(changedRoot);
+  for (const name of RELEASE_FILES) await writeFile(join(changedRoot, name), await readFile(join(root, name)));
+  const changedEnv = fixture.environment(), changedConfig = await freezeConfig(productionConfig(changedRoot, changedEnv));
+  await writeFile(join(changedRoot, 'controller.tar'), 'changed after the manifest was frozen\n');
+  const changed = await cli(changedEnv, { production: true, releaseRoot: changedRoot });
+  assert.notEqual(changed.code, 0);
+  assert.ok(changed.events.some(event => event.event === 'transfer_failed' && event.category === 'manifest_local_mismatch'));
+  assert.ok(!changed.events.some(event => ['ssh_version', 'stage_owned', 'transfer_start', 'activation_start'].includes(event.event)));
+  absent(changedConfig.stage);
+  assert.equal(fixture.python('import os; print(os.path.exists("/tmp/activation-sentinel"))').trim(), 'False');
+  console.log('PASS real production CLI rejects changed local bytes against the frozen manifest before SSH/stage/activation');
+  const rejected = new ReleaseTransfer(await configFor(), { log: value => captured.push(value), beforeActivate: async () => {
     gated++; throw new Error('SYNTHETIC_TOKEN_MUST_NOT_LEAK');
   } });
   await assert.rejects(rejected.execute());
@@ -202,7 +237,7 @@ try {
     }
   }
   gated = 0;
-  const corrupted = new CorruptedTransfer(configFor(), { log: value => captured.push(value), beforeActivate: async () => { gated++; } });
+  const corrupted = new CorruptedTransfer(await configFor(), { log: value => captured.push(value), beforeActivate: async () => { gated++; } });
   await assert.rejects(corrupted.execute(), { category: 'integrity' });
   assert.equal(gated, 0);
   absent(corrupted.config.stage);
@@ -219,7 +254,7 @@ try {
       finally { this.config.key = key; }
     }
   }
-  const unauthorized = new UnauthorizedScp(configFor(), { log: value => captured.push(value), beforeActivate: async () => { throw new Error('must not run'); } });
+  const unauthorized = new UnauthorizedScp(await configFor(), { log: value => captured.push(value), beforeActivate: async () => { throw new Error('must not run'); } });
   await assert.rejects(unauthorized.execute(), { category: 'authentication' });
   absent(unauthorized.config.stage);
   assert.equal(fixture.python('import os; print(os.path.exists("/tmp/activation-sentinel"))').trim(), 'False');
@@ -238,7 +273,7 @@ try {
     }
   }
   const slowLog = [];
-  const slow = new SlowTransfer(configFor(), {
+  const slow = new SlowTransfer(await configFor(), {
     beforeActivate: async () => { throw new Error('gate intentionally rejects'); },
     log: value => slowLog.push(JSON.parse(value)) });
   await assert.rejects(slow.execute(), { category: 'revision_gate' });
@@ -253,7 +288,7 @@ try {
   await writeFile(join(root, 'controller.tar'), 'synthetic controller.tar\n');
   console.log('PASS real slow SFTP survives first 15-second sample failure, later sampling recovers, final hash verified, revision gate still blocks activation');
 
-  const foreignConfig = configFor();
+  const foreignConfig = await configFor();
   fixture.python(`import os; os.makedirs(${JSON.stringify(foreignConfig.stage)}); open(${JSON.stringify(`${foreignConfig.stage}/.transfer-owner`)},'w').write('foreign'); open(${JSON.stringify(`${foreignConfig.stage}/controller.tar`)},'w').write('must-stay')`);
   const foreign = new ReleaseTransfer(foreignConfig, { log: value => captured.push(value), beforeActivate: async () => { throw new Error('must not run'); } });
   await assert.rejects(foreign.execute());
@@ -267,15 +302,16 @@ try {
       return result;
     }
   }
-  const unexpected = new UnexpectedFileTransfer(configFor(), { log: value => captured.push(value), beforeActivate: async () => { throw new Error('gate'); } });
+  const unexpected = new UnexpectedFileTransfer(await configFor(), { log: value => captured.push(value), beforeActivate: async () => { throw new Error('gate'); } });
   await assert.rejects(unexpected.execute());
   assert.equal(fixture.python(`print(open(${JSON.stringify(`${unexpected.config.stage}/unowned-canary`)}).read())`).trim(), 'must-stay');
   assert.ok(captured.some(value => value.includes('unexpected_stage_files')));
   console.log('PASS cleanup removes only allowed owned files, preserves unexpected canary, reports unconfirmed');
 
-  const activeConfig = configFor(), activeLog = [], activeAbort = new AbortController();
+  const activeConfig = productionConfig(root), activeLog = [], activeAbort = new AbortController();
   const holder = `import os,time,pathlib; pathlib.Path('/tmp/remote-holder-pid').write_text(str(os.getpid())); time.sleep(20); pathlib.Path('/tmp/remote-holder-read').write_bytes(pathlib.Path(${JSON.stringify(`${activeConfig.stage}/controller.tar`)}).read_bytes())`;
   await writeFile(join(root, 'remote-release.sh'), `#!/bin/sh\ntrap '' HUP TERM\npython3 -c '${holder.replaceAll("'", "'\\''")}' >/tmp/remote-holder-log 2>&1 &\nwait $!\n`);
+  await freezeConfig(activeConfig);
   const active = new ReleaseTransfer(activeConfig, { signal: activeAbort.signal, beforeActivate: async () => {}, log: value => {
     activeLog.push(value);
     if (JSON.parse(value).event === 'activation_start') setTimeout(() => activeAbort.abort(), 1000);
@@ -292,7 +328,7 @@ try {
 
   await writeFile(join(root, 'remote-release.sh'), '#!/bin/sh\nprintf active > /tmp/activation-sentinel\nprintf SYNTHETIC_REMOTE_STDERR_MUST_NOT_LEAK >&2\nexit 0\n');
 
-  const acceptedConfig = configFor(), sockets = new Set(), timers = new Set();
+  const acceptedConfig = await configFor(), sockets = new Set(), timers = new Set();
   const upstreamPort = acceptedConfig.port, upstreamHost = acceptedConfig.host;
   const proxy = createServer(client => {
     sockets.add(client);

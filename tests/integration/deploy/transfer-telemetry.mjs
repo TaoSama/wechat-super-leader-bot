@@ -16,7 +16,7 @@ const CANCEL_MS = 15_000;
 const SAMPLE_MS = 250;
 const SAMPLE_WAIT_MS = 8_000;
 const DEPLOY_MODULES = ['transfer-release.mjs', 'transfer-process.mjs', 'transfer-telemetry.mjs',
-  'transfer-files.mjs', 'resolve-revision.mjs'];
+  'transfer-files.mjs', 'transfer-manifest.mjs', 'resolve-revision.mjs'];
 
 class ProbeFailure extends Error {
   constructor(category) { super(category); this.category = category; }
