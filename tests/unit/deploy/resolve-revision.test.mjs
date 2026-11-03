@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { assertCurrentRevision, resolveRevision } from '../../../scripts/deploy/resolve-revision.mjs';
 
@@ -7,6 +8,17 @@ const MERGE = 'b'.repeat(40);
 const NEWER = 'c'.repeat(40);
 const REPOSITORY = 'owner/repo';
 const ROOT = `/repos/${REPOSITORY}`;
+const READY_VERIFY_RUN_ID = 124;
+const DEFAULT_PR_TYPES = ['opened', 'synchronize', 'reopened'];
+
+function configuredPullRequestTypes() {
+  const workflow = readFileSync(new URL('../../../.github/workflows/verify.yml', import.meta.url), 'utf8');
+  const triggers = /^on:[ \t]*\n((?:[ \t].*\n|\n)*)/m.exec(workflow)?.[1];
+  const pullRequest = /^  pull_request:[ \t]*\n((?: {4}.*\n)*)/m.exec(triggers ?? '');
+  assert.ok(pullRequest, 'Verify must configure a pull_request trigger');
+  const types = /^    types:[ \t]*\[([^\]]*)\]/m.exec(pullRequest[1])?.[1];
+  return types === undefined ? DEFAULT_PR_TYPES : types.split(',').map(type => type.trim());
+}
 
 function fixture() {
   const metadata = { id: 1, full_name: REPOSITORY, default_branch: 'main', owner: { login: 'owner' } };
@@ -19,7 +31,7 @@ function fixture() {
   const state = { metadata, run, pr, current: MERGE, reads: 0, waits: 0, logs: [] };
   const api = async path => {
     if (path === ROOT) return structuredClone(state.metadata);
-    if (path === `${ROOT}/actions/runs/123`) return structuredClone(state.run);
+    if (path === `${ROOT}/actions/runs/${state.run.id}`) return structuredClone(state.run);
     if (path === `${ROOT}/commits/${HEAD}/pulls?per_page=100`) return [structuredClone(state.pr)];
     if (path === `${ROOT}/actions/workflows/verify.yml/runs?event=pull_request&head_sha=${HEAD}&status=success&per_page=100`) {
       return { workflow_runs: [structuredClone(state.run)] };
@@ -53,14 +65,49 @@ test('Verify completion before automatic merge waits and then resolves', async (
   assert.equal(state.reads, 2);
 });
 
-test('manual merge hours after successful CI still deploys through the closed event', async () => {
+for (const [name, waits] of [
+  ['merge precedes CI completion', 0],
+  ['CI completion precedes auto merge enablement', 2],
+  ['CI completion precedes a direct merge', 1],
+]) {
+  test(`ready-for-review starts a fresh Verify when ${name}`, async () => {
+    const { options, state } = fixture();
+    const types = configuredPullRequestTypes();
+    for (const type of DEFAULT_PR_TYPES) assert.ok(types.includes(type), `Verify must preserve ${type}`);
+    Object.assign(state.pr, { state: 'open', merged: false, draft: true, auto_merge: null });
+    assert.equal(await resolveRevision(options), null, 'the old Verify cannot select a revision while the PR is draft');
+    assert.equal(state.waits, 0);
+
+    const freshRun = types.includes('ready_for_review') ? { ...state.run, id: READY_VERIFY_RUN_ID } : null;
+    assert.ok(freshRun, 'the actual Verify trigger must start a new run on ready_for_review');
+    state.run = freshRun;
+    state.pr.draft = false;
+    options.event = { workflow_run: { id: freshRun.id } };
+    const merge = () => Object.assign(state.pr, { state: 'closed', merged: true, auto_merge: null });
+    if (waits === 0) merge();
+    options.wait = async () => {
+      assert.match(state.logs.at(-1), /waiting.*merge/i);
+      if (!state.pr.auto_merge) assert.doesNotMatch(state.logs.at(-1), /automatic merge/i);
+      state.waits++;
+      if (waits === 2 && state.waits === 1) state.pr.auto_merge = { merge_method: 'squash' };
+      else merge();
+    };
+    assert.equal(await resolveRevision(options), MERGE);
+    assert.notEqual(MERGE, state.run.head_sha);
+    assert.equal(state.waits, waits);
+    assert.match(state.logs.at(-1), new RegExp(`run=${READY_VERIFY_RUN_ID} PR=73.*head=${HEAD}.*merge=${MERGE}`));
+  });
+}
+
+test('manual merge after the Verify wait budget still deploys through the closed event', async () => {
   const { options, state } = fixture();
   Object.assign(state.pr, { state: 'open', merged: false });
-  assert.equal(await resolveRevision(options), null);
+  await assert.rejects(resolveRevision(options), /Timed out.*no deployment/);
+  assert.equal(state.waits, options.attempts - 1);
   Object.assign(state.pr, { state: 'closed', merged: true });
   Object.assign(options, { eventName: 'pull_request_target', event: { pull_request: { number: 73 } } });
   assert.equal(await resolveRevision(options), MERGE);
-  assert.equal(state.waits, 0);
+  assert.equal(state.waits, options.attempts - 1, 'the closed event requires no further waiting');
 });
 
 test('closed PR event still requires successful Verify and an actual merged PR', async () => {
@@ -73,13 +120,15 @@ test('closed PR event still requires successful Verify and an actual merged PR',
   assert.equal(await resolveRevision(options), null);
 });
 
-test('automatic merge timeout fails explicitly without selecting a revision', async () => {
-  const { options, state } = fixture();
-  Object.assign(state.pr, { state: 'open', merged: false, auto_merge: {} });
-  await assert.rejects(resolveRevision(options), /Timed out.*no deployment/);
-  assert.equal(state.waits, 2);
-  assert.equal(state.reads, 3);
-});
+for (const [name, autoMerge] of [['auto merge enabled', {}], ['auto merge not yet enabled', null]]) {
+  test(`unmerged verified PR (${name}) exhausts the original wait budget without deployment`, async () => {
+    const { options, state } = fixture();
+    Object.assign(state.pr, { state: 'open', merged: false, auto_merge: autoMerge });
+    await assert.rejects(resolveRevision(options), /Timed out.*no deployment/);
+    assert.equal(state.waits, options.attempts - 1);
+    assert.equal(state.reads, options.attempts);
+  });
+}
 
 const rejected = {
   'failed CI': s => { s.run.conclusion = 'failure'; },
@@ -96,7 +145,6 @@ const rejected = {
   'draft PR': s => { s.pr.draft = true; },
   'old CI head': s => { s.pr.head.sha = NEWER; },
   'closed unmerged PR': s => { s.pr.merged = false; },
-  'unmerged PR without auto merge': s => { s.pr.state = 'open'; s.pr.merged = false; },
   'superseded merge': s => { s.current = NEWER; },
 };
 for (const [name, mutate] of Object.entries(rejected)) {
@@ -109,12 +157,26 @@ for (const [name, mutate] of Object.entries(rejected)) {
   });
 }
 
-test('head update while waiting for merge prevents deployment', async () => {
-  const { options, state } = fixture();
-  Object.assign(state.pr, { state: 'open', merged: false, auto_merge: {} });
-  options.wait = async () => { state.pr.head.sha = NEWER; };
-  assert.equal(await resolveRevision(options), null);
-});
+for (const [name, mutate] of Object.entries({
+  'head update': pr => { pr.head.sha = NEWER; },
+  'source repository change': pr => { pr.head.repo.id = 2; },
+  'source becoming main': pr => { pr.head.ref = 'main'; },
+  'author change': pr => { pr.user.login = 'contributor'; },
+  'target branch change': pr => { pr.base.ref = 'release'; },
+  'target repository change': pr => { pr.base.repo.id = 2; },
+  'draft conversion': pr => { pr.draft = true; },
+  'closed unmerged PR': pr => { pr.state = 'closed'; },
+})) {
+  test(`${name} while waiting for merge prevents deployment`, async () => {
+    const { options, state } = fixture();
+    Object.assign(state.pr, { state: 'open', merged: false, auto_merge: null });
+    options.wait = async () => { state.waits++; mutate(state.pr); };
+    assert.equal(await resolveRevision(options), null);
+    assert.equal(state.waits, 1, 'an identity change stops further polling immediately');
+    assert.equal(state.reads, 2);
+    assert.match(state.logs.at(-1), /deployment skipped:/);
+  });
+}
 
 test('API errors and invalid merge revisions fail closed', async () => {
   const { options, state } = fixture();
