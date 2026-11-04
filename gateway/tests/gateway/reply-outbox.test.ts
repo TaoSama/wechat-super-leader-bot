@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import { StateManager } from "../../src/runtime/state.js";
+import { MAX_REJECTED_REPLY_ATTEMPTS, StateManager } from "../../src/runtime/state.js";
 import { ControllerClient } from "../../src/controller/client.js";
 import { ILinkClient } from "../../src/wechat/client.js";
 import { WeChatGateway } from "../../src/gateway.js";
@@ -159,4 +159,37 @@ test("persistently rejected reply stops after bounded attempts without blocking 
   assert.deepEqual(sends, ["ab", "cd", "cd", "cd", "ok"], "a new inbound must not replay the refused reply first");
   assert.equal(restarted.outbox[key].status, "expired");
   assert.equal(restarted.outbox[restarted.computeDeliveryKey("chat", "m2")], undefined);
+});
+
+test("a restart after the final recorded refusal expires the reply without another send", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-rejected-restart-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const account = path.join(directory, "account.json"), statePath = path.join(directory, "state.json");
+  fs.writeFileSync(account, JSON.stringify({ token: "synthetic", accountId: "synthetic" }));
+  const sends: string[] = [];
+  const ilinkFetch: typeof fetch = async (url, init) => {
+    if (String(url).endsWith("getconfig")) return Response.json({ ret: 0, typing_ticket: "ticket" });
+    if (String(url).endsWith("sendtyping")) return Response.json({ ret: 0 });
+    sends.push(JSON.parse(String(init?.body)).msg.item_list[0].text_item.text);
+    return Response.json({ ret: 0 });
+  };
+  const controllerFetch: typeof fetch = async () => Response.json({ text: "ab" });
+  const state = new StateManager(account, statePath);
+  state.markBaselineEstablished();
+  state.recordInboundContext(state.computeDeliveryKey("chat", "m1"), "chat", Date.now() - 1000, true, "context");
+  const key = state.computeDeliveryKey("chat", "m1");
+  state.putOutbox({ kind: "reply", source: "controller", chatId: "chat", messageId: "m1", deliveryKey: key, splitMaxChars: 2, status: "pending" });
+  state.prepareReplyDelivery(key, "a".repeat(64), 1);
+  // Simulate a crash after the final refusal was persisted but before the outbox expired.
+  for (let attempt = 0; attempt < MAX_REJECTED_REPLY_ATTEMPTS; attempt++) {
+    state.beginReplyChunk(key, 0);
+    state.rejectReplyChunk(key, 0);
+  }
+  const restarted = new StateManager(account, statePath);
+  const gateway = new WeChatGateway({ stateManager: restarted, splitMaxChars: 2,
+    ilink: new ILinkClient({ stateManager: restarted, fetchImpl: ilinkFetch }),
+    controller: new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic", fetchImpl: controllerFetch }) });
+  await gateway.flushRepliesOnce();
+  assert.deepEqual(sends, []);
+  assert.equal(restarted.outbox[key].status, "expired");
 });
