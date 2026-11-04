@@ -504,6 +504,12 @@ export class WeChatGateway {
       let receiptStatus = "error";
       traceEvent("delivery.start", { source: item.source });
       try {
+        // A restart can resume a delivery whose final refusal was recorded before its outbox expired.
+        if (this.hasExhaustedReplyRejections(item.deliveryKey)) {
+          receiptStatus = "rejected";
+          await this.expireRejectedReply(item);
+          return;
+        }
         const deadline = Date.now() + REPLY_TIMEOUT_MS;
         if (reply.images?.length) {
           await this.ilink.sendImageReply(item.chatId, reply.images, { deliveryKey: `image-reply:${item.deliveryKey}`,
@@ -530,13 +536,9 @@ export class WeChatGateway {
           await this.ackEngineReply(item, "expired");
           return;
         }
-        if (isRejectedSendReceipt(error) && !this.hasQuarantinedInboundReply(item.deliveryKey) &&
-            (this.stateManager.hasExhaustedReplyRejections(item.deliveryKey) ||
-             this.stateManager.hasExhaustedReplyRejections(`image-reply:${item.deliveryKey}`))) {
-          // A persistently refused reply becomes terminal so retries cannot drain the shared send budget.
+        if (isRejectedSendReceipt(error) && this.hasExhaustedReplyRejections(item.deliveryKey)) {
           receiptStatus = "rejected";
-          this.stateManager.updateOutbox(item.deliveryKey, { status: "expired" });
-          await this.ackEngineReply(item, "expired");
+          await this.expireRejectedReply(item);
           return;
         }
         if (this.hasQuarantinedInboundReply(item.deliveryKey)) {
@@ -656,6 +658,18 @@ export class WeChatGateway {
     if (!this.replyEngine) throw new ReplyEngineUnavailableError();
     await this.replyEngine.ackReply(this.stateManager.account!.accountId, item.chatId, item.messageId, status);
     this.stateManager.updateOutbox(item.deliveryKey, { engineAcked: true });
+  }
+
+  private hasExhaustedReplyRejections(deliveryKey: string): boolean {
+    return !this.hasQuarantinedInboundReply(deliveryKey) &&
+      (this.stateManager.hasExhaustedReplyRejections(deliveryKey) ||
+       this.stateManager.hasExhaustedReplyRejections(`image-reply:${deliveryKey}`));
+  }
+
+  /** A persistently refused reply becomes terminal so retries cannot drain the shared send budget. */
+  private async expireRejectedReply(item: DeliveryOutboxItem): Promise<void> {
+    this.stateManager.updateOutbox(item.deliveryKey, { status: "expired" });
+    await this.ackEngineReply(item, "expired");
   }
 
   private hasQuarantinedInboundReply(deliveryKey: string): boolean {
