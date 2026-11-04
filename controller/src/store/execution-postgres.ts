@@ -2,7 +2,8 @@ import type pg from "pg";
 import { normalizeExecution, validateExecutionUpdate, executionPageLimit, EXECUTION_PAGE_SIZE,
   type CreateExecutionResult, type ExecutionRecord } from "../leader/plans/execution.js";
 import { validateChatId, validateExpectedRevision } from "../leader/state.js";
-import { ConflictError } from "./interface.js";
+import { ActivePlanLimitError, ConflictError } from "./interface.js";
+import { MAX_ACTIVE_PLANS_PER_CHAT } from "../leader/contracts.js";
 import { executionListQuery } from "./execution-list.js";
 import { createTerminalNotifications, validateNotificationTime } from "../notifications/contracts.js";
 import { insertTerminalNotification } from "./notification-postgres.js";
@@ -64,7 +65,7 @@ export async function pgConfirmExecution(pool: pg.Pool, record: ExecutionRecord,
     const state = row ? { chatId: row.chat_id, revision: Number(row.revision), data: data as Record<string, unknown> } : null;
     assertExecutionConfirmation(input.record, input.authority, state, now());
     const created = await pgCreateExecutionIfAbsent(client, input.record);
-    // INSERT/unique-index waits can outlive the claim while the state row stays locked.
+    // Authorization-lock and INSERT waits can outlive the claim while the state row stays locked.
     // Recheck before issuing COMMIT; expired inserts remain invisible and roll back.
     assertExecutionConfirmation(input.record, input.authority, state, now());
     await client.query("COMMIT");
@@ -90,13 +91,17 @@ export async function pgCreateExecutionIfAbsent(pool: ExecutionQueryClient, reco
   }
   const occupied = await pool.query("SELECT id FROM leader_goals WHERE chat_id=$1 AND status IN ('active','blocked') LIMIT 1", [normalized.chatId]);
   if (occupied.rows.length) throw new ConflictError("Chat already has an open goal");
+  // Every active-plan insert for this chat holds the same advisory lock, so the count cannot race.
+  const active = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM leader_executions WHERE chat_id=$1 AND status='active'", [normalized.chatId]);
+  if (Number(active.rows[0]?.count ?? 0) >= MAX_ACTIVE_PLANS_PER_CHAT) throw new ActivePlanLimitError();
   const result = await pool.query<ExecutionRow>(`INSERT INTO leader_executions
     (id,chat_id,revision,status,data,created_at) VALUES ($1,$2,$3,$4,$5::jsonb,$6)
     ON CONFLICT DO NOTHING RETURNING *`,
   [normalized.id, normalized.chatId, normalized.revision, normalized.status, JSON.stringify(normalized), normalized.createdAt]);
   if (result.rows.length) return { created: true, execution: executionFromRow(result.rows[0]) };
   const existing = await pgGetExecution(pool, normalized.id);
-  if (!existing) throw new ConflictError("Chat already has an active execution");
+  if (!existing) throw new ConflictError("Execution insert conflicted without a stored record");
   if (existing.chatId !== normalized.chatId || JSON.stringify(existing.plan) !== JSON.stringify(normalized.plan)) {
     throw new ConflictError("Execution ID already used with different chat or plan");
   }

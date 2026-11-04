@@ -8,10 +8,12 @@ import { initNotificationCandidateState } from "./notification-candidates-postgr
 
 const INITIAL_SCHEMA_VERSION = 1;
 const KNOWN_SESSION_OBSERVATION_VERSION = 2;
+const MULTIPLE_ACTIVE_PLANS_VERSION = 3;
 const SCHEMA_MIGRATION_LOCK = "controller-schema-migrations";
 const SCHEMA_MIGRATIONS = [
   { version: INITIAL_SCHEMA_VERSION, apply: migrateInitialSchema },
   { version: KNOWN_SESSION_OBSERVATION_VERSION, apply: migrateKnownSessionObservations },
+  { version: MULTIPLE_ACTIVE_PLANS_VERSION, apply: migrateMultipleActivePlans },
 ];
 
 export async function initializeDatabase(pool: pg.Pool): Promise<void> {
@@ -131,4 +133,10 @@ async function migrateKnownSessionObservations(client: pg.PoolClient): Promise<v
   await client.query(`INSERT INTO known_sessions (node_id,session_id,data,updated_at)
     SELECT node_id,session_id,data,updated_at FROM node_sessions ON CONFLICT(node_id,session_id) DO NOTHING`);
   await client.query("DELETE FROM node_sessions;");
+}
+
+// The per-chat cap is enforced under the chat authorization lock; the index only serves that count.
+async function migrateMultipleActivePlans(client: pg.PoolClient): Promise<void> {
+  await client.query("DROP INDEX IF EXISTS leader_executions_active_chat_idx");
+  await client.query("CREATE INDEX IF NOT EXISTS leader_executions_active_chat_created_idx ON leader_executions (chat_id, created_at, id) WHERE status='active'");
 }

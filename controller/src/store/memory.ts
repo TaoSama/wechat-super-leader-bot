@@ -2,7 +2,8 @@ import { CommandRecord, CommandAuthority, MessageRecord, Session, SendRoute, val
 import { ACTIVE_COMMAND_STATUSES, beforeInQueue, sameAuthority, sameCommandPayload } from "../commands/queue.js";
 import { InputReceipt } from "../sessions/input-receipt.js";
 import { commandSummary, type CommandSummary } from "../commands/public.js";
-import { IStore, CreateCommandResult, ConflictError } from "./interface.js";
+import { IStore, CreateCommandResult, ConflictError, ActivePlanLimitError } from "./interface.js";
+import { MAX_ACTIVE_PLANS_PER_CHAT } from "../leader/contracts.js";
 import { MemoryMessageImages, type StoredMessageImage } from "../sessions/message-images.js";
 import { sameSkillRefs } from "../skills/catalog.js";
 import { nextCommandState, inspectionLimit, validateStoredCommandInput } from "./command-state.js";
@@ -341,10 +342,11 @@ export class MemoryStore implements IStore {
       }
       return { created: false, execution: structuredClone(existing) };
     }
-    if ([...this.goals.values()].some(goal => goal.chatId === normalized.chatId && goalIsOpen(goal)) ||
-      [...this.executions.values()].some(execution => execution.chatId === normalized.chatId && execution.status === "active")) {
-      throw new ConflictError("Chat already has an active execution");
+    if ([...this.goals.values()].some(goal => goal.chatId === normalized.chatId && goalIsOpen(goal))) {
+      throw new ConflictError("Chat already has an open goal");
     }
+    const active = [...this.executions.values()].filter(execution => execution.chatId === normalized.chatId && execution.status === "active");
+    if (active.length >= MAX_ACTIVE_PLANS_PER_CHAT) throw new ActivePlanLimitError();
     this.executions.set(normalized.id, normalized);
     return { created: true, execution: structuredClone(normalized) };
   }

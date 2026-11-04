@@ -18,6 +18,7 @@ const AuthorizationFieldsSchema = z.object({
 // Zod defaults bypass parsing; construct the complete fail-closed value instead of returning an empty object.
 export const DirectAuthorizationSchema = AuthorizationFieldsSchema.default(() => AuthorizationFieldsSchema.parse({}));
 export const DirectRequestSchema = PostMessageRequestSchema.strict();
+export const CancelPlanArgumentsSchema = z.object({ planId: z.string().uuid().optional() }).strict();
 export const DirectCallSchema = DirectRequestSchema.extend({
   callId: z.string().min(1).max(128),
   name: z.string().min(1).max(128),

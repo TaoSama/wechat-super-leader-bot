@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { CommandError, type CommandService } from "../../commands/service.js";
 import { ConflictError, type IStore } from "../../store/interface.js";
-import { LeaderDataSchema, type LeaderData, type LeaderReply, type Plan } from "../contracts.js";
+import { LeaderDataSchema, MAX_ACTIVE_PLANS_PER_CHAT, type LeaderData, type LeaderReply, type Plan } from "../contracts.js";
 import { hasTerminalTarget } from "./execution.js";
+import { listChatActivePlans } from "./active.js";
 
 export const TERMINAL_INPUT_WARNING = "原终端输入 · 非原子：CLI 退出、同类进程替换或人工输入可能与投递竞态。输入已写入不表示 Agent 已开始、成功或完成；不自动重发，也不解锁依赖。";
 
@@ -26,10 +27,10 @@ export async function submitTerminalPlan(store: IStore, commands: Pick<CommandSe
     const command = await commands.submit({ nodeId: action.nodeId, sessionId: action.sessionId,
       prompt: action.prompt, skills: action.skills, action: "send", requestId: terminalPlanRequestId(chatId, plan.id) },
     5000, async () => {
-      const active = await store.getLatestExecution(chatId);
+      const atLimit = (await listChatActivePlans(store, chatId)).length >= MAX_ACTIVE_PLANS_PER_CHAT;
       const current = await store.getLeaderState(chatId);
       const inflight = current && LeaderDataSchema.parse(current.data).inflight;
-      if (active?.status === "active" || current?.revision !== revision || !inflight ||
+      if (atLimit || current?.revision !== revision || !inflight ||
           inflight.messageId !== claim.messageId || inflight.inputHash !== claim.inputHash ||
           inflight.expiresAt <= now() || plan.expiresAt <= now() || JSON.stringify(inflight.plan) !== JSON.stringify(plan)) {
         throw new CommandError(409, "终端输入确认所有权或时限已失效");

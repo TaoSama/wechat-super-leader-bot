@@ -8,7 +8,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { formatDisplayTime } from "../display-time.js";
 import { CommandError, CommandService } from "../commands/service.js";
 import { NodeHub } from "../nodes/hub.js";
-import { ConflictError, IStore } from "../store/interface.js";
+import { ActivePlanLimitError, ConflictError, IStore } from "../store/interface.js";
 import type { LeaderModel, ModelMessage, ModelToolCall } from "./model/contracts.js";
 import { hasSkillRefs } from "../skills/catalog.js";
 import { selectExecutionObservation, selectModelObservation } from "../sessions/observation.js";
@@ -21,6 +21,7 @@ import { retainLeaderData } from "./persistence.js";
 import { authorizationConversation, invalidateConversationPreview } from "./conversation-history.js";
 import { classifyUserAuthorization } from "./model/user-authorization.js";
 import { createExecution, hasTerminalTarget, matchesExecutionCommand, validatePlanDependencies } from "./plans/execution.js";
+import { ACTIVE_PLAN_LIMIT_TEXT, ambiguousCancellationText, cancelActivePlan, listChatActivePlans } from "./plans/active.js";
 import { assertTerminalSingleStep, submitTerminalPlan, TERMINAL_INPUT_WARNING } from "./plans/terminal.js";
 import { recoverSteerPlanCommand, steerPlanRequestId } from "./plans/steer.js";
 import { ExecutionScheduler } from "./plans/scheduler.js";
@@ -46,7 +47,7 @@ import { assertBackgroundSourcesDiscovered, BACKGROUND_INSTRUCTIONS, BACKGROUND_
   confirmBackgroundMutations, executeBackgroundTool, recoverBackgroundFollowups, type BackgroundToolAuthority, type BackgroundToolService, type BackgroundTurn } from "./background-tools.js";
 import {
   CLAIM_TTL_MS, ConsoleLinkIssued, ConsoleLinkIssuer, LEADER_TOOLS, LeaderData, LeaderDataSchema, LeaderReply,
-  MAX_MODEL_STEPS, MAX_REPLY_CHARS, MAX_RESULT_CODE_POINTS, MAX_RESULT_JSON_CHARS, MAX_TOOL_CALLS, PLAN_TTL_MS, Plan,
+  MAX_ACTIVE_PLANS_PER_CHAT, MAX_MODEL_STEPS, MAX_REPLY_CHARS, MAX_RESULT_CODE_POINTS, MAX_RESULT_JSON_CHARS, MAX_TOOL_CALLS, PLAN_TTL_MS, Plan,
   SYSTEM_PROMPT, TURN_TIMEOUT_MS, ToolArguments,
 } from "./contracts.js";
 
@@ -61,6 +62,8 @@ const clip = (text: string, length: number) => {
 const confirmation = /^(?:请)?(?:确认|执行|开始|开始执行|确认执行|确认开始|按这个计划执行|就按这个执行|确认这个计划)[。！!]?$/;
 const naturalConfirmation = /^(?:是|是的|对|对的|没错|好的|好|可以|就这样|就这个|就是这个|就是它|嗯|嗯嗯)[。！!]?$/;
 const cancellation = /^(?:请|帮我)?(?:取消计划|不用执行|取消执行|停止后续任务|停止后续执行|先别跑后面的任务)[。！!]?$/;
+const planCancellation = /^(?:请|帮我)?取消计划\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})[。！!]?$/i;
+const cancelledPlanId = (text: string) => planCancellation.exec(text)?.[1].toLowerCase();
 export type Hub = Pick<NodeHub, "getAllSessions" | "getNodeStatusList" | "getNodeSession" | "isNodeConnected" | "getAllSkills" | "getNodeSkills" | "readHistory"> & ReadinessHub & Partial<MediaHub>
   & Partial<Pick<NodeHub, "listAutomations" | "inspectAutomation">>;
 
@@ -186,7 +189,8 @@ export class LeaderOrchestrator {
     if (plan || data.pending && data.pending.expiresAt <= confirmationTime) data.pending = undefined;
     if (goal || data.pendingGoal && data.pendingGoal.expiresAt <= confirmationTime) data.pendingGoal = undefined;
     // Persist revocation with the cancellation claim, before any asynchronous cleanup.
-    if (goalCancellation(text.trim()) || cancellation.test(text.trim())) data.steerGeneration++;
+    const cancelPlanId = cancelledPlanId(text.trim());
+    if (goalCancellation(text.trim()) || cancellation.test(text.trim()) || cancelPlanId) data.steerGeneration++;
     data.inflight = { messageId, inputHash, expiresAt: this.now() + CLAIM_TTL_MS, plan, goal };
     let claimed = await this.save(chatId, saved?.revision ?? 0, data);
     let reply: LeaderReply;
@@ -204,17 +208,18 @@ export class LeaderOrchestrator {
     } else if (goal || goalId || text.trim().startsWith("确认目标")) {
       reply = goal ? await this.confirmGoal(chatId, claimed.revision, goal, data)
         : { text: "没有该ID的待确认目标；未派发。请先核对目标预览，并回复‘确认目标 <UUID>’。" };
-    } else if (cancellation.test(text.trim())) {
+    } else if (cancellation.test(text.trim()) || cancelPlanId) {
       invalidatedConfirmation = true;
       data.pending = undefined;
       const hadPendingGoal = !!data.pendingGoal;
       data.pendingGoal = undefined;
-      if (hadPendingGoal || await this.goals.hasUnfinished(chatId)) {
+      if (!cancelPlanId && (hadPendingGoal || await this.goals.hasUnfinished(chatId))) {
         reply = await this.goals.cancel(chatId);
       } else {
-        const latest = await this.store.getLatestExecution(chatId);
-        const cancelled = latest?.status === "active" ? await this.executions.cancel(latest.id, chatId) : null;
-        reply = { text: cancelled ? `已取消待确认计划；以下已确认计划停止后续派发。\n${executionSummary(cancelled)}`
+        const cancelled = await cancelActivePlan(this.store, this.executions, chatId, cancelPlanId);
+        reply = { text: cancelled.kind === "cancelled" ? `已取消待确认计划；以下已确认计划停止后续派发。\n${executionSummary(cancelled.view)}`
+          : cancelled.kind === "ambiguous" ? `已取消待确认计划。${ambiguousCancellationText(cancelled.plans)}`
+          : cancelled.kind === "missing" ? "已取消待确认计划；没有该ID的进行中计划，未停止其他计划。没有新增派发，不会停止原会话已有任务。"
           : "已取消待确认计划；当前没有活动执行计划。没有新增派发，不会停止原会话已有任务。" };
       }
     } else if (confirms && (plan || !authorizationConversation(data.history).length)) {
@@ -360,7 +365,8 @@ export class LeaderOrchestrator {
       }, this.now);
     }
     catch (error) {
-      if (error instanceof ConflictError) return { text: "确认授权已失效、已有活动计划或计划身份冲突，没有新增派发。请先查询计划进度，必要时重新规划。" };
+      if (error instanceof ActivePlanLimitError) return { text: ACTIVE_PLAN_LIMIT_TEXT };
+      if (error instanceof ConflictError) return { text: "确认授权已失效、已有持续目标或计划身份冲突，没有新增派发。请先查询进度，必要时重新规划。" };
       throw error;
     }
     await this.executions.advance(plan.id);
@@ -794,10 +800,11 @@ export class LeaderOrchestrator {
       case "get_command": {
         const { commandId, planId, goalId } = ToolArguments.get_command.parse(raw);
         if (!data.commandIds.includes(commandId)) {
-          const execution = planId ? await this.store.getExecution(planId) : await this.store.getLatestExecution(chatId);
+          const candidates = planId ? [await this.store.getExecution(planId)]
+            : [...await listChatActivePlans(this.store, chatId), await this.store.getLatestExecution(chatId)];
           const command = await this.store.getCommand(commandId);
-          const executionOwns = !!execution && execution.chatId === chatId && !!command && execution.plan.actions.some((_, index) =>
-            execution.attempts[index] && matchesExecutionCommand(execution, index, command));
+          const executionOwns = !!command && candidates.some(execution => !!execution && execution.chatId === chatId &&
+            execution.plan.actions.some((_, index) => execution.attempts[index] && matchesExecutionCommand(execution, index, command)));
           if (!executionOwns && !await this.goals.ownsCommand(chatId, commandId, goalId)) {
             sessionTitles.independent();
             return { error: "Command does not belong to this chat" };
@@ -810,7 +817,14 @@ export class LeaderOrchestrator {
       }
       case "get_plan_progress": {
         const { planId } = ToolArguments.get_plan_progress.parse(raw);
-        const id = planId ?? (await this.store.getLatestExecution(chatId))?.id;
+        const active = planId ? [] : await listChatActivePlans(this.store, chatId);
+        if (active.length > 1) {
+          const views = (await Promise.all(active.map(execution => this.executions.view(execution.id, chatId)))).flatMap(view => view ? [view] : []);
+          return { activePlans: views.map(view => ({ ...view,
+            steps: sessionTitles.focus(view.steps, (node, session) => this.hub.getNodeSession(node, session)?.title) })),
+          note: "本聊天有多个进行中计划；查询或取消单个计划时带上对应 planId" };
+        }
+        const id = planId ?? active[0]?.id ?? (await this.store.getLatestExecution(chatId))?.id;
         if (!id) { sessionTitles.independent(); return { plan: null }; }
         const view = await this.executions.view(id, chatId);
         if (!view) sessionTitles.independent();
@@ -845,7 +859,7 @@ export class LeaderOrchestrator {
         try { validatePlanDependencies({ actions }); }
         catch { return { error: "Invalid plan dependencies or result sources; resultFrom must select distinct direct earlier dependencies, and same-session tasks must form a chain" }; }
         const supplement = actions.length === 1 && actions[0].deliveryMode === "steer";
-        if (!supplement && (await this.store.getLatestExecution(chatId))?.status === "active") return { error: "An active plan already exists; query its progress or ask the user to cancel it" };
+        if (!supplement && (await listChatActivePlans(this.store, chatId)).length >= MAX_ACTIVE_PLANS_PER_CHAT) return { error: ACTIVE_PLAN_LIMIT_TEXT };
         if (!supplement && await this.goals.hasUnfinished(chatId)) return { error: "An active or blocked goal already exists; query its progress or cancel it" };
         const readiness = hasTerminalTarget({actions}) ? await waitForSendReadiness(this.hub, actions, {
           signal, now: this.now, timeoutMs: data.inflight!.expiresAt - this.now(),

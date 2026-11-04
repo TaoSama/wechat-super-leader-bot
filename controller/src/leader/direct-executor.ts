@@ -17,6 +17,7 @@ import { goalPreview } from "./goals/presentation.js";
 import type { GoalConversation } from "./goals/conversation.js";
 import type { ExecutionScheduler } from "./plans/scheduler.js";
 import { recoverSteerPlanCommand } from "./plans/steer.js";
+import { ambiguousCancellationText, cancelActivePlan } from "./plans/active.js";
 import { retainLeaderData } from "./persistence.js";
 import { SessionTitles } from "./queries/session-titles.js";
 import { sendSessionImages } from "./queries/session-images.js";
@@ -24,7 +25,7 @@ import type { MediaHub } from "../sessions/message-images.js";
 import type { Hub } from "./orchestrator.js";
 import { DirectToolRejectedError } from "./direct-errors.js";
 import { DirectToolJournal } from "./direct-journal.js";
-import { DIRECT_TOOL_INSTRUCTIONS, DirectAuthorizationSchema,
+import { CancelPlanArgumentsSchema, DIRECT_TOOL_INSTRUCTIONS, DirectAuthorizationSchema,
   type DirectCall, type DirectRequest, type DirectToolResult } from "./direct-contracts.js";
 import { goalConfirmation } from "./goals/conversation.js";
 import { traceSpan } from "../runtime/telemetry.js";
@@ -119,7 +120,7 @@ export class DirectToolExecutor {
 
   private validate(request: DirectCall) {
     const schemas = { ...ToolArguments, ...AUTOMATION_ARGUMENTS, ...BACKGROUND_ARGUMENTS,
-      confirm_pending: z.object({}).strict(), cancel_plan: z.object({}).strict(), cancel_goal: z.object({}).strict() };
+      confirm_pending: z.object({}).strict(), cancel_plan: CancelPlanArgumentsSchema, cancel_goal: z.object({}).strict() };
     const schema = schemas[request.name as keyof typeof schemas];
     if (!schema) throw new DirectToolRejectedError(400, "Unknown business tool");
     const parsed = schema.safeParse(request.arguments);
@@ -328,14 +329,15 @@ export class DirectToolExecutor {
         }
         result = reply;
       } else if (name === "cancel_goal" || name === "cancel_plan") {
-        z.object({}).strict().parse(request.arguments);
+        const { planId }: { planId?: string } = (name === "cancel_plan" ? CancelPlanArgumentsSchema : z.object({}).strict()).parse(request.arguments);
         await assertAuthority();
         if (name === "cancel_goal") { data.pendingGoal = undefined; reply = await o.goals.cancel(chatId); }
         else {
           data.pending = undefined;
-          const latest = await o.store.getLatestExecution(chatId);
-          const view = latest?.status === "active" ? await o.executions.cancel(latest.id, chatId) : null;
-          reply = { text: view ? "已取消计划后续派发，原会话当前执行未停止。" : "已取消待确认计划；没有活动计划。" };
+          const cancelled = await cancelActivePlan(o.store, o.executions, chatId, planId);
+          reply = { text: cancelled.kind === "cancelled" ? "已取消计划后续派发，原会话当前执行未停止。"
+            : cancelled.kind === "ambiguous" ? `已取消待确认计划。${ambiguousCancellationText(cancelled.plans)}`
+            : cancelled.kind === "missing" ? "已取消待确认计划；没有该ID的进行中计划，未停止其他计划。" : "已取消待确认计划；没有活动计划。" };
         }
         result = reply;
       } else if (name === "send_session_images") {

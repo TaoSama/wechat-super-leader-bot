@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { LeaderOrchestrator } from "../../src/leader/orchestrator.js";
 import { MemoryStore } from "../../src/store/memory.js";
 import { ExecutionScheduler } from "../../src/leader/plans/scheduler.js";
-import { CLAIM_TTL_MS, LeaderDataSchema, PLAN_TTL_MS } from "../../src/leader/contracts.js";
+import { CLAIM_TTL_MS, LeaderDataSchema, MAX_ACTIVE_PLANS_PER_CHAT, PLAN_TTL_MS } from "../../src/leader/contracts.js";
 import { selectSendRoute } from "../../src/sessions/send-eligibility.js";
 import type { LeaderModel, ModelMessage, ModelReply } from "../../src/leader/model/contracts.js";
 import type { CommandRecord, PostCommandRequest, ScopedSession, SendRoute } from "../../src/types.js";
@@ -490,16 +490,19 @@ describe("Leader orchestration", () => {
     expect(f.commands.submit).not.toHaveBeenCalled();
   });
 
-  it("rejects parallel writes to one session and additional plans while an execution is active", async () => {
+  it("rejects parallel writes to one session within a plan and plans beyond the per-chat cap", async () => {
     const f = fixture([tool("propose_plan", { actions: [...actions, ...actions] }), final("需要串行")]);
     await f.create().handle("chat", "duplicate", "同时执行");
     expect((await f.store.getLeaderState("chat"))?.data.pending).toBeUndefined();
-    await f.create(new ScriptedModel([tool("propose_plan", { actions })])).handle("chat", "valid", "生成计划");
-    await f.create().handle("chat", "confirm", "确认执行");
-    const more = new ScriptedModel([tool("propose_plan", { actions }), final("已有活动计划")]);
+    for (let index = 0; index < MAX_ACTIVE_PLANS_PER_CHAT; index++) {
+      await f.create(new ScriptedModel([tool("propose_plan", { actions })])).handle("chat", `valid-${index}`, `生成计划 ${index}`);
+      await f.create().handle("chat", `confirm-${index}`, "确认执行");
+    }
+    expect(await f.store.listActiveExecutions()).toHaveLength(MAX_ACTIVE_PLANS_PER_CHAT);
+    const more = new ScriptedModel([tool("propose_plan", { actions }), final("计划已达上限")]);
     await f.create(more).handle("chat", "more", "再安排一个");
-    expect(more.calls[1].find(message => message.role === "tool")?.content).toContain("active plan already exists");
-    expect(f.commands.submit).toHaveBeenCalledTimes(1);
+    expect(more.calls[1].find(message => message.role === "tool")?.content).toContain(`已有 ${MAX_ACTIVE_PLANS_PER_CHAT} 个进行中的计划，已达上限`);
+    expect(f.commands.submit).toHaveBeenCalledTimes(MAX_ACTIVE_PLANS_PER_CHAT);
   });
 
   it("shares a concurrent duplicate request but rejects conflicting or competing messages", async () => {

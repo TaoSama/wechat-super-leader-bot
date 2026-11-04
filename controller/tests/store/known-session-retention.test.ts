@@ -306,7 +306,7 @@ suite(`${backend} known-session retention`, { timeout: 30_000 }, () => {
       expect(await store.getKnownSession(NODE, imported.id)).toEqual(imported);
       expect((await pool!.query("SELECT count(*) FROM known_sessions WHERE observed_order>0")).rows[0].count).toBe("2");
       expect(await store.getCommand(queued.commandId)).toMatchObject({ status: "queued", prompt: queued.prompt });
-      expect((await pool!.query("SELECT version FROM controller_schema_migrations ORDER BY version")).rows).toEqual([{ version: 1 }, { version: 2 }]);
+      expect((await pool!.query("SELECT version FROM controller_schema_migrations ORDER BY version")).rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
       expect((await pool!.query("SELECT count(*) FROM node_sessions")).rows[0].count).toBe("0");
       await store.init();
       expect(await store.getKnownSession(NODE, imported.id)).toEqual(imported);
