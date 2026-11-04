@@ -7,6 +7,7 @@ import type { useSessionHistory } from "../useSessionHistory";
 import { SessionDetails } from "./SessionDetails";
 import { ExecutionTimeline } from "../execution-timeline";
 import { hasWechatHistorySource } from "../history-contract";
+import { CLAUDE_CODE_PROVIDER_LABEL, isClaudeCodeSession } from "../claude-session";
 
 interface Props {
   session: ScopedSession;
@@ -31,6 +32,7 @@ export function SessionInfo({ session, model, connected, terminal, now, blockRea
     ["推理强度", model.reasoningEffort || "未报告"],
     ["模型来源", modelSourceLabel(model.source)],
     ["模型观测时间", model.observedAt ? formatTimestamp(model.observedAt) : "未报告"],
+    ...(isClaudeCodeSession(session) ? [["会话来源", CLAUDE_CODE_PROVIDER_LABEL]] : []),
     ["会话 ID", session.id],
     ["最近更新", formatTimestamp(session.updatedAt || session.observedAt)],
   ];

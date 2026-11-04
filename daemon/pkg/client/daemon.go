@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/claude"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex"
 	codexdesktop "github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex/desktop"
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/codex/rollout"
@@ -70,6 +71,9 @@ type Daemon struct {
 	historyContexts    *historyContexts
 	historyRequests    *historyRequests
 	mediaState         *mediaState
+	claude             *claude.Adapter
+	claudeSnapshot     []protocol.Session
+	claudeWatchers     sync.WaitGroup
 }
 
 func NewDaemon(cfg *config.Config, adapter codex.SessionAdapter) *Daemon {
@@ -96,6 +100,7 @@ func NewDaemon(cfg *config.Config, adapter codex.SessionAdapter) *Daemon {
 		d.desktopController = codexdesktop.NewDesktopController(cfg.DesktopSocketPath)
 		d.desktopHistory = codexdesktop.NewDesktopHistoryReader(cfg.DesktopSocketPath)
 	}
+	d.configureClaude()
 	if cfg.CodexHome != "" {
 		d.sessionCatalog = rollout.NewRolloutCatalog(cfg.CodexHome)
 	}

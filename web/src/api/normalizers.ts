@@ -135,7 +135,7 @@ export function normalizeCommand(raw: unknown): CommandRecord | null {
     error: typeof obj.error === "string" ? obj.error : undefined,
     turnId: typeof obj.turnId === "string" ? obj.turnId : undefined,
     ...(expectedTurnId ? { expectedTurnId } : {}),
-    sendRoute: obj.sendRoute === "desktop-owner" || obj.sendRoute === "control-socket" || obj.sendRoute === "app-server-resume" || obj.sendRoute === "terminal-pane" ? obj.sendRoute : undefined,
+    sendRoute: obj.sendRoute === "desktop-owner" || obj.sendRoute === "control-socket" || obj.sendRoute === "app-server-resume" || obj.sendRoute === "terminal-pane" || obj.sendRoute === "claude-resume" ? obj.sendRoute : undefined,
     inputReceipt,
     expiresAt: typeof obj.expiresAt === "string" ? obj.expiresAt : "",
     createdAt: typeof obj.createdAt === "string" ? obj.createdAt : "",

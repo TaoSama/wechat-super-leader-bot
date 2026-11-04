@@ -7,13 +7,14 @@ import { NodeHub } from "../nodes/hub.js";
 import { HistoryError } from "../sessions/history.js";
 import { INTERRUPT_RESULT_WAIT_MS } from "../sessions/turn-interrupt.js";
 import { TERMINAL_SESSION_ID_PATTERN } from "../sessions/terminal.js";
+import { CLAUDE_SESSION_ID_PATTERN } from "../sessions/claude.js";
 import { DeliveryModeSchema, PostCommandRequestSchema, SessionHistorySchema, TurnIdSchema, type CommandAuthority } from "../types.js";
 import { GatewaySettingsClient, SettingsHttpError } from "../settings/gateway-client.js";
 import { makeWechatSession, normalizeHistoryContext, WECHAT_NODE_ID, wechatSessionId } from "../sessions/wechat-history.js";
 
 const TargetSchema = z.object({
   nodeId: PostCommandRequestSchema.shape.nodeId,
-  sessionId: z.string().min(1).max(64).refine(value => /^[A-Za-z0-9_-]+$/.test(value) || TERMINAL_SESSION_ID_PATTERN.test(value)),
+  sessionId: z.string().min(1).max(64).refine(value => /^[A-Za-z0-9_-]+$/.test(value) || TERMINAL_SESSION_ID_PATTERN.test(value) || CLAUDE_SESSION_ID_PATTERN.test(value)),
 });
 const HistoryQuerySchema = z.object({
   source: z.enum(["control-socket", "wechat-codex"]).optional(),

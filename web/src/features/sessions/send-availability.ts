@@ -2,6 +2,7 @@ import type { ScopedSession, SendAvailability, SendRoute } from "../../types";
 import { isDesktopObservationFresh, isIsoTimestamp, normalizeDesktopObservation } from "./session-observation";
 import { isTerminalSession, TERMINAL_READ_ONLY_REASON } from "./terminal-session";
 import { TERMINAL_SESSION_ID } from "./input-receipt";
+import { CLAUDE_SESSION_ID, isClaudeCodeSession, isClaudeSessionId } from "./claude-session";
 
 export const MAX_SEND_AVAILABILITY_AGE_MS = 45_000;
 const AVAILABILITY_KEYS = new Set(["route", "state", "observedAt", "validUntil", "reason"]);
@@ -12,7 +13,7 @@ const KNOWN_SESSION_STATES = new Set(["idle", "active", "busy", "running", "notL
 
 export function isSessionMessageTarget(session: ScopedSession): boolean {
   return typeof session.nodeId === "string" && session.nodeId.length > 0 && session.nodeId.length <= MAX_NODE_ID_LENGTH &&
-    (isTerminalSession(session) ? TERMINAL_SESSION_ID.test(session.id) : SESSION_ID.test(session.id));
+    (isTerminalSession(session) ? TERMINAL_SESSION_ID.test(session.id) : isClaudeSessionId(session.id) ? CLAUDE_SESSION_ID.test(session.id) : SESSION_ID.test(session.id));
 }
 
 // Queue admission proves target identity and capability, never current dispatch authority.
@@ -20,6 +21,7 @@ export function canQueueSession(session: ScopedSession, connected: boolean, now 
   if (isTerminalSession(session) || !isSessionMessageTarget(session) || !Number.isFinite(now)) return false;
   const observed = (timestamp: unknown) => isIsoTimestamp(timestamp) && Date.parse(timestamp) <= now &&
     (!connected || now - Date.parse(timestamp) <= MAX_SEND_AVAILABILITY_AGE_MS);
+  if (isClaudeSessionId(session.id)) return isClaudeCodeSession(session) && session.capabilities.includes("resume-send") && observed(session.observedAt);
   if (session.desktopObservation !== undefined) {
     const desktop = normalizeDesktopObservation(session.desktopObservation);
     if (!desktop || desktop.status === "unknown" || !observed(desktop.observedAt) ||
@@ -98,6 +100,7 @@ export function canResumeSession(session: ScopedSession, now = Date.now()): bool
 }
 
 export function sessionSendBlockReason(session: ScopedSession, now = Date.now()): string | null {
+  if (isClaudeSessionId(session.id)) return claudeSendBlockReason(session, now);
   if (canResumeSession(session, now)) return null;
   const terminal = isTerminalSession(session);
   const availability = normalizeSendAvailability(session.sendAvailability);
@@ -129,7 +132,16 @@ export function sessionSendBlockReason(session: ScopedSession, now = Date.now())
   return null;
 }
 
+function claudeSendBlockReason(session: ScopedSession, now: number): string | null {
+  if (!isClaudeCodeSession(session) || !session.capabilities.includes("resume-send")) return "Claude Code 会话仅支持读取";
+  if (session.status !== "idle") return "Claude Code 会话正在使用或刚有活动，请稍后发送";
+  const observedAt = isIsoTimestamp(session.observedAt) ? Date.parse(session.observedAt) : NaN;
+  if (!Number.isFinite(now) || !Number.isFinite(observedAt) || observedAt > now || now - observedAt > MAX_SEND_AVAILABILITY_AGE_MS) return "会话状态待更新，暂不可发送";
+  return null;
+}
+
 export function sendRouteLabel(route: SendRoute): string {
+  if (route === "claude-resume") return "恢复原 Claude Code 会话（单轮无交互）";
   return route === "terminal-pane" ? "原终端输入（非原子）" : route === "desktop-owner" ? "原桌面会话" :
     route === "app-server-resume" ? "按需恢复原会话（执行时检查占用）" : "宿主控制接口";
 }

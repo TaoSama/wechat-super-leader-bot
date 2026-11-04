@@ -38,7 +38,7 @@ export interface DesktopObservation {
   reasoningEffort?: string;
 }
 
-export type SendRoute = "control-socket" | "desktop-owner" | "app-server-resume" | "terminal-pane";
+export type SendRoute = "control-socket" | "desktop-owner" | "app-server-resume" | "terminal-pane" | "claude-resume";
 interface SendAvailabilityFields {
   state: "ready" | "blocked" | "unavailable";
   observedAt: string;
@@ -90,7 +90,7 @@ export interface HistoryItem {
   truncated?: boolean;
 }
 
-export type HistorySource = "control-socket" | "codex-desktop" | "terminal-transcript" | "wechat-codex";
+export type HistorySource = "control-socket" | "codex-desktop" | "terminal-transcript" | "wechat-codex" | "claude-transcript";
 
 export interface SessionHistory {
   session: ScopedSession;

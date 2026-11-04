@@ -66,6 +66,7 @@ node gateway/dist/index.js --run
 
 - `.runtime/` 下的配置、Daemon 状态、微信账号和 Gateway 状态均为私有数据，不入库。
 - Daemon 默认只读；发送需显式配置 desktop socket 或 CLI 终端。owner 不符或失联时降级为只读，不创建替代会话。
+- 已有 Claude Code 会话默认关闭；Daemon 传 `--claude-projects-root <配置目录>/projects` 启用（可选 `--claude-path`、`--claude-permission-mode`，默认 `dontAsk`），仅续写近期无活动的会话。
 
 ## 部署
 

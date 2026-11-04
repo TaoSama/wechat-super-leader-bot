@@ -17,6 +17,7 @@ const SOURCE_LABELS: Record<HistorySource, string> = {
   "codex-desktop": "远端会话历史",
   "terminal-transcript": "终端记录",
   "wechat-codex": "主微信 Codex 历史",
+  "claude-transcript": "Claude Code 记录",
 };
 
 const STATUS_LABELS: Record<NonNullable<HistoryTurn["status"]>, string> = {

@@ -47,7 +47,7 @@ async function pgQueueUnsentCommand(pool: pg.Pool, map: Mapper, id: string, stat
   const result = await pool.query(`UPDATE commands SET status='queued',updated_at=NOW()
     WHERE command_id=$1 AND status=$2 AND action='send' AND authority IS NOT NULL
       AND ($2='admitting' OR authority->>'type' IN ('automation','plan'))
-      AND send_route IN ('control-socket','app-server-resume','desktop-owner')
+      AND send_route IN ('control-socket','app-server-resume','desktop-owner','claude-resume')
       AND turn_id IS NULL AND input_receipt IS NULL AND expires_at>NOW() RETURNING *`, [id,status]);
   return result.rows[0] ? map(result.rows[0]) : null;
 }
