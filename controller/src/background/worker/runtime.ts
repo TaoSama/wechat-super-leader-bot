@@ -2,7 +2,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { WorkerInput, WorkerInspectOptions, WorkerRuntime, WorkerRuntimeOptions, WorkerRuntimeStatus } from "./contracts.js";
 import { WorkerStorage, alive, hash, readJson, validId, writeJson, type Receipt } from "./storage.js";
-import { CodexCliExecutor, WorkerExecutionFailure } from "./executor.js";
+import { CodexCliExecutor } from "./executor.js";
+import { WorkerExecutionFailure } from "./process.js";
 import { outputSchema, parseOutput, workerPrompt } from "./output.js";
 import { exportWorkerArtifacts } from "./artifacts.js";
 

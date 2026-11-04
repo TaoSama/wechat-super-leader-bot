@@ -1,38 +1,18 @@
-import { spawn } from "node:child_process";
-import { accessSync, constants, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import * as path from "node:path";
 import type { WorkerExecutionRequest, WorkerExecutor, WorkerRuntimeOptions } from "./contracts.js";
+import { executable, runWorkerProcess, workerEnvironment } from "./process.js";
 
-const MAX_STREAM_BYTES = 16 * 1024 * 1024;
-const KILL_GRACE_MS = 3000;
-const HARD_STOP_MS = KILL_GRACE_MS + 1000;
 const DOCS_STARTUP_TIMEOUT_SECONDS = 10;
 const DOCS_TOOL_TIMEOUT_SECONDS = 30;
 const HEADLESS_SKILLS_ROOT = "/etc/codex/skills";
-const ENV_ALLOWLIST = ["PATH", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"] as const;
-
-export class WorkerExecutionFailure extends Error {
-  constructor(message: string, readonly processCleanupUnverified = false) { super(message); }
-}
-
-function executable(command: string): string {
-  const candidates = command.includes(path.sep) ? [command]
-    : (process.env.PATH ?? "").split(path.delimiter).map(dir => path.join(dir, command));
-  for (const candidate of candidates) {
-    try { accessSync(candidate, constants.X_OK); return realpathSync(candidate); }
-    catch (error) {
-      if (!["ENOENT", "EACCES", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
-    }
-  }
-  throw new Error("Configured Codex executable is unavailable");
-}
 
 export class CodexCliExecutor implements WorkerExecutor {
   constructor(private readonly options: WorkerRuntimeOptions) {}
 
   async execute(request: WorkerExecutionRequest): Promise<string> {
     if (request.signal.aborted) throw new Error("Worker execution cancelled before launch");
-    const command = executable(this.options.codexPath ?? "codex");
+    const command = executable(this.options.codexPath ?? "codex", "Codex");
     const nodePath = realpathSync(process.execPath);
     const shellPath = [path.dirname(nodePath), "/usr/local/bin", "/usr/bin", "/bin"].join(path.delimiter);
     const nodeLibraries = process.platform === "darwin"
@@ -77,84 +57,20 @@ export class CodexCliExecutor implements WorkerExecutor {
       "--model", request.model ?? this.options.model, "--output-schema", request.schemaPath,
       ...config.flatMap(value => ["--config", value]),
       ...(request.threadId ? ["resume", request.threadId] : []), "-"];
-    const env: NodeJS.ProcessEnv = { HOME: request.workspace, CODEX_HOME: request.home };
-    for (const key of ENV_ALLOWLIST) if (process.env[key] !== undefined) env[key] = process.env[key];
+    const env = workerEnvironment({ HOME: request.workspace, CODEX_HOME: request.home });
     if (this.options.apiKey) env.CODEX_API_KEY = this.options.apiKey;
-    return new Promise<string>((resolve, reject) => {
-      const child = spawn(command, args, { cwd: request.workspace, env, detached: process.platform !== "win32",
-        stdio: ["pipe", "pipe", "pipe"] });
-      let remaining = "";
-      let bytes = 0;
-      let output = "";
-      let completed = false;
-      let failure: Error | undefined;
-      let callbacks = Promise.resolve();
-      let killTimer: ReturnType<typeof setTimeout> | undefined;
-      let hardTimer: ReturnType<typeof setTimeout> | undefined;
-      let settled = false;
-      const kill = (signal: NodeJS.Signals) => {
-        if (!child.pid) return;
-        try { process.kill(process.platform === "win32" ? child.pid : -child.pid, signal); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") failure = new Error("Unable to stop worker process"); }
-      };
-      const stop = () => {
-        kill("SIGTERM");
-        killTimer ??= setTimeout(() => kill("SIGKILL"), KILL_GRACE_MS);
-        hardTimer ??= setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          request.signal.removeEventListener("abort", stop);
-          child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy();
-          reject(new WorkerExecutionFailure("Worker descendants could not be confirmed stopped", true));
-        }, HARD_STOP_MS);
-      };
-      const fail = (message: string) => { failure ??= new Error(message); stop(); };
-      const line = (raw: string) => {
-        if (!raw.trim()) return;
-        try {
-          const event = JSON.parse(raw) as Record<string, any>;
-          if (event.type === "thread.started") callbacks = callbacks.then(() => request.onThread(event.thread_id))
-            .catch(() => fail("Unable to persist worker thread identity"));
-          if (event.type === "item.completed" && event.item?.type === "agent_message") output = event.item.text;
-          if (event.type === "turn.completed") completed = true;
-          if (event.type === "turn.failed" || event.type === "error") fail("Codex reported a failed worker turn");
-        } catch { fail("Codex emitted an invalid event"); }
-      };
-      child.stdout.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => {
-        bytes += Buffer.byteLength(chunk);
-        if (bytes > MAX_STREAM_BYTES) { fail("Worker output exceeded its budget"); return; }
-        remaining += chunk;
-        let boundary: number;
-        while ((boundary = remaining.indexOf("\n")) >= 0) {
-          line(remaining.slice(0, boundary)); remaining = remaining.slice(boundary + 1);
-        }
-      });
-      child.stderr.on("data", () => { /* Drain diagnostics; never propagate secrets from provider errors. */ });
-      child.stdin.on("error", () => fail("Codex closed its input unexpectedly"));
-      child.once("error", () => fail("Codex worker process could not start"));
-      child.once("exit", stop);
-      child.once("close", async code => {
-        request.signal.removeEventListener("abort", stop);
-        if (killTimer) clearTimeout(killTimer);
-        if (hardTimer) clearTimeout(hardTimer);
-        if (settled) return;
-        settled = true;
-        // A completed turn must not leave ordinary shell descendants running in
-        // its process group after the workspace becomes eligible for cleanup.
-        kill("SIGKILL");
-        line(remaining);
-        try {
-          await callbacks;
-          if (request.signal.aborted) throw new Error("Worker execution interrupted; effects must be checked before retrying");
-          if (failure) throw failure;
-          if (code !== 0 || !completed || !output.trim()) throw new Error("Worker ended without a verified complete turn");
-          resolve(output);
-        } catch (error) { reject(error); }
-      });
-      request.signal.addEventListener("abort", stop, { once: true });
-      if (request.signal.aborted) stop();
-      if (child.pid) request.onProcess(child.pid).then(() => child.stdin.end(request.prompt), () => fail("Unable to persist worker launch receipt"));
-    });
+    let output = "";
+    let completed = false;
+    return runWorkerProcess(request, { label: "Codex", command, args, env,
+      onEvent: (event, context) => {
+        if (event.type === "thread.started") context.thread(event.thread_id);
+        if (event.type === "item.completed" && event.item?.type === "agent_message") output = event.item.text;
+        if (event.type === "turn.completed") completed = true;
+        if (event.type === "turn.failed" || event.type === "error") context.fail("Codex reported a failed worker turn");
+      },
+      finish: code => {
+        if (code !== 0 || !completed || !output.trim()) throw new Error("Worker ended without a verified complete turn");
+        return output;
+      } });
   }
 }

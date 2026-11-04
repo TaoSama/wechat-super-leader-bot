@@ -33,4 +33,22 @@ describe("background execution configuration", () => {
     expect(() => loadBackgroundConfig({ ...env, BACKGROUND_WORKER_ROOT: "/data/other/workers" }, provider,
       "/data/controller-runtime")).toThrow(/inside CONTROLLER_DATA_ROOT/);
   });
+  it("defaults to Codex and validates the opt-in Claude executor", () => {
+    expect(loadBackgroundConfig(env, provider)).toMatchObject({ executorKind: "codex" });
+    expect(loadBackgroundConfig(env, provider)?.claude).toBeUndefined();
+    expect(() => loadBackgroundConfig({ ...env, BACKGROUND_EXECUTOR: "gemini" }, provider)).toThrow(/BACKGROUND_EXECUTOR.*codex, claude/);
+    expect(() => loadBackgroundConfig({ ...env, BACKGROUND_EXECUTOR: "claude" }, provider))
+      .toThrow(/BACKGROUND_CLAUDE_API_KEY or BACKGROUND_CLAUDE_OAUTH_TOKEN/);
+    expect(() => loadBackgroundConfig({ ...env, BACKGROUND_EXECUTOR: "claude", BACKGROUND_CLAUDE_API_KEY: "a",
+      BACKGROUND_CLAUDE_OAUTH_TOKEN: "b" }, provider)).toThrow(/only one/);
+    const claude = loadBackgroundConfig({ ...env, BACKGROUND_EXECUTOR: "claude", BACKGROUND_CLAUDE_OAUTH_TOKEN: " token ",
+      BACKGROUND_CLAUDE_MODEL: "opus" });
+    expect(claude).toMatchObject({ executorKind: "claude", model: "opus", baseUrl: "", apiKey: "",
+      claude: { path: "claude", model: "opus", oauthToken: "token" } });
+    expect(claude?.claude?.apiKey).toBeUndefined();
+    const fallback = loadBackgroundConfig({ ...env, BACKGROUND_EXECUTOR: "claude", BACKGROUND_CLAUDE_API_KEY: "key",
+      BACKGROUND_CLAUDE_PATH: "/opt/claude" }, provider);
+    expect(fallback).toMatchObject({ model: "claude-cli-default", apiKey: "", claude: { path: "/opt/claude", apiKey: "key" } });
+    expect(fallback?.claude?.model).toBeUndefined();
+  });
 });

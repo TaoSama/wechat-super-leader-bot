@@ -32,6 +32,7 @@ flowchart TB
 - 会话忙或离线时排队，恢复后按序投递，未发送内容可取消。
 - 状态不明时保留原记录，不换 ID 重发。
 - 后台定时任务的汇报格式可通过 `update_automation` 更新，仅影响后续轮次，详见 [docs/automation-prompt-updates.md](docs/automation-prompt-updates.md)。
+- 后台任务默认由 Codex 执行；设置 `BACKGROUND_EXECUTOR=claude` 可改用 Claude Code（opt-in，生产启用前见 [docs/production-deployment.md](docs/production-deployment.md#claude-code-后台执行器opt-in)）。
 
 ## 控制台
 
