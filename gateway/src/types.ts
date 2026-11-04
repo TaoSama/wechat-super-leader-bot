@@ -24,7 +24,7 @@ export interface GatewaySyncState {
   delivery_outbox?: Record<string, DeliveryOutboxItem>;
 }
 
-export type DeliveryOutboxSource = "controller" | "engine" | "codex-conflict";
+export type DeliveryOutboxSource = "controller" | "engine" | "codex-conflict" | "unsupported-media";
 
 export interface DeliveryOutboxItem {
   kind: "reply" | "notification";
@@ -55,13 +55,18 @@ export interface ReplyDeliveryState {
   renewalRejected?: true;
 }
 
+export type UnsupportedInboundKind = "image" | "file" | "video" | "voice" | "unknown";
+
 export interface InboundWeChatMessage {
   chatId: string;
+  /** Empty only when unsupportedKinds is present. */
   text: string;
   messageId: string;
   deliveryKey: string;
   contextToken?: string;
   createdAtMs?: number;
+  /** Content the gateway cannot forward yet; the sender gets a fixed notice instead of a leader reply. */
+  unsupportedKinds?: UnsupportedInboundKind[];
 }
 
 export interface ControllerMessageRequest {

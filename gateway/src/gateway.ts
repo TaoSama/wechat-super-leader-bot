@@ -30,6 +30,7 @@ import { QueryProgress, MAX_PROGRESS_CHARS, type ProgressSink } from "./leader/p
 import { rememberNotificationStage } from "./runtime/request-diagnostics.js";
 import { NotificationCycleDiagnostics } from "./runtime/notification-diagnostics.js";
 
+export const UNSUPPORTED_MEDIA_REPLY = "目前只支持文字和语音消息，图片、文件、视频等内容暂时无法处理，请改用文字描述。";
 const MIN_NOTIFICATION_INTERVAL_MS = 1;
 const NOTIFICATION_INTEREST_CACHE_MS = 30_000;
 
@@ -109,6 +110,8 @@ export class WeChatGateway {
     this.inboundRunner = new InboundRunner({ inbox: this.inbox,
       process: msg => runWithTrace(createMessageTrace(msg.chatId, msg.messageId), async () => { await this.processMessage(msg); }),
       steer: async msg => {
+        // Unsupported content waits for the running turn and then gets its own notice.
+        if (msg.unsupportedKinds?.length) return false;
         await this.queryStarts.get(msg.chatId);
         return this.replyEngine?.steer?.(this.stateManager.account!.accountId,
           { chatId: msg.chatId, messageId: msg.messageId, text: msg.text }, this.controller) ?? false;
@@ -361,6 +364,18 @@ export class WeChatGateway {
         // The new inbound may have restored the budget needed to drain a full queue.
         await this.flushRepliesOnce(undefined, msg.chatId);
         this.stateManager.assertOutboxCapacity(msg.deliveryKey);
+      }
+      if (msg.unsupportedKinds?.length) {
+        ready();
+        traceEvent("message.unsupported", { reason: msg.unsupportedKinds.join(",") });
+        // The fixed notice is durable like any reply, so restart recovery resends it without duplicates.
+        this.stateManager.putOutbox({ kind: "reply", source: "unsupported-media", chatId: msg.chatId, messageId: msg.messageId,
+          deliveryKey: msg.deliveryKey, splitMaxChars: this.splitMaxChars, status: "pending" });
+        this.stateManager.recordProcessedMessageKey(msg.deliveryKey, { preserveReplyEvidence: true });
+        await this.deliverReply(this.stateManager.outbox[msg.deliveryKey], { text: UNSUPPORTED_MEDIA_REPLY });
+        outcome = "processed";
+        this.healthTracker?.recordMessageProgress();
+        return outcome;
       }
       this.ilink.sendTyping(msg.chatId);
       const request = { chatId: msg.chatId, messageId: msg.messageId, text: msg.text };
@@ -633,6 +648,7 @@ export class WeChatGateway {
 
   private async getFrozenReply(item: DeliveryOutboxItem): Promise<ControllerMessageResponse> {
     if (item.source === "codex-conflict") return { text: CONFLICT_REPLY };
+    if (item.source === "unsupported-media") return { text: UNSUPPORTED_MEDIA_REPLY };
     if (item.source === "engine") {
       if (!this.replyEngine) throw new ReplyEngineUnavailableError();
       return this.replyEngine.getReply(this.stateManager.account!.accountId, item.chatId, item.messageId, this.controller);

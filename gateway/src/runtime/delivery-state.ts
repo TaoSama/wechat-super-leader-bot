@@ -5,7 +5,7 @@ import { restoreAccountContext, type AccountSendBudget, type ChatContextWindow }
 const MAX_SAME_TIMESTAMP_KEYS = 256;
 export const MAX_INBOUND_CLOCK_SKEW_MS = 30_000;
 const OUTBOX_STATUSES = new Set(["pending", "claiming", "claimed", "defer", "receipt", "uncertain", "expired"]);
-const OUTBOX_SOURCES = new Set<DeliveryOutboxSource>(["controller", "engine", "codex-conflict"]);
+const OUTBOX_SOURCES = new Set<DeliveryOutboxSource>(["controller", "engine", "codex-conflict", "unsupported-media"]);
 const NOTIFICATION_IDENTITY = /^[0-9a-f]{64}$/;
 
 function outboxSource(source: unknown): DeliveryOutboxSource {

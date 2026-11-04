@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { InboundWeChatMessage } from "../types.js";
+import type { InboundWeChatMessage, UnsupportedInboundKind } from "../types.js";
 import { OutboxBackpressureError } from "./delivery-state.js";
 import { resolvePath, writePrivateJsonSync } from "./state.js";
 
@@ -13,7 +13,8 @@ const MAX_ITEMS = 10_000;
 const LOCK_WAIT_TIMEOUT_MS = 10_000;
 const LOCK_RETRY_DELAY_MS = 10;
 const LOCK_STALE_AFTER_MS = 60_000;
-const MESSAGE_FIELDS = new Set(["chatId", "text", "messageId", "deliveryKey", "contextToken", "createdAtMs"]);
+const MESSAGE_FIELDS = new Set(["chatId", "text", "messageId", "deliveryKey", "contextToken", "createdAtMs", "unsupportedKinds"]);
+const UNSUPPORTED_KINDS = new Set<UnsupportedInboundKind>(["image", "file", "video", "voice", "unknown"]);
 const STATE_FIELDS = new Set(["version", "fingerprint", "items"]);
 
 export class InboxConflictError extends Error {
@@ -33,10 +34,21 @@ function string(value: unknown, maxBytes: number): string {
   return value;
 }
 
+function unsupportedKinds(value: unknown): UnsupportedInboundKind[] {
+  if (!Array.isArray(value) || !value.length || new Set(value).size !== value.length ||
+      value.some(kind => !UNSUPPORTED_KINDS.has(kind as UnsupportedInboundKind))) {
+    throw new Error("Invalid inbound inbox unsupported kinds");
+  }
+  return [...value] as UnsupportedInboundKind[];
+}
+
 function message(value: unknown): InboundWeChatMessage {
   const raw = object(value, MESSAGE_FIELDS);
+  // Unsupported content carries no text; every other message must keep its full text.
+  const kinds = raw.unsupportedKinds === undefined ? undefined : unsupportedKinds(raw.unsupportedKinds);
+  if (kinds && raw.text !== "") throw new Error("Invalid inbound inbox string");
   const result: InboundWeChatMessage = {
-    chatId: string(raw.chatId, ID_MAX_BYTES), text: string(raw.text, INBOUND_INBOX_TEXT_MAX_BYTES),
+    chatId: string(raw.chatId, ID_MAX_BYTES), text: kinds ? "" : string(raw.text, INBOUND_INBOX_TEXT_MAX_BYTES),
     messageId: string(raw.messageId, ID_MAX_BYTES), deliveryKey: string(raw.deliveryKey, ID_MAX_BYTES),
   };
   if (raw.contextToken !== undefined) result.contextToken = string(raw.contextToken, CONTEXT_MAX_BYTES);
@@ -44,6 +56,7 @@ function message(value: unknown): InboundWeChatMessage {
     if (!Number.isSafeInteger(raw.createdAtMs) || (raw.createdAtMs as number) < 0) throw new Error("Invalid inbound inbox timestamp");
     result.createdAtMs = raw.createdAtMs as number;
   }
+  if (kinds) result.unsupportedKinds = kinds;
   return result;
 }
 
