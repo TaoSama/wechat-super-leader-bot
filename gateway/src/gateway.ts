@@ -3,6 +3,7 @@ import { performance } from "node:perf_hooks";
 import { createMessageTrace, currentTrace, runWithTrace, traceEvent, traceSpan } from "./runtime/telemetry.js";
 import { StateManager } from "./runtime/state.js";
 import { ILinkClient } from "./wechat/client.js";
+import { isRejectedSendReceipt } from "./wechat/send-receipt.js";
 import { ControllerClient, ChatNotAllowedError } from "./controller/client.js";
 import { PermanentImageDownloadError } from "./controller/image-client.js";
 import { PermanentReplyUnavailableError } from "./controller/reply-client.js";
@@ -525,6 +526,15 @@ export class WeChatGateway {
         if (error instanceof PermanentImageDownloadError) {
           this.stateManager.recordReplyFailure(`image-reply:${item.deliveryKey}`, error.reason);
           receiptStatus = "expired";
+          this.stateManager.updateOutbox(item.deliveryKey, { status: "expired" });
+          await this.ackEngineReply(item, "expired");
+          return;
+        }
+        if (isRejectedSendReceipt(error) && !this.hasQuarantinedInboundReply(item.deliveryKey) &&
+            (this.stateManager.hasExhaustedReplyRejections(item.deliveryKey) ||
+             this.stateManager.hasExhaustedReplyRejections(`image-reply:${item.deliveryKey}`))) {
+          // A persistently refused reply becomes terminal so retries cannot drain the shared send budget.
+          receiptStatus = "rejected";
           this.stateManager.updateOutbox(item.deliveryKey, { status: "expired" });
           await this.ackEngineReply(item, "expired");
           return;
