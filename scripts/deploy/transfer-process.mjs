@@ -13,6 +13,7 @@ export function errorCategory(result) {
   if (result.code === 73) return 'stage_ownership';
   if (result.code === 74) return 'integrity';
   if (result.code === 75) return 'unexpected_stage_files';
+  if (result.code === 77) return 'activation_state';
   const text = result.stderr ?? '';
   for (const [pattern, category] of [
     [/Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED/i, 'host_key'],

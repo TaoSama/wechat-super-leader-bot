@@ -240,6 +240,8 @@ async function lifecycle(mode) {
     if (operation === 'create') return { owned: true };
     if (operation === 'status') return { bytes: files.map(file => file.bytes) };
     if (operation === 'verify') return { verified: true };
+    if (operation === 'activate') return { started: true };
+    if (operation === 'activation') return { exit_code: 0, output: '' };
     assert.equal(operation, 'cleanup');
     return { cleanup: 'confirmed' };
   };
@@ -294,7 +296,7 @@ for (const [mode, category] of [['missing', 'ss_missing'], ['timeout', 'ss_timeo
     assert.equal(result.childrenActive, 0);
     assert.equal(result.gateCalls, 1);
     assert.equal(result.activationStarted, true);
-    assert.deepEqual(result.remoteOperations, ['create', 'status', 'status', 'verify', 'cleanup']);
+    assert.deepEqual(result.remoteOperations, ['create', 'status', 'status', 'verify', 'activate', 'activation', 'cleanup']);
     assert.ok(result.logs.some(event => event.event === 'sender_telemetry' && event.category === category));
     assert.ok(result.logs.some(event => event.event === 'release_complete' && event.children_active === 0));
     assert.ok(result.logs.some(event => event.event === 'cleanup_state' && event.cleanup === 'confirmed'));

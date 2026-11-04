@@ -1,17 +1,22 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
+import { ACTIVATION_LOG, ACTIVATION_STATUS, REMOTE_FILES } from '../../../scripts/deploy/transfer-files.mjs';
 
 const REVISION = 'a'.repeat(40);
 const SCRIPT = fileURLToPath(new URL('../../../scripts/deploy/remote-release.sh', import.meta.url));
 const RELEASE_ENV = `CONTROLLER_IMAGE=super-leader-controller:${REVISION}\n` +
   `GATEWAY_IMAGE=super-leader-gateway:${REVISION}\nGATEWAY_CONTEXT_WINDOW_MS=82800000\n`;
 const PREVIOUS_ENV = RELEASE_ENV.replaceAll(REVISION, 'b'.repeat(40));
+const OWNER = 'synthetic-owner';
+const STATUS_WAIT_MS = 10_000;
+const POLL_MS = 50;
 
 function releaseFixture() {
   const root = mkdtempSync(join(tmpdir(), 'release-idempotency-'));
@@ -36,6 +41,11 @@ const revision = process.env.TEST_RELEASE_REVISION;
 if (args[0] === 'compose') {
   const ps = args.indexOf('ps');
   if (ps !== -1) console.log(args.at(-1));
+  if (args.includes('--force-recreate') && process.env.TEST_RECREATE_MS) {
+    // Block like a long stop_grace_period, then write to stderr as Compose does.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.TEST_RECREATE_MS));
+    console.error('Container super-leader-gateway Recreated');
+  }
 } else if (args[0] === 'inspect' || (args[0] === 'image' && args[1] === 'inspect')) {
   const format = args[args.indexOf('--format') + 1];
   const service = args.at(-1);
@@ -58,7 +68,8 @@ if (args[0] === 'compose') {
     '--checksums', join(stage, 'release.sha256'), '--compose-overlay', join(stage, 'compose.release.yaml'),
     '--compose-base', join(stage, 'compose.yaml'), '--compose-production', join(stage, 'compose.production.yaml'),
     '--compose-gateway', join(stage, 'compose.gateway.yaml'), '--seccomp-policy', join(stage, 'codex-seccomp.json')];
-  return { root, run(overrides = {}) {
+  return { root, stage, args: args.slice(), env: overrides => ({ ...process.env, PATH: `${bin}:${process.env.PATH}`,
+    TEST_RELEASE_REVISION: REVISION, RELEASE_COMMAND_LOG: join(root, 'commands.jsonl'), ...overrides }), run(overrides = {}) {
     const result = spawnSync('bash', [SCRIPT, ...args], { encoding: 'utf8', timeout: 10_000,
       env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TEST_RELEASE_REVISION: REVISION,
         RELEASE_COMMAND_LOG: join(root, 'commands.jsonl'), ...overrides } });
@@ -110,3 +121,75 @@ for (const [name, overrides] of [
     } finally { fixture.cleanup(); }
   });
 }
+
+function helper(fixture, op, payload, env) {
+  return spawnSync('python3', ['-', fixture.stage, OWNER, op, Buffer.from(JSON.stringify(payload)).toString('base64')],
+    { input: REMOTE_FILES, encoding: 'utf8', timeout: 10_000, env });
+}
+
+async function waitForStatus(stage) {
+  const deadline = Date.now() + STATUS_WAIT_MS;
+  while (!existsSync(join(stage, ACTIVATION_STATUS))) {
+    assert.ok(Date.now() < deadline, 'detached activation publishes its exit status');
+    await delay(POLL_MS);
+  }
+  return readFileSync(join(stage, ACTIVATION_STATUS), 'utf8');
+}
+
+test('detached activation finishes its rollback after the launching session is killed and its pipes close', async () => {
+  const fixture = releaseFixture();
+  try {
+    copyFileSync(SCRIPT, join(fixture.stage, 'remote-release.sh'));
+    writeFileSync(join(fixture.stage, '.transfer-owner'), OWNER);
+    const env = fixture.env({ TEST_HEALTH: 'unhealthy', TEST_RECREATE_MS: '1500' });
+    const launcher = spawn('python3', ['-', fixture.stage, OWNER, 'activate',
+      Buffer.from(JSON.stringify(fixture.args)).toString('base64')], { detached: true, env, stdio: ['pipe', 'pipe', 'ignore'] });
+    launcher.stdin.end(REMOTE_FILES);
+    let stdout = '';
+    for await (const chunk of launcher.stdout) {
+      stdout += chunk;
+      if (stdout.includes('"started"')) break;
+    }
+    assert.deepEqual(JSON.parse(stdout), { started: true });
+    // Emulate a cancelled runner: kill the SSH-side process group and drop its output pipe.
+    try { process.kill(-launcher.pid, 'SIGKILL'); }
+    catch (error) { if (error.code !== 'ESRCH') throw error; }
+    launcher.stdout.destroy();
+
+    assert.equal(existsSync(join(fixture.stage, ACTIVATION_STATUS)), false, 'activation is still running');
+    assert.equal(helper(fixture, 'cleanup', [], env).status, 77, 'cleanup refuses a stage in use');
+    assert.equal(helper(fixture, 'activate', fixture.args, env).status, 77, 'a second launch is rejected');
+    assert.deepEqual(JSON.parse(helper(fixture, 'activation', [], env).stdout), { exit_code: null });
+
+    assert.equal(await waitForStatus(fixture.stage), '1');
+    const log = readFileSync(join(fixture.stage, ACTIVATION_LOG), 'utf8');
+    assert.match(log, /Container super-leader-gateway Recreated/);
+    assert.match(log, /restoring the previous image selection/);
+    assert.match(log, /deployment is not successful/);
+    assert.equal(readFileSync(join(fixture.root, '.runtime/release.env'), 'utf8'), PREVIOUS_ENV);
+    const finished = JSON.parse(helper(fixture, 'activation', [], env).stdout);
+    assert.equal(finished.exit_code, 1);
+    assert.match(finished.output, /restoring the previous image selection/);
+
+    const cleaned = helper(fixture, 'cleanup', [], env);
+    assert.equal(cleaned.status, 0, cleaned.stderr);
+    assert.equal(existsSync(fixture.stage), false, 'completed stage and its activation evidence are removable');
+  } finally { fixture.cleanup(); }
+});
+
+test('detached activation publishes a successful exit status with the runtime verification output', async () => {
+  const fixture = releaseFixture();
+  try {
+    copyFileSync(SCRIPT, join(fixture.stage, 'remote-release.sh'));
+    writeFileSync(join(fixture.stage, '.transfer-owner'), OWNER);
+    writeFileSync(join(fixture.root, '.runtime/release.env'), PREVIOUS_ENV);
+    const env = fixture.env();
+    const launched = helper(fixture, 'activate', fixture.args, env);
+    assert.equal(launched.status, 0, launched.stderr);
+    assert.equal(await waitForStatus(fixture.stage), '0');
+    const finished = JSON.parse(helper(fixture, 'activation', [], env).stdout);
+    assert.equal(finished.exit_code, 0);
+    assert.match(finished.output, /^gateway_context_window_ms=82800000$/m);
+    assert.equal(readFileSync(join(fixture.root, '.runtime/release.env'), 'utf8'), RELEASE_ENV);
+  } finally { fixture.cleanup(); }
+});

@@ -23,13 +23,21 @@ export async function manifestFor(root, names, signal) {
   return files;
 }
 
+export const ACTIVATION_LOG = 'activation.log';
+export const ACTIVATION_STATUS = 'activation.status';
+const ACTIVATION_OUTPUT_BYTES = 8192;
+
 // Python is already available on the deployment host. All operations are confined
 // to one newly-created stage and a fixed file list, guarded by an ownership token.
+// Activation runs in its own session with file-backed stdio, so a closed SSH channel
+// cannot SIGPIPE/SIGHUP the release or its rollback; the exit status is published atomically.
 export const REMOTE_FILES = String.raw`
-import sys,os,json,hashlib,stat,base64
+import sys,os,json,hashlib,stat,base64,subprocess
 stage,owner,op,encoded=sys.argv[1:]
 files=json.loads(base64.b64decode(encoded))
 marker=os.path.join(stage,'.transfer-owner')
+log=os.path.join(stage,'${ACTIVATION_LOG}')
+status=os.path.join(stage,'${ACTIVATION_STATUS}')
 if op=='create':
  os.makedirs(os.path.dirname(stage),mode=0o700,exist_ok=True)
  os.mkdir(stage,0o700)
@@ -58,8 +66,31 @@ elif op=='verify':
    for chunk in iter(lambda:stream.read(1048576),b''):h.update(chunk)
   if h.hexdigest()!=f['sha256']:sys.exit(74)
  print(json.dumps({'verified':True}))
+elif op=='activate':
+ script=os.path.join(stage,'remote-release.sh')
+ os.chmod(script,0o700)
+ try:output=os.open(log,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+ except FileExistsError:sys.exit(77)
+ if os.fork()==0:
+  os.setsid()
+  os.dup2(os.open(os.devnull,os.O_RDONLY),0);os.dup2(output,1);os.dup2(output,2)
+  try:code=subprocess.call([script]+files)
+  except OSError:code=126
+  with open(status+'.tmp','w') as f:f.write(str(code));f.flush();os.fsync(f.fileno())
+  os.replace(status+'.tmp',status)
+  os._exit(0)
+ print(json.dumps({'started':True}))
+elif op=='activation':
+ if not os.path.isfile(log):sys.exit(77)
+ result={'exit_code':None}
+ if os.path.isfile(status):
+  with open(status) as f:result['exit_code']=int(f.read())
+  with open(log,'rb') as f:
+   f.seek(max(0,os.fstat(f.fileno()).st_size-${ACTIVATION_OUTPUT_BYTES}));result['output']=f.read().decode('utf-8','replace')
+ print(json.dumps(result))
 elif op=='cleanup':
- for name in [f['name'] for f in files]+['release.env.next']:
+ if os.path.exists(log) and not os.path.exists(status):sys.exit(77)
+ for name in [f['name'] for f in files]+['release.env.next','${ACTIVATION_LOG}','${ACTIVATION_STATUS}']:
   try:os.unlink(os.path.join(stage,name))
   except FileNotFoundError:pass
  if set(os.listdir(stage))!={'.transfer-owner'}:sys.exit(75)

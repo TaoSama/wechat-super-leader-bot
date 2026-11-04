@@ -73,9 +73,12 @@ Actions 的传输 step 使用 `exec node` 替换入口 bash，因此发送到入
 交给 Node。Node 在唯一的自有临时目录中以 0600 创建凭证文件，等待传输停止及远端清理
 结束后才删除；入口 shell 不使用可能提前删 key 的 EXIT trap。构建后版本检查单独执行，
 取消该检查后不会启动后续传输 step。
-进入远端激活后，本地 SSH 退出或断链不能证明远端 release/Compose 已停止；只有 SSH
-明确返回成功、确认远端命令已完成后，wrapper 才可继续清理。激活中的取消/断链会保留
-stage，记录 `activation_completion_unknown`，交由原任务核查。初始清理状态始终为
+远端激活以独立会话在后台运行：`remote-release.sh` 的标准输入接 `/dev/null`，输出写入
+stage 内的 `activation.log`，结束后原子写入 `activation.status`。SSH 只负责启动和轮询，
+runner 超时、取消或断链不会让 Compose 或回滚因 SIGPIPE/SIGHUP 中途退出。同一 stage
+只能启动一次；激活未结束时拒绝清理 stage。wrapper 每 5 秒读取一次状态，读到退出码 0
+才继续清理；非零退出码记录 `activation_failed` 并保留 stage 和日志作为证据；等待超时
+或取消记录 `activation_completion_unknown`，保留 stage，交由原任务核查。初始清理状态始终为
 `unconfirmed`，只有实际完成归属校验和删除后才记录 `confirmed`。
 SIGKILL、runner 丢失或网络不可达可能阻止日志和清理；不能据此声称已经清理。
 普通清理最多 8 秒，其中连接最多 5 秒；诊断会按剩余期限缩短连接/执行预算，另外保留

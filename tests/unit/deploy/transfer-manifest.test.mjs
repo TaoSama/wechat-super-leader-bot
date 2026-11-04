@@ -304,13 +304,15 @@ test('sender consumes the frozen files and carries the immutable artifact identi
     if (operation === 'create') return { owned: true };
     if (operation === 'status') return { bytes: wire().files.map(file => file.bytes) };
     if (operation === 'verify') return { verified: true };
+    if (operation === 'activate') return { started: true };
+    if (operation === 'activation') return { exit_code: 0, output: '' };
     assert.equal(operation, 'cleanup');
     return { cleanup: 'confirmed' };
   };
   await transfer.execute();
   assert.equal(gates, 1);
-  assert.deepEqual(remote, ['create', 'status', 'status', 'verify', 'cleanup']);
-  assert.equal(commands.length, 2);
+  assert.deepEqual(remote, ['create', 'status', 'status', 'verify', 'activate', 'activation', 'cleanup']);
+  assert.equal(commands.length, 1);
   assert.deepEqual(commands[0], ['ssh', ['-V']]);
   for (const event of ['transfer_manifest', 'release_complete']) {
     const record = logs.find(value => value.event === event);

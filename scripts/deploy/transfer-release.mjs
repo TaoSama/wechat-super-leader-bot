@@ -24,6 +24,9 @@ const DIAGNOSTIC_SUCCESS_BYTES = 1024 * 1024;
 const DIAGNOSTIC_CANCEL_BYTES = 256 * 1024;
 const DIAGNOSTIC_PARTIAL_WAIT_MS = 10_000;
 const DIAGNOSTIC_POLL_MS = 500;
+const ACTIVATION_POLL_MS = 5_000;
+// Matches the job budget; past it the wrapper reports unknown completion, not success or failure.
+const ACTIVATION_WAIT_MS = 20 * 60_000;
 
 export function transferConfiguration(values, env = process.env) {
   const config = { diagnostic: values.diagnostic === true, root: values['release-root'],
@@ -86,9 +89,9 @@ export class ReleaseTransfer {
       '-o', `ConnectTimeout=${connectSeconds}`, '-o', 'ConnectionAttempts=1', '-o', 'LogLevel=ERROR'];
   }
 
-  async remote(op, files = this.files, cleanup = false) {
+  async remote(op, payload = this.files, cleanup = false) {
     const c = this.config;
-    const manifest = Buffer.from(JSON.stringify(files)).toString('base64');
+    const manifest = Buffer.from(JSON.stringify(payload)).toString('base64');
     const command = ['python3', '-', c.stage, this.owner, op, manifest].map(quoteShell).join(' ');
     const timeoutMs = this.timeout(cleanup);
     const result = await this.processes.checked('ssh', [...this.sshArgs(timeoutMs), '-p', String(c.port), `${c.user}@${c.host}`, command], {
@@ -161,6 +164,25 @@ export class ReleaseTransfer {
     return result;
   }
 
+  // The detached remote run outlives this SSH client; only its published exit status confirms completion.
+  async awaitActivation({ pollMs = ACTIVATION_POLL_MS, waitMs = ACTIVATION_WAIT_MS } = this.activationTiming ?? {}) {
+    const deadline = Date.now() + waitMs;
+    while (Date.now() < deadline) {
+      try {
+        const state = await this.remote('activation');
+        if (state.exit_code !== null) {
+          if (!Number.isSafeInteger(state.exit_code) || typeof state.output !== 'string') throw new TransferFailure('remote_response');
+          return state;
+        }
+      } catch (error) {
+        if (this.signal.aborted || !(error instanceof TransferFailure) || !PROGRESS_UNAVAILABLE_CATEGORIES.has(error.category)) throw error;
+        this.log('activation_poll_unavailable', { category: error.category });
+      }
+      await delay(pollMs, undefined, { signal: this.signal });
+    }
+    throw new TransferFailure('activation_completion_unknown');
+  }
+
   async deploy() {
     const result = await this.copy(this.files);
     if (result.code !== 0 || result.reason) throw new TransferFailure(errorCategory(result));
@@ -172,18 +194,20 @@ export class ReleaseTransfer {
     catch { throw new TransferFailure(this.signal.aborted ? 'cancelled' : 'revision_gate'); }
     this.signal.throwIfAborted();
     const c = this.config, stage = c.stage;
-    const args = [`${stage}/remote-release.sh`, '--release-dir', c.path, '--stage-dir', stage, '--revision', c.revision,
+    const args = ['--release-dir', c.path, '--stage-dir', stage, '--revision', c.revision,
       '--controller-image', `super-leader-controller:${c.revision}`, '--gateway-image', `super-leader-gateway:${c.revision}`,
       '--controller-archive', `${stage}/controller.tar`, '--gateway-archive', `${stage}/gateway.tar`,
       '--checksums', `${stage}/release.sha256`, '--compose-overlay', `${stage}/compose.release.yaml`,
       '--compose-base', `${stage}/compose.yaml`, '--compose-production', `${stage}/compose.production.yaml`,
       '--compose-gateway', `${stage}/compose.gateway.yaml`, '--seccomp-policy', `${stage}/codex-seccomp.json`, '--env-file', c.envFile];
-    const command = `chmod 700 ${quoteShell(`${stage}/remote-release.sh`)} && ${args.map(quoteShell).join(' ')}`;
     this.activationStarted = true;
     this.log('activation_start');
-    const activation = await this.processes.checked('ssh', [...this.sshArgs(), '-p', String(c.port), `${c.user}@${c.host}`, command], { signal: this.signal });
-    this.remoteCompleted = true;
-    const window = /^gateway_context_window_ms=([0-9]+)$/m.exec(activation.stdout);
+    if ((await this.remote('activate', args)).started !== true) throw new TransferFailure('remote_response');
+    const activation = await this.awaitActivation();
+    this.activationExitCode = activation.exit_code;
+    this.log('activation_finished', { exit_code: activation.exit_code });
+    if (activation.exit_code !== 0) throw new TransferFailure('remote_command');
+    const window = /^gateway_context_window_ms=([0-9]+)$/m.exec(activation.output);
     if (window && Number.isSafeInteger(Number(window[1]))) this.log('runtime_verified', { gateway_context_window_ms: Number(window[1]) });
     this.log('deployment_verified');
   }
@@ -263,9 +287,11 @@ export class ReleaseTransfer {
       if (stageAttempted && this.processes.children.size > 0) {
         this.log('cleanup_state', { cleanup: 'unconfirmed', category: 'children_still_active' });
         failure ??= new TransferFailure('process_stop');
-      } else if (stageAttempted && this.activationStarted && !this.remoteCompleted) {
-        this.log('cleanup_state', { cleanup: 'unconfirmed', category: 'activation_completion_unknown' });
-        failure ??= new TransferFailure('activation_completion_unknown');
+      } else if (stageAttempted && this.activationStarted && this.activationExitCode !== 0) {
+        // A failed run keeps its stage and activation log as evidence; an unfinished run may still be using it.
+        const category = this.activationExitCode === undefined ? 'activation_completion_unknown' : 'activation_failed';
+        this.log('cleanup_state', { cleanup: 'unconfirmed', category });
+        failure ??= new TransferFailure(category);
       } else if (stageAttempted) {
         try {
           if ((await this.remote('cleanup', this.files, true)).cleanup !== 'confirmed') throw new TransferFailure('remote_response');
