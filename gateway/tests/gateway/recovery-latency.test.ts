@@ -31,14 +31,14 @@ function fixture(t: TestContext) {
     traceEvent("fixture.wechat.send");
     return Response.json({ ret: 0 });
   } });
-  const put = (messageId: string, status: "pending" | "receipt" | "expired" = "pending", source: "engine" | "controller" = "engine") => {
+  const put = (messageId: string, status: "pending" | "receipt" | "expired" | "uncertain" = "pending", source: "engine" | "controller" = "engine") => {
     const deliveryKey = state.computeDeliveryKey("chat", messageId);
     state.putOutbox({ kind: "reply", source, chatId: "chat", messageId, deliveryKey,
       splitMaxChars: 1000, status,
       ...(status === "receipt" ? { receiptStatus: "accepted" as const } : {}) });
     return deliveryKey;
   };
-  return { state, events, ilink, put };
+  return { account, state, events, ilink, put };
 }
 
 for (const source of ["engine", "controller"] as const) {
@@ -115,6 +115,107 @@ test("terminal receipt retries each receive an independent trace and never re-re
   assert.equal(events.filter(event => event.stage === "delivery.recovery.ack.end").length, 2);
   assert.equal(new Set(events.map(event => event.attemptId)).size, 2);
   assert.equal(events.some(event => event.stage === "delivery.recovery.read.start" || event.stage === "delivery.start"), false);
+});
+
+for (const status of ["uncertain", "expired"] as const) {
+  test(`${status} recovery becomes silent after a durable engine acknowledgement, including after restart`, async t => {
+    const { account, state, events, ilink, put } = fixture(t);
+    const key = put("terminal", status);
+    const budget = structuredClone(state.accountSendBudget);
+    const windows = structuredClone(state.contextWindows);
+    const tokens = structuredClone(state.contextTokens);
+    const ackReply = t.mock.fn(async () => {});
+    const engine: GatewayReplyEngine = { requestBudgetMs: 100,
+      reply: async () => { throw new Error("Unexpected regeneration"); },
+      getReply: async () => { throw new Error("Unexpected frozen read"); }, ackReply };
+    const controller = new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "private-controller-token",
+      fetchImpl: async () => { throw new Error("Unexpected Controller call"); } });
+    const gateway = new WeChatGateway({ stateManager: state, ilink, controller, replyEngine: engine });
+    await gateway.flushRepliesOnce();
+    assert.equal(ackReply.mock.callCount(), 1);
+    assert.equal(state.outbox[key].engineAcked, true);
+    assert.equal(events.filter(event => event.stage === "delivery.recovery.ack.end").length, 1);
+    const terminal = structuredClone(state.outbox[key]);
+    events.length = 0;
+    await gateway.flushRepliesOnce();
+    await gateway.flushRepliesOnce();
+    assert.deepEqual(events, [], "acknowledged audit entries must not create recovery spans");
+    const restarted = new StateManager(account);
+    const replacement = new WeChatGateway({ stateManager: restarted, ilink, controller, replyEngine: engine });
+    await replacement.flushRepliesOnce();
+    await replacement.flushRepliesOnce();
+    assert.deepEqual(events, [], "restart must preserve the silent terminal state");
+    assert.equal(ackReply.mock.callCount(), 1);
+    assert.equal(terminal.status, status);
+    assert.deepEqual(state.outbox[key], terminal);
+    assert.deepEqual(restarted.outbox[key], terminal);
+    assert.deepEqual(restarted.accountSendBudget, budget);
+    assert.deepEqual(restarted.contextWindows, windows);
+    assert.deepEqual(restarted.contextTokens, tokens);
+  });
+
+  for (const failureAt of ["engine", "state"] as const) {
+    test(`${status} retries after ${failureAt} acknowledgement failure and becomes silent only after persistence`, async t => {
+      const { state, events, ilink, put } = fixture(t);
+      const key = put("terminal", status);
+      state.updateOutbox(key, { engineAcked: false });
+      const budget = structuredClone(state.accountSendBudget);
+      const failure = new Error("synthetic acknowledgement failure");
+      let fail = true;
+      const ackReply = t.mock.fn(async () => { if (fail && failureAt === "engine") throw failure; });
+      const saveState = state.saveState.bind(state);
+      t.mock.method(state, "saveState", () => {
+        if (fail && failureAt === "state") throw failure;
+        saveState();
+      });
+      const engine: GatewayReplyEngine = { requestBudgetMs: 100,
+        reply: async () => { throw new Error("Unexpected regeneration"); },
+        getReply: async () => { throw new Error("Unexpected frozen read"); }, ackReply };
+      const controller = new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "private-controller-token",
+        fetchImpl: async () => { throw new Error("Unexpected Controller call"); } });
+      const gateway = new WeChatGateway({ stateManager: state, ilink, controller, replyEngine: engine });
+      await assert.rejects(gateway.flushRepliesOnce(), error => error === failure);
+      assert.equal(state.outbox[key].engineAcked, false);
+      assert.equal(events.find(event => event.stage === "delivery.recovery.end")?.outcome, "error");
+      fail = false;
+      await gateway.flushRepliesOnce();
+      assert.equal(ackReply.mock.callCount(), 2);
+      assert.equal(state.outbox[key].engineAcked, true);
+      assert.equal(state.outbox[key].status, status);
+      events.length = 0;
+      await gateway.flushRepliesOnce();
+      assert.deepEqual(events, []);
+      assert.equal(ackReply.mock.callCount(), 2);
+      assert.deepEqual(state.accountSendBudget, budget);
+    });
+  }
+}
+
+test("acknowledged terminal audit entries do not block accepted cleanup or pending delivery", async t => {
+  const { state, events, ilink, put } = fixture(t);
+  const uncertain = put("uncertain", "uncertain"), expired = put("expired", "expired");
+  const accepted = put("accepted", "receipt"), pending = put("pending");
+  for (const key of [uncertain, expired, accepted]) state.updateOutbox(key, { engineAcked: true });
+  const budget = state.remainingSendBudget("chat");
+  const reads: string[] = [], acknowledgements: string[] = [];
+  const engine: GatewayReplyEngine = { requestBudgetMs: 100,
+    reply: async () => { throw new Error("Unexpected regeneration"); },
+    getReply: async (_account, _chat, messageId) => { reads.push(messageId); return { text: "frozen reply" }; },
+    ackReply: async (_account, _chat, messageId) => { acknowledgements.push(messageId); } };
+  const controller = new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "private-controller-token",
+    fetchImpl: async () => { throw new Error("Unexpected Controller call"); } });
+  const gateway = new WeChatGateway({ stateManager: state, ilink, controller, replyEngine: engine });
+  await gateway.flushRepliesOnce();
+  assert.equal(state.outbox[accepted], undefined);
+  assert.equal(state.outbox[pending], undefined);
+  assert.deepEqual(reads, ["pending"]);
+  assert.deepEqual(acknowledgements, ["pending"]);
+  assert.equal(state.outbox[uncertain].status, "uncertain");
+  assert.equal(state.outbox[expired].status, "expired");
+  assert.equal(state.remainingSendBudget("chat"), budget - 1);
+  assert.equal(events.filter(event => event.stage === "fixture.wechat.send").length, 1);
+  const terminalTraces = new Set(["uncertain", "expired"].map(messageId => createMessageTrace("chat", messageId).traceId));
+  assert.equal(events.some(event => terminalTraces.has(String(event.traceId))), false);
 });
 
 test("failed frozen reads remain pending, retain original error and emit failure on the old message only", async t => {
