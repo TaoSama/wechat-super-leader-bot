@@ -77,6 +77,8 @@ integration("Postgres automation persistence", () => {
     expect(next.run.id).not.toBe(inspection.run.id);
     const runs = await restarted.listRuns(schedule.id, authority.chatId);
     expect(runs.map(run => [run.id, run.status])).toEqual([[next.run.id, "dispatching"], [inspection.run.id, "unknown"]]);
+    await restarted.finish(next.run.id, "new-process", { status: "completed", result: { text: "later report" } }, now);
+    expect((await restarted.pendingOutbox(now)).map(item => item.kind).sort()).toEqual(["blocked", "completed"]);
   });
   it("releases schedules that older releases left blocked by an unknown run", async () => {
     const cron = await create();

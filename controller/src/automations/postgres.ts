@@ -151,7 +151,7 @@ export class PostgresAutomationRepository implements AutomationRepository {
       await saveSchedule(client, schedule);
       if (item && schedule.status !== "cancelled") {
         if (schedule.retention === "latest") await client.query(`UPDATE automation_outbox SET state='superseded',
-          data=jsonb_set(data,'{status}','"superseded"') WHERE schedule_id=$1 AND state='pending' AND NOT (data ? 'supplement')`, [schedule.id]);
+          data=jsonb_set(data,'{status}','"superseded"') WHERE schedule_id=$1 AND state='pending' AND NOT (data ? 'supplement') AND data->>'kind' <> 'blocked'`, [schedule.id]);
         await client.query(`INSERT INTO automation_outbox(id,schedule_id,state,expires_at,created_at,data) VALUES($1,$2,$3,$4,$5,$6)
           ON CONFLICT(id) DO NOTHING`, [item.id, item.scheduleId, item.status, item.expiresAt, item.createdAt, item]);
       }

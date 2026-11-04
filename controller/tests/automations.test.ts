@@ -188,6 +188,8 @@ describe("persistent automation scheduling", () => {
     expect(new Set(started).size).toBe(6);
     expect(started[0]).toBe(unknown.id);
     expect(runs.filter(run => run.status === "unknown").map(run => run.id)).toEqual([unknown.id]);
+    // Later results with latest retention must not hide the unknown-outcome warning.
+    expect((await f.repository.pendingOutbox(f.now())).filter(item => item.kind === "blocked").map(item => item.id)).toEqual([notice.id]);
   });
   it("completes a one-shot whose only occurrence ended unknown and reports it once", async () => {
     const f = fixture();

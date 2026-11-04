@@ -41,6 +41,7 @@ export function finishRun(schedule: Schedule, run: AutomationRun, outcome: Runne
   const expiresAt = run.scheduledAt + schedule.businessTtlMs;
   if (outcome.status === "unknown") {
     // The run stays unknown and is never redispatched; later occurrences keep their own run IDs.
+    // Its notice is never superseded by later results, which do not repeat the warning.
     run.error = outcome.error;
     if (expiresAt <= now) return;
     return { id: run.id, runId: run.id, scheduleId: schedule.id, chatId: schedule.chatId,

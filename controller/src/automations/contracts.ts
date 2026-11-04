@@ -69,7 +69,7 @@ export interface AutomationRunner {
 }
 export interface AutomationSupplement {
   runId: string; scheduleId: string; chatId: string; invocationId: string;
-  text: string; kind: AutomationOutbox["kind"]; createdAt: number; expiresAt: number;
+  text: string; kind: Exclude<AutomationOutbox["kind"], "blocked">; createdAt: number; expiresAt: number;
 }
 export interface AutomationRepository {
   create(schedule: Schedule): Promise<Schedule>;
