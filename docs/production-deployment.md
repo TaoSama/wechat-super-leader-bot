@@ -76,7 +76,7 @@ Actions 的传输 step 使用 `exec node` 替换入口 bash，因此发送到入
 远端激活以独立会话在后台运行：`remote-release.sh` 的标准输入接 `/dev/null`，输出写入
 stage 内的 `activation.log`，结束后原子写入 `activation.status`。SSH 只负责启动和轮询，
 runner 超时、取消或断链不会让 Compose 或回滚因 SIGPIPE/SIGHUP 中途退出。同一 stage
-只能启动一次；激活未结束时拒绝清理 stage。wrapper 每 5 秒读取一次状态，读到退出码 0
+只能启动一次；激活未结束时拒绝清理 stage。同一发布目录同时只允许一个激活：上一次被取消的任务仍在远端运行时，新的发布会等它结束（`activation_waiting`）再启动，等不到就失败且不会启动。wrapper 每 5 秒读取一次状态，读到退出码 0
 才继续清理；非零退出码记录 `activation_failed` 并保留 stage 和日志作为证据；等待超时
 或取消记录 `activation_completion_unknown`，保留 stage，交由原任务核查。初始清理状态始终为
 `unconfirmed`，只有实际完成归属校验和删除后才记录 `confirmed`。

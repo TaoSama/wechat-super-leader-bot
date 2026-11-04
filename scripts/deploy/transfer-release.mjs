@@ -25,7 +25,7 @@ const DIAGNOSTIC_CANCEL_BYTES = 256 * 1024;
 const DIAGNOSTIC_PARTIAL_WAIT_MS = 10_000;
 const DIAGNOSTIC_POLL_MS = 500;
 const ACTIVATION_POLL_MS = 5_000;
-// Matches the job budget; past it the wrapper reports unknown completion, not success or failure.
+// Normally the 20-minute job timeout ends the wrapper first; either way completion is reported as unknown.
 const ACTIVATION_WAIT_MS = 20 * 60_000;
 
 export function transferConfiguration(values, env = process.env) {
@@ -164,6 +164,23 @@ export class ReleaseTransfer {
     return result;
   }
 
+  // An earlier run that outlived its cancelled job still holds the activation lock; wait for it to finish.
+  async launchActivation(args, { pollMs = ACTIVATION_POLL_MS, waitMs = ACTIVATION_WAIT_MS } = this.activationTiming ?? {}) {
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      try {
+        if ((await this.remote('activate', args)).started !== true) throw new TransferFailure('remote_response');
+        return;
+      } catch (error) {
+        if (!(error instanceof TransferFailure) || error.category !== 'activation_busy' || this.signal.aborted) throw error;
+        // Nothing was launched, so the stage stays safe to clean up.
+        if (Date.now() >= deadline) { this.activationStarted = false; throw error; }
+        this.log('activation_waiting', { category: error.category });
+      }
+      await delay(pollMs, undefined, { signal: this.signal });
+    }
+  }
+
   // The detached remote run outlives this SSH client; only its published exit status confirms completion.
   async awaitActivation({ pollMs = ACTIVATION_POLL_MS, waitMs = ACTIVATION_WAIT_MS } = this.activationTiming ?? {}) {
     const deadline = Date.now() + waitMs;
@@ -202,7 +219,7 @@ export class ReleaseTransfer {
       '--compose-gateway', `${stage}/compose.gateway.yaml`, '--seccomp-policy', `${stage}/codex-seccomp.json`, '--env-file', c.envFile];
     this.activationStarted = true;
     this.log('activation_start');
-    if ((await this.remote('activate', args)).started !== true) throw new TransferFailure('remote_response');
+    await this.launchActivation(args);
     const activation = await this.awaitActivation();
     this.activationExitCode = activation.exit_code;
     this.log('activation_finished', { exit_code: activation.exit_code });

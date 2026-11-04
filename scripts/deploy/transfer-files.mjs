@@ -32,7 +32,7 @@ const ACTIVATION_OUTPUT_BYTES = 8192;
 // Activation runs in its own session with file-backed stdio, so a closed SSH channel
 // cannot SIGPIPE/SIGHUP the release or its rollback; the exit status is published atomically.
 export const REMOTE_FILES = String.raw`
-import sys,os,json,hashlib,stat,base64,subprocess
+import sys,os,json,hashlib,stat,base64,subprocess,fcntl
 stage,owner,op,encoded=sys.argv[1:]
 files=json.loads(base64.b64decode(encoded))
 marker=os.path.join(stage,'.transfer-owner')
@@ -69,6 +69,12 @@ elif op=='verify':
 elif op=='activate':
  script=os.path.join(stage,'remote-release.sh')
  os.chmod(script,0o700)
+ runtime=os.path.join(files[files.index('--release-dir')+1],'.runtime')
+ os.makedirs(runtime,mode=0o700,exist_ok=True)
+ # One activation per release directory; the forked child keeps this lock until it finishes.
+ lock=os.open(os.path.join(runtime,'activation.lock'),os.O_WRONLY|os.O_CREAT,0o600)
+ try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+ except BlockingIOError:sys.exit(78)
  try:output=os.open(log,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
  except FileExistsError:sys.exit(77)
  if os.fork()==0:

@@ -321,3 +321,27 @@ test('sender consumes the frozen files and carries the immutable artifact identi
   }
   assert.deepEqual(logs.find(value => value.event === 'transfer_manifest').files, wire().files);
 });
+
+test('activation waits while an earlier run holds the release lock, then launches once', async t => {
+  const f = await fixture(t), remote = [], logs = [];
+  const processes = { children: new Set(), async checked() { return { code: 0, stdout: '', stderr: 'OpenSSH_9.6p1' }; } };
+  const transfer = new ReleaseTransfer(transferConfiguration(f.values, ENV), { processes,
+    log: line => logs.push(JSON.parse(line)), beforeActivate: async () => {} });
+  transfer.activationTiming = { pollMs: 1, waitMs: 60_000 };
+  transfer.copy = async () => ({ code: 0 });
+  let busy = 2;
+  transfer.remote = async operation => {
+    remote.push(operation);
+    if (operation === 'create') return { owned: true };
+    if (operation === 'status') return { bytes: wire().files.map(file => file.bytes) };
+    if (operation === 'verify') return { verified: true };
+    if (operation === 'activate') { if (busy-- > 0) throw new TransferFailure('activation_busy'); return { started: true }; }
+    if (operation === 'activation') return { exit_code: 0, output: '' };
+    assert.equal(operation, 'cleanup');
+    return { cleanup: 'confirmed' };
+  };
+  await transfer.execute();
+  assert.deepEqual(remote, ['create', 'status', 'status', 'verify', 'activate', 'activate', 'activate', 'activation', 'cleanup']);
+  assert.equal(logs.filter(value => value.event === 'activation_waiting').length, 2);
+  assert.ok(logs.some(value => value.event === 'deployment_verified'));
+});

@@ -14,6 +14,7 @@ export function errorCategory(result) {
   if (result.code === 74) return 'integrity';
   if (result.code === 75) return 'unexpected_stage_files';
   if (result.code === 77) return 'activation_state';
+  if (result.code === 78) return 'activation_busy';
   const text = result.stderr ?? '';
   for (const [pattern, category] of [
     [/Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED/i, 'host_key'],
@@ -21,7 +22,7 @@ export function errorCategory(result) {
     [/Could not resolve hostname|Name or service not known/i, 'dns'],
     [/Connection timed out|Operation timed out/i, 'timeout'],
     [/Connection refused|No route to host|Network is unreachable/i, 'network_connect'],
-    [/Connection reset|Broken pipe|Connection closed/i, 'network_closed'],
+    [/Connection reset|Broken pipe|Connection closed|Connection to \S+ closed/i, 'network_closed'],
     [/No space left on device/i, 'remote_capacity'],
     [/Permission denied/i, 'remote_permission'],
   ]) if (pattern.test(text)) return category;

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -158,7 +159,7 @@ test('detached activation finishes its rollback after the launching session is k
 
     assert.equal(existsSync(join(fixture.stage, ACTIVATION_STATUS)), false, 'activation is still running');
     assert.equal(helper(fixture, 'cleanup', [], env).status, 77, 'cleanup refuses a stage in use');
-    assert.equal(helper(fixture, 'activate', fixture.args, env).status, 77, 'a second launch is rejected');
+    assert.equal(helper(fixture, 'activate', fixture.args, env).status, 78, 'a second launch is refused while the first holds the lock');
     assert.deepEqual(JSON.parse(helper(fixture, 'activation', [], env).stdout), { exit_code: null });
 
     assert.equal(await waitForStatus(fixture.stage), '1');
@@ -192,4 +193,24 @@ test('detached activation publishes a successful exit status with the runtime ve
     assert.match(finished.output, /^gateway_context_window_ms=82800000$/m);
     assert.equal(readFileSync(join(fixture.root, '.runtime/release.env'), 'utf8'), RELEASE_ENV);
   } finally { fixture.cleanup(); }
+});
+
+test('a second activation waits for the release-directory lock held by a still-running one', async () => {
+  const fixture = releaseFixture();
+  const holder = spawn('python3', ['-c', 'import fcntl,os,sys,time\nf=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT,0o600)\nfcntl.flock(f,fcntl.LOCK_EX)\nprint("held",flush=True)\ntime.sleep(60)',
+    join(fixture.root, '.runtime/activation.lock')], { stdio: ['ignore', 'pipe', 'inherit'] });
+  try {
+    copyFileSync(SCRIPT, join(fixture.stage, 'remote-release.sh'));
+    writeFileSync(join(fixture.stage, '.transfer-owner'), OWNER);
+    writeFileSync(join(fixture.root, '.runtime/release.env'), PREVIOUS_ENV);
+    for await (const chunk of holder.stdout) if (String(chunk).includes('held')) break;
+    const env = fixture.env();
+    assert.equal(helper(fixture, 'activate', fixture.args, env).status, 78, 'a concurrent activation is refused');
+    assert.equal(existsSync(join(fixture.stage, ACTIVATION_LOG)), false, 'a refused launch leaves the stage retryable');
+    holder.kill('SIGKILL');
+    await once(holder, 'exit');
+    const launched = helper(fixture, 'activate', fixture.args, env);
+    assert.equal(launched.status, 0, launched.stderr);
+    assert.equal(await waitForStatus(fixture.stage), '0');
+  } finally { holder.kill('SIGKILL'); fixture.cleanup(); }
 });
