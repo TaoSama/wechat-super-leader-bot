@@ -17,6 +17,9 @@ import { SessionHistory } from "./SessionHistory";
 import { SessionComposer } from "./SessionComposer";
 import { SessionInfo } from "./SessionInfo";
 import { SessionStatus } from "./SessionStatus";
+import { SessionInterrupt } from "./SessionInterrupt";
+import { useSessionInterrupt } from "../useSessionInterrupt";
+import { runningTurnId } from "../history-turns";
 
 interface Props {
   data: ControlPlaneStatusResponse;
@@ -43,6 +46,9 @@ export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = t
   const history = useSessionHistory(selected, connected && active && detailVisible, onAuthFailure);
   const showHistory = !selectedTerminal || !!selected && hasTerminalHistorySource(selected) || !!history.history;
   const messages = useSessionMessages(selected, onAuthFailure);
+  const interrupt = useSessionInterrupt(selected, onAuthFailure, () => void history.refresh());
+  const stoppableTurnId = selected && connected && !selectedTerminal && !selectedWechat && history.history
+    ? runningTurnId(history.history.items, history.history.turnStatuses) : null;
   const blockReason = sendBlockReason(selected, connected, stale, observationNow);
   const submission = messages.submission;
   const pending = !!submission && (submission.uncertain || ["admitting", "queued", "pending", "accepted", "uncertain"].includes(submission.command?.status ?? ""));
@@ -116,6 +122,7 @@ export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = t
         <SessionHistory session={selected} terminal={selectedTerminal} showHistory={showHistory} history={history} scroll={scroll} />
         <div className="session-bottom-slot">
           {showHistory && scroll.newContent && <div className="latest-message-slot"><button type="button" className="new-message-button" onClick={scroll.jumpLatest}><ArrowDown size={16} aria-hidden="true" />有新消息 · 跳到最新</button></div>}
+          {!selectedWechat && !selectedTerminal && <SessionInterrupt key={`interrupt:${selectedKey}`} interrupt={interrupt} runningTurnId={stoppableTurnId} />}
           {selectedWechat ? <p className="composer-readonly" role="status">主微信 Codex 对话 · 只读历史</p> : <SessionComposer key={selectedKey} session={selected} model={selectedModel!} messages={messages} terminal={selectedTerminal} mobile={mobile} connected={connected} busy={["active", "busy", "running"].includes(selectedObservation!.executionStatus)} blockReason={blockReason} pending={pending} onSend={send} onRecover={() => void messages.submit(true)} />}
         </div>
         {detailsOpen && <SessionInfo session={selected} model={selectedModel!} connected={connected} terminal={selectedTerminal} now={observationNow} blockReason={blockReason} showHistory={showHistory} history={history} onClose={() => setDetailsOpen(false)} />}

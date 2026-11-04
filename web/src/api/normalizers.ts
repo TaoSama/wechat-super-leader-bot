@@ -104,7 +104,11 @@ export function normalizeCommand(raw: unknown): CommandRecord | null {
     ? rawStatus
     : "uncertain";
 
-  const action: ActionType = obj.action === "send" ? "send" : "read";
+  const action: ActionType = obj.action === "send" || obj.action === "interrupt" ? obj.action : "read";
+  const expectedTurnId = typeof obj.expectedTurnId === "string" && obj.expectedTurnId ? obj.expectedTurnId : undefined;
+  // An interrupt targets exactly one native turn and never carries input or a terminal route.
+  if (action === "interrupt" && (!expectedTurnId || obj.prompt !== undefined || obj.sendRoute === "terminal-pane" ||
+      obj.sessionId.startsWith("terminal:") || obj.turnId !== undefined && obj.turnId !== expectedTurnId)) return null;
   const inputReceipt = normalizeInputReceipt(obj.inputReceipt);
   const terminalSend = action === "send" && (obj.sendRoute === "terminal-pane" || obj.sessionId.startsWith("terminal:"));
   if (terminalSend) {
@@ -130,6 +134,7 @@ export function normalizeCommand(raw: unknown): CommandRecord | null {
     outputTruncated: typeof obj.outputTruncated === "boolean" ? obj.outputTruncated : undefined,
     error: typeof obj.error === "string" ? obj.error : undefined,
     turnId: typeof obj.turnId === "string" ? obj.turnId : undefined,
+    ...(expectedTurnId ? { expectedTurnId } : {}),
     sendRoute: obj.sendRoute === "desktop-owner" || obj.sendRoute === "control-socket" || obj.sendRoute === "app-server-resume" || obj.sendRoute === "terminal-pane" ? obj.sendRoute : undefined,
     inputReceipt,
     expiresAt: typeof obj.expiresAt === "string" ? obj.expiresAt : "",

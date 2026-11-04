@@ -91,7 +91,7 @@ export class DirectToolExecutor {
 
   private isReadOnly(name: string) {
     return !["execute_plan", "execute_goal", "propose_plan", "propose_goal", "remember", "forget", "get_console_link",
-      "confirm_pending", "cancel_plan", "cancel_goal", "send_session_images", "create_automation", "update_automation", "follow_up_background_task", "extend_background_task"].includes(name);
+      "confirm_pending", "cancel_plan", "cancel_goal", "send_session_images", "interrupt_session", "create_automation", "update_automation", "follow_up_background_task", "extend_background_task"].includes(name);
   }
 
   async call(request: DirectCall): Promise<DirectToolResult> {
@@ -335,7 +335,7 @@ export class DirectToolExecutor {
         else {
           data.pending = undefined;
           const cancelled = await cancelActivePlan(o.store, o.executions, chatId, planId);
-          reply = { text: cancelled.kind === "cancelled" ? "已取消计划后续派发，原会话当前执行未停止。"
+          reply = { text: cancelled.kind === "cancelled" ? "已取消计划后续派发，原会话当前执行未停止；如需停止正在运行的轮次，请明确告诉我停止哪个会话。"
             : cancelled.kind === "ambiguous" ? `已取消待确认计划。${ambiguousCancellationText(cancelled.plans)}`
             : cancelled.kind === "missing" ? "已取消待确认计划；没有该ID的进行中计划，未停止其他计划。" : "已取消待确认计划；没有活动计划。" };
         }
@@ -364,6 +364,8 @@ export class DirectToolExecutor {
           reply = { text: goalPreview(data.pendingGoal, node => o.hub.getNodeSkills(node), (node, session) => o.hub.getNodeSession(node, session)?.title) }; result = reply;
         } else if (name === "list_sessions" && parseSessionDirectoryQuery(request.text)) {
           reply = { text: titles.render("") };
+        } else if (name === "interrupt_session" && result && typeof result === "object" && "receipt" in result && typeof result.receipt === "string") {
+          reply = { text: result.receipt, ...("commandId" in result && typeof result.commandId === "string" ? { commandId: result.commandId } : {}) };
         } else if (name === "get_console_link" && link.issuedLink) {
           reply = { text: `控制台登录链接（签发后1小时内可重复登录）：\n${link.issuedLink.url}` };
         }
@@ -414,6 +416,7 @@ export class DirectToolExecutor {
     if (name === "execute_goal") require(auth.intent === "goal");
     if (["propose_plan", "propose_goal"].includes(name)) require(auth.intent === "preview");
     if (name === "send_session_images") require(auth.sendImages);
+    if (name === "interrupt_session") require(auth.interruptSession);
     if (name === "remember" || name === "forget") require(auth.memoryOperations.includes(name));
     if (name === "follow_up_background_task") require(auth.backgroundOperations.includes("follow_up"));
     if (name === "extend_background_task") require(auth.backgroundOperations.includes("extend"));

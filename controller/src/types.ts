@@ -4,7 +4,7 @@ import { sanitizeModelMetadata } from "./sessions/model-metadata.js";
 import { InputReceiptSchema, TerminalSessionIdSchema, type InputReceipt } from "./sessions/input-receipt.js";
 import { isTerminalHistoryTarget, isTerminalSession } from "./sessions/terminal.js";
 
-export const ActionTypeSchema = z.enum(["read", "send"]);
+export const ActionTypeSchema = z.enum(["read", "send", "interrupt"]);
 export type ActionType = z.infer<typeof ActionTypeSchema>;
 export const MAX_DAEMON_CONTROL_MESSAGE_BYTES = 1024 * 1024;
 export const MAX_TURN_OUTPUT_BYTES = 8 * 1024 * 1024;
@@ -244,6 +244,12 @@ export const ControllerCancelHistoryMessageSchema = z.object({
   sessionId: z.string().min(1).max(64),
 }).strict();
 
+/** Interrupt targets exactly one native turn and carries no input, skills or delivery mode. */
+function isInterruptShape(value: { prompt?: string; skills?: unknown[]; deliveryMode?: DeliveryMode; expectedTurnId?: string; sessionId: string }): boolean {
+  return value.prompt === undefined && !value.skills?.length && value.deliveryMode === undefined &&
+    isValidTurnId(value.expectedTurnId) && !value.sessionId.startsWith("terminal:");
+}
+
 export const ControllerCommandMessageSchema = z.object({
   type: z.literal("command"),
   commandId: z.string().min(1),
@@ -258,8 +264,8 @@ export const ControllerCommandMessageSchema = z.object({
   expectedTurnId: TurnIdSchema.optional(),
 }).refine(value => value.action !== "read" || value.sendRoute === undefined, "Read commands cannot carry a send route")
   .refine(value => value.action !== "read" || value.deliveryMode === undefined,"Read commands cannot carry delivery mode")
-  .refine(value => value.deliveryMode === "steer" ? value.action === "send" && value.expectedTurnId !== undefined : value.expectedTurnId === undefined,
-    "Only steer requires an exact expected turn ID")
+  .refine(value => value.action === "interrupt" ? isInterruptShape(value) : value.deliveryMode === "steer" ? value.action === "send" && value.expectedTurnId !== undefined : value.expectedTurnId === undefined,
+    "Only steer and interrupt require an exact expected turn ID")
   .refine(value => value.action !== "send" ||
     (value.sendRoute === "terminal-pane" ? TerminalSessionIdSchema.safeParse(value.sessionId).success : !value.sessionId.startsWith("terminal:")),
   "Terminal targets require the exclusive terminal-pane send route");
@@ -296,8 +302,8 @@ export const PostCommandRequestSchema = z
     expectedTurnId: TurnIdSchema.optional(),
   }).strict()
   .refine(value => value.action !== "read" || value.deliveryMode === undefined,"Read commands cannot carry delivery mode")
-  .refine(value => value.deliveryMode === "steer" ? value.action === "send" && value.expectedTurnId !== undefined : value.expectedTurnId === undefined,
-    "Only steer requires an exact expected turn ID")
+  .refine(value => value.action === "interrupt" ? isInterruptShape(value) : value.deliveryMode === "steer" ? value.action === "send" && value.expectedTurnId !== undefined : value.expectedTurnId === undefined,
+    "Only steer and interrupt require an exact expected turn ID")
   .refine(
     (data) => {
       if (data.action === "send") {
@@ -348,6 +354,7 @@ export function validateCommandSendRoute(command: Pick<CommandRecord, "action" |
   if (command.sendRoute === "terminal-pane" && !TerminalSessionIdSchema.safeParse(command.sessionId).success) throw new Error("Terminal route requires a precise terminal session");
   if (command.sendRoute === undefined) return; // Historical records remain readable, but are never replayed.
   SendRouteSchema.parse(command.sendRoute);
+  if (command.action === "interrupt" && command.sendRoute !== "terminal-pane") return;
   if (command.action !== "send") throw new Error("Read commands cannot carry a send route");
 }
 

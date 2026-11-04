@@ -10,6 +10,9 @@ import { matchesGoalCommand } from "../leader/goals/goal.js";
 import { routeSupportsDeliveryMode } from "./delivery.js";
 import { isPlanCommandAuthorized } from "./plan-authorization.js";
 
+export const TERMINAL_INTERRUPT_UNSUPPORTED = "终端会话暂不支持中断";
+const INTERRUPT_AUTHORITY_TYPES: ReadonlySet<CommandAuthority["type"]> = new Set(["admin", "chat", "console"]);
+
 export class CommandError extends Error {
   constructor(public readonly httpStatus: number, message: string) { super(message); }
 }
@@ -81,6 +84,7 @@ export class CommandService {
       await this.store.markExpiredActiveCommandsUncertain();
       return (await this.store.getCommand(previous.commandId))!;
     }
+    if (request.action === "interrupt") return this.submitInterrupt(request, waitMs, assertDispatchAllowed, authority);
     let sendRoute: SendRoute | undefined;
     let readyAtSubmission = false;
     if (request.action === "send") {
@@ -116,6 +120,44 @@ export class CommandService {
       else await this.store.markExpiredActiveCommandsUncertain();
     } else await this.transmit(record,waitMs);
     return (await this.store.getCommand(record.commandId))!;
+  }
+
+  /** Interrupts bypass the per-session send queue: they target one live turn and never start input. */
+  private async submitInterrupt(request: PostCommandRequest, waitMs: number, assertDispatchAllowed: (() => Promise<void>) | undefined,
+    authority: CommandAuthority): Promise<CommandRecord> {
+    if (!INTERRUPT_AUTHORITY_TYPES.has(authority.type)) throw new CommandError(403, "This authorization cannot interrupt a session turn");
+    if (authority.type === "chat" && !this.isChatAllowed(authority.chatId)) throw new CommandError(403, "CHAT_NOT_ALLOWED");
+    const sendRoute = this.interruptRoute(request);
+    const now = new Date();
+    const record: CommandRecord = { ...request, authority, sendRoute, commandId: `cmd_${randomUUID()}`, status: "pending",
+      createdAt: now.toISOString(), updatedAt: now.toISOString(), expiresAt: new Date(now.getTime() + this.ttlSeconds * 1000).toISOString() };
+    const created = await this.store.createCommandIfAbsent(record);
+    if (!created.created) return created.command;
+    this.onStatusChanged?.();
+    try { await assertDispatchAllowed?.(); }
+    catch (error) {
+      await this.store.updateCommandStatus(record.commandId, "failed", undefined, "Dispatch authority expired before transmission");
+      throw error;
+    }
+    try { this.interruptRoute(request, sendRoute); }
+    catch (error) {
+      if (!(error instanceof CommandError)) throw error;
+      await this.store.updateCommandStatus(record.commandId, "failed", undefined, error.message);
+      throw error;
+    }
+    await this.transmit(record, waitMs);
+    return (await this.store.getCommand(record.commandId))!;
+  }
+
+  private interruptRoute(request: Pick<PostCommandRequest, "nodeId" | "sessionId">, expected?: SendRoute): SendRoute {
+    if (!this.hub.isNodeConnected(request.nodeId)) throw new CommandError(503, "Target node is offline");
+    const session = this.hub.getNodeSession(request.nodeId, request.sessionId);
+    if (!session) throw new CommandError(404, "Target session is unavailable");
+    if (isTerminalSession(session)) throw new CommandError(400, TERMINAL_INTERRUPT_UNSUPPORTED);
+    const route = queueSendRoute(session);
+    if (!route || route === "terminal-pane") throw new CommandError(400, "Target does not support this action");
+    if (expected && route !== expected) throw new CommandError(409, "Target route changed before interrupt transmission");
+    return route;
   }
 
   async cancel(commandId: string, authority?: CommandAuthority): Promise<CommandRecord> {

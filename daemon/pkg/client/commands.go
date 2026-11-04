@@ -213,6 +213,9 @@ func (d *Daemon) executeVolatileCommand(ctx context.Context, cmd protocol.Contro
 			res = protocol.DaemonResultMessage{Type: "result", CommandID: cmdID, Status: protocol.StatusUncertain, Error: protocol.InvalidTurnAcknowledgement}
 		}
 
+	case protocol.ActionInterrupt:
+		res = d.interruptTurn(execCtx, cmd)
+
 	default:
 		res = protocol.DaemonResultMessage{
 			Type:      "result",

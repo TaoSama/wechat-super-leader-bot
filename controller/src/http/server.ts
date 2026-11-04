@@ -27,6 +27,7 @@ import { ConsoleAuthError, ConsoleAuthService } from "../console/auth.js";
 import { createConsoleAuthRouter, extractSessionCookie, checkOriginMatches } from "../console/routes.js";
 import { isConsoleRead, isConsoleMessage, isSameOriginMessage } from "../console/access.js";
 import { createSessionRouter } from "../console/sessions.js";
+import { interruptRunningTurn } from "../sessions/turn-interrupt.js";
 import { StatusEvents } from "./status-events.js";
 import { readConsoleExecutions } from "../console/executions.js";
 import { readConsoleGoals } from "../console/goals.js";
@@ -444,6 +445,11 @@ export class ControllerServer {
             replyText = intent.clarificationMessage || "请进一步明确指定目标会话。";
           } else if (intent.action === "unknown") {
             replyText = intent.replyText || "未能识别该指令意图。可以尝试“查看会话列表”或“查看进度”。";
+          } else if (intent.action === "interrupt_session") {
+            const result = await interruptRunningTurn(this.hub, this.commands, { chatId, nodeId: intent.nodeId!,
+              sessionId: intent.sessionId!, requestId: makeMessageRequestId(chatId, messageId) });
+            replyText = result.text;
+            commandId = result.commandId;
           } else if (intent.action === "read_session" || intent.action === "send_session") {
             const action = intent.action === "read_session" ? "read" : "send";
             try {

@@ -19,6 +19,7 @@ const FRAME_LIMIT = 16 * 1024 * 1024;
 const LARGE_SNAPSHOT_BYTES = 17 * 1024 * 1024;
 const SNAPSHOT_LIMIT = 32 * 1024 * 1024;
 const MODEL_CALL_ID = 'fixture-desktop-model-view';
+const RUNNING_TURN_ID = 'fixture-running-turn';
 
 /** Capture the real tool output received over the fixture model HTTP boundary. */
 export function createDesktopModelFixture() {
@@ -54,7 +55,7 @@ export async function verifyDesktopRoute({ base, request, nodeToken, waitFor, mo
     modelProvider: 'fixture-desktop-provider', latestReasoningEffort: 'high',
     threadRuntimeStatus: { type: 'idle', activeFlags: [] }, requests: [], turns: [], turnsPagination: { hasLoadedOldest: false },
     fixturePadding: 'x'.repeat(LARGE_SNAPSHOT_BYTES) };
-  let daemon, fixtures, revision = 1, starts = 0, settingsReads = 0, fullHistoryLoads = 0;
+  let daemon, fixtures, revision = 1, starts = 0, settingsReads = 0, fullHistoryLoads = 0, interrupts = 0;
   const server = createServer(socket => {
     const connection = { socket, clientId: `fixture-client-${randomUUID()}`, following: false };
     connections.add(connection);
@@ -180,6 +181,20 @@ export async function verifyDesktopRoute({ base, request, nodeToken, waitFor, mo
         reply(connection, message, OWNER_ID, { result: { turn: { id: turnId } } });
         return;
       }
+      case 'thread-follower-interrupt-turn': {
+        assert.equal(message.version, 4);
+        assert.equal(message.targetClientId, OWNER_ID);
+        assert.deepEqual(params, { conversationId: SESSION_ID, mode: 'user-stop', expectedTurnId: RUNNING_TURN_ID });
+        assert.equal(++interrupts, 1, 'Interrupt was sent more than once');
+        const index = state.turns.findIndex(turn => turn.turnId === RUNNING_TURN_ID);
+        assert(index >= 0 && state.turns[index].status === 'inProgress', 'Interrupt targeted a turn that is not running');
+        state.turns[index].status = 'interrupted';
+        state.threadRuntimeStatus.type = 'idle';
+        publishPatches([{ op: 'replace', path: ['turns', index, 'status'], value: 'interrupted' },
+          { op: 'replace', path: ['threadRuntimeStatus', 'type'], value: 'idle' }]);
+        reply(connection, message, OWNER_ID, { interruptedTurnId: RUNNING_TURN_ID, ok: true });
+        return;
+      }
       default: throw new Error(`Unexpected desktop method: ${message.method}`);
     }
   }
@@ -213,6 +228,39 @@ export async function verifyDesktopRoute({ base, request, nodeToken, waitFor, mo
       'Directory lost the selected execution state');
     assert(!response.body.text.includes('模型：'), 'Compact directory leaked the independent model line');
     assert(!response.body.text.includes(model), 'Compact directory leaked selected model metadata');
+  };
+  // Stop one exact running turn on the original owner; a retry reuses the receipt and sends nothing.
+  const verifyInterrupt = async () => {
+    await waitFor(async () => {
+      assertHealthy();
+      return ![...connections].some(connection => !connection.clientType || connection.clientType === 'super-leader-desktop-controller');
+    }, 'One-shot desktop readers disconnected before running turn');
+    const sentBefore = starts;
+    state.turns.push({ turnId: RUNNING_TURN_ID, status: 'inProgress', items: [
+      { id: 'running-user', type: 'userMessage', content: [{ type: 'text', text: 'long running request' }] }] });
+    state.threadRuntimeStatus.type = 'active';
+    publishPatches([{ op: 'add', path: ['turns', state.turns.length - 1], value: state.turns.at(-1) },
+      { op: 'replace', path: ['threadRuntimeStatus', 'type'], value: 'active' }]);
+    await waitFor(async () => (await status())?.sendAvailability?.reason === 'busy', 'Running turn observed');
+    const path = `/v1/sessions/${NODE_ID}/${SESSION_ID}/interrupt`;
+    const body = { requestId: randomUUID(), turnId: RUNNING_TURN_ID };
+    const stopped = await request(path, body);
+    assert([200, 202].includes(stopped.status), JSON.stringify(stopped.body));
+    assert.equal(stopped.body.action, 'interrupt');
+    assert.equal(stopped.body.sendRoute, 'desktop-owner');
+    await waitFor(async () => { assertHealthy(); return (await request(`/v1/commands/${stopped.body.commandId}`)).body.status === 'completed'; },
+      'Real Go exact desktop interrupt confirmation');
+    const receipt = (await request(`/v1/commands/${stopped.body.commandId}`)).body;
+    assert.equal(receipt.turnId, RUNNING_TURN_ID);
+    assert.equal(receipt.output, 'interrupted');
+    assert.equal((await request(path, body)).body.commandId, receipt.commandId);
+    const finished = await request(path, { requestId: randomUUID(), turnId: RUNNING_TURN_ID });
+    await waitFor(async () => !['pending'].includes((await request(`/v1/commands/${finished.body.commandId}`)).body.status),
+      'Interrupt of a finished turn settles');
+    assert.equal((await request(`/v1/commands/${finished.body.commandId}`)).body.status, 'failed', 'Finished turn was interrupted again');
+    assert.equal(interrupts, 1);
+    assert.equal(starts, sentBefore, 'Interrupt sent new input');
+    console.log('PASS HTTP → real Go Daemon → simulated desktop owner interrupt: exact expectedTurnId, confirmed interrupted receipt, idempotent retry, finished turn fails without a second native interrupt');
   };
   const assertHealthy = () => {
     if (errors.length) throw new AggregateError(errors, `Desktop fixture protocol error: ${errors.map(error => error.message).join('; ')}`);
@@ -390,6 +438,7 @@ export async function verifyDesktopRoute({ base, request, nodeToken, waitFor, mo
     const skillReceipt = await verifySkillCombination({ request, waitFor, status, assertHealthy, starts: () => starts,
       nodeId: NODE_ID, sessionId: SESSION_ID, fixtures, plainReceipt: receipt });
     await onSkillReceipt?.(skillReceipt);
+    await verifyInterrupt();
     return receipt;
   } finally {
     if (daemon && daemon.exitCode === null && daemon.signalCode === null) {

@@ -57,6 +57,16 @@ export async function sendSessionMessage(nodeId: string, sessionId: string, prom
   return command;
 }
 
+export const SESSION_INTERRUPT_INTENT = "session-interrupt";
+
+/** Re-posting the same requestId recovers the original receipt; it never starts a second stop. */
+export async function interruptSession(nodeId: string, sessionId: string, turnId: string, requestId: string, signal?: AbortSignal): Promise<CommandRecord> {
+  const raw = await sessionRequest(`${sessionPath(nodeId, sessionId)}/interrupt`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json", "X-Super-Leader-Intent": SESSION_INTERRUPT_INTENT }, body: JSON.stringify({ requestId, turnId }), signal });
+  const command = normalizeCommand(raw);
+  if (!command || command.action !== "interrupt" || command.nodeId !== nodeId || command.sessionId !== sessionId || command.expectedTurnId !== turnId) throw new Error("停止回执与当前会话不匹配，需核查");
+  return command;
+}
+
 export async function fetchCommand(commandId: string, signal?: AbortSignal): Promise<CommandRecord> {
   const command = normalizeCommand(await sessionRequest(`/v1/commands/${encodeURIComponent(commandId)}`, { method: "GET", headers: { Accept: "application/json" }, signal }));
   if (!command || command.commandId !== commandId) throw new Error("命令回执格式无效");

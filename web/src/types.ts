@@ -6,8 +6,8 @@
 import type { ConsoleGoals } from "./features/leader/goal-contract";
 import type { ConsoleAutomation } from "./features/notifications/automation-contract";
 import type { ConsoleDelivery } from "./features/notifications/delivery-contract";
-export type ActionType = "read" | "send";
-export type SessionCapability = ActionType | "resume-send";
+export type ActionType = "read" | "send" | "interrupt";
+export type SessionCapability = "read" | "send" | "resume-send";
 
 export type CommandStatus =
   | "admitting"
@@ -117,6 +117,7 @@ export interface CommandRecord {
   outputTruncated?: boolean;
   error?: string;
   turnId?: string;
+  expectedTurnId?: string;
   sendRoute?: SendRoute;
   inputReceipt?: InputReceipt;
   expiresAt: string;

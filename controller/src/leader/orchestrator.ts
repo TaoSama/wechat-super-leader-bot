@@ -29,6 +29,8 @@ import { executionSummary, sessionLabels } from "./plans/presentation.js";
 import { readSessionHistory } from "./queries/session-history.js";
 import { SessionTitles } from "./queries/session-titles.js";
 import { authorizeImageDelivery, sendSessionImages } from "./queries/session-images.js";
+import { authorizeSessionInterrupt } from "./model/interrupt-authorization.js";
+import { interruptSessionTurn } from "./session-interrupt.js";
 import type { MediaHub } from "../sessions/message-images.js";
 import { GoalConversation, goalConfirmation, goalCancellation } from "./goals/conversation.js";
 import { GoalScheduler } from "./goals/scheduler.js";
@@ -641,6 +643,9 @@ export class LeaderOrchestrator {
               !this.hub.listMedia || !this.hub.readMedia) return { text: "原会话图片读取能力不可用，未发送图片。" };
           return sendSessionImages(this.hub as Hub & MediaHub, this.store, chatId, data.inflight!.messageId, target.data, signal, this.now);
         }
+        if (call.function.name === "interrupt_session" && !await authorizeSessionInterrupt(this.model, sanitizedUserPrompt, signal)) {
+          return { text: "本条消息未明确要求停止会话当前正在运行的轮次，未发送停止请求。" };
+        }
         if (call.function.name === "execute_plan" || call.function.name === "execute_goal") {
           const intent = await currentUserIntent();
           const requiredIntent = call.function.name === "execute_plan" ? "task" : "goal";
@@ -702,6 +707,10 @@ export class LeaderOrchestrator {
         } catch {
           return { error: "获取控制台链接失败，请稍后再试" };
         }
+      }
+      case "interrupt_session": {
+        const target = ToolArguments.interrupt_session.parse(raw);
+        return interruptSessionTurn({ store: this.store, hub: this.hub, commands: this.commands, now: this.now }, chatId, data, target, signal);
       }
       case "list_nodes": return this.hub.getNodeStatusList();
       case "focus_session_candidates": {

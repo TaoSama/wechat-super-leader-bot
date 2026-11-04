@@ -45,6 +45,12 @@ type steerFixture struct {
 
 func newSteerFixture(t *testing.T, fixture *steerFixture) string {
 	t.Helper()
+	return newRPCSocketFixture(t, &fixture.connections, fixture.serve)
+}
+
+// newRPCSocketFixture serves one app-server protocol handler per connection.
+func newRPCSocketFixture(t *testing.T, counter *atomic.Int32, serve func(*testing.T, *websocket.Conn)) string {
+	t.Helper()
 	// A short path avoids the macOS Unix socket path length limit.
 	dir, err := os.MkdirTemp("/tmp", "codex-steer-")
 	if err != nil {
@@ -72,7 +78,7 @@ func newSteerFixture(t *testing.T, fixture *steerFixture) string {
 			t.Errorf("upgrade fixture connection: %v", err)
 			return
 		}
-		fixture.connections.Add(1)
+		counter.Add(1)
 		mu.Lock()
 		connections[conn] = true
 		mu.Unlock()
@@ -88,7 +94,7 @@ func newSteerFixture(t *testing.T, fixture *steerFixture) string {
 			t.Errorf("set fixture deadline: %v", err)
 			return
 		}
-		fixture.serve(t, conn)
+		serve(t, conn)
 	}))
 	server.Listener = listener
 	server.Start()
