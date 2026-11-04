@@ -575,7 +575,8 @@ export class WeChatGateway {
               await traceSpan("delivery.recovery.outbox.remove", async () => this.stateManager.removeOutbox(item.deliveryKey));
             });
           } catch (error) { firstError ??= error; }
-        } else if (item.kind === "reply" && item.source === "engine" && (item.status === "uncertain" || item.status === "expired")) {
+        } else if (item.kind === "reply" && item.source === "engine" && !item.engineAcked &&
+            (item.status === "uncertain" || item.status === "expired")) {
           const status = item.status;
           try {
             await this.withRecoveryTrace(item, () => traceSpan("delivery.recovery.ack", () => this.ackEngineReply(item, status)));
