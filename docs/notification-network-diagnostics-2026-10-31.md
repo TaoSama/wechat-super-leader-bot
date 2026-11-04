@@ -16,7 +16,7 @@
 
 异步上下文记录本轮全部请求失败，保留 Gateway 原 firstError 抛出顺序。请求成功需完成原有结构/身份校验；校验失败不会新增回执重试。请求身份仅用于进程内哈希匹配，不输出。cause 链与 AggregateError 有遍历上限并处理循环引用；未知代码统一为 OtherCode。日志不包含 message、stack、URL、主机、账号、消息正文、token 或原 cause 对象。
 
-没有匹配请求的本地阶段失败不自动声称恢复；超过 64 个不同失败身份时设置 `recoveryEvidenceOverflow` 并保守保留“恢复未证明”。这些诊断状态只在内存，不写业务账本、不影响调度、额度、健康判定或发送结果。生产日志仍沿用现有容器轮转限制，正常成功循环不逐秒写日志。
+没有匹配请求的本地阶段失败不自动声称恢复；超过 64 个不同失败身份时设置 `recoveryEvidenceOverflow` 并保守保留“恢复未证明”。未恢复的失败证据（已有请求身份哈希、次数、首末失败时间、阶段/phase/cause code 摘要、溢出标记）写入 Gateway 状态目录下的 `<state>.notification-recovery.json`（原子写、0600，仅证据变化时写，不含消息、堆栈、URL、主机、账号、正文或 token）。重启后输出 `notification_cycle_restored`（恢复条数与时长），之后仍需匹配的成功才输出 `notification_cycle_recovered`；最后失败超过 7 天的证据丢弃并记 `notification_cycle_restore_discarded`，损坏或不可读的文件同样记录后从空状态开始。该文件不写业务账本、不影响调度、额度、健康判定或发送结果。生产日志仍沿用现有容器轮转限制，正常成功循环不逐秒写日志。
 
 ## 本地运行证据
 
