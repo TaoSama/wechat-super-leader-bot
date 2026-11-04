@@ -23,6 +23,11 @@ export function parseILinkJson(raw: string): unknown {
   });
 }
 
+/** WeChat explicitly refused the message, as opposed to an ambiguous or malformed receipt. */
+export function isRejectedSendReceipt(error: unknown): boolean {
+  return error instanceof ILinkSendReceiptError && (error.reason === "RejectedRet" || error.reason === "RejectedErrcode");
+}
+
 /** An HTTP-success JSON object may omit its zero code; acceptance is not delivery proof. */
 export function validateSendReceipt(response: Record<string, unknown>): void {
   for (const field of ["ret", "errcode"] as const) {

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { StateManager } from "../runtime/state.js";
-import { ILinkSendReceiptError } from "../wechat/send-receipt.js";
+import { isRejectedSendReceipt } from "../wechat/send-receipt.js";
 import { parseResultDelivery, type MaterializedResultDelivery, type ResultArtifact } from "./contracts.js";
 
 export type ResultSendKind = "final" | "progress";
@@ -44,7 +44,7 @@ export function resultAcknowledgedSteps(state: ResultDeliveryOptions["state"], p
   return count;
 }
 function defaultClassification(error: unknown): "not_submitted" | "rejected" | "unknown" {
-  if (error instanceof ILinkSendReceiptError && ["RejectedRet", "RejectedErrcode"].includes(error.reason)) return "rejected";
+  if (isRejectedSendReceipt(error)) return "rejected";
   if (error instanceof Error && error.name === "LocalSendDeferredError") return "not_submitted";
   return "unknown";
 }

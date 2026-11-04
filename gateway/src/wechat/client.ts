@@ -6,7 +6,7 @@ import { InboundWeChatMessage } from "../types.js";
 import { StateManager } from "../runtime/state.js";
 import { DEFAULT_MESSAGE_MAX_CHARS, legacyWeChatCitationBody, markdownToWeChat, unicodeSafeBoundary } from "./markdown.js";
 import { DEFAULT_POLL_TIMEOUT_MS, MAX_POLL_TIMEOUT_MS, POLL_NETWORK_MARGIN_MS, MAX_POLL_ATTEMPTS, SEND_REQUEST_TIMEOUT_MS, REPLY_TIMEOUT_MS, NOTIFICATION_REPLY_TIMEOUT_MS } from "../runtime/budgets.js";
-import { ILinkSendReceiptError, parseILinkJson, validateSendReceipt } from "./send-receipt.js";
+import { ILinkSendReceiptError, isRejectedSendReceipt, parseILinkJson, validateSendReceipt } from "./send-receipt.js";
 import { TypingIndicator } from "./typing.js";
 import { ImageUploader, type UploadedImageItem, type UploadRequest } from "./media-upload.js";
 import { sendImageReply as deliverImages, validateImageAttachments, type ImageAttachment } from "./media-delivery.js";
@@ -530,8 +530,7 @@ export class ILinkClient {
           try {
             await traceSpan("wechat.chunk.send", () => this.sendSingleTextNow(chatId, chunks[idx], deterministicClientId, replySignal), { chunkIndex: idx });
           } catch (error) {
-            if (error instanceof ILinkSendReceiptError &&
-                (error.reason === "RejectedRet" || error.reason === "RejectedErrcode")) {
+            if (isRejectedSendReceipt(error)) {
               this.stateManager.rejectReplyChunk(deliveryKey, idx, options?.renewalReminder ? { renewalReminder: true } : undefined);
               traceEvent("wechat.chunk.rejected", { chunkIndex: idx });
             }

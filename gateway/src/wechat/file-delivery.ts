@@ -6,7 +6,7 @@ import { transferTimeoutMs } from "../runtime/transfer-budget.js";
 import { MEDIA_UPLOAD_TIMEOUT_MS } from "./cdn-upload.js";
 import { CHECKPOINT_MARGIN_MS, SEND_REQUEST_TIMEOUT_MS, NOTIFICATION_REPLY_TIMEOUT_MS, REPLY_TIMEOUT_MS } from "../runtime/budgets.js";
 import type { FileUploadMetadata, UploadedFileItem } from "./file-upload.js";
-import { ILinkSendReceiptError } from "./send-receipt.js";
+import { isRejectedSendReceipt } from "./send-receipt.js";
 
 export interface FileReplyOptions {
   deliveryKey: string;
@@ -78,7 +78,7 @@ export async function deliverFileReply(options: FileDeliveryOptions): Promise<nu
       try {
         await beforeAbort(options.send(uploaded, clientId, signal), signal);
       } catch (error) {
-        if (error instanceof ILinkSendReceiptError && ["RejectedRet", "RejectedErrcode"].includes(error.reason)) {
+        if (isRejectedSendReceipt(error)) {
           state.rejectReplyChunk(deliveryKey, 0);
         }
         throw error;

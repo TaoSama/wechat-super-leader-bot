@@ -117,3 +117,46 @@ test("unknown legacy context queues reply without creating window or blocking an
   assert.equal(state.syncBuf, "next");
   assert.equal(Object.values(state.outbox)[0].chatId, "legacy");
 });
+
+test("persistently rejected reply stops after bounded attempts without blocking the chat", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-rejected-reply-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const account = path.join(directory, "account.json"), statePath = path.join(directory, "state.json");
+  fs.writeFileSync(account, JSON.stringify({ token: "synthetic", accountId: "synthetic" }));
+  const sends: string[] = [];
+  let page = 1;
+  const ilinkFetch: typeof fetch = async (url, init) => {
+    if (String(url).endsWith("getupdates")) return Response.json({ ret: 0, get_updates_buf: `cursor-${page}`, msgs: [{
+      message_type: 1, from_user_id: "chat", client_id: `m${page}`, context_token: `context-${page}`,
+      create_time_ms: Date.now() - 1000, item_list: [{ type: 1, text_item: { text: "request" } }] }] });
+    if (String(url).endsWith("getconfig")) return Response.json({ ret: 0, typing_ticket: "ticket" });
+    if (String(url).endsWith("sendtyping")) return Response.json({ ret: 0 });
+    const text = JSON.parse(String(init?.body)).msg.item_list[0].text_item.text;
+    sends.push(text);
+    return Response.json(text === "cd" ? { ret: -2 } : { ret: 0 });
+  };
+  const controllerFetch: typeof fetch = async (url, init) => {
+    if (String(url).endsWith("authorize")) return Response.json({ allowed: true });
+    const messageId = init?.body ? JSON.parse(String(init.body)).messageId : decodeURIComponent(String(url).split("/").at(-2)!);
+    return Response.json({ text: messageId === "m1" ? "abcdef" : "ok" });
+  };
+  const create = (state: StateManager) => new WeChatGateway({ stateManager: state, splitMaxChars: 2,
+    ilink: new ILinkClient({ stateManager: state, fetchImpl: ilinkFetch }),
+    controller: new ControllerClient({ controllerUrl: "http://127.0.0.1:8790", controllerToken: "synthetic", fetchImpl: controllerFetch }) });
+  const state = new StateManager(account, statePath);
+  state.markBaselineEstablished();
+  const gateway = create(state);
+  await assert.rejects(gateway.pollOnce(), /RejectedRet/);
+  const key = state.computeDeliveryKey("chat", "m1");
+  assert.equal(state.outbox[key].status, "pending", "a single refusal may be transient and stays retryable");
+  for (let pass = 0; pass < 15; pass++) await gateway.flushRepliesOnce().catch(() => undefined);
+  assert.deepEqual(sends, ["ab", "cd", "cd", "cd"], "the refused chunk is retried a bounded number of times");
+  assert.equal(state.outbox[key].status, "expired");
+  assert.equal(state.accountSendBudget!.remaining, 6);
+  page = 2;
+  const restarted = new StateManager(account, statePath);
+  await create(restarted).pollOnce();
+  assert.deepEqual(sends, ["ab", "cd", "cd", "cd", "ok"], "a new inbound must not replay the refused reply first");
+  assert.equal(restarted.outbox[key].status, "expired");
+  assert.equal(restarted.outbox[restarted.computeDeliveryKey("chat", "m2")], undefined);
+});
