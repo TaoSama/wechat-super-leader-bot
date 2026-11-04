@@ -94,7 +94,7 @@ export class AutomationService {
           try { outcome = await this.options.runner.start(run, schedule); }
           catch (error) {
             this.options.onError?.(error, `automation dispatch ${run.id}`);
-            outcome = { status: "unknown", error: "Dispatch failed without a definite non-submission receipt; inspect manually before resuming" };
+            outcome = { status: "unknown", error: "Dispatch failed without a definite non-submission receipt; this occurrence is never redispatched" };
           }
         }
         await this.finish(run, schedule, owner, outcome);

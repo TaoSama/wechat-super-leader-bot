@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { CLAIM_LEASE_MS, type AutomationRun, type AutomationOutbox, type RunnerOutcome, type Schedule } from "./contracts.js";
 import { dueOccurrence } from "./timing.js";
 
+const UNKNOWN_RUN_TEXT = "本次定时任务结果不明，不会自动重发。请到目标会话核查本次是否已执行；此结果不影响后续轮次。";
+
 export function newRun(schedule: Schedule, now: number, owner: string, existing?: AutomationRun): AutomationRun {
   const { scheduledAt, nextAt } = dueOccurrence(schedule, now);
   const expired = now >= scheduledAt + schedule.businessTtlMs;
@@ -34,13 +36,16 @@ export function finishRun(schedule: Schedule, run: AutomationRun, outcome: Runne
     if (outcome.reason === "paused" && schedule.status === "paused") schedule.nextAt = run.scheduledAt;
     return;
   }
-  if (outcome.status === "unknown") {
-    run.error = outcome.error;
-    // An unobserved submission blocks future occurrences until the owner resolves it.
-    return;
-  }
   delete schedule.activeRunId;
   if (schedule.nextAt === null && schedule.status !== "cancelled") schedule.status = "completed";
+  const expiresAt = run.scheduledAt + schedule.businessTtlMs;
+  if (outcome.status === "unknown") {
+    // The run stays unknown and is never redispatched; later occurrences keep their own run IDs.
+    run.error = outcome.error;
+    if (expiresAt <= now) return;
+    return { id: run.id, runId: run.id, scheduleId: schedule.id, chatId: schedule.chatId,
+      kind: "blocked", text: UNKNOWN_RUN_TEXT, createdAt: now, expiresAt, status: "pending" };
+  }
   run.result = structuredClone(outcome.result);
   const previousOutcome = schedule.lastOutcome;
   const fingerprint = outcome.result.fingerprint ?? createHash("sha256").update(outcome.result.text + "\0" + (outcome.result.error ?? "")).digest("hex");
@@ -51,7 +56,6 @@ export function finishRun(schedule: Schedule, run: AutomationRun, outcome: Runne
   const recovered = previousOutcome === "failed" && outcome.status === "completed";
   const meaningful = outcome.status === "failed" || recovered || outcome.result.meaningful !== false;
   const text = outcome.result.text.trim() || (outcome.status === "failed" ? outcome.result.error?.trim() : "");
-  const expiresAt = run.scheduledAt + schedule.businessTtlMs;
   if (!text || !meaningful || (monitor && same) || expiresAt <= now) return;
   return {
     id: run.id, runId: run.id, scheduleId: schedule.id, chatId: schedule.chatId,

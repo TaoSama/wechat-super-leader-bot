@@ -51,7 +51,8 @@ export interface AutomationRun {
 }
 export interface AutomationOutbox {
   id: string; scheduleId: string; runId: string; chatId: string;
-  kind: "completed" | "failed" | "recovered";
+  /** `blocked` reports an unknown run outcome that needs the owner's inspection. */
+  kind: "completed" | "failed" | "recovered" | "blocked";
   text: string; createdAt: number; expiresAt: number;
   status: "pending" | "published" | "superseded" | "expired";
   bodyClearedAt?: number;
