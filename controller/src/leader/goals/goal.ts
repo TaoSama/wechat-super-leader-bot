@@ -22,10 +22,14 @@ export const GoalProposalSchema = z.object({ id: z.string().uuid(), expiresAt: s
 export type GoalProposal = z.infer<typeof GoalProposalSchema>;
 const reason = z.string().trim().min(1).max(1000);
 export const GoalDecisionSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("next"), target: z.number().int().min(1).max(4), prompt: z.string().trim().min(1).max(1000),
-    sourceActions: z.array(z.number().int().min(1).max(GOAL_ACTION_LIMIT)).max(3), reason }).strict(),
-  z.object({ type: z.literal("complete"), criteria: z.array(z.object({ criterion: z.number().int().min(1).max(8),
-    actions: z.array(z.number().int().min(1).max(GOAL_ACTION_LIMIT)).min(1).max(GOAL_ACTION_LIMIT) }).strict()).min(1).max(8), reason }).strict(),
+  z.object({ type: z.literal("next"), target: z.number().int().min(1).max(4).describe("authorization.targets 的一基编号"),
+    prompt: z.string().trim().min(1).max(1000),
+    sourceActions: z.array(z.number().int().min(1).max(GOAL_ACTION_LIMIT)).max(3)
+      .describe("要附给这条任务的更早动作的一基编号，只能选 completed 且有 result 的动作；不列出就不转发"), reason }).strict(),
+  z.object({ type: z.literal("complete"), criteria: z.array(z.object({ criterion: z.number().int().min(1).max(8).describe("完成条件的一基编号"),
+    actions: z.array(z.number().int().min(1).max(GOAL_ACTION_LIMIT)).min(1).max(GOAL_ACTION_LIMIT)
+      .describe("支撑这条条件的动作一基编号，结果必须非空且未裁剪") }).strict()).min(1).max(8)
+      .describe("每条完成条件各列一项"), reason }).strict(),
   z.object({ type: z.literal("blocked"), reason }).strict(),
 ]);
 export type GoalDecision = z.infer<typeof GoalDecisionSchema>;

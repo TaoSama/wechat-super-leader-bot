@@ -80,8 +80,8 @@ async function handle(request) {
   }
   assert.equal(request.method, 'turn/start');
   assert.equal(request.params.threadId, THREAD_ID);
-  assert.equal(request.params.input.length, 1); assert.equal(request.params.input[0].type, 'text');
-  const prompt = request.params.input[0].text;
+  assert(request.params.input.length >= 1 && request.params.input.every(item => item.type === 'text'));
+  const prompt = request.params.input.at(-1).text;
   const match = prompt.match(/<current_user_message>(.+)<\\/current_user_message>/);
   assert(match); const input = JSON.parse(match[1]).text;
   fs.appendFileSync(settings.nativeLog, JSON.stringify({ input, pid: process.pid, resumed, methods }) + '\\n');

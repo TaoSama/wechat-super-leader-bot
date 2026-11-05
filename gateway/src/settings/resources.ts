@@ -7,6 +7,8 @@ const MAX_SKILL_FILES = 2048;
 const MAX_SKILL_BYTES = 32 * MAX_RESOURCE_BYTES;
 const DIRECTORY_MODE = 0o700;
 const FILE_MODE = 0o600;
+const BASES_FILE = "bases.json";
+const REVISION_PATTERN = /^[a-f0-9]{64}$/;
 
 export class RuntimeResourceError extends Error {
   constructor(public readonly status: number, public readonly code: string, message: string) {
@@ -25,8 +27,10 @@ export interface ResourceMetadata {
   bytes: number;
   source: "default" | "override";
   editable: boolean;
+  /** The override was saved against an older default, or before base revisions were recorded. */
+  stale: boolean;
 }
-export interface ResourceDocument extends ResourceMetadata { content: string }
+export interface ResourceDocument extends ResourceMetadata { content: string; defaultContent?: string }
 export interface RuntimeResourcesOptions {
   root: string;
   skillsRoot: string;
@@ -190,8 +194,8 @@ export class RuntimeResources {
     return this.operation(() => [
       ...Object.keys(this.defaults).sort().map(name => this.read(`prompt/${name}`)),
       ...this.skillFiles().map(file => this.describe(`skill/${file.relative}`, file)),
-    ].map(({ id, kind, title, path: resourcePath, revision, version, bytes: size, source, editable }) =>
-      ({ id, kind, title, path: resourcePath, revision, version, bytes: size, source, editable })));
+    ].map(({ id, kind, title, path: resourcePath, revision, version, bytes: size, source, editable, stale }) =>
+      ({ id, kind, title, path: resourcePath, revision, version, bytes: size, source, editable, stale })));
   }
 
   read(id: string): ResourceDocument {
@@ -202,7 +206,7 @@ export class RuntimeResources {
         const data = override?.data ?? Buffer.from(this.defaults[parts[1]], "utf8");
         const content = decode(data);
         if (content === undefined) return fail(400, "invalid_text", "Resource is not valid UTF-8 text");
-        return { ...this.metadata(id, data, override ? "override" : "default", true), content };
+        return this.document(this.metadata(id, data, override ? "override" : "default", true), content);
       }
       if (parts[0] === "skill" && parts.length >= 3) {
         const file = this.skillFiles().find(candidate => candidate.relative === parts.slice(1).join("/"));
@@ -211,7 +215,7 @@ export class RuntimeResources {
           if (!data) return fail(404, "resource_not_found", "Resource does not exist");
           const content = decode(data.data);
           if (content === undefined) return fail(400, "binary_resource", "Binary skill files can be viewed as metadata only");
-          return { ...this.metadata(id, data.data, file.source, true), content };
+          return this.document(this.metadata(id, data.data, file.source, true), content);
         }
       }
       return fail(404, "resource_not_found", "Resource does not exist");
@@ -221,7 +225,7 @@ export class RuntimeResources {
   write(id: string, update: { content: string; expectedRevision: string }): ResourceDocument {
     return this.operation(() => {
       text(update.content);
-      if (typeof update.expectedRevision !== "string" || !/^[a-f0-9]{64}$/.test(update.expectedRevision)) {
+      if (typeof update.expectedRevision !== "string" || !REVISION_PATTERN.test(update.expectedRevision)) {
         fail(400, "invalid_revision", "A valid expectedRevision is required");
       }
       const current = this.read(id);
@@ -237,6 +241,8 @@ export class RuntimeResources {
         mode |= (bytes(source.file)?.mode ?? 0) & 0o111;
       }
       store(destination, update.content, mode);
+      const base = this.defaultData(id);
+      if (base) store(path.join(this.root, BASES_FILE), JSON.stringify({ ...this.bases(), [id]: digest(base) }));
       return this.read(id);
     });
   }
@@ -265,8 +271,36 @@ export class RuntimeResources {
 
   private metadata(id: string, data: Buffer, source: "default" | "override", editable: boolean): ResourceMetadata {
     const revision = digest(data);
+    const base = source === "override" ? this.defaultData(id) : undefined;
+    const stale = !!base && !base.equals(data) && this.bases()[id] !== digest(base);
     return { id, kind: id.startsWith("prompt/") ? "prompt" : "skill", title: id.split("/").at(-1)!,
-      path: id.slice(id.indexOf("/") + 1), revision, version: `sha256:${revision}`, bytes: data.length, source, editable };
+      path: id.slice(id.indexOf("/") + 1), revision, version: `sha256:${revision}`, bytes: data.length, source, editable, stale };
+  }
+  private document(metadata: ResourceMetadata, content: string): ResourceDocument {
+    const base = metadata.stale ? decode(this.defaultData(metadata.id)!) : undefined;
+    return { ...metadata, content, ...(base !== undefined ? { defaultContent: base } : {}) };
+  }
+  /** The deployed text an override shadows; skills added only as overrides have none. */
+  private defaultData(id: string): Buffer | undefined {
+    const parts = segments(id);
+    if (parts[0] === "prompt") return Object.hasOwn(this.defaults, parts[1]) ? Buffer.from(this.defaults[parts[1]], "utf8") : undefined;
+    return bytes(path.join(this.skillsRoot, ...parts.slice(1)))?.data;
+  }
+  /**
+   * Default revision each override was saved against. These only drive the stale notice, so an
+   * unreadable record marks every override stale instead of blocking turns that read prompts.
+   */
+  private bases(): Record<string, string> {
+    const data = bytes(path.join(this.root, BASES_FILE));
+    if (!data) return {};
+    let value: unknown;
+    try { value = JSON.parse(decode(data.data) ?? ""); }
+    catch (error) {
+      if (error instanceof SyntaxError) return {};
+      throw error;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return Object.fromEntries(Object.entries(value).filter(([, revision]) => typeof revision === "string" && REVISION_PATTERN.test(revision)));
   }
   private describe(id: string, file: SkillFile): ResourceMetadata {
     const data = bytes(file.file);

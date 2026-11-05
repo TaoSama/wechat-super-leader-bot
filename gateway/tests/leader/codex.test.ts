@@ -150,12 +150,12 @@ test("each native turn gets current Beijing time, including midnight after threa
   assert.match(inputs[1], /<current_time time_zone="Asia\/Shanghai">2026-10-19 00:00:00 UTC\+08:00<\/current_time>/);
   assert.doesNotMatch(inputs[1], /2026-10-18 23:14:05/);
   for (const input of inputs) {
-    assert.match(input, /不沿用历史消息或记忆中的“现在”/);
-    assert.match(input, /来源没有时区时，标注时区未知，不猜测/);
-    assert.match(input, /标题简短并独立成段，列表每项单独一行/);
-    assert.match(input, /默认不反复输出“桌面观测过期”“已失联”等技术状态/);
-    assert.match(input, /用户询问细节或能力时，如实解释当前限制/);
-    assert.match(input, /不要伪造在线状态或声称尚未验证的执行已经完成/);
+    assert.match(input, /不用历史消息或记忆里的“现在”/);
+    assert.match(input, /没有时区的照原样写，并注明“时区未知”/);
+    assert.match(input, /标题单独一行，列表每项一行/);
+    assert.match(input, /不主动提“观测过期”“已失联”这类技术状态/);
+    assert.match(input, /用户问起时如实说明限制/);
+    assert.match(input, /不要说已完成/);
   }
 });
 

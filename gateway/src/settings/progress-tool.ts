@@ -1,5 +1,5 @@
 import { Script } from "node:vm";
-import { MAX_PROGRESS_CHARS } from "../leader/progress.js";
+import { MAX_PROGRESS_CHARS, QUERY_PROGRESS_LIMIT } from "../leader/progress.js";
 
 export interface ProgressTextSchema {
   type: "string";
@@ -26,7 +26,7 @@ const COMPLEX_PATTERN_CHARACTERS = "\\()[]{}*+?|.";
 
 export const DEFAULT_PROGRESS_TOOL: ProgressTool = parseProgressTool(JSON.stringify({
   name: "report_progress",
-  description: "在处理耗时较长、已有值得告知的真实进展或需要说明等待原因时，向微信用户发送一条中间进度。简短、具体、有证据，不凑数、不把派发说成完成；每个根 query 最多3次，追加消息不重置额度。返回sent/status/used/remaining/limit；失败或未知不重发，继续完成工作并给最终回复。",
+  description: `任务耗时长时，往微信发一条有实际内容的中间进展，比如已经查到什么、下一步做什么。不要把“已派发”说成“已完成”。每条用户请求最多 ${QUERY_PROGRESS_LIMIT} 次，用户追加消息不会重置次数；结果里 remaining 是剩余次数。发送失败或结果不明时不要重发，继续完成工作再给最终回复。`,
   inputSchema: { type: "object", properties: { text: { type: "string", minLength: 1, maxLength: MAX_PROGRESS_CHARS } },
     required: ["text"], additionalProperties: false },
 }));

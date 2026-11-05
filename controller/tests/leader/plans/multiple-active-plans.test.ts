@@ -32,14 +32,13 @@ function fixture() {
   const executions = new ExecutionScheduler(store, commands, { now: () => now });
   const create = () => new LeaderOrchestrator(store, hub, commands, model, () => now, undefined, executions, undefined,
     undefined, undefined, { isAllowed: id => id === CHAT_ID });
-  const call = (name: string, args: unknown = {}, intent = "query") => create().direct.call(DirectCallSchema.parse({
-    chatId: CHAT_ID, messageId: `message-${randomUUID()}`, text: `调用 ${name}`, callId: randomUUID(), name, arguments: args,
-    authorization: { intent } }));
+  const call = (name: string, args: unknown = {}) => create().direct.call(DirectCallSchema.parse({
+    chatId: CHAT_ID, messageId: `message-${randomUUID()}`, text: `调用 ${name}`, callId: randomUUID(), name, arguments: args }));
   // Two ordered steps on distinct sessions; the second step unlocks only after the first completes.
   const plan = (first: string, second: string) => call("execute_plan", { actions: [
     { nodeId: "air", sessionId: first, prompt: `${first} 第一步` },
     { nodeId: "air", sessionId: second, prompt: `${second} 第二步`, dependsOn: [1] },
-  ] }, "task");
+  ] });
   return { store, commands, executions, create, call, plan };
 }
 
@@ -70,12 +69,12 @@ describe("multiple active plans in one chat", () => {
   it("reports the store cap in Chinese when a preview is confirmed after the slots fill", async () => {
     const f = fixture();
     for (let index = 1; index < MAX_ACTIVE_PLANS_PER_CHAT; index++) await f.plan("first", "second");
-    await f.call("propose_plan", { actions: [{ nodeId: "air", sessionId: "third", prompt: "待确认任务" }] }, "preview");
+    await f.call("propose_plan", { actions: [{ nodeId: "air", sessionId: "third", prompt: "待确认任务" }] });
     // Another confirmation path takes the last slot while this preview waits for the user.
     await f.store.createExecutionIfAbsent(createExecution(CHAT_ID, { id: randomUUID(), expiresAt: Date.now() + 60_000,
       actions: [{ nodeId: "air", sessionId: "fourth", prompt: "并发确认", sendRoute: "control-socket", dependsOn: [] }] }, Date.now()));
     const confirmed = await f.create().direct.call(DirectCallSchema.parse({ chatId: CHAT_ID, messageId: "confirm", text: "确认",
-      callId: randomUUID(), name: "confirm_pending", arguments: {}, authorization: { intent: "task" } }));
+      callId: randomUUID(), name: "confirm_pending", arguments: {} }));
     expect(confirmed.reply?.text).toContain("已达上限，没有新增派发");
     expect(await listChatActivePlans(f.store, CHAT_ID)).toHaveLength(MAX_ACTIVE_PLANS_PER_CHAT);
   });
@@ -90,14 +89,14 @@ describe("multiple active plans in one chat", () => {
     const single = (await f.call("get_plan_progress", { planId: older.id })).result as { id: string; steps: unknown[] };
     expect(single).toMatchObject({ id: older.id, steps: expect.any(Array) });
 
-    const ambiguous = await f.call("cancel_plan", {}, "task");
+    const ambiguous = await f.call("cancel_plan", {});
     expect(ambiguous.reply?.text).toContain("当前有 2 个进行中的计划，没有停止任何计划");
     for (const plan of [newer, older]) expect(ambiguous.reply?.text).toContain(plan.id);
     expect(await listChatActivePlans(f.store, CHAT_ID)).toHaveLength(2);
 
-    const missing = await f.call("cancel_plan", { planId: randomUUID() }, "task");
+    const missing = await f.call("cancel_plan", { planId: randomUUID() });
     expect(missing.reply?.text).toContain("没有该ID的进行中计划");
-    const cancelled = await f.call("cancel_plan", { planId: older.id }, "task");
+    const cancelled = await f.call("cancel_plan", { planId: older.id });
     expect(cancelled.reply?.text).toContain("已取消计划后续派发");
     expect((await f.store.getExecution(older.id))?.status).toBe("cancelled");
     expect((await listChatActivePlans(f.store, CHAT_ID)).map(plan => plan.id)).toEqual([newer.id]);
@@ -124,10 +123,10 @@ describe("multiple active plans in one chat", () => {
   it("keeps plans and persistent goals mutually exclusive", async () => {
     const f = fixture();
     await f.plan("first", "second");
-    await expect(f.call("execute_goal", goal, "goal")).resolves.toMatchObject({ result: expect.objectContaining({ error: expect.anything() }) });
+    await expect(f.call("execute_goal", goal)).resolves.toMatchObject({ result: expect.objectContaining({ error: expect.anything() }) });
     expect(await f.store.getLatestGoal(CHAT_ID)).toBeNull();
-    await f.call("cancel_plan", {}, "task");
-    expect((await f.call("execute_goal", goal, "goal")).reply?.text).toContain("目标已确认");
+    await f.call("cancel_plan", {});
+    expect((await f.call("execute_goal", goal)).reply?.text).toContain("目标已确认");
     const blocked = await f.plan("third", "fourth");
     expect(JSON.stringify(blocked)).toContain("goal already exists");
     expect(await listChatActivePlans(f.store, CHAT_ID)).toEqual([]);

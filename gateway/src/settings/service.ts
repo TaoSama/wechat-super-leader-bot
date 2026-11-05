@@ -2,13 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ModelReasoningEffort } from "@openai/codex-sdk";
-import { LEADER_SYSTEM_PROMPT } from "../leader/prompt.js";
+import { describeContextLayers, LEADER_SYSTEM_PROMPT } from "../leader/prompt.js";
 import { HEADLESS_CODEX_CONFIG, HEADLESS_SKILLS_ROOT } from "../leader/headless-config.js";
 import { DEFAULT_PROGRESS_TOOL, parseProgressTool } from "./progress-tool.js";
 import { RuntimeResources, RuntimeResourceError, type ResourceMetadata } from "./resources.js";
 import { GatewayModelCatalog } from "./models.js";
 import { writePrivateJsonSync } from "../runtime/state.js";
 import type { LeaderWorkspace, MemoryFile } from "../leader/workspace.js";
+import { agentInstructionsStatus, DEFAULT_AGENT_INSTRUCTIONS, rebaseAgentInstructions } from "../leader/agent-instructions.js";
 import { AppServerRejectedError, readAppServerThreadHistory } from "../leader/app-server.js";
 import { projectHistoryItems } from "../leader/history.js";
 import type { CodexOptions } from "@openai/codex-sdk";
@@ -21,15 +22,7 @@ const HISTORY_MAX_LIMIT = 50;
 const HISTORY_MAX_CURSOR = 4096;
 const HISTORY_CONTEXT_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
-const ENVELOPE = `微信主会话的实际运行输入由下列资源按轮组合：
-1. 可编辑的微信主会话 SP 静态主体。
-2. 当前北京时间 current_time（运行时生成）。
-3. Controller 业务指令 controller_instructions（独立资源）。
-4. 本聊天 task.md / memory.md / preference.md 的 memory_snapshot。
-5. 当前真实用户消息编号与原文 current_user_message。
-6. Codex 从本聊天工作目录加载 AGENTS.md 和本轮冻结的 Skill。
-这里的 SP 是 Gateway 注入的运行指令，不代表能够编辑 Codex 内建系统提示词。
-动态时间、当前消息和记忆快照每轮生成，不保存为模板编辑内容。`;
+const ENVELOPE = describeContextLayers();
 type Selection = { model: string; reasoningEffort: ModelReasoningEffort | null };
 interface Options {
   root: string; model: string; apiKey?: string; baseUrl?: string; codexPath?: string; skillsRoot?: string;
@@ -42,8 +35,10 @@ interface Options {
 export type SettingResource = {
   id: string; kind: "prompt" | "memory" | "skill" | "tool"; title: string; scope: string; path: string;
   revision: string; version: string; editable: boolean; effect: string; reason?: string;
+  /** A saved override or AGENTS.md was based on an older default. */
+  stale: boolean;
 };
-export type SettingDocument = SettingResource & { content: string; language: string };
+export type SettingDocument = SettingResource & { content: string; language: string; defaultContent?: string };
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RuntimeResourceError(400, "invalid_request", "Expected an object");
@@ -176,13 +171,13 @@ export class GatewaySettings {
     return { id: `gateway.${Buffer.from(resource.id).toString("base64url")}`, kind: resource.id === "prompt/progress_tool" ? "tool" : resource.kind,
       title: resource.id === "prompt/main" ? "微信主会话 SP · 静态主体" : resource.id === "prompt/progress_tool" ? "report_progress · 工具 Schema" : resource.title,
       scope: "wechat", path: resource.path, revision: resource.revision, version: resource.version, editable: resource.editable,
-      effect: EFFECT, ...(resource.id === "prompt/main" ? { reason: "Gateway 每轮注入的指令主体；Codex 内建系统提示词不由此修改" } : {}),
+      stale: resource.stale, effect: EFFECT, ...(resource.id === "prompt/main" ? { reason: "Gateway 每轮注入的指令主体；Codex 内建系统提示词不由此修改" } : {}),
       ...(!resource.editable ? { reason: "二进制文件仅展示版本与路径" } : {}) };
   }
   private envelope(): SettingDocument {
     const revision = hash(ENVELOPE);
     return { id: `gateway.${Buffer.from("effective/envelope").toString("base64url")}`, kind: "prompt", title: "主会话生效指令组成", scope: "wechat",
-      path: "运行时/指令组成说明", revision, version: `sha256:${revision}`, editable: false,
+      path: "运行时/指令组成说明", revision, version: `sha256:${revision}`, editable: false, stale: false,
       effect: "每轮按真实消息和当前时间生成", reason: "动态上下文由运行时生成，请编辑其对应的静态资源", content: ENVELOPE, language: "markdown" };
   }
   private nativeTools(): SettingDocument {
@@ -191,7 +186,7 @@ export class GatewaySettings {
       schemaOwnership: "Codex 内建 Schema 由所用 CLI 版本定义；外部 MCP Schema 由其服务器定义。此处展示实际启用配置，不伪造远程 Schema 或可编辑能力。可编辑的本地 report_progress 和 Controller 业务工具分别列于资源目录。" }, null, 2);
     const revision = hash(content);
     return { id: `gateway.${Buffer.from("effective/native-tools").toString("base64url")}`, kind: "tool", title: "原生工具与外部 MCP · 来源配置",
-      scope: "wechat", path: "运行时/原生工具来源.json", revision, version: `sha256:${revision}`, editable: false,
+      scope: "wechat", path: "运行时/原生工具来源.json", revision, version: `sha256:${revision}`, editable: false, stale: false,
       effect: "随 Codex CLI 或外部 MCP 服务版本变化", reason: "Schema 由对应原生实现定义；此处可查看实际启用配置", content, language: "json" };
   }
   private decode(id: string): string {
@@ -210,8 +205,10 @@ export class GatewaySettings {
     if (!MEMORY_FILES.includes(name as typeof MEMORY_FILES[number])) throw new RuntimeResourceError(404, "resource_not_found", "Unknown memory file");
     const workspace = await this.chat(chatId);
     const file = workspace.readEditableFile(name as MemoryFile | "AGENTS.md");
+    const stale = name === "AGENTS.md" && agentInstructionsStatus(file.content) === "stale";
     return { id: `gateway.${Buffer.from(`memory/${name}`).toString("base64url")}`, kind: name === "AGENTS.md" ? "prompt" : "memory",
       title: name, scope: "wechat", path: `聊天/${name}`, ...file, version: `sha256:${file.revision}`, editable: true,
+      stale, ...(stale ? { defaultContent: DEFAULT_AGENT_INSTRUCTIONS } : {}),
       effect: name === "AGENTS.md" ? EFFECT : "保存到本聊天真实文件；下一轮读取", language: "markdown" };
   }
   async list(chatId?: string) {
@@ -227,7 +224,8 @@ export class GatewaySettings {
     if (decoded === "effective/native-tools") return this.nativeTools();
     if (decoded.startsWith("memory/")) return this.memory(decoded.slice(7), chatId);
     const resource = this.resources.read(decoded);
-    return { ...this.metadata(resource), content: resource.content, language: decoded === "prompt/progress_tool" ? "json" : path.extname(resource.path) === ".py" ? "python" : "markdown" };
+    return { ...this.metadata(resource), content: resource.content,
+      ...(resource.defaultContent !== undefined ? { defaultContent: resource.defaultContent } : {}), language: decoded === "prompt/progress_tool" ? "json" : path.extname(resource.path) === ".py" ? "python" : "markdown" };
   }
   async write(id: string, body: unknown): Promise<SettingDocument> {
     const value = object(body), decoded = this.decode(id);
@@ -238,7 +236,8 @@ export class GatewaySettings {
       await this.memory(name, chatId);
       return this.options.withChat(chatId, async () => {
         const workspace = await this.chat(chatId);
-        if (!workspace.writeEditableFile(name as MemoryFile | "AGENTS.md", content, expectedRevision)) throw new RuntimeResourceError(409, "revision_conflict", "File changed; reload before saving");
+        const saved = name === "AGENTS.md" ? rebaseAgentInstructions(content) : content;
+        if (!workspace.writeEditableFile(name as MemoryFile | "AGENTS.md", saved, expectedRevision)) throw new RuntimeResourceError(409, "revision_conflict", "File changed; reload before saving");
         return this.memory(name, chatId);
       });
     }

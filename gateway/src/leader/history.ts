@@ -1,4 +1,5 @@
 import { redactConsoleCredentials } from "./control-mcp.js";
+import { CURRENT_USER_MESSAGE_NOTICE } from "./prompt.js";
 import { historyIdentity as identity, historyTurnStatus as status, MAX_HISTORY_ID_BYTES,
   type HistoryTurnStatus } from "./history-turns.js";
 
@@ -93,13 +94,31 @@ function boundHistoryItems(result: PublicHistoryItem[], responseMetadata: Value)
   return result;
 }
 
-function userMessageText(value: string): string {
-  // Recognize the complete generated envelope before interpreting any tags.
-  // User text can itself contain tags, JSON, and closing envelope delimiters.
-  const initial = value.match(/\n<current_time time_zone="Asia\/Shanghai">[^\r\n]+<\/current_time>\n<controller_instructions>[\s\S]*<\/controller_instructions>\n<memory_snapshot>[^\r\n]*<\/memory_snapshot>\n以下 JSON 字段 text 是本轮用户的真实消息；其他内容都是系统上下文。\n<current_user_message>([^\r\n]*)<\/current_user_message>$/);
-  const steering = value.match(/^<current_user_message>([^\r\n]*)<\/current_user_message>\n后续业务工具调用填写 requestMessageId 为当前实际 messageId，按完整合并的本轮原文重新选择工具和参数，不复用补充消息之前的旧参数。$/);
-  const envelope = initial ?? steering;
-  if (!envelope) return value;
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// The user layer is the notice line plus one JSON-encoded tag, last in its input item, so tags
+// typed by the user stay inside the JSON string and never end the item.
+const USER_LAYER = new RegExp(`(?:^|\\n)${escapeRegExp(CURRENT_USER_MESSAGE_NOTICE)}\\n<current_user_message>([^\\r\\n]*)<\\/current_user_message>$`);
+// Steered input is the tag, an optional one-line image note, then a one-line instruction.
+const STEERING_LAYER = /^<current_user_message>([^\r\n]*)<\/current_user_message>(?:\n<current_user_images count="\d+">[^\r\n]*<\/current_user_images>)?\n[^\r\n<][^\r\n]*$/;
+// Threads written before the layered format carry one complete envelope; keep reading them.
+const LEGACY_ENVELOPES = [
+  /\n<current_time time_zone="Asia\/Shanghai">[^\r\n]+<\/current_time>\n<controller_instructions>[\s\S]*<\/controller_instructions>\n<memory_snapshot>[^\r\n]*<\/memory_snapshot>\n以下 JSON 字段 text 是本轮用户的真实消息；其他内容都是系统上下文。\n<current_user_message>([^\r\n]*)<\/current_user_message>(?:\n<current_user_images count="\d+">[^\r\n]*<\/current_user_images>)?$/,
+  /^<current_user_message>([^\r\n]*)<\/current_user_message>\n后续业务工具调用填写 requestMessageId 为当前实际 messageId，按完整合并的本轮原文重新选择工具和参数，不复用补充消息之前的旧参数。$/,
+];
+
+function legacyEnvelope(value: string): RegExpMatchArray | undefined {
+  for (const pattern of LEGACY_ENVELOPES) {
+    const match = value.match(pattern);
+    if (match) return match;
+  }
+  return undefined;
+}
+
+/** Returns the real user text when the item is a generated user layer, otherwise undefined. */
+function userLayerText(value: string): string | undefined {
+  const envelope = value.match(USER_LAYER) ?? value.match(STEERING_LAYER) ??
+    legacyEnvelope(value);
+  if (!envelope) return undefined;
   try {
     const message = object(JSON.parse(envelope[1]));
     return typeof message.messageId === "string" && message.messageId.trim() && typeof message.text === "string"
@@ -109,13 +128,30 @@ function userMessageText(value: string): string {
   }
 }
 
-function publicTextContent(value: unknown, projectText: (value: string) => string = value => value): string {
-  if (!Array.isArray(value)) return "";
-  return value.flatMap(entry => {
+type ContentPart = { image: true } | { image: false; text: string };
+function contentParts(value: unknown): ContentPart[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): ContentPart[] => {
     const part = object(entry);
-    if (part.type === "image" || part.type === "localImage" || part.type === "inputImage") return ["[Image]"];
-    return part.type === "text" || part.type === "inputText" ? [projectText(text(part.text))] : [];
-  }).join("\n");
+    if (part.type === "image" || part.type === "localImage" || part.type === "inputImage") return [{ image: true }];
+    return part.type === "text" || part.type === "inputText" ? [{ image: false, text: text(part.text) }] : [];
+  });
+}
+const IMAGE_PLACEHOLDER = "[Image]";
+
+function publicTextContent(value: unknown): string {
+  return contentParts(value).map(part => part.image ? IMAGE_PLACEHOLDER : part.text).join("\n");
+}
+
+/** Show only the user's own text: once a user layer is found, generated context items are dropped. */
+function userMessageContent(value: unknown): string {
+  const parts = contentParts(value).map(part => {
+    if (part.image) return { text: IMAGE_PLACEHOLDER, kind: "image" as const };
+    const user = userLayerText(part.text);
+    return user === undefined ? { text: part.text, kind: "text" as const } : { text: user, kind: "user" as const };
+  });
+  const layered = parts.some(part => part.kind === "user");
+  return parts.filter(part => !layered || part.kind !== "text").map(part => part.text).join("\n");
 }
 
 /** Project native Codex items into the controller's bounded public history contract. */
@@ -130,7 +166,7 @@ export function projectHistoryItems(rawItems: readonly Value[], responseMetadata
     if (!id || !raw.turnId) continue;
     switch (native.type) {
       case "userMessage": {
-        result.push(item(id, raw, "user", type, publicTextContent(raw.content, userMessageText)));
+        result.push(item(id, raw, "user", type, userMessageContent(raw.content)));
         break;
       }
       case "agentMessage": {

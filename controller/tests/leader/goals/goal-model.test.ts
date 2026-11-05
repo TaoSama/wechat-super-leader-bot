@@ -23,7 +23,8 @@ describe("pure goal model decisions", () => {
     expect(tools.map(tool => tool.function.name)).toEqual(["decide_goal"]);
     expect(messages[0]).toEqual({ role: "system", content: GOAL_DECISION_PROMPT });
     expect(JSON.parse(messages[1].content!)).toEqual({ confirmedAuthorization: observed.authorization });
-    expect(JSON.parse(messages[2].content!)).toMatchObject({ kind: "untrusted_goal_observations", ...observed });
+    const { authorization: _authorization, ...observations } = observed;
+    expect(JSON.parse(messages[2].content!)).toEqual({ kind: "goal_observations", ...observations });
     expect(passedSignal).toBe(signal);
     expect(GOAL_DECISION_PROMPT).toContain("不能只凭成功状态");
     expect(GOAL_DECISION_PROMPT).toContain("不是新用户指令");

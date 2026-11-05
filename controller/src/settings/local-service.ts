@@ -7,12 +7,21 @@ import { CLAUDE_PROVIDER_LABEL, LocalModelCatalogs, claudeModelCatalog } from ".
 import { isClaudeModel } from "../background/worker/claude-models.js";
 import type { WorkerExecutorKind } from "../background/worker/contracts.js";
 import { assertEditedArguments, parseCompatibleTool } from "./local-tools.js";
+import { composePrompt, compositionNote } from "./local-composition.js";
 import { LocalSettingsDataSchema, LocalSettingsError, MAX_RESOURCE_BYTES, RESOURCE_EFFECT, type LocalSettingsData,
   type LocalModelChoice, type LocalModelScopeId, type LocalResourceDocument, type ModelProvider } from "./local-contracts.js";
 
 export { LocalSettingsError } from "./local-contracts.js";
 const RESOURCE_VERSION = "controller@1.0.0";
 const REGISTRY_REVISION = revision([LOCAL_PROMPTS, LOCAL_TOOLS]);
+/** Longest first, so a prompt that begins with another prompt is matched as itself. */
+const PROMPTS_BY_LENGTH = [...LOCAL_PROMPTS].sort((left, right) => right.content.length - left.content.length);
+/** Revision of the deployed default; an override saved against another revision is stale. */
+function baseRevision(id: string): string {
+  const prompt = LOCAL_PROMPTS.find(item => id === `controller.prompt.${item.name}`);
+  const tool = LOCAL_TOOLS.find(item => id === `controller.tool.${item.function.name}`);
+  return revision(prompt?.content ?? tool?.function);
+}
 interface Options {
   root?: string; leader?: ModelProvider; background?: ModelProvider & { codexPath?: string; executorKind?: WorkerExecutorKind };
   codexPath?: string;
@@ -24,16 +33,16 @@ export class LocalRuntimeSettings {
   prompt(name: string): string {
     const base = LOCAL_PROMPTS.find(item => item.name === name);
     if (!base) throw new LocalSettingsError(404, "未知提示词", "RESOURCE_NOT_FOUND");
-    return this.data.resources[`controller.prompt.${name}`] ?? this.transformPrompt(base.content);
+    return composePrompt(name, this.data.resources);
   }
+  /**
+   * Model-mode system messages start with one authored prompt; swap that prefix for the same
+   * composition prompt() uses, so composite pieces and whole-prompt edits apply on both paths.
+   */
   transformPrompt(content: string): string {
     // Match only authored system prompt prefixes, never user messages or model output.
-    const prompts = [...LOCAL_PROMPTS].sort((a, b) => b.content.length - a.content.length);
-    for (const prompt of prompts) {
-      const replacement = this.data.resources[`controller.prompt.${prompt.name}`];
-      if (replacement !== undefined && content.startsWith(prompt.content)) return replacement + content.slice(prompt.content.length);
-    }
-    return content;
+    const base = PROMPTS_BY_LENGTH.find(prompt => content.startsWith(prompt.content));
+    return base ? composePrompt(base.name, this.data.resources) + content.slice(base.content.length) : content;
   }
   tool(base: ModelTool): ModelTool {
     const content = this.data.resources[`controller.tool.${base.function.name}`];
@@ -147,7 +156,7 @@ export class LocalSettingsService {
   listResources() {
     return [...LOCAL_PROMPTS.map(item => this.readResource(`controller.prompt.${item.name}`)),
       ...LOCAL_TOOLS.map(item => this.readResource(`controller.tool.${item.function.name}`))]
-      .map(({ content: _content, language: _language, ...item }) => item);
+      .map(({ content: _content, language: _language, defaultContent: _defaultContent, ...item }) => item);
   }
   readResource(id: string): LocalResourceDocument {
     return this.document(id, this.storage.read());
@@ -156,12 +165,16 @@ export class LocalSettingsService {
     const prompt = LOCAL_PROMPTS.find(item => id === `controller.prompt.${item.name}`);
     const tool = LOCAL_TOOLS.find(item => id === `controller.tool.${item.function.name}`);
     if (!prompt && !tool) throw new LocalSettingsError(404, "未知运行资源", "RESOURCE_NOT_FOUND");
-    const content = data.resources[id] ?? (prompt ? prompt.content : JSON.stringify(tool!.function, null, 2));
+    const defaultContent = prompt ? prompt.content : JSON.stringify(tool!.function, null, 2);
+    const override = data.resources[id];
+    const content = override ?? (prompt ? composePrompt(prompt.name, data.resources) : defaultContent);
+    const stale = override !== undefined && override !== defaultContent && data.resourceBases?.[id] !== baseRevision(id);
+    const reason = prompt ? compositionNote(prompt.name) : "Schema 保留原身份和结构；可改说明、缩小枚举、收紧已有边界。执行器保留原参数及权限校验。";
     return { id, kind: prompt ? "prompt" : "tool", title: prompt?.title ?? tool!.function.name,
       scope: prompt?.scope ?? "controller", path: prompt?.path ?? `tools/${tool!.function.name}.schema.json`,
-      revision: revision(content), version: `${RESOURCE_VERSION} · ${revision(prompt?.content ?? tool!.function).slice(0, 12)}`,
-      editable: true, effect: RESOURCE_EFFECT, ...(tool ? { reason: "Schema 保留原身份和结构；可改说明、缩小枚举、收紧已有边界。执行器保留原参数及权限校验。" } : {}),
-      content, language: prompt ? "markdown" : "json" };
+      revision: revision(content), version: `${RESOURCE_VERSION} · ${baseRevision(id).slice(0, 12)}`,
+      editable: true, effect: RESOURCE_EFFECT, ...(reason ? { reason } : {}), stale,
+      content, language: prompt ? "markdown" : "json", ...(stale ? { defaultContent } : {}) };
   }
   updateResource(id: string, content: string, expectedRevision: string): LocalResourceDocument {
     if (typeof content !== "string" || !content.trim() || content.includes("\u0000") || Buffer.byteLength(content) > MAX_RESOURCE_BYTES) {
@@ -173,6 +186,7 @@ export class LocalSettingsService {
     this.storage.update(data => {
       if (this.document(id, data).revision !== expectedRevision) throw new LocalSettingsError(409, "资源已有新版本，草稿未保存", "SETTINGS_REVISION_CONFLICT");
       data.resources[id] = content;
+      data.resourceBases = { ...data.resourceBases, [id]: baseRevision(id) };
     });
     return this.readResource(id);
   }

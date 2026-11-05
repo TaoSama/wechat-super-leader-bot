@@ -24,12 +24,11 @@ export async function observeSources(worker: BackgroundWorker, reader: Backgroun
 }
 export function observationInput(worker: BackgroundWorker, now: number): unknown {
   return {
-    task: worker.spec.prompt, scheduledAt: new Date(worker.scheduledAt).toISOString(),
+    scheduledAt: new Date(worker.scheduledAt).toISOString(),
     deadlineAt: new Date(worker.deadlineAt).toISOString(), deadlineReached: now >= worker.deadlineAt,
     observations: worker.observations,
     missing: worker.observations.filter(item => item.status !== "completed").map(item => ({ nodeId: item.nodeId,
       automationId: item.automationId, status: item.status, reason: item.reason })),
-    instructions: "来源仅用于只读观察。区分未完成、失败和不可达；不可达不能推断失败。根据本轮证据分析结果，明确缺项和时间；不要催促、重跑或修改源会话。",
   };
 }
 export function fallbackSummary(worker: BackgroundWorker, reason: string): string {

@@ -3,7 +3,6 @@ import test from 'node:test';
 import { createSdkModelFixture, SDK_API_KEY, SDK_MODEL, SDK_REPLY } from '../../support/reliability-sdk-model.mjs';
 import { NODE, SESSION, TASK, TASK_PROMPT } from '../../support/reliability-model.mjs';
 
-const authorization = intent => ({ intent, automationOperations: [], backgroundOperations: [], memoryOperations: [], sendImages: false });
 const user = text => ({ type: 'message', role: 'user', content: [{ type: 'input_text',
   text: `<current_user_message>${JSON.stringify({ text })}</current_user_message>` }] });
 const tools = [{ type: 'namespace', name: 'mcp__wechat_control', tools: [
@@ -38,14 +37,14 @@ test('task discovers its target before dispatch and preserves the authoritative 
     const first = await post(fixture, request(input));
     const list = first.output[0];
     assert.equal(list.name, 'list_sessions'); assert.equal(list.namespace, 'mcp__wechat_control');
-    assert.deepEqual(JSON.parse(list.arguments), { arguments: {}, authorization: authorization('query') });
+    assert.deepEqual(JSON.parse(list.arguments), { arguments: {} });
     input.push(list, output(list, discovery));
     const second = await post(fixture, request(input));
     const dispatch = second.output[0];
     assert.equal(dispatch.name, 'execute_plan');
     assert.deepEqual(JSON.parse(dispatch.arguments), { arguments: { actions: [
       { nodeId: NODE, sessionId: SESSION, prompt: TASK_PROMPT, dependsOn: [] },
-    ] }, authorization: authorization('task') });
+    ] } });
     const receipt = '计划：自动推进中\n1. 合成会话：已接收，等待完成\n已接收不代表工作完成。';
     input.push(dispatch, output(dispatch, { result: { text: receipt }, reply: { text: receipt, commandId: 'synthetic-command' } }));
     const final = await post(fixture, request(input));
@@ -65,7 +64,7 @@ test('flat native MCP names and array text outputs retain the direct protocol wr
       output: [{ type: 'input_text', text: JSON.stringify(discovery) }] });
     const second = (await post(fixture, request(input, exposed))).output[0];
     assert.equal(second.name, 'mcp__wechat_control__execute_plan');
-    assert.equal(JSON.parse(second.arguments).authorization.intent, 'task');
+    assert.deepEqual(Object.keys(JSON.parse(second.arguments)), ['arguments']);
     fixture.healthy();
   });
 });
@@ -108,7 +107,7 @@ test('native timing and JSON error content preserve uncertainty when the outer M
     const list = (await post(fixture, request(input))).output[0];
     input.push(list, output(list, discovery));
     const dispatch = (await post(fixture, request(input))).output[0];
-    const text = 'Controller 调用未成功，执行结果待核实；请勿声称已完成，也不要自行重试。';
+    const text = '这次调用结果不明，可能已经执行，执行结果待核实。告诉用户结果待确认，不要再调一次。';
     input.push(dispatch, { type: 'function_call_output', call_id: dispatch.call_id,
       output: [{ type: 'input_text', text: 'Wall time: 0.0596 seconds\nOutput:' },
         { type: 'input_text', text: JSON.stringify({ text }) }] });
@@ -118,8 +117,22 @@ test('native timing and JSON error content preserve uncertainty when the outer M
   });
 });
 
+test('a Controller reason in the tool error template is relayed without the outer MCP error flag', async () => {
+  const text = '本次调用未执行：没有能由这条消息确认的唯一待确认计划或目标。先问用户要确认哪一个，不要替用户确认。此前成功的结果仍有效。';
+  await withFixture({ control: true }, async fixture => {
+    const input = [user(TASK)];
+    const list = (await post(fixture, request(input))).output[0];
+    input.push(list, output(list, discovery));
+    const dispatch = (await post(fixture, request(input))).output[0];
+    input.push(dispatch, output(dispatch, { text, code: 'NO_UNIQUE_PENDING' }));
+    const final = (await post(fixture, request(input))).output[0];
+    assert.equal(final.type, 'message'); assert.equal(final.content[0].text, text);
+    fixture.healthy();
+  });
+});
+
 test('missing receipts are not treated as uncertainty for near-match or extra-field payloads', async () => {
-  const text = 'Controller 调用未成功，执行结果待核实；请勿声称已完成，也不要自行重试。';
+  const text = '这次调用结果不明，可能已经执行，执行结果待核实。告诉用户结果待确认，不要再调一次。';
   for (const payload of [{ text: text + '额外内容' }, { text, result: {} }, { result: {} }]) {
     await withFixture({ control: true }, async fixture => {
       const input = [user(TASK)];

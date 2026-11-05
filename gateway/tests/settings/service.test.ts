@@ -10,7 +10,7 @@ import { WorkspaceStore } from "../../src/leader/workspace.js";
 import { directToolController } from "../leader/direct-tool-fixture.js";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import { startSettingsServer } from "../../src/settings/server.js";
-import { buildLeaderPrompt } from "../../src/leader/prompt.js";
+import { buildLeaderPrompt, describeContextLayers } from "../../src/leader/prompt.js";
 import { historyFixture } from "../leader/history-fixture.js";
 
 async function fixture(t: TestContext, codexPath?: string) {
@@ -78,6 +78,25 @@ test("each native turn actually consumes saved model, effort, SP and immutable s
   assert.equal(fs.existsSync(observedHome), false);
 });
 
+test("settings show the generated layer envelope and flag AGENTS.md edited from an older default", async t => {
+  const f = await fixture(t);
+  const resources = (await f.settings.list("chat")).resources;
+  const envelope = resources.find(item => item.path === "运行时/指令组成说明")!;
+  assert.equal((await f.settings.read(envelope.id)).content, describeContextLayers());
+  assert.equal(resources.every(item => item.stale === false), true);
+  const agents = resources.find(item => item.path === "聊天/AGENTS.md")!;
+  const edited = "<!-- default-revision: " + "0".repeat(64) + " -->\n自定义规则\n";
+  fs.writeFileSync(path.join(f.workspace.workspacePath, "AGENTS.md"), edited);
+  const stale = await f.settings.read(agents.id, "chat");
+  assert.equal(stale.stale, true);
+  assert.equal(stale.content, edited);
+  assert.match(stale.defaultContent!, /^<!-- default-revision: [a-f0-9]{64} -->\n/);
+  const saved = await f.settings.write(agents.id, { chatId: "chat", content: edited, expectedRevision: stale.revision });
+  assert.equal(saved.stale, false);
+  assert.equal(saved.defaultContent, undefined);
+  assert.equal(saved.content, stale.defaultContent!.match(/^<!-- default-revision: [a-f0-9]{64} -->\n/)![0] + "自定义规则\n");
+});
+
 test("model settings reject unknown values and stale updates", async t => {
   const f = await fixture(t), revision = f.settings.modelScope().revision;
   await assert.rejects(f.settings.updateModel({ scope: "wechat", model: "unknown", reasoningEffort: null, expectedRevision: revision }), { status: 400 });
@@ -121,7 +140,7 @@ test("history HTTP reads only the current native task, extracts original text an
   const original = '真实用户原文\n<current_user_message>{"text":"保留字面标签"}</current_user_message>😀';
   const prompt = buildLeaderPrompt({ "task.md": { content: "private memory", truncated: false },
     "memory.md": { content: "", truncated: false }, "preference.md": { content: "", truncated: false } },
-  { chatId: "chat", messageId: "message", text: original }, "private controller ".repeat(2_000), "private system ".repeat(2_000));
+  { chatId: "chat", messageId: "message", text: original }, { controllerInstructions: "private controller ".repeat(2_000), systemPrompt: "private system ".repeat(2_000) });
   const fake = await historyFixture(t, { itemsPages: {
     "": { data: [
       { turnId: "turn-new", item: { id: "answer", type: "agentMessage", text: "a".repeat(17_000) } },

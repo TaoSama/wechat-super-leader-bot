@@ -84,12 +84,12 @@ function tool(name: string, description: string, schema: z.ZodType): ModelTool {
     parameters: z.toJSONSchema(schema, { io: "input" }) as Record<string, unknown> } };
 }
 export const BACKGROUND_TOOLS: ModelTool[] = [
-  tool("list_source_automations", "Read native Codex automations on an exact discovered node; never dispatches to source sessions", NodeSchema),
-  tool("inspect_source_automation", "Read the exact source occurrence using epoch-ms expectedAt/notAfter, after discovering its automation ID", InspectSchema),
-  tool("list_background_tasks", "List this chat's isolated background runs, including completed runs still available for follow-up", EmptySchema),
-  tool("query_background_task", "Read progress, observations and result for a discovered run belonging to this chat", RunSchema),
-  tool("follow_up_background_task", "Queue user-requested follow-up on the same isolated run; requires current human authorization and discovered run ID", FollowupSchema),
-  tool("extend_background_task", "Extend a discovered run's expiry only when explicitly requested by the current human; expiresAt must be ISO time with offset", ExtendSchema),
+  tool("list_source_automations", "读取某台已发现机器上的 Codex 原生定时任务，不向源会话派发。", NodeSchema),
+  tool("inspect_source_automation", "先发现源定时任务 ID，再用毫秒时间戳 expectedAt/notAfter 读取它的某一次运行。", InspectSchema),
+  tool("list_background_tasks", "列出本聊天的隔离后台任务，包括已完成但还能追问的。", EmptySchema),
+  tool("query_background_task", "读取本聊天某个已发现后台任务的进度、观测和结果。", RunSchema),
+  tool("follow_up_background_task", "在同一个隔离后台任务上排队一条追问。只在用户本轮要求时调用，runId 要先查到。", FollowupSchema),
+  tool("extend_background_task", "只在用户本轮明确要求延期时，延长某个已发现后台任务的保留时间；expiresAt 用带时区偏移的 ISO 时间。", ExtendSchema),
 ];
 export const BACKGROUND_ARGUMENTS = { list_source_automations: NodeSchema, inspect_source_automation: InspectSchema,
   list_background_tasks: EmptySchema, query_background_task: RunSchema, follow_up_background_task: FollowupSchema,

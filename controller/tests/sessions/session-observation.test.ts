@@ -204,8 +204,9 @@ describe("Leader list-only and explicit-output tool guidance", () => {
     expect(prompt).toContain("不为列举任务额外调用 read_session");
     expect(prompt).toContain("只有用户明确询问具体会话的进度或最新输出时才调用 read_session");
     expect(toolDescriptions).toEqual(LEADER_TOOLS.map(item => item.function.description));
-    expect(toolDescriptions.find(item => item.includes("双源观测"))).toContain("不为列举任务额外调用 read_session");
-    expect(toolDescriptions.find(item => item.includes("最新输出"))).toContain("仅在用户明确询问具体会话的进度或最新输出时");
+    const descriptionOf = (name: string) => LEADER_TOOLS.find(item => item.function.name === name)!.function.description;
+    expect(descriptionOf("list_sessions")).toContain("列举任务只用本工具，不要逐个调 read_session");
+    expect(descriptionOf("read_session")).toContain("用于回答用户对这个会话进度或输出的提问");
     expect(result).toMatchObject({ total: 1, sessions: [expect.objectContaining({ title: "active-session", cwd: "/fixture",
       executionStatus: "active", statusSource: "codex-desktop" })], snapshot: { statusCounts: { active: 1 } } });
     expect(commands.submit).not.toHaveBeenCalled();

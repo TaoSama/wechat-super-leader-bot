@@ -131,7 +131,7 @@ test("unsubmitted steer corrections reach Controller together before any superse
   assert.equal(batch.messageId, "correction");
   assert.deepEqual(listed.at(-1), batch);
   assert.equal(Object.isFrozen(listed.at(-1)), true);
-  assert.match(batch.text, /后面的消息.*修改、限制或撤销优先/);
+  assert.match(batch.text, /后面的说法优先/);
   assert.ok(batch.text.includes("给会话 A 发消息执行部署\n只执行这次授权"));
   assert.ok(batch.text.includes("改成给 B 查询状态，别发 A，也不要部署"));
   assert.ok(batch.text.indexOf("给会话 A") < batch.text.indexOf("改成给 B"));
@@ -160,6 +160,9 @@ test("omitted or stale message identity never inherits appended authority and re
   assert.equal(tool.wasCalled, false);
   const selected = await inspect(tool, "inspect_current", "corrected");
   assert.equal(selected.isError, undefined);
+  const switched = JSON.parse(selected.content[0].text);
+  assert.equal(switched.currentRequest.messageId, "corrected");
+  assert.equal(typeof switched.instructions, "string");
   assert.equal(submitted.length, 1);
   assert.equal(submitted[0].messageId, "corrected");
   assert.ok(submitted[0].text.includes(correction.text));
@@ -190,7 +193,7 @@ test("superseded queued batches reject old parameters and retain every unsubmitt
   release();
   const results = await Promise.all([initial, second]);
   assert.equal(results[1].isError, true);
-  assert.match(results[1].content[0].text, /本调用未提交执行/);
+  assert.match(results[1].content[0].text, /本次调用未执行/);
   assert.equal(submitted.length, 1);
   await inspect(tool, "inspect_current", "later");
   assert.equal(submitted.length, 2);
@@ -211,7 +214,7 @@ test("oversized combined originals are rejected without truncating or executing 
   for (let index = 0; index < 2; index++) {
     const result = await inspect(tool, "inspect_current", "correction");
     assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /均未提交执行/);
+    assert.match(result.content[0].text, /都没有提交/);
   }
   assert.equal(submissions, 0);
   assert.equal(tool.wasCalled, false);
@@ -417,7 +420,7 @@ test("a queued mutation rechecks steer holds and the latest accepted identity at
     const results = await Promise.all([query, mutation]);
     assert.equal(results[1].isError, true);
     const rejection = JSON.parse(results[1].content[0].text);
-    assert.match(rejection.text, /本调用未提交执行/);
+    assert.match(rejection.text, /本次调用未执行/);
     assert.equal(rejection.currentRequest.messageId, "cancel");
     assert.ok(rejection.currentRequest.text.includes("不要执行B"));
     assert.deepEqual(submitted, ["query"]);

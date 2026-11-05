@@ -37,8 +37,7 @@ async function taskReceipt(h, messageId) {
   const body = submissions[0].body;
   assert.match(body.callId, /^[a-f0-9]{64}$/);
   assert.deepEqual(body, { chatId: CHAT, messageId, text: TASK, callId: body.callId, name: 'execute_plan',
-    arguments: { actions: [{ nodeId: NODE, sessionId: SESSION, prompt: TASK_PROMPT, dependsOn: [] }] },
-    authorization: { intent: 'task', automationOperations: [], backgroundOperations: [], memoryOperations: [], sendImages: false } });
+    arguments: { actions: [{ nodeId: NODE, sessionId: SESSION, prompt: TASK_PROMPT, dependsOn: [] }] } });
   const calls = h.control.requests.filter(item => item.method === 'POST' && item.path === '/v1/tools/call');
   assert.deepEqual(calls.map(item => item.body.name), ['list_sessions', 'execute_plan']);
   assert.equal(h.control.requests.filter(item => item.path === '/v1/messages').length, 0, 'SDK must not fall back to the Controller model');

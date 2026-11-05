@@ -9,8 +9,17 @@ export const SDK_API_KEY = 'synthetic-native-sdk-api-key';
 export const SDK_REPLY = '合成 SDK 原生进程回复：本轮处理完成。';
 const TOOL_OUTPUT_TYPES = new Set(['function_call_output', 'custom_tool_call_output']);
 const NATIVE_TOOL_TIMING_HEADER = /^Wall time: \d+(?:\.\d+)? seconds\r?\nOutput:\s*$/;
-const CONTROLLER_UNCERTAIN_TEXT = 'Controller 调用未成功，执行结果待核实；请勿声称已完成，也不要自行重试。';
-const QUERY_AUTHORIZATION = { intent: 'query', automationOperations: [], backgroundOperations: [], memoryOperations: [], sendImages: false };
+const CONTROLLER_UNCERTAIN_TEXT = '这次调用结果不明，可能已经执行，执行结果待核实。告诉用户结果待确认，不要再调一次。';
+// Controller-supplied failures carry the reason code beside the templated text.
+const CONTROLLER_FAILURE_PREFIXES = ['本次调用未执行：', '这次调用结果不明，可能已经执行：'];
+
+function controllerFailureText(value) {
+  const keys = Object.keys(value);
+  if (keys.length === 1 && value.text === CONTROLLER_UNCERTAIN_TEXT) return value.text;
+  const templated = keys.length === 2 && typeof value.code === 'string' && typeof value.text === 'string' &&
+    CONTROLLER_FAILURE_PREFIXES.some(prefix => value.text.startsWith(prefix));
+  return templated ? value.text : undefined;
+}
 
 function businessTool(tools, name) {
   const matches = tools.filter(tool => tool.name === name || tool.name.endsWith(`__${name}`));
@@ -58,9 +67,9 @@ function taskOutput(body, tools, outputs) {
   if (outputs.length === 2) {
     const completed = toolPayload(outputs[1].output);
     // Native Responses retains MCP error content but omits its outer isError flag.
-    const nativeUncertain = Object.keys(completed).length === 1 && completed.text === CONTROLLER_UNCERTAIN_TEXT;
+    const nativeFailure = controllerFailureText(completed);
     if (completed.isError) return messageOutput('Controller 调用未成功，执行结果待核实；请勿自行重试。');
-    if (nativeUncertain) return messageOutput(CONTROLLER_UNCERTAIN_TEXT);
+    if (nativeFailure) return messageOutput(nativeFailure);
     assert.equal(typeof completed.reply?.text, 'string', 'SDK dispatch result must provide its authoritative receipt');
     assert(completed.reply.text.trim(), 'SDK dispatch receipt must not be empty');
     return messageOutput(completed.reply.text);
@@ -75,8 +84,7 @@ function taskOutput(body, tools, outputs) {
     args = { actions: [{ nodeId: targets[0].nodeId, sessionId: targets[0].id, prompt: TASK_PROMPT, dependsOn: [] }] };
   }
   return [{ type: 'function_call', id: `fc_${randomUUID()}`, call_id: `call_${randomUUID()}`,
-    ...businessTool(tools, name), status: 'completed', arguments: JSON.stringify({ arguments: args,
-      authorization: { ...QUERY_AUTHORIZATION, intent: name === 'execute_plan' ? 'task' : 'query' } }) }];
+    ...businessTool(tools, name), status: 'completed', arguments: JSON.stringify({ arguments: args }) }];
 }
 
 export function currentSdkUserText(body) {

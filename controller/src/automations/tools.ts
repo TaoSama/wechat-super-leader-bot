@@ -13,10 +13,10 @@ function tool(name: string, description: string, schema: z.ZodType): ModelTool {
   return { type: "function", function: { name, description, parameters: z.toJSONSchema(schema, { io: "input" }) as Record<string, unknown> } };
 }
 export const AUTOMATION_TOOLS: ModelTool[] = [
-  tool("create_automation", "Create a reminder, session schedule, or isolated background task with current human authorization. For immediate independent work or waiting for existing tasks to finish, use kind=background, nested background spec, and timing.type=at with the current time. Discover all source automations before configuring read-only cross-machine monitoring; never dispatch to their sessions. Use discovered node/session IDs for session schedules. Starting is silent; meaningful results and failures use the unified result queue.", CreateScheduleSchema),
-  tool("list_automations", "List current user's schedules and statuses", EmptySchema),
-  tool("update_automation", "Pause, resume or cancel with id/status, or edit only a background schedule's prompt with id/prompt/expectedPromptRevision when explicitly requested by the current user. Read the schedule first; expectedPromptRevision is latestPromptUpdate.revision, or 0 if absent. Running occurrences and terminal schedules cannot receive a new edit. These two argument forms cannot be mixed. Prompt edits preserve sources, timing and past results and apply to future occurrences only.", UpdateAutomationSchema),
-  tool("automation_runs", "Read persisted schedule execution results and command status", IdSchema),
+  tool("create_automation", "在用户本轮明确要求时，创建提醒、会话定时任务或隔离后台任务。立即开始的独立工作、或等待已有任务完成，用 kind=background，把配置放进 background 对象，并用 timing.type=at 加当前时间。做跨机器只读监控前先发现全部源定时任务，不给它们的会话派发。会话定时任务用已发现的节点和会话 ID。开始运行时不通知，有意义的结果和失败通过统一结果队列发送。", CreateScheduleSchema),
+  tool("list_automations", "列出当前用户的定时任务及状态。", EmptySchema),
+  tool("update_automation", "只在用户本轮明确要求时调用，两种用法不能混用：用 id+status 暂停、恢复或取消；或用 id+prompt+expectedPromptRevision 修改后台定时任务今后每次运行的正文。改正文前先读取任务，expectedPromptRevision 填 latestPromptUpdate.revision，没有就填 0；版本冲突时先核对最新正文，不要直接重试。正在运行的这一次和已结束的任务不能改正文。改正文保留来源、时间和历史结果，只影响以后的运行。", UpdateAutomationSchema),
+  tool("automation_runs", "读取某个定时任务已记录的运行结果和命令状态。", IdSchema),
 ];
 export const AUTOMATION_ARGUMENTS = { create_automation: CreateScheduleSchema, list_automations: EmptySchema,
   update_automation: UpdateAutomationSchema, automation_runs: IdSchema };

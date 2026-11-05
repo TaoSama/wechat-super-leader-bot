@@ -5,11 +5,12 @@ import { CommandError } from "../commands/service.js";
 import { type IStore } from "../store/interface.js";
 import type { LeaderState } from "./state.js";
 import type { ModelToolCall } from "./model/contracts.js";
-import { AUTOMATION_ARGUMENTS, AUTOMATION_TOOLS, AUTOMATION_TOOL_NAMES, executeAutomationTool, UpdateAutomationSchema } from "../automations/tools.js";
+import { AUTOMATION_ARGUMENTS, AUTOMATION_TOOLS, AUTOMATION_TOOL_NAMES, executeAutomationTool } from "../automations/tools.js";
 import type { AutomationService } from "../automations/service.js";
 import { BackgroundSpecSchema } from "../background/contracts.js";
 import { BACKGROUND_ARGUMENTS, BACKGROUND_TOOLS, BACKGROUND_TOOL_NAMES, assertBackgroundSourcesDiscovered,
   executeBackgroundTool, type BackgroundToolService, type BackgroundToolAuthority } from "./background-tools.js";
+import type { BackgroundOperation } from "./model/background-authorization.js";
 import { CLAIM_TTL_MS, LEADER_TOOLS, LeaderDataSchema, TURN_TIMEOUT_MS, type LeaderData,
   MAX_REPLY_CHARS, ToolArguments, type LeaderReply, type Plan, type ConsoleLinkIssued } from "./contracts.js";
 import type { GoalProposal } from "./goals/goal.js";
@@ -23,10 +24,10 @@ import { SessionTitles } from "./queries/session-titles.js";
 import { sendSessionImages } from "./queries/session-images.js";
 import type { MediaHub } from "../sessions/message-images.js";
 import type { Hub } from "./orchestrator.js";
-import { DirectToolRejectedError } from "./direct-errors.js";
+import { DirectToolRejectedError, chatBusy, chatBusyAfterStart, discoveryChanged, goalsUnavailable, invalidArguments } from "./direct-errors.js";
 import { approvalAuthorizationFailure } from "./session-approval.js";
 import { DirectToolJournal } from "./direct-journal.js";
-import { CancelPlanArgumentsSchema, DIRECT_TOOL_INSTRUCTIONS, DirectAuthorizationSchema,
+import { CancelPlanArgumentsSchema, DIRECT_TOOL_INSTRUCTIONS,
   type DirectCall, type DirectRequest, type DirectToolResult } from "./direct-contracts.js";
 import { goalConfirmation } from "./goals/conversation.js";
 import { traceSpan } from "../runtime/telemetry.js";
@@ -43,6 +44,22 @@ function canonical(value: unknown): unknown {
 }
 const EXPLICIT_CONFIRM = /^(?:请)?(?:确认|执行|开始|开始执行|确认执行|确认开始|按这个计划执行|就按这个执行|确认这个计划)[。！!]?$/;
 const CONFIRM = /^(?:请)?(?:确认|执行|开始|开始执行|确认执行|确认开始|按这个计划执行|就按这个执行|确认这个计划|是|是的|对|对的|没错|好的|好|可以|就这样|就这个|就是这个|就是它|嗯|嗯嗯)[。！!]?$/;
+
+/** Calling one of these tools is itself the request for the background operation it performs. */
+const BACKGROUND_OPERATION_BY_TOOL: Partial<Record<string, BackgroundOperation>> = {
+  follow_up_background_task: "follow_up", extend_background_task: "extend",
+};
+
+/** Monitoring sources and isolated background work exist only on kind=background schedules. */
+function assertAutomationKind(args: unknown) {
+  if (args === null || typeof args !== "object" || !("kind" in args) || args.kind === "background") return;
+  const background = "background" in args ? args.background : undefined;
+  const sources = background !== null && typeof background === "object" && "sources" in background ? background.sources : undefined;
+  if (background !== undefined || "sources" in args || Array.isArray(sources) && sources.length) {
+    throw new DirectToolRejectedError(400, "AUTOMATION_KIND_MISMATCH",
+      "监控其他定时任务或隔离后台任务必须用 kind=background。改成 kind=background 并把配置放进 background 后再调用。");
+  }
+}
 
 interface LinkContext { requestId: string; cachedLinkPromise?: Promise<ConsoleLinkIssued>; issuedLink?: ConsoleLinkIssued }
 interface Options {
@@ -92,9 +109,7 @@ export class DirectToolExecutor {
   }
 
   private wrapper(schema: unknown) {
-    return { type: "object", properties: { arguments: schema,
-      authorization: z.toJSONSchema(DirectAuthorizationSchema, { io: "input" }) },
-      required: ["arguments"], additionalProperties: false };
+    return { type: "object", properties: { arguments: schema }, required: ["arguments"], additionalProperties: false };
   }
 
   private isReadOnly(name: string) {
@@ -110,13 +125,14 @@ export class DirectToolExecutor {
     const base = [...LEADER_TOOLS, ...AUTOMATION_TOOLS, ...BACKGROUND_TOOLS, ...DIRECT_EXTRA_TOOLS].find(tool => tool.function.name === request.name);
     if (base && settings) {
       try { settings.assertArguments(base, request.arguments); }
-      catch { throw new DirectToolRejectedError(400, "Business arguments rejected by this turn's configured tool schema"); }
+      catch { throw invalidArguments(); }
     }
     if (this.isReadOnly(request.name)) return this.journal.call(request, () => this.read(request));
     const effect = ["execute_plan", "execute_goal", "confirm_pending"].includes(request.name)
       ? "dispatch" : ["propose_plan", "propose_goal"].includes(request.name) ? "preview" : request.name === "send_session_images" ? "images" : `${request.name}:${JSON.stringify(canonical(request.arguments))}`;
     const result = await this.journal.call(request, async () => {
-      if (this.chats.has(request.chatId)) throw new CommandError(409, "Another direct tool is active for this chat");
+      // Runs inside the journal action, after its start markers; see chatBusyAfterStart.
+      if (this.chats.has(request.chatId)) throw chatBusyAfterStart();
       this.chats.add(request.chatId);
       try { return await this.run(request); }
       finally { this.chats.delete(request.chatId); }
@@ -130,14 +146,15 @@ export class DirectToolExecutor {
     const schemas = { ...ToolArguments, ...AUTOMATION_ARGUMENTS, ...BACKGROUND_ARGUMENTS,
       confirm_pending: z.object({}).strict(), cancel_plan: CancelPlanArgumentsSchema, cancel_goal: z.object({}).strict() };
     const schema = schemas[request.name as keyof typeof schemas];
-    if (!schema) throw new DirectToolRejectedError(400, "Unknown business tool");
+    if (!schema) throw new DirectToolRejectedError(400, "UNKNOWN_TOOL", "没有这个业务工具。只使用工具列表里的工具。");
+    if (request.name === "create_automation") assertAutomationKind(request.arguments);
     const parsed = schema.safeParse(request.arguments);
-    if (!parsed.success) throw new DirectToolRejectedError(400, "Invalid business tool arguments");
-    if (!this.options.goalsAvailable && ["execute_goal", "propose_goal"].includes(request.name)) throw new DirectToolRejectedError(503, "Goal execution model unavailable");
+    if (!parsed.success) throw invalidArguments(parsed.error);
+    if (!this.options.goalsAvailable && ["execute_goal", "propose_goal"].includes(request.name)) throw goalsUnavailable();
     if (AUTOMATION_TOOL_NAMES.has(request.name) && !this.options.automations || BACKGROUND_TOOL_NAMES.has(request.name) && !this.options.background) {
-      throw new DirectToolRejectedError(503, "Business tool unavailable");
+      throw new DirectToolRejectedError(503, "TOOL_UNAVAILABLE", "这个业务工具当前不可用。告诉用户该功能暂时不能用，不要重试。");
     }
-    this.checkAuthorization(request);
+    this.checkApproval(request);
   }
 
   private async settingsView(request: DirectRequest): Promise<LocalRuntimeSettings | undefined> {
@@ -153,7 +170,7 @@ export class DirectToolExecutor {
         text: hash(request.text), replyText: JSON.stringify({ reference: snapshotReference }), createdAt: new Date(this.options.now()).toISOString() });
       frozen = await this.options.store.getMessage(request.chatId, messageId);
     }
-    if (!frozen || frozen.text !== hash(request.text)) throw new DirectToolRejectedError(409, "Frozen runtime snapshot does not match this user message");
+    if (!frozen || frozen.text !== hash(request.text)) throw new DirectToolRejectedError(409, "SETTINGS_SNAPSHOT_MISMATCH", "本轮的配置快照与这条消息不一致。不要重试，告诉用户请重新发送消息。");
     let value: unknown;
     try {
       const marker = JSON.parse(frozen.replyText) as unknown;
@@ -162,11 +179,11 @@ export class DirectToolExecutor {
       value = reference ? settings.readTurnSnapshot(reference) : marker;
       if (value === null || value === undefined) throw new Error("Missing runtime snapshot");
     }
-    catch { throw new DirectToolRejectedError(503, "Frozen runtime snapshot is unreadable"); }
+    catch { throw new DirectToolRejectedError(503, "SETTINGS_SNAPSHOT_UNREADABLE", "本轮的配置快照无法读取。不要重试，告诉用户请重新发送消息。"); }
     try { return settings.restoreTurn(value); }
     catch (error) {
       const status = error && typeof error === "object" && "statusCode" in error && typeof error.statusCode === "number" ? error.statusCode : 503;
-      throw new DirectToolRejectedError(status, "Frozen runtime version is incompatible; start a new user message");
+      throw new DirectToolRejectedError(status, "SETTINGS_SNAPSHOT_INCOMPATIBLE", "本轮的配置快照已不兼容当前版本。不要重试，告诉用户请重新发送消息。");
     }
   }
 
@@ -177,7 +194,7 @@ export class DirectToolExecutor {
       const expiredSteer = data.inflight && data.inflight.expiresAt <= this.options.now() &&
         data.inflight.plan?.actions.length === 1 && data.inflight.plan.actions[0].deliveryMode === "steer";
       if (!expiredSteer && data.directContext?.messageId === request.messageId && data.directContext.inputHash === inputHash && data.directContext.expiresAt > this.options.now()) return data;
-      if (data.inflight && data.inflight.expiresAt > this.options.now()) throw new CommandError(409, "Previous chat request is still active");
+      if (data.inflight && data.inflight.expiresAt > this.options.now()) throw chatBusy();
       if (expiredSteer) {
         await this.recoverSteerReceipt(request.chatId, data);
         data.inflight = undefined;
@@ -189,7 +206,7 @@ export class DirectToolExecutor {
       const next = await this.options.store.compareAndSetLeaderState(request.chatId, saved?.revision ?? 0, data);
       if (next) return LeaderDataSchema.parse(next.data);
     }
-    throw new CommandError(409, "Chat context changed repeatedly; retry discovery");
+    throw new DirectToolRejectedError(409, "CHAT_STATE_CHANGING", "本聊天的状态在反复变化。稍后重新查询一次再调用。");
   }
 
   private async recoverSteerReceipt(chatId: string, data: LeaderData): Promise<void> {
@@ -222,10 +239,10 @@ export class DirectToolExecutor {
     const hub = this.options.hub;
     return { getNodeStatusList: () => hub.getNodeStatusList(),
       listAutomations: (node: string, signal?: AbortSignal) => {
-        if (!hub.listAutomations) throw new CommandError(503, "Source discovery unavailable");
+        if (!hub.listAutomations) throw new CommandError(503, "这台机器的定时任务列表当前不可查询。告诉用户暂时无法查看，不要重试。");
         return hub.listAutomations(node, signal);
       }, inspectAutomation: (node: string, args: Parameters<NonNullable<Hub["inspectAutomation"]>>[1], signal?: AbortSignal) => {
-        if (!hub.inspectAutomation) throw new CommandError(503, "Source inspection unavailable");
+        if (!hub.inspectAutomation) throw new CommandError(503, "这台机器的定时任务详情当前不可查询。告诉用户暂时无法查看，不要重试。");
         return hub.inspectAutomation(node, args, signal);
       } };
   }
@@ -250,14 +267,14 @@ export class DirectToolExecutor {
       let merged = false;
       for (let attempt = 0; attempt < 8; attempt++) {
         const saved = await o.store.getLeaderState(request.chatId), latest = LeaderDataSchema.parse(saved?.data ?? {}), context = latest.directContext;
-        if (!context || context.messageId !== request.messageId || context.inputHash !== hash(request.text) || context.expiresAt <= o.now() || latest.inflight) throw new CommandError(409, "Discovery authority changed; repeat discovery");
+        if (!context || context.messageId !== request.messageId || context.inputHash !== hash(request.text) || context.expiresAt <= o.now() || latest.inflight) throw discoveryChanged();
         context.discoveredRunIds = [...new Set([...context.discoveredRunIds, ...authority.discoveredRunIds])];
         for (const [node, ids] of authority.discoveredSources) context.discoveredSources[node] = [...new Set([...(context.discoveredSources[node] ?? []), ...ids])];
         context.discoveredSessions = [...new Map([...context.discoveredSessions, ...sessions].map(item => [JSON.stringify([item.nodeId, item.id]), item])).values()];
         LeaderDataSchema.parse(latest);
         if (await o.store.compareAndSetLeaderState(request.chatId, saved?.revision ?? 0, latest)) { merged = true; break; }
       }
-      if (!merged) throw new CommandError(409, "Discovery metadata changed repeatedly");
+      if (!merged) throw discoveryChanged();
     }
     const reply = request.name === "list_sessions" && parseSessionDirectoryQuery(request.text) ? { text: titles.render("") } : undefined;
     if (reply) await o.store.recordMessage({ chatId: request.chatId, messageId: request.messageId, text: request.text, replyText: reply.text, createdAt: new Date().toISOString() });
@@ -265,10 +282,10 @@ export class DirectToolExecutor {
   }
 
   private async run(request: DirectCall): Promise<DirectToolResult> {
-    const o = this.options, { chatId, messageId, name, authorization: auth } = request;
+    const o = this.options, { chatId, messageId, name } = request;
     const saved = await o.store.getLeaderState(chatId);
     const data = LeaderDataSchema.parse(saved?.data ?? {});
-    if (data.inflight && data.inflight.expiresAt > o.now()) throw new CommandError(409, "Previous chat request is still active");
+    if (data.inflight && data.inflight.expiresAt > o.now()) throw chatBusyAfterStart();
     await this.recoverSteerReceipt(chatId, data);
     const inputHash = hash(request.text);
     const priorPlan = data.pending, priorGoal = data.pendingGoal;
@@ -284,10 +301,10 @@ export class DirectToolExecutor {
       const current = await o.store.getLeaderState(chatId);
       const claim = current && LeaderDataSchema.parse(current.data).inflight;
       if (current?.revision !== claimed.revision || claim?.messageId !== messageId || claim?.inputHash !== inputHash || claim.expiresAt <= o.now()) {
-        throw new CommandError(409, "Direct tool authority changed or expired");
+        throw new CommandError(409, "本轮处理授权已变化或过期。先查询实际状态再告诉用户，不要再调一次。");
       }
     };
-    const authority: BackgroundToolAuthority = { chatId, currentMessageId: messageId, operations: new Set(auth.backgroundOperations),
+    const authority: BackgroundToolAuthority = { chatId, currentMessageId: messageId, operations: new Set(BACKGROUND_OPERATION_BY_TOOL[name] ? [BACKGROUND_OPERATION_BY_TOOL[name]] : []),
       discoveredRunIds: new Set(data.directContext.discoveredRunIds),
       discoveredSources: new Map(Object.entries(data.directContext.discoveredSources).map(([node, ids]) => [node, new Set(ids)])),
       assertCurrentAuthority: assertAuthority };
@@ -296,12 +313,12 @@ export class DirectToolExecutor {
     const signal = AbortSignal.timeout(TURN_TIMEOUT_MS);
     let result: unknown, reply: LeaderReply | undefined;
     try {
-      this.checkAuthorization(request);
+      this.checkApproval(request);
       if (BACKGROUND_TOOL_NAMES.has(name)) {
-        if (!o.background) throw new CommandError(503, "Background tools unavailable");
+        if (!o.background) throw new CommandError(503, "后台任务工具当前不可用。告诉用户该功能暂时不能用，不要重试。");
         result = await traceSpan("leader.tool", () => executeBackgroundTool(o.background!, this.sourceHub(), name, request.arguments, authority, signal), { tool: name, source: "direct" });
       } else if (AUTOMATION_TOOL_NAMES.has(name)) {
-        if (!o.automations) throw new CommandError(503, "Automation tools unavailable");
+        if (!o.automations) throw new CommandError(503, "定时任务工具当前不可用。告诉用户该功能暂时不能用，不要重试。");
         const raw = request.arguments;
         const background = raw !== null && typeof raw === "object" && "kind" in raw && raw.kind === "background";
         if (name === "create_automation" && background) {
@@ -323,14 +340,14 @@ export class DirectToolExecutor {
           (!preview || preview.followupMessageId === messageId);
         const selectedGoal = explicitGoal ? priorGoal?.id === explicitGoal : unique && !priorPlan;
         if (preview?.messageId === messageId || !(explicitGoal ? selectedGoal : unique && (explicit || natural))) {
-          throw new CommandError(409, "No unique prior preview confirmed by the real current user");
+          throw new DirectToolRejectedError(409, "NO_UNIQUE_PENDING", "没有能由这条消息确认的唯一待确认计划或目标。先问用户要确认哪一个，不要替用户确认。");
         }
         if (priorPlan && !explicitGoal) {
           data.inflight.plan = priorPlan; data.pending = undefined;
           claimed = await o.save(chatId, claimed.revision, data);
           reply = await o.executePlan(chatId, claimed.revision, priorPlan, data);
         } else {
-          if (!o.goalsAvailable) throw new CommandError(503, "Goal execution model unavailable");
+          if (!o.goalsAvailable) throw goalsUnavailable();
           data.inflight.goal = priorGoal!; data.pendingGoal = undefined;
           claimed = await o.save(chatId, claimed.revision, data);
           reply = await o.confirmGoal(chatId, claimed.revision, priorGoal!, data);
@@ -350,9 +367,9 @@ export class DirectToolExecutor {
         result = reply;
       } else if (name === "send_session_images") {
         const target = ToolArguments.send_session_images.parse(request.arguments);
-        if (!o.hub.listMedia || !o.hub.readMedia) throw new CommandError(503, "Image tools unavailable");
+        if (!o.hub.listMedia || !o.hub.readMedia) throw new DirectToolRejectedError(503, "IMAGES_UNAVAILABLE", "发图功能当前不可用。告诉用户暂时不能发图，不要重试。");
         const session = o.hub.getNodeSession(target.nodeId, target.sessionId);
-        if (!o.hub.isNodeConnected(target.nodeId) || !session?.capabilities.includes("read")) throw new CommandError(403, "Image source unavailable");
+        if (!o.hub.isNodeConnected(target.nodeId) || !session?.capabilities.includes("read")) throw new DirectToolRejectedError(403, "IMAGE_SOURCE_UNAVAILABLE", "目标会话当前离线或不可读取。告诉用户该会话的图片暂时拿不到，不要重试。");
         reply = await sendSessionImages(o.hub as Hub & MediaHub, o.store, chatId, messageId, target, signal, o.now);
         result = reply;
       } else {
@@ -417,37 +434,13 @@ export class DirectToolExecutor {
     }
   }
 
-  private checkAuthorization(request: DirectCall) {
-    const { name, authorization: auth } = request;
-    const require = (allowed: boolean) => { if (!allowed) throw new DirectToolRejectedError(403, "Current-turn authorization does not permit this operation"); };
-    if (["execute_plan", "cancel_plan", "cancel_goal"].includes(name)) require(auth.intent === "task");
-    if (name === "execute_goal") require(auth.intent === "goal");
-    if (["propose_plan", "propose_goal"].includes(name)) require(auth.intent === "preview");
-    if (name === "send_session_images") require(auth.sendImages);
-    if (name === "interrupt_session") require(auth.interruptSession);
-    if (name === "answer_approval") {
-      const target = ToolArguments.answer_approval.safeParse(request.arguments);
-      require(target.success);
-      const failure = target.success ? approvalAuthorizationFailure(request.text, auth.approvalDecision,
-        this.options.hub.getNodeSession(target.data.nodeId, target.data.sessionId), target.data) : undefined;
-      if (failure) throw new DirectToolRejectedError(403, failure);
-    }
-    if (name === "remember" || name === "forget") require(auth.memoryOperations.includes(name));
-    if (name === "follow_up_background_task") require(auth.backgroundOperations.includes("follow_up"));
-    if (name === "extend_background_task") require(auth.backgroundOperations.includes("extend"));
-    if (name === "create_automation") {
-      const args = request.arguments;
-      const kind = args !== null && typeof args === "object" && "kind" in args ? args.kind : undefined;
-      require(kind === "background" ? auth.backgroundOperations.includes("create") : auth.automationOperations.includes("create"));
-      if (kind === "session") require(auth.intent !== "isolated_background");
-    }
-    if (name === "update_automation") {
-      const parsed = UpdateAutomationSchema.safeParse(request.arguments);
-      const args = parsed.success ? parsed.data : undefined;
-      const status = args && "status" in args ? args.status : undefined;
-      const editingPrompt = args !== undefined && "prompt" in args;
-      const operation = editingPrompt ? "edit" : status === "paused" ? "pause" : status === "active" ? "resume" : status === "cancelled" ? "cancel" : undefined;
-      require(operation !== undefined && auth.automationOperations.includes(operation));
-    }
+  /** Permission follows the tool and its arguments; only deterministic facts are checked here. */
+  private checkApproval(request: DirectCall) {
+    if (request.name !== "answer_approval") return;
+    const target = ToolArguments.answer_approval.safeParse(request.arguments);
+    if (!target.success) throw invalidArguments(target.error);
+    const failure = approvalAuthorizationFailure(request.text, target.data.decision,
+      this.options.hub.getNodeSession(target.data.nodeId, target.data.sessionId), target.data);
+    if (failure) throw new DirectToolRejectedError(403, "APPROVAL_REJECTED", failure);
   }
 }

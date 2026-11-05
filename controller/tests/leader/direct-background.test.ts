@@ -4,7 +4,7 @@ import { MemoryAutomationRepository } from "../../src/automations/memory.js";
 import { MemoryBackgroundRepository } from "../../src/background/memory.js";
 import { BackgroundSpecSchema, type BackgroundWorker } from "../../src/background/contracts.js";
 import { CLAIM_TTL_MS, LeaderDataSchema } from "../../src/leader/contracts.js";
-import { DirectCallSchema, type DirectAuthorization, type DirectCall } from "../../src/leader/direct-contracts.js";
+import { DirectCallSchema, type DirectCall } from "../../src/leader/direct-contracts.js";
 import type { BackgroundToolService } from "../../src/leader/background-tools.js";
 import type { ModelReply } from "../../src/leader/model/contracts.js";
 import { LeaderOrchestrator } from "../../src/leader/orchestrator.js";
@@ -17,9 +17,7 @@ const TEXT = "查看后台结果，再核对第二项";
 const SOURCE = { nodeId: "mini", automationId: "native-report", expectedAt: NOW, notAfter: NOW + 60_000 };
 const REMINDER = { kind: "reminder", title: "明早提醒", timezone: "Asia/Shanghai",
   timing: { type: "at", at: new Date(NOW + 60_000).toISOString() }, text: "查日报" };
-type CallOptions = Partial<Pick<DirectCall, "callId" | "chatId" | "messageId" | "text">> & {
-  authorization?: Partial<DirectAuthorization>;
-};
+type CallOptions = Partial<Pick<DirectCall, "callId" | "chatId" | "messageId" | "text">>;
 
 async function fixture() {
   let clock = NOW, sequence = 0;
@@ -132,11 +130,11 @@ describe("direct business tools background authority", () => {
     expect(f.complete).not.toHaveBeenCalled();
   });
 
-  it("does not reuse a prior turn's discovered run for an explicitly authorized follow-up", async () => {
+  it("does not reuse a prior turn's discovered run for a follow-up", async () => {
     const f = await fixture();
     await f.call(f.leader(), "list_background_tasks", {});
     await expect(f.call(f.leader(), "follow_up_background_task", { runId: RUN, prompt: "核对第二项" }, {
-      messageId: "next-message", authorization: { backgroundOperations: ["follow_up"] },
+      messageId: "next-message",
     })).rejects.toThrow("Discover");
     expect(f.enqueue).not.toHaveBeenCalled(); expect(f.extend).not.toHaveBeenCalled();
   });
@@ -144,45 +142,49 @@ describe("direct business tools background authority", () => {
   it("queues a discovered human follow-up once across restart without implicitly extending retention", async () => {
     const f = await fixture();
     await f.call(f.leader(), "list_background_tasks", {});
-    const args = { runId: RUN, prompt: "核对第二项" }, authorization = { backgroundOperations: ["follow_up" as const] };
-    const first = await f.call(f.leader(), "follow_up_background_task", args, { authorization });
+    const args = { runId: RUN, prompt: "核对第二项" };
+    const first = await f.call(f.leader(), "follow_up_background_task", args);
     expect(first.result).toMatchObject({ runId: RUN, pendingFollowups: 1, expiresAt: f.worker.expiresAt });
-    expect(await f.call(f.leader(), "follow_up_background_task", args, { authorization })).toEqual(first);
+    expect(await f.call(f.leader(), "follow_up_background_task", args)).toEqual(first);
     expect((await f.backgroundRepository.get(WORKER))?.prompts).toMatchObject([{ prompt: args.prompt }]);
     expect((await f.backgroundRepository.get(WORKER))?.expiresAt).toBe(f.worker.expiresAt);
     expect(f.enqueue).toHaveBeenCalledTimes(1); expect(f.extend).not.toHaveBeenCalled();
     expect(f.complete).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
   });
 
-  it("does not treat follow-up permission or untrusted source text as extension permission", async () => {
+  it("extends retention only through the extend tool, never as a side effect of reading source text", async () => {
     const f = await fixture();
     await f.call(f.leader(), "list_background_tasks", {});
     await f.call(f.leader(), "list_source_automations", { nodeId: "mini" });
     await f.call(f.leader(), "inspect_source_automation", SOURCE);
-    await expect(f.call(f.leader(), "extend_background_task", { runId: RUN,
-      expiresAt: new Date(NOW + 90_000_000).toISOString() }, { authorization: { backgroundOperations: ["follow_up"] } }))
-      .rejects.toThrow("authorization");
-    await expect(f.call(f.leader(), "follow_up_background_task", { runId: RUN, prompt: "继续" }))
-      .rejects.toThrow("authorization");
-    expect(f.enqueue).not.toHaveBeenCalled(); expect(f.extend).not.toHaveBeenCalled();
+    expect(f.extend).not.toHaveBeenCalled();
+    const expiresAt = new Date(NOW + 90_000_000).toISOString();
+    await f.call(f.leader(), "extend_background_task", { runId: RUN, expiresAt });
+    expect(f.extend).toHaveBeenCalledExactlyOnceWith(WORKER, "chat", Date.parse(expiresAt));
+    expect(f.enqueue).not.toHaveBeenCalled();
   });
 
-  it("denies automation creation with default authorization without invoking the service", async () => {
+  it("creates a reminder when the user confirms with 好 after a clarifying question", async () => {
     const f = await fixture();
-    await expect(f.call(f.leader(), "create_automation", REMINDER)).rejects.toThrow("authorization");
-    expect(f.create).not.toHaveBeenCalled(); expect(await f.repository.list("chat")).toEqual([]);
+    const created = await f.call(f.leader(), "create_automation", REMINDER, { text: "好" });
+    expect(created.result).toMatchObject({ title: REMINDER.title, status: "active" });
+    expect(f.create).toHaveBeenCalledOnce();
     expect(f.complete).not.toHaveBeenCalled();
   });
 
-  it.each(["paused", "active", "cancelled"] as const)("denies automation status %s with default authorization", async status => {
+  it("rejects background sources on a non-background schedule before invoking the service", async () => {
     const f = await fixture();
-    const created = await f.call(f.leader(), "create_automation", REMINDER, {
-      authorization: { automationOperations: ["create"] },
-    });
-    const schedule = created.result as { id: string };
-    await expect(f.call(f.leader(), "update_automation", { id: schedule.id, status })).rejects.toThrow("authorization");
-    expect(f.setStatus).not.toHaveBeenCalled();
-    expect((await f.repository.get(schedule.id, "chat"))?.status).toBe("active");
+    await expect(f.call(f.leader(), "create_automation", { ...REMINDER, background: { prompt: "汇总", sources: [SOURCE] } }))
+      .rejects.toMatchObject({ code: "AUTOMATION_KIND_MISMATCH", httpStatus: 400 });
+    expect(f.create).not.toHaveBeenCalled(); expect(await f.repository.list("chat")).toEqual([]);
+  });
+
+  it.each(["paused", "active", "cancelled"] as const)("applies automation status %s from the update tool alone", async status => {
+    const f = await fixture();
+    const schedule = (await f.call(f.leader(), "create_automation", REMINDER)).result as { id: string };
+    if (status === "active") await f.call(f.leader(), "update_automation", { id: schedule.id, status: "paused" });
+    await f.call(f.leader(), "update_automation", { id: schedule.id, status });
+    expect((await f.repository.get(schedule.id, "chat"))?.status).toBe(status);
     expect(f.complete).not.toHaveBeenCalled(); expect(f.runner.start).not.toHaveBeenCalled();
   });
 });

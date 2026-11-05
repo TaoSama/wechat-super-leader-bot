@@ -1,5 +1,8 @@
+import fs from "node:fs";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConsoleAuthService } from "../../src/console/auth.js";
 import { consoleLinkRequestId, redactIssuedConsoleLink, restoreConsoleLinkReply } from "../../src/console/link-reply.js";
 import { hashConsoleToken } from "../../src/console/types.js";
@@ -13,18 +16,22 @@ const ADMIN = "console-recovery-test-admin";
 const PUBLIC_URL = "https://console.example.test";
 const CHAT = "console-chat";
 const servers = new Set<ControllerServer>();
+let settingsRoot: string;
+
+beforeEach(() => { settingsRoot = fs.mkdtempSync(path.join(tmpdir(), "console-link-settings-")); });
 const bearer = { authorization: `Bearer ${ADMIN}`, "content-type": "application/json" };
 
 afterEach(async () => {
   for (const server of servers) await server.stop();
   servers.clear();
   vi.restoreAllMocks();
+  fs.rmSync(settingsRoot, { recursive: true, force: true });
 });
 
 async function start(store: MemoryStore, now: () => number, model?: LeaderModel) {
   const server = new ControllerServer({ host: "127.0.0.1", port: 0, controllerToken: ADMIN,
     nodeTokens: {}, tokenToNode: new Map(), allowedChatIds: new Set([CHAT]),
-    persistenceMode: "memory", commandTtlSeconds: 60, consolePublicUrl: PUBLIC_URL }, store, model, now);
+    persistenceMode: "memory", commandTtlSeconds: 60, consolePublicUrl: PUBLIC_URL, settingsRoot }, store, model, now);
   servers.add(server);
   await server.start();
   const base = `http://127.0.0.1:${(server.getHttpServer().address() as AddressInfo).port}`;

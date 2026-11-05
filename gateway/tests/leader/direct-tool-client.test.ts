@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ControllerToolRejectedError } from "../../src/controller/direct-tools.js";
+import { ControllerToolFailedError, ControllerToolRejectedError } from "../../src/controller/direct-tools.js";
 import { ControllerClient } from "../../src/controller/client.js";
 
 const request = { chatId: "chat", messageId: "message", text: "本轮原文" };
@@ -59,4 +59,30 @@ test("direct tool client trusts only explicit pre-execution rejection markers on
   for (body of [{ code: "DIRECT_TOOL_REJECTED" }, { execution: "not_started" }, { code: "DIRECT_TOOL_REJECTED", execution: "started" }]) {
     await assert.rejects(client.callTool(invocation), error => error instanceof Error && !(error instanceof ControllerToolRejectedError));
   }
+});
+
+test("direct tool client carries the Controller's reason and message, or none when the body lacks them", async () => {
+  let status = 409;
+  let body: unknown = { code: "DIRECT_TOOL_REJECTED", reason: "NO_UNIQUE_PENDING", execution: "not_started", message: "先问用户要确认哪一个。" };
+  const client = new ControllerClient({ controllerUrl: "http://127.0.0.1:1", controllerToken: "synthetic-token",
+    fetchImpl: async () => typeof body === "string" ? new Response(body, { status }) : Response.json(body, { status }) });
+  const invocation = { ...request, callId: "stable-call", name: tool.name, arguments: {} };
+  await assert.rejects(client.callTool(invocation), error => error instanceof ControllerToolRejectedError &&
+    error.detail?.code === "NO_UNIQUE_PENDING" && error.detail.message === "先问用户要确认哪一个。");
+  body = { code: "DIRECT_TOOL_FAILED", execution: "unknown", message: "结果需要核对。" };
+  await assert.rejects(client.callTool(invocation), error => error instanceof ControllerToolFailedError &&
+    error.httpStatus === 409 && error.detail?.code === "DIRECT_TOOL_FAILED");
+  body = { code: "DIRECT_TOOL_REJECTED", execution: "not_started", error: "legacy body" };
+  await assert.rejects(client.callTool(invocation), error => error instanceof ControllerToolRejectedError && error.detail === undefined);
+  status = 500; body = "<html>not json</html>";
+  await assert.rejects(client.callTool(invocation), error => error instanceof ControllerToolFailedError && error.detail === undefined);
+});
+
+test("a previous-release Controller that rejects for a missing attestation is named as an upgrade, not a refusal", async () => {
+  const body = { code: "DIRECT_TOOL_REJECTED", execution: "not_started", error: "Current-turn authorization does not permit this operation" };
+  const client = new ControllerClient({ controllerUrl: "http://127.0.0.1:1", controllerToken: "synthetic-token",
+    fetchImpl: async () => Response.json(body, { status: 403 }) });
+  const invocation = { ...request, callId: "stable-call", name: "execute_plan", arguments: {} };
+  await assert.rejects(client.callTool(invocation), error => error instanceof ControllerToolRejectedError &&
+    error.httpStatus === 403 && error.detail?.code === "CONTROLLER_UPGRADING" && /正在升级/.test(error.detail.message));
 });

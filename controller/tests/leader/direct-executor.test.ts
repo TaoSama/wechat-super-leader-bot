@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { LeaderOrchestrator } from "../../src/leader/orchestrator.js";
 import { DirectCallSchema } from "../../src/leader/direct-contracts.js";
+import { DirectToolRejectedError } from "../../src/leader/direct-errors.js";
+import { CommandError } from "../../src/commands/service.js";
 import { LeaderDataSchema } from "../../src/leader/contracts.js";
 import { MemoryStore } from "../../src/store/memory.js";
 import type { CommandRecord, PostCommandRequest, ScopedSession, SendRoute } from "../../src/types.js";
@@ -34,21 +36,37 @@ function fixture() {
 describe("single-agent direct business executor", () => {
   it("dispatches once without classifier or acknowledgement models, including a different-call-ID replay", async () => {
     const f = fixture(), direct = f.create().direct;
-    const request = call("execute_plan", { actions }, { authorization: { intent: "task" } });
+    const request = call("execute_plan", { actions });
     const first = await direct.call(request);
     expect(first.reply?.text).toContain("已接收");
     expect(f.commands.submit).toHaveBeenCalledOnce();
     expect(await f.create().direct.call({ ...request, callId: randomUUID() })).toEqual(first);
-    await expect(direct.call({ ...request, callId: randomUUID(), arguments: { actions: [{ ...actions[0], prompt: "第二个任务" }] } })).rejects.toThrow(/effect key/);
+    await expect(direct.call({ ...request, callId: randomUUID(), arguments: { actions: [{ ...actions[0], prompt: "第二个任务" }] } })).rejects.toMatchObject({ code: "EFFECT_ALREADY_SUBMITTED" });
     expect(f.commands.submit).toHaveBeenCalledOnce();
     expect(f.model.complete).not.toHaveBeenCalled();
+  });
+
+  it("reports a chat that turned busy after the journal start as an unknown outcome, not a clean refusal", async () => {
+    const f = fixture(), direct = f.create().direct;
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const submit = f.commands.submit.getMockImplementation()!;
+    f.commands.submit.mockImplementationOnce(async (...args) => { await blocked; return submit(...args); });
+    const first = direct.call(call("execute_plan", { actions }));
+    await vi.waitFor(() => expect(f.commands.submit).toHaveBeenCalledOnce());
+    const busy = await direct.call(call("cancel_plan", {})).catch((error: unknown) => error);
+    expect(busy).toBeInstanceOf(CommandError);
+    expect(busy).not.toBeInstanceOf(DirectToolRejectedError);
+    expect(busy).toMatchObject({ httpStatus: 409, message: expect.stringContaining("上一个操作还在处理") });
+    release();
+    expect((await first).reply?.text).toContain("已接收");
   });
 
   it("persists a continuous goal without invoking a synchronous goal decision or acknowledgement", async () => {
     const f = fixture();
     const request = call("execute_goal", { objective: "持续核查结果", criteria: ["取得最终结论"],
       targets: [{ nodeId: "air", sessionId: "original" }], constraints: "仅核查，不修改其他会话",
-      maxActions: 3, maxDecisions: 5, durationMinutes: 30, shareResults: true }, { authorization: { intent: "goal" } });
+      maxActions: 3, maxDecisions: 5, durationMinutes: 30, shareResults: true });
     const result = await f.create().direct.call(request);
     expect(result.reply?.text).toContain("目标已确认");
     expect((await f.store.getLatestGoal(chatId))?.status).toBe("active");
@@ -57,22 +75,31 @@ describe("single-agent direct business executor", () => {
     expect(await f.create().direct.call({ ...request, callId: randomUUID() })).toEqual(result);
   });
 
-  it("rejects implicit authorization before writing an uncertain effect and permits corrected authorization", async () => {
-    const f = fixture(), direct = f.create().direct, request = call("execute_plan", { actions });
-    await expect(direct.call(request)).rejects.toThrow(/authorization/);
-    const result = await direct.call({ ...request, authorization: { ...request.authorization, intent: "task" } });
-    expect(result.reply?.text).toContain("已接收");
+  it("derives permission from the tool and ignores a legacy attestation from an older Gateway", async () => {
+    const f = fixture(), direct = f.create().direct;
+    const request = call("execute_plan", { actions }, { authorization: { intent: "query" } });
+    expect((await direct.call(request)).reply?.text).toContain("已接收");
+    expect(f.commands.submit).toHaveBeenCalledOnce();
     expect(f.model.complete).not.toHaveBeenCalled();
+  });
+
+  it("cancels a pending plan on a plain cancel request without any attestation", async () => {
+    const f = fixture();
+    await f.create().direct.call(call("propose_plan", { actions }, { messageId: "preview", text: "先预览" }));
+    const cancelled = await f.create().direct.call(call("cancel_plan", {}, { messageId: "cancel", text: "取消这个计划" }));
+    expect(cancelled.reply?.text).toContain("已取消待确认计划");
+    expect(LeaderDataSchema.parse((await f.store.getLeaderState(chatId))?.data).pending).toBeUndefined();
+    expect(f.commands.submit).not.toHaveBeenCalled();
   });
 
   it("allows preview confirmation only from a subsequent real user message, preserving explicit confirmation after queries", async () => {
     const f = fixture(), direct = f.create().direct;
-    const preview = call("propose_plan", { actions }, { text: "先预览任务", authorization: { intent: "preview" } });
+    const preview = call("propose_plan", { actions }, { text: "先预览任务" });
     expect((await direct.call(preview)).reply?.text).toContain("尚未派发");
-    await expect(direct.call({ ...preview, name: "confirm_pending", callId: randomUUID(), arguments: {} })).rejects.toThrow(/prior preview/);
+    await expect(direct.call({ ...preview, name: "confirm_pending", callId: randomUUID(), arguments: {} })).rejects.toMatchObject({ code: "NO_UNIQUE_PENDING" });
     expect(f.commands.submit).not.toHaveBeenCalled();
     await f.create().direct.call(call("list_nodes", {}, { messageId: "unrelated-query", text: "节点在线吗" }));
-    await expect(f.create().direct.call(call("confirm_pending", {}, { messageId: "ambiguous-yes", text: "好" }))).rejects.toThrow(/prior preview/);
+    await expect(f.create().direct.call(call("confirm_pending", {}, { messageId: "ambiguous-yes", text: "好" }))).rejects.toMatchObject({ code: "NO_UNIQUE_PENDING" });
     const result = await f.create().direct.call(call("confirm_pending", {}, { messageId: "explicit-confirm", text: "确认" }));
     expect(result.reply?.text).toContain("已接收");
     expect(f.commands.submit).toHaveBeenCalledOnce();
@@ -81,17 +108,17 @@ describe("single-agent direct business executor", () => {
 
   it("accepts an immediate natural confirmation across executor restart", async () => {
     const f = fixture();
-    await f.create().direct.call(call("propose_plan", { actions }, { messageId: "preview", text: "先预览", authorization: { intent: "preview" } }));
+    await f.create().direct.call(call("propose_plan", { actions }, { messageId: "preview", text: "先预览" }));
     expect((await f.create().direct.call(call("confirm_pending", {}, { messageId: "yes", text: "好" }))).reply?.text).toContain("已接收");
     expect(f.commands.submit).toHaveBeenCalledOnce();
   });
 
   it("permits only one displayed preview per real user turn", async () => {
     const f = fixture(), direct = f.create().direct;
-    const request = call("propose_plan", { actions }, { authorization: { intent: "preview" } });
+    const request = call("propose_plan", { actions });
     const first = await direct.call(request);
     expect(await direct.call({ ...request, callId: randomUUID() })).toEqual(first);
-    await expect(direct.call({ ...request, callId: randomUUID(), arguments: { actions: [{ ...actions[0], prompt: "另一个候选任务" }] } })).rejects.toThrow(/effect key/);
+    await expect(direct.call({ ...request, callId: randomUUID(), arguments: { actions: [{ ...actions[0], prompt: "另一个候选任务" }] } })).rejects.toMatchObject({ code: "EFFECT_ALREADY_SUBMITTED" });
     const pending = LeaderDataSchema.parse((await f.store.getLeaderState(chatId))?.data).pending;
     expect(pending?.actions[0].prompt).toBe(actions[0].prompt);
   });
@@ -99,10 +126,10 @@ describe("single-agent direct business executor", () => {
   it("rejects an oversized preview without leaving a confirmable pending plan", async () => {
     const f = fixture();
     f.sessions[0].title = "完整标题".repeat(2300);
-    const result = await f.create().direct.call(call("propose_plan", { actions }, { authorization: { intent: "preview" } }));
+    const result = await f.create().direct.call(call("propose_plan", { actions }));
     expect(result.reply?.text).toContain("无法完整展示");
     expect(LeaderDataSchema.parse((await f.store.getLeaderState(chatId))?.data).pending).toBeUndefined();
-    await expect(f.create().direct.call(call("confirm_pending", {}, { messageId: "yes", text: "确认" }))).rejects.toThrow(/prior preview/);
+    await expect(f.create().direct.call(call("confirm_pending", {}, { messageId: "yes", text: "确认" }))).rejects.toMatchObject({ code: "NO_UNIQUE_PENDING" });
     expect(f.commands.submit).not.toHaveBeenCalled();
   });
 

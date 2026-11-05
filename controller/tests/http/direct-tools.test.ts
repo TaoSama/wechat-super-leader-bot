@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ControllerServer } from "../../src/http/server.js";
 import { MemoryStore } from "../../src/store/memory.js";
@@ -10,20 +12,27 @@ import { GoalScheduler } from "../../src/leader/goals/scheduler.js";
 describe("direct business tools HTTP boundary", () => {
   let server: ControllerServer | undefined;
   let events: Record<string, unknown>[];
+  let settingsRoot: string;
   beforeEach(() => {
     events = [];
+    settingsRoot = fs.mkdtempSync(path.join(tmpdir(), "direct-tools-settings-"));
     vi.spyOn(fs, "writeSync").mockImplementation((_fd: number, message: string | ArrayBufferView) => {
       events.push(JSON.parse(String(message)));
       return Buffer.byteLength(String(message));
     });
   });
-  afterEach(async () => { if (server) await server.stop(); server = undefined; vi.restoreAllMocks(); });
+  afterEach(async () => {
+    if (server) await server.stop();
+    server = undefined;
+    vi.restoreAllMocks();
+    fs.rmSync(settingsRoot, { recursive: true, force: true });
+  });
 
   async function start(model?: LeaderModel) {
     const store = new MemoryStore();
     server = new ControllerServer({ host: "127.0.0.1", port: 0, controllerToken: "private-token",
       nodeTokens: {}, tokenToNode: new Map(), allowedChatIds: new Set(["private-chat"]),
-      persistenceMode: "memory", commandTtlSeconds: 60, consolePublicUrl: "https://console.example.test" }, store, model);
+      persistenceMode: "memory", commandTtlSeconds: 60, consolePublicUrl: "https://console.example.test", settingsRoot }, store, model);
     await server.start();
     const address = server.getHttpServer().address();
     if (!address || typeof address === "string") throw new Error("Missing test address");
@@ -42,7 +51,9 @@ describe("direct business tools HTTP boundary", () => {
     expect((await post("list", request, { authorization: "Bearer wrong" })).status).toBe(403);
     expect((await post("list", { ...request, injected: true })).status).toBe(400);
     expect((await post("call", { ...call, authorization: { intent: "invented" } })).status).toBe(400);
-    expect((await post("list", { ...request, chatId: "denied" })).status).toBe(403);
+    const denied = await post("list", { ...request, chatId: "denied" });
+    expect(denied.status).toBe(403);
+    expect(await denied.json()).toEqual({ code: "CHAT_NOT_ALLOWED", execution: "not_started", message: expect.stringContaining("不要重试") });
     expect(read).not.toHaveBeenCalled();
     expect(events).toHaveLength(0);
   });
@@ -103,19 +114,37 @@ describe("direct business tools HTTP boundary", () => {
     }
   });
 
+  it("still accepts a legacy attestation from an older Gateway and ignores it", async () => {
+    const { post } = await start();
+    const response = await post("call", { ...call, authorization: { intent: "query" } });
+    expect(response.status).toBe(200);
+    expect((await response.json()).result).toEqual([]);
+  });
+
+  it("explains a refused confirmation with a reason code and Chinese next step", async () => {
+    const { post } = await start();
+    const response = await post("call", { ...call, name: "confirm_pending", text: "确认" });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ code: "DIRECT_TOOL_REJECTED", reason: "NO_UNIQUE_PENDING", execution: "not_started",
+      message: expect.stringContaining("先问用户") });
+  });
+
   it("reports a conflicting replay as a finished 409", async () => {
     const { post } = await start();
     expect((await post("call", call)).status).toBe(200);
-    expect((await post("call", { ...call, text: "替换原文" })).status).toBe(409);
+    const conflict = await post("call", { ...call, text: "替换原文" });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ code: "DIRECT_TOOL_REJECTED", reason: "MESSAGE_REBOUND", execution: "not_started" });
     expect(events.filter(event => event.stage === "controller.response.finish").at(-1)).toMatchObject({ httpStatus: 409, outcome: "error" });
   });
 
   it("returns 400 for business schema errors and allows corrected arguments with the same call ID", async () => {
     const { post, store } = await start();
-    const planCall = { ...call, name: "execute_plan", authorization: { intent: "task" }, arguments: { actions: "invalid" } };
+    const planCall = { ...call, name: "execute_plan", arguments: { actions: "invalid" } };
     const invalid = await post("call", planCall);
     expect(invalid.status).toBe(400);
-    expect((await invalid.json()).error).toBe("Invalid business tool arguments");
+    expect(await invalid.json()).toEqual({ code: "DIRECT_TOOL_REJECTED", reason: "INVALID_ARGUMENTS", execution: "not_started",
+      message: expect.stringContaining("actions") });
     expect(await store.getLeaderState(request.chatId)).toBeNull();
     const corrected = await post("call", { ...planCall, arguments: { actions: [
       { nodeId: "unavailable-node", sessionId: "unavailable-session", prompt: "检查构建" },

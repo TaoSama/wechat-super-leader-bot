@@ -4,6 +4,7 @@ import { SYSTEM_PROMPT, LEADER_TOOLS, ToolArguments } from "../leader/contracts.
 import { CancelPlanArgumentsSchema, DIRECT_TOOL_INSTRUCTIONS } from "../leader/direct-contracts.js";
 import { BACKGROUND_INSTRUCTIONS, BACKGROUND_TOOLS, BACKGROUND_ARGUMENTS } from "../leader/background-tools.js";
 import { AUTOMATION_TOOLS, AUTOMATION_ARGUMENTS } from "../automations/tools.js";
+import { AUTOMATION_INSTRUCTIONS } from "../automations/instructions.js";
 import { ACKNOWLEDGEMENT_PROMPT } from "../leader/acknowledgement.js";
 import { GOAL_DECISION_PROMPT, GOAL_DECISION_TOOL } from "../leader/goals/model.js";
 import { GoalDecisionSchema } from "../leader/goals/goal.js";
@@ -17,17 +18,22 @@ import { WORKER_SYSTEM_PROMPT } from "../background/worker/output.js";
 
 const EMPTY = { type: "object", properties: {}, additionalProperties: false };
 export const DIRECT_EXTRA_TOOLS: ModelTool[] = [
-  { name: "confirm_pending", description: "Consume the real current user's confirmation of the uniquely displayed, unexpired plan or goal; never confirms the agent's own preview." },
-  { name: "cancel_plan", description: "Cancel pending or future fixed-plan steps when explicitly requested; does not stop an already running source task. " +
-    "Pass the known planId when this chat has several active plans; without it only a single active plan is cancelled, otherwise the reply lists the active plans to choose from.",
+  { name: "confirm_pending", description: "用户回复“确认”“执行”时，执行当前唯一一个已展示、未过期的待确认计划或目标。只依据用户本人的确认，不能确认你自己刚生成的预览。" },
+  { name: "cancel_plan", description: "用户明确要求时，停止计划里还没派发的步骤，不影响已经在会话里运行的任务。本聊天有多个进行中的计划时传 planId；不传时只取消唯一的那个，否则回执会列出可选的计划。",
   parameters: z.toJSONSchema(CancelPlanArgumentsSchema) as Record<string, unknown> },
-  { name: "cancel_goal", description: "Cancel this chat's pending or active goal when explicitly requested; does not stop source tasks already running." },
+  { name: "cancel_goal", description: "用户明确要求时，取消本聊天待确认或进行中的持续目标，不停止会话里已在运行的任务。" },
 ].map(({ parameters = EMPTY, ...item }) => ({ type: "function", function: { ...item, parameters } }));
 
-export interface RegisteredPrompt { name: string; title: string; content: string; scope: string; path: string }
+export interface RegisteredPrompt {
+  name: string; title: string; content: string; scope: string; path: string;
+  /** Registered prompts embedded verbatim in content; editing one of them changes this prompt too. */
+  parts?: string[];
+}
 export const LOCAL_PROMPTS: RegisteredPrompt[] = [
   { name: "leader", title: "内部协调提示词", content: SYSTEM_PROMPT, scope: "controller", path: "leader/contracts.ts · SYSTEM_PROMPT" },
-  { name: "direct", title: "微信业务工具协议提示词", content: DIRECT_TOOL_INSTRUCTIONS, scope: "controller", path: "leader/direct-contracts.ts · DIRECT_TOOL_INSTRUCTIONS" },
+  { name: "direct", title: "微信业务工具协议提示词", content: DIRECT_TOOL_INSTRUCTIONS, scope: "controller", path: "leader/direct-contracts.ts · DIRECT_TOOL_INSTRUCTIONS",
+    parts: ["automation-tools", "background-tools"] },
+  { name: "automation-tools", title: "定时任务工具提示词", content: AUTOMATION_INSTRUCTIONS, scope: "controller", path: "automations/instructions.ts · AUTOMATION_INSTRUCTIONS" },
   { name: "background-tools", title: "后台任务工具提示词", content: BACKGROUND_INSTRUCTIONS, scope: "controller", path: "leader/background-tools.ts · BACKGROUND_INSTRUCTIONS" },
   { name: "acknowledgement", title: "执行回执提示词", content: ACKNOWLEDGEMENT_PROMPT, scope: "controller", path: "leader/acknowledgement.ts · ACKNOWLEDGEMENT_PROMPT" },
   { name: "goal", title: "持续目标决策提示词", content: GOAL_DECISION_PROMPT, scope: "controller", path: "leader/goals/model.ts · GOAL_DECISION_PROMPT" },
