@@ -30,7 +30,7 @@ afterEach(async () => {
   }
 });
 
-function fixture(options: { model?: LeaderModel; fileMaxBytes?: number; background?: boolean } = {}) {
+function fixture(options: { model?: LeaderModel; fileMaxBytes?: number; background?: boolean; executor?: "codex" | "claude" } = {}) {
   const root = mkdtempSync(join(tmpdir(), "background-summary-"));
   roots.push(root);
   const config: Config = {
@@ -42,7 +42,7 @@ function fixture(options: { model?: LeaderModel; fileMaxBytes?: number; backgrou
       BACKGROUND_WORKER_ROOT: join(root, "workers"), BACKGROUND_ARTIFACT_ROOT: join(root, "artifacts"),
       BACKGROUND_MODEL_BASE_URL: PROVIDER_ORIGIN, BACKGROUND_MODEL_NAME: PROVIDER_MODEL, BACKGROUND_MODEL_API_KEY: PROVIDER_KEY,
       // A background turn budget must not be passed to the HTTP summary client's shorter timeout option.
-      BACKGROUND_TURN_TIMEOUT_MS: "3600000",
+      BACKGROUND_TURN_TIMEOUT_MS: "3600000", BACKGROUND_EXECUTOR: options.executor ?? "codex",
     }) }),
   };
   const store = new MemoryStore();
@@ -63,10 +63,12 @@ function response() {
 }
 
 describe("background result summaries with rules mode", () => {
-  it.each(["attachment", "download"] as const)("uses the independent provider for a complete %s delivery", async mode => {
+  it.each([["attachment", "codex"], ["download", "codex"], ["attachment", "claude"]] as const)(
+    "uses the independent provider for a complete %s delivery (%s executor)", async (mode, executor) => {
     const fetchModel = vi.fn<typeof fetch>().mockImplementation(async () => response());
     vi.stubGlobal("fetch", fetchModel);
-    const { runtime, config } = fixture({ fileMaxBytes: mode === "download" ? 1 : undefined });
+    const { runtime, config } = fixture({ fileMaxBytes: mode === "download" ? 1 : undefined, executor });
+    expect(config.background?.executorKind).toBe(executor);
     expect(config.leader).toBeUndefined();
     const request = input(LONG_RESULT);
     const plan = await runtime.results.prepareResult(request);

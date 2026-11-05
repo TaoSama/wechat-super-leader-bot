@@ -30,6 +30,8 @@ export interface BackgroundConfig {
   apiKey: string;
   timeoutMs: number;
   maxConcurrent: number;
+  /** The background HTTP model provider, kept for result summaries even when Claude runs the turns. */
+  summaryProvider?: { model: string; baseUrl: string; apiKey: string };
 }
 
 const DEFAULT_TURN_TIMEOUT_MS = 10 * 60_000;
@@ -128,6 +130,7 @@ export function loadBackgroundConfig(env: NodeJS.ProcessEnv,
   return { executorKind, ...(claude ? { claude } : {}), root: resolvedRoot, artifactRoot: resolvedArtifacts,
     // The Codex provider is unused by Claude, which falls back to its CLI default model.
     ...(claude ? { model: claude.model ?? CLAUDE_DEFAULT_MODEL_LABEL, baseUrl: "", apiKey: "" } : { model: model!, baseUrl: baseUrl!, apiKey: apiKey! }),
+    ...(model && baseUrl && apiKey ? { summaryProvider: { model, baseUrl, apiKey } } : {}),
     codexPath: env.BACKGROUND_CODEX_PATH?.trim() || "codex",
     timeoutMs: integer("BACKGROUND_TURN_TIMEOUT_MS", DEFAULT_TURN_TIMEOUT_MS, MAX_TURN_TIMEOUT_MS),
     maxConcurrent: integer("BACKGROUND_MAX_CONCURRENT", 2, 8) };

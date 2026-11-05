@@ -51,11 +51,10 @@ export class TaskNotifications {
     const schedules = this.pool ? new PostgresAutomationRepository(this.pool) : new MemoryAutomationRepository();
     const deliveries = this.pool ? new PostgresDeliveryRepository(this.pool) : new MemoryDeliveryRepository(now);
     this.fallbackRepository = this.pool ? new PostgresFallbackRepository(this.pool) : new MemoryFallbackRepository();
-    const backgroundProvider = config.background;
+    const backgroundProvider = config.background?.summaryProvider;
     this.results = new ResultDeliveryService(deliveries, {
       // Short results need no model. Initialize the independent provider only when a summary is requested.
-      // A Claude background executor has no HTTP provider for summaries.
-      model: model ?? (backgroundProvider?.baseUrl ? {
+      model: model ?? (backgroundProvider ? {
         complete: (...args: Parameters<LeaderModel["complete"]>) => new HttpLeaderModel({
           baseUrl: backgroundProvider.baseUrl, apiKey: backgroundProvider.apiKey, model: backgroundProvider.model,
         }).complete(...args),

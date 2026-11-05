@@ -65,6 +65,10 @@ describe("background execution configuration", () => {
     const claudeEnv = { ...env, BACKGROUND_EXECUTOR: "claude" };
     expect(loadBackgroundConfig({ ...claudeEnv, BACKGROUND_MODEL_BASE_URL: "https://gateway.test/v1/", BACKGROUND_MODEL_API_KEY: "gw" })?.claude)
       .toMatchObject({ baseUrl: "https://gateway.test", apiKey: "gw" });
+    // Result summaries keep the background HTTP provider when Claude runs the turns.
+    expect(loadBackgroundConfig({ ...claudeEnv, BACKGROUND_MODEL_NAME: "summary", BACKGROUND_MODEL_BASE_URL: "https://gateway.test/v1",
+      BACKGROUND_MODEL_API_KEY: "gw" })?.summaryProvider).toEqual({ model: "summary", baseUrl: "https://gateway.test/v1", apiKey: "gw" });
+    expect(loadBackgroundConfig({ ...claudeEnv, BACKGROUND_CLAUDE_API_KEY: "key" })?.summaryProvider).toBeUndefined();
     // Falls back to the leader provider, like the Codex background provider does.
     expect(loadBackgroundConfig(claudeEnv, provider)?.claude).toMatchObject({ baseUrl: "https://example.test", apiKey: "secret" });
     // A Claude-specific credential never travels to the inherited gateway URL.
