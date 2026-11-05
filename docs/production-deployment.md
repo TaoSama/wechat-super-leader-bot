@@ -324,30 +324,117 @@ docker-compose --env-file /dev/null --profile wechat \
 旧版 actionlint（如 1.7.12）尚未识别 GitHub 新增的 `concurrency.queue`；可针对这一项
 使用 `-ignore 'unexpected key "queue"'` 检查其余规则，并以 GitHub 实际工作流解析为准。
 
-## Claude Code 后台执行器（opt-in）
+## Claude Code 后台执行器
 
-后台任务默认使用 Codex（`BACKGROUND_EXECUTOR` 未设置或为 `codex`）；生产镜像和
-`compose.production.yaml` 不传递 Claude 相关变量，因此合并本功能不改变生产行为。
-设置 `BACKGROUND_EXECUTOR=claude` 后，Controller 以 `claude -p` 执行后台任务：
+生产 `compose.production.yaml` 默认 `BACKGROUND_EXECUTOR=claude`：后台任务、`kind=background`
+的定时任务和 leader 的后台追问/延期工具都由 Controller 容器内的 `claude -p` 子进程执行。
+微信主对话 leader 不受影响，仍使用 Codex Task；`kind=session` 定时任务仍发到创建时冻结的节点会话
+（可以是 Codex 会话，也可以是节点上的 Claude Code 会话）。回滚只需在 `.runtime/controller.env`
+设 `BACKGROUND_EXECUTOR=codex` 后重新发布。
+
+### `.runtime/controller.env` 需要的变量
+
+后台执行仍需 `BACKGROUND_WORKER_ROOT`（例如 `/var/lib/super-leader-runtime/background/workers`），
+未设置时整个后台执行关闭。凭证只写在 `.runtime/controller.env`（权限 `600`），不进仓库、不进日志。
 
 | 变量 | 说明 |
 |------|------|
-| `BACKGROUND_CLAUDE_API_KEY` / `BACKGROUND_CLAUDE_OAUTH_TOKEN` | 二选一，仅作为 `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` 注入子进程 |
-| `BACKGROUND_CLAUDE_MODEL` | 可选，未设置时使用 CLI 默认模型；控制台的后台模型设置不作用于 Claude |
-| `BACKGROUND_CLAUDE_PATH` | 可选，默认 `claude` |
+| `BACKGROUND_EXECUTOR` | 可选，生产默认 `claude`；设 `codex` 回滚 |
+| `BACKGROUND_MODEL_BASE_URL` / `BACKGROUND_MODEL_API_KEY` | 已有的后台模型网关。未设置 Claude 专用凭证时，Claude 复用这对值：URL 作为 `ANTHROPIC_BASE_URL`，key 作为 `ANTHROPIC_API_KEY`（`x-api-key` 头）。两者都未设置时继续回退到 `LEADER_MODEL_*` |
+| `BACKGROUND_CLAUDE_BASE_URL` | 可选，覆盖 Anthropic 兼容端点。末尾的 `/v1` 会被去掉，因为 Claude Code 会自己拼 `/v1/messages`；必须是 `http(s)`，不能带用户名、密码、query 或 fragment |
+| `BACKGROUND_CLAUDE_API_KEY` | 可选，以 `ANTHROPIC_API_KEY`（`x-api-key`）发送 |
+| `BACKGROUND_CLAUDE_AUTH_TOKEN` | 可选，以 `ANTHROPIC_AUTH_TOKEN`（`Authorization: Bearer`）发送；网关要求 Bearer 认证时用它 |
+| `BACKGROUND_CLAUDE_OAUTH_TOKEN` | 可选，`claude setup-token` 生成的订阅 token，以 `CLAUDE_CODE_OAUTH_TOKEN` 发送；服务端自动化使用受 Anthropic 消费者条款约束，生产优先用 API key |
+| `BACKGROUND_CLAUDE_MODEL` | 可选，网关暴露的 Claude 模型名：别名 `sonnet` / `opus` / `haiku`，或 `claude-*`（允许 `vendor/claude-*` 前缀和 `[1m]` 后缀）；未设置时使用 CLI 默认模型 |
+| `BACKGROUND_CLAUDE_PATH` | 可选，默认镜像内的 `claude` |
 
-每轮使用 `--permission-mode dontAsk`、限定工具集、`--setting-sources user`（配置目录即隔离的
-worker home）和 `--settings`：开启 Bash sandbox 且禁止回退到非 sandbox 执行，Edit 只允许工作区，
-Read/Edit 拒绝 worker home、artifact root、`/etc/super-leader` 和 `/proc`。结构化结果用与 Codex
-相同的 schema 校验，缺失或无效即判为未验证完成；`session_id` 作为续接 ID。
+三个 `BACKGROUND_CLAUDE_*` 凭证最多设一个，同时设置多个时 Controller 拒绝启动。设置了 Claude 专用凭证时，
+不会继承 `BACKGROUND_MODEL_BASE_URL`：没有 `BACKGROUND_CLAUDE_BASE_URL` 就发往 Anthropic 官方 API，
+避免把专用凭证发给别的端点。控制台「后台任务」模型设置在 Claude 下显示 `Claude Code CLI` 和 Claude
+模型别名；选中的 Claude 模型和推理强度作用于后续轮次，之前为 Codex 保存的模型不会传给 Claude。
 
-生产启用前需完成（均未在本仓库实现或验证）：
+### 隔离方式
 
-1. 在 `deploy/Dockerfile.controller` 安装固定版本的 `@anthropic-ai/claude-code`，并安装其 Linux
-   sandbox 依赖（bubblewrap、socat）；镜像内确认 sandbox 实际生效，sandbox 不可用时不得启用。
-2. 在 `compose.production.yaml` 透传上述变量，凭证只放 `.runtime/controller.env`。
-3. 复核 seccomp 与 `super-leader-codex` AppArmor profile：bubblewrap 需要的 user namespace
-   与 mount 能力可能被当前策略拒绝，放宽前需单独评审。
-4. 用真实 CLI 核对 `--settings` 能通过校验（`-p` 模式下校验失败的设置会被静默忽略）、
-   `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` 确实从 Bash 子进程移除凭证，以及 sandbox 内 Bash 的
-   网络策略是否满足任务需要（Codex worker 允许 shell 联网）。
+Claude 作为 Controller 子进程运行在同一个加固容器里（只读根文件系统、UID 1000、`cap_drop: ALL`、
+`no-new-privileges`、seccomp 与 `super-leader-codex` AppArmor）。镜像固定安装
+`@anthropic-ai/claude-code@2.1.311`、`bubblewrap` 和 `socat`。每轮的 `--settings` 包括：
+
+- `sandbox.enabled`、`failIfUnavailable: true`、`allowUnsandboxedCommands: false`：sandbox 起不来时
+  CLI 直接失败，Bash 永远不会在 sandbox 外执行。`enableWeakerNestedSandbox: false`：bubblewrap 在新
+  PID 命名空间里挂载新的 `/proc`，看不到 Controller 和 CLI 进程的 `/proc/<pid>/environ`。
+- 文件工具 `blockReadsOutsideWorkingDirectories`，Read/Edit 只允许工作区；Read/Edit 拒绝 worker home、
+  artifact root、`/etc/super-leader`、`/proc`。
+- Bash 的 `filesystem.denyRead` 覆盖整个 `CONTROLLER_DATA_ROOT`、artifact root 和 `/tmp/*`，只用
+  `allowRead` 重新打开本 worker 的工作区和本轮临时目录 `/tmp/slc-<id>`（`TMPDIR` 与
+  `CLAUDE_CODE_TMPDIR` 都指向它，轮次结束即删除）。其他 worker、设置目录和 Controller 的临时文件不可读，
+  `/tmp` 下已有文件也不可覆盖。临时目录路径保持在 CLI 的 44 字节上限内，否则 CLI 会让 Bash 回退到共享的
+  `/tmp/claude-<uid>`。
+- 网络经 sandbox 代理，允许公网域名，拒绝 `postgres`、`controller`、`gateway` 和云元数据地址。
+- `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`：Bash 子进程环境里没有 Anthropic 凭证。
+
+Compose 为 Controller 额外设置 `systempaths=unconfined`，否则 Docker 屏蔽的 `/proc` 路径会让 bubblewrap
+无法挂载新的 `/proc`。AppArmor 仍拒绝 `kcore`、`sysrq-trigger`、`/proc/sys` 写入和 `/sys/firmware`。
+seccomp 只新增三条精确匹配：`clone` 标志 `0x30020011` / `0x70020011`（bubblewrap 不隔离 IPC）和
+`unshare(CLONE_NEWPID|CLONE_NEWNS)`（apply-seccomp 在自己创建的 user namespace 内）。AppArmor
+profile 规则未变，VPS 上的 `/etc/apparmor.d/super-leader-codex` 不需要重新加载。
+
+Controller 启动时先运行 `claude sandbox status` 校验设置已生效且是严格模式，Linux 上再用 `bwrap` 试建
+user、PID、network 命名空间并挂载 `/proc`；任一步失败就拒绝启动，不接受后台任务。
+
+### 升级执行器时的已有 worker
+
+每个后台 worker 记录创建时的执行器（`executorKind`），会话续接 ID 也带上执行器类型。切换执行器后，
+旧 worker 的 Codex 线程不会被传给 `claude --resume`，下一轮会开启新的 Claude 会话；控制台按记录显示
+Codex / Claude Code 标签，切换前创建的执行记录显示「执行器未记录」。
+
+### 镜像内验证
+
+升级 Claude Code 版本、Docker、内核或修改 seccomp/AppArmor/compose 安全选项后，在本地构建镜像并运行：
+
+```sh
+docker build -f deploy/Dockerfile.controller -t super-leader-controller:claude-verify .
+node tests/integration/leader/claude-worker-container.mjs --run
+```
+
+它在生产同等加固参数下用真实 CLI 和容器内的模拟 Anthropic API 跑两轮任务，验证 sandbox 启动、凭证不在
+Bash 环境和任何 `/proc/<pid>/environ` 中、其他 worker 与设置目录不可读、`unshare -U` 被拒绝、续接同一会话、
+清理临时目录；并验证去掉 `systempaths=unconfined` 或去掉三条 seccomp 规则时 Controller 拒绝启动。
+没有 AppArmor 的引擎（Docker Desktop）可加 `--skip-apparmor`，但不能作为生产证据。
+
+## 节点启用 Claude Code 会话
+
+Daemon 默认不读取 Claude Code 会话。节点上启用时由运维在合并后手工重装服务，注意两点：
+
+- `--service install` 只按本次命令的参数重建 launchd plist，**没有重新传入的参数会被丢弃**。
+- launchd 环境的 `PATH` 不含 `~/.local/bin`，必须显式传 `--claude-path`，否则参数校验失败，
+  KeepAlive 会反复重启 Daemon，连 Codex 会话也会离线。
+
+以 macmini 为例（macair 换成对应用户目录），以登录用户身份执行，不要用 root：
+
+```sh
+# 1. 备份并读出当前参数
+cp ~/Library/LaunchAgents/site.taoai.super-leader-daemon.plist ~/super-leader-daemon.plist.bak
+plutil -extract ProgramArguments json -o - ~/Library/LaunchAgents/site.taoai.super-leader-daemon.plist
+
+# 2. 用包含 daemon/pkg/claude 的提交构建 Daemon，先前台试跑一次（同样参数，不带 --service）
+#    确认没有参数错误后 Ctrl-C
+./super-leader-daemon <第 1 步除 argv[0] 外的全部参数> \
+  --claude-projects-root /Users/macmini/.claude/projects \
+  --claude-path /Users/macmini/.local/bin/claude
+
+# 3. 用同样参数重装服务；--token-file 指向已有的 <state-dir>/service-node-token，token 不进 argv
+./super-leader-daemon <同上全部参数> \
+  --claude-projects-root /Users/macmini/.claude/projects \
+  --claude-path /Users/macmini/.local/bin/claude \
+  --service install
+
+# 4. 核对
+plutil -extract ProgramArguments json -o - ~/Library/LaunchAgents/site.taoai.super-leader-daemon.plist
+./super-leader-daemon --service status
+tail -n 50 <state-dir>/daemon.stderr.log
+```
+
+`--claude-permission-mode` 默认 `dontAsk`，安装时会写入 plist。完成后控制台的节点会话列表应出现带
+「Claude Code」标签的 `claude:` 会话。安装中途失败时服务保持停止，用备份的 plist 或修正后的命令重装。
+Claude Code 会话通过登录钥匙串取凭证，用户未登录或 token 过期时发送会失败；续写的 Bash 命令使用 launchd
+的最小 `PATH`。
