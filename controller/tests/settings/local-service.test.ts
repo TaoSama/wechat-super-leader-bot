@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { LocalSettingsService } from "../../src/settings/local-service.js";
+import { LocalSettingsService, executorModelChoice } from "../../src/settings/local-service.js";
 import { assertEditedArguments, parseCompatibleTool } from "../../src/settings/local-tools.js";
 import { SYSTEM_PROMPT, LEADER_TOOLS, LeaderDataSchema } from "../../src/leader/contracts.js";
 import { DIRECT_TOOL_INSTRUCTIONS, DirectCallSchema } from "../../src/leader/direct-contracts.js";
@@ -50,6 +50,19 @@ describe("Controller persistent runtime settings", () => {
     const codexScope = (await codex.snapshot()).scopes.find(item => item.id === "background")!;
     await codex.updateModel({ scope: "background", model: "new-future-model", reasoningEffort: null, expectedRevision: codexScope.revision });
     expect((await service.snapshot()).scopes.find(item => item.id === "background")).toMatchObject({ model: "claude-cli-default" });
+  });
+  it("rolls a saved Claude background model back to the Codex default after an executor switch", async () => {
+    const f = fixture();
+    const service = new LocalSettingsService({ ...f.options, background: { model: "claude-cli-default", baseUrl: "", apiKey: "", executorKind: "claude" } });
+    const scope = (await service.snapshot()).scopes.find(item => item.id === "background")!;
+    await service.updateModel({ scope: "background", model: "sonnet", reasoningEffort: "max", expectedRevision: scope.revision });
+    const codex = new LocalSettingsService(f.options);
+    expect((await codex.snapshot()).scopes.find(item => item.id === "background"))
+      .toMatchObject({ model: "worker", reasoningEffort: null, provider: "https://worker-model.example" });
+    expect(executorModelChoice(codex.capture().model("background", "worker"), false, "worker")).toEqual({ model: "worker", reasoningEffort: null });
+    expect(executorModelChoice({ model: "sonnet", reasoningEffort: "max" }, true, "claude-cli-default")).toEqual({ model: "sonnet", reasoningEffort: "max" });
+    expect(executorModelChoice({ model: "gpt-x", reasoningEffort: "high" }, true, "claude-cli-default")).toEqual({ model: "claude-cli-default", reasoningEffort: null });
+    expect(executorModelChoice({ model: "worker", reasoningEffort: "high" }, false, "worker")).toEqual({ model: "worker", reasoningEffort: "high" });
   });
   it("persists actual prompt text with CAS across service recreation and freezes an existing model conversation", async () => {
     const f = fixture(), seen: ModelMessage[][] = [];

@@ -57,6 +57,14 @@ export class LocalRuntimeSettings {
   }
 }
 
+/**
+ * A background model choice applies only to the executor family it was saved for;
+ * after an executor switch the configured default runs until a new choice is saved.
+ */
+export function executorModelChoice(choice: LocalModelChoice, claude: boolean, fallback: string): LocalModelChoice {
+  return choice.model === fallback || isClaudeModel(choice.model) === claude ? choice : { model: fallback, reasoningEffort: null };
+}
+
 /** A single persistent source for editable Controller runtime resources. */
 export class LocalSettingsService {
   private readonly storage: LocalSettingsStorage;
@@ -97,8 +105,8 @@ export class LocalSettingsService {
     const provider = scope === "controller" ? this.options.leader : this.options.background;
     const choice = this.capture().model(scope, provider?.model ?? "未配置");
     const claude = this.claudeScope(scope);
-    // A model saved for the Codex executor does not run on Claude; show the model Claude actually uses.
-    const shown = claude && !isClaudeModel(choice.model) ? { model: provider!.model, reasoningEffort: choice.reasoningEffort } : choice;
+    // Show the model the current executor actually runs, not one saved for the other executor.
+    const shown = scope === "background" && provider ? executorModelChoice(choice, claude, provider.model) : choice;
     return { id: scope, label: scope === "controller" ? "内部协调" : "后台任务", ...shown,
       revision: revision([scope, choice, provider?.baseUrl ?? null]), editable: !!provider, effect: RESOURCE_EFFECT,
       provider: claude ? CLAUDE_PROVIDER_LABEL : provider ? new URL(provider.baseUrl).origin : "未配置" };
