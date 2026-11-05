@@ -41,16 +41,17 @@ export async function pgCreateConsoleLinkIfAbsent(
   const normalized = normalizeConsoleLinkRecord(record);
   const insertRes = await pool.query(
     `
-    INSERT INTO console_links (token_hash, created_at, expires_at, consumed_at)
-    VALUES ($1, $2::timestamptz, $3::timestamptz, $4::timestamptz)
+    INSERT INTO console_links (token_hash, created_at, expires_at, consumed_at, chat_id)
+    VALUES ($1, $2::timestamptz, $3::timestamptz, $4::timestamptz, $5)
     ON CONFLICT (token_hash) DO NOTHING
-    RETURNING token_hash, created_at, expires_at, consumed_at;
+    RETURNING token_hash, created_at, expires_at, consumed_at, chat_id;
     `,
     [
       normalized.tokenHash,
       normalized.createdAt,
       normalized.expiresAt,
       normalized.consumedAt ?? null,
+      normalized.chatId ?? null,
     ]
   );
 
@@ -59,7 +60,7 @@ export async function pgCreateConsoleLinkIfAbsent(
   }
 
   const selectRes = await pool.query(
-    "SELECT token_hash, created_at, expires_at, consumed_at FROM console_links WHERE token_hash = $1",
+    "SELECT token_hash, created_at, expires_at, consumed_at, chat_id FROM console_links WHERE token_hash = $1",
     [normalized.tokenHash]
   );
   if (selectRes.rows.length === 0) {
@@ -72,7 +73,7 @@ export async function pgCreateConsoleLinkIfAbsent(
 
 export async function pgGetConsoleLink(pool: pg.Pool, tokenHash: string): Promise<ConsoleLinkRecord | null> {
   const result = await pool.query(
-    "SELECT token_hash, created_at, expires_at, consumed_at FROM console_links WHERE token_hash = $1",
+    "SELECT token_hash, created_at, expires_at, consumed_at, chat_id FROM console_links WHERE token_hash = $1",
     [validateConsoleTokenHash(tokenHash)],
   );
   return result.rows.length ? mapConsoleLinkRow(result.rows[0]) : null;
@@ -103,7 +104,7 @@ export async function pgConsumeConsoleLink(
       SET consumed_at = COALESCE(consumed_at, $2::timestamptz)
       WHERE token_hash = $1
         AND expires_at > $2::timestamptz
-      RETURNING token_hash;
+      RETURNING token_hash, chat_id;
       `,
       [validTokenHash, validNow.iso]
     );
@@ -115,10 +116,10 @@ export async function pgConsumeConsoleLink(
 
     await client.query(
       `
-      INSERT INTO console_sessions (token_hash, created_at, expires_at)
-      VALUES ($1, $2::timestamptz, $3::timestamptz);
+      INSERT INTO console_sessions (token_hash, created_at, expires_at, chat_id)
+      VALUES ($1, $2::timestamptz, $3::timestamptz, $4);
       `,
-      [normalizedSession.tokenHash, normalizedSession.createdAt, normalizedSession.expiresAt]
+      [normalizedSession.tokenHash, normalizedSession.createdAt, normalizedSession.expiresAt, updateRes.rows[0].chat_id ?? null]
     );
 
     await client.query("COMMIT");
@@ -140,7 +141,7 @@ export async function pgGetConsoleSession(
   const validNow = validateIsoTimestamp(now, "now");
   const res = await pool.query(
     `
-    SELECT token_hash, created_at, expires_at
+    SELECT token_hash, created_at, expires_at, chat_id
     FROM console_sessions
     WHERE token_hash = $1 AND expires_at > $2::timestamptz
     `,
@@ -163,6 +164,7 @@ function mapConsoleLinkRow(row: any): ConsoleLinkRecord {
     createdAt: new Date(row.created_at).toISOString(),
     expiresAt: new Date(row.expires_at).toISOString(),
     consumedAt: row.consumed_at ? new Date(row.consumed_at).toISOString() : undefined,
+    chatId: typeof row.chat_id === "string" ? row.chat_id : undefined,
   });
 }
 
@@ -171,5 +173,6 @@ function mapConsoleSessionRow(row: any): ConsoleSessionRecord {
     tokenHash: row.token_hash,
     createdAt: new Date(row.created_at).toISOString(),
     expiresAt: new Date(row.expires_at).toISOString(),
+    chatId: typeof row.chat_id === "string" ? row.chat_id : undefined,
   });
 }

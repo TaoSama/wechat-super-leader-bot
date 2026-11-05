@@ -57,3 +57,13 @@ test("MCP injects bounded context as data, preserves full restrictions and redac
   assert.equal(tool.wasCalled, false);
   assert.deepEqual(parseControllerContext(fixture), fixture);
 });
+
+test("attachment metadata is accepted only in its bounded shape", () => {
+  const entry = { id: "6f1c2a8e-1d2b-4c3d-8e9f-0a1b2c3d4e5f", kind: "image", name: "image.png", mime: "image/png", size: 11,
+    receivedAt: "2026-11-05T00:00:00.000Z" };
+  const base = { history: [], memories: {} };
+  assert.deepEqual(parseControllerContext({ ...base, attachments: [entry] }).attachments, [entry]);
+  assert.throws(() => parseControllerContext({ ...base, attachments: [{ ...entry, data: "AAAA" }] }), /invalid response schema/);
+  assert.throws(() => parseControllerContext({ ...base, attachments: [{ ...entry, id: "../x" }] }), /invalid response schema/);
+  assert.throws(() => parseControllerContext({ ...base, attachments: Array(6).fill(entry) }), /invalid response schema/);
+});

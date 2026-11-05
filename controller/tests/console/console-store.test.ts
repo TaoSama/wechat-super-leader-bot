@@ -21,8 +21,8 @@ function createPostgresStoreWithFakePool() {
 
 class FakePgPool {
   on = vi.fn();
-  public links = new Map<string, { token_hash: string; created_at: string; expires_at: string; consumed_at?: string }>();
-  public sessions = new Map<string, { token_hash: string; created_at: string; expires_at: string }>();
+  public links = new Map<string, { token_hash: string; created_at: string; expires_at: string; consumed_at?: string; chat_id: string | null }>();
+  public sessions = new Map<string, { token_hash: string; created_at: string; expires_at: string; chat_id: string | null }>();
   public queries: { sql: string; params?: unknown[] }[] = [];
   public consoleLinksCreated = false;
   public consoleSessionsCreated = false;
@@ -32,7 +32,7 @@ class FakePgPool {
     let inTx = false;
     // Stage mutations during a transaction
     let stagedLinkUpdates = new Map<string, string>(); // tokenHash -> consumed_at
-    let stagedSessionInserts = new Map<string, { token_hash: string; created_at: string; expires_at: string }>();
+    let stagedSessionInserts = new Map<string, { token_hash: string; created_at: string; expires_at: string; chat_id: string | null }>();
 
     return {
       query: async (sql: string, params?: unknown[]) => {
@@ -98,7 +98,7 @@ class FakePgPool {
             } else {
               link.consumed_at = firstLoginAt;
             }
-            return { rows: [{ token_hash: tokenHash }] };
+            return { rows: [{ token_hash: tokenHash, chat_id: link.chat_id }] };
           }
           return { rows: [] };
         }
@@ -116,6 +116,7 @@ class FakePgPool {
             token_hash: tokenHash,
             created_at: createdAt,
             expires_at: expiresAt,
+            chat_id: (params?.[3] as string | null) ?? null,
           };
           if (inTx) {
             stagedSessionInserts.set(tokenHash, sessionRow);
@@ -138,6 +139,7 @@ class FakePgPool {
               created_at: createdAt,
               expires_at: expiresAt,
               consumed_at: consumedAt,
+              chat_id: (params?.[4] as string | null) ?? null,
             };
             this.links.set(tokenHash, row);
             return { rows: [row] };
@@ -146,14 +148,14 @@ class FakePgPool {
         }
 
         // SELECT token_hash, created_at, expires_at, consumed_at FROM console_links WHERE token_hash = $1
-        if (normalized.startsWith("SELECT token_hash, created_at, expires_at, consumed_at FROM console_links")) {
+        if (normalized.startsWith("SELECT token_hash, created_at, expires_at, consumed_at, chat_id FROM console_links")) {
           const tokenHash = params?.[0] as string;
           const row = this.links.get(tokenHash);
           return row ? { rows: [{ ...row }] } : { rows: [] };
         }
 
         // SELECT token_hash, created_at, expires_at FROM console_sessions WHERE token_hash = $1 AND expires_at > $2::timestamptz
-        if (normalized.startsWith("SELECT token_hash, created_at, expires_at FROM console_sessions")) {
+        if (normalized.startsWith("SELECT token_hash, created_at, expires_at, chat_id FROM console_sessions")) {
           const tokenHash = params?.[0] as string;
           const nowIso = params?.[1] as string;
           const nowMs = Date.parse(nowIso);
@@ -224,6 +226,21 @@ describe("Console Auth Store Contract (Memory & Postgres)", () => {
         expect(await store.getConsoleLink(tokenHash)).toEqual(record);
         for (const query of fakePool?.queries.slice(queryCount) ?? []) expect(query.sql.trim()).toMatch(/^SELECT /);
         await expect(store.getConsoleLink("raw-token")).rejects.toThrow(/64-character lowercase hexadecimal/i);
+      });
+
+      it("binds sessions to the chat recorded on the consumed link", async () => {
+        const { store } = await backend.create();
+        const now = "2026-10-11T12:00:00.000Z", expiresAt = "2026-10-11T13:00:00.000Z";
+        const bound = hashConsoleToken("chat-bound-link"), unbound = hashConsoleToken("unbound-link");
+        await store.createConsoleLinkIfAbsent({ tokenHash: bound, createdAt: now, expiresAt, chatId: "chat-a" });
+        await store.createConsoleLinkIfAbsent({ tokenHash: unbound, createdAt: now, expiresAt });
+        expect((await store.getConsoleLink(bound))?.chatId).toBe("chat-a");
+        const boundSession = hashConsoleToken("bound-session"), unboundSession = hashConsoleToken("unbound-session");
+        // The link, never the caller, decides the chat scope.
+        expect(await store.consumeConsoleLink(bound, { tokenHash: boundSession, createdAt: now, expiresAt, chatId: "chat-b" }, now)).toBe(true);
+        expect(await store.consumeConsoleLink(unbound, { tokenHash: unboundSession, createdAt: now, expiresAt }, now)).toBe(true);
+        expect((await store.getConsoleSession(boundSession, now))?.chatId).toBe("chat-a");
+        expect((await store.getConsoleSession(unboundSession, now))?.chatId).toBeUndefined();
       });
 
       it("creates a login link and does not overwrite or revive the existing link", async () => {

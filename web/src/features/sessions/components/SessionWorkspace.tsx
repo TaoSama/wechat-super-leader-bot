@@ -19,6 +19,8 @@ import { SessionInfo } from "./SessionInfo";
 import { SessionStatus } from "./SessionStatus";
 import { SessionInterrupt } from "./SessionInterrupt";
 import { useSessionInterrupt } from "../useSessionInterrupt";
+import { SessionApprovals } from "./SessionApprovals";
+import { useSessionApproval } from "../useSessionApproval";
 import { runningTurnId } from "../history-turns";
 
 interface Props {
@@ -47,6 +49,7 @@ export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = t
   const showHistory = !selectedTerminal || !!selected && hasTerminalHistorySource(selected) || !!history.history;
   const messages = useSessionMessages(selected, onAuthFailure);
   const interrupt = useSessionInterrupt(selected, onAuthFailure, () => void history.refresh());
+  const approval = useSessionApproval(selected, onAuthFailure);
   const stoppableTurnId = selected && connected && !selectedTerminal && !selectedWechat && history.history
     ? runningTurnId(history.history.items, history.history.turnStatuses) : null;
   const blockReason = sendBlockReason(selected, connected, stale, observationNow);
@@ -122,6 +125,7 @@ export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = t
         <SessionHistory session={selected} terminal={selectedTerminal} showHistory={showHistory} history={history} scroll={scroll} />
         <div className="session-bottom-slot">
           {showHistory && scroll.newContent && <div className="latest-message-slot"><button type="button" className="new-message-button" onClick={scroll.jumpLatest}><ArrowDown size={16} aria-hidden="true" />有新消息 · 跳到最新</button></div>}
+          {!selectedWechat && !selectedTerminal && selected?.pendingApprovals && <SessionApprovals key={`approvals:${selectedKey}`} approvals={selected.pendingApprovals} approval={approval} connected={connected} />}
           {!selectedWechat && !selectedTerminal && <SessionInterrupt key={`interrupt:${selectedKey}`} interrupt={interrupt} runningTurnId={stoppableTurnId} />}
           {selectedWechat ? <p className="composer-readonly" role="status">主微信 Codex 对话 · 只读历史</p> : <SessionComposer key={selectedKey} session={selected} model={selectedModel!} messages={messages} terminal={selectedTerminal} mobile={mobile} connected={connected} busy={["active", "busy", "running"].includes(selectedObservation!.executionStatus)} blockReason={blockReason} pending={pending} onSend={send} onRecover={() => void messages.submit(true)} />}
         </div>

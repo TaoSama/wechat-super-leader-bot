@@ -96,7 +96,7 @@ it("atomically converts all legacy statuses without changing text, timestamps or
   expect(restarted.filter(sql => /^(ALTER |DROP INDEX |CREATE (UNIQUE )?INDEX)/.test(sql))).toEqual([]);
   expect(restarted.filter(sql => sql.includes("node_sessions") || sql.includes("known_sessions"))).toEqual([]);
   expect(restarted.some(sql => sql.startsWith("UPDATE commands SET status = 'uncertain'"))).toBe(true);
-  expect(pool.versions).toEqual(new Set([1, 2, 3]));
+  expect(pool.versions).toEqual(new Set([1, 2, 3, 4]));
   expect(pool.statements.filter(s => s.startsWith("UPDATE leader_notifications SET data="))).toHaveLength(4);
   expect((await store.listPendingNotifications(["allowed"], NOW + NOTIFICATION_ATTEMPT_MS)).map(n => n.id)).toEqual([old[0].id]);
   expect((await store.getNotification(old[1].id, NOW + NOTIFICATION_ATTEMPT_MS + 1))!.status).toBe("uncertain");
@@ -112,7 +112,7 @@ it("atomically converts all legacy statuses without changing text, timestamps or
 it("applies only the pending observation and plan-index migrations to version 1 and skips them on later startups", async () => {
   const { pool, store } = fixture([]); pool.versions.add(1);
   await store.init();
-  expect(pool.versions).toEqual(new Set([1, 2, 3]));
+  expect(pool.versions).toEqual(new Set([1, 2, 3, 4]));
   expect(pool.statements.filter(sql => sql.includes("leader_notifications"))).toEqual([]);
   const alter = pool.statements.indexOf("ALTER TABLE known_sessions ADD COLUMN IF NOT EXISTS observed_order BIGSERIAL");
   const backfill = pool.statements.findIndex(sql => sql.startsWith("INSERT INTO known_sessions (node_id,session_id,data,updated_at)"));

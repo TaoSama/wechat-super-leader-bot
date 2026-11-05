@@ -170,7 +170,7 @@ it("PostgresStore progress projects bounded completed output and excludes unfini
   expect(queries).toHaveLength(2);
   const columns = queries[1].slice("SELECT ".length, queries[1].indexOf(" FROM commands")).split(",").map(column => column.trim());
   expect(columns).toEqual(["command_id", "request_id", "node_id", "session_id", "action", "prompt", "status", "expires_at", "created_at", "updated_at",
-    "skills", "turn_id", "send_route", "input_receipt", "delivery_mode", "expected_turn_id", "authority", "queue_order",
+    "skills", "turn_id", "send_route", "input_receipt", "delivery_mode", "expected_turn_id", "approval_request_id", "approval_decision", "authority", "attachments", "queue_order",
     `CASE WHEN status='completed' THEN substring(output from 1 for ${PROGRESS_OUTPUT_LIMIT}) END AS output`]);
   expect(columns).not.toContain("output"); expect(columns).not.toContain("error"); expect(columns).not.toContain("*");
 });
@@ -212,7 +212,7 @@ it("PostgresStore includes durable queued authorization when rechecking model pr
   const context = (await store.getProgressNotificationContext(source, NOW + 30_000))!;
   expect(context.evidence).toMatchObject([{ status: "queued" }]);
   expect(await store.enqueueProgressNotification(source, NOW + 30_000, { eventKey: context.eventKey, text: "任务已排队，等待会话可用。" })).toMatchObject({ kind: "progress" });
-  expect(pool.queries.filter(query => query.includes(" FROM commands ")).at(-1)).toContain("authority,queue_order");
+  expect(pool.queries.filter(query => query.includes(" FROM commands ")).at(-1)).toContain("authority,attachments,queue_order");
 });
 
 async function terminal(store: IStore, index = 1, chatId = "allowed", status: ExecutionRecord["status"] = "completed", now = NOW) {

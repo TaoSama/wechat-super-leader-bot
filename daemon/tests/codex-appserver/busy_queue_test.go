@@ -12,6 +12,18 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// nativeThreadStatus encodes a session status the way app-server reports it:
+// waiting states are active threads carrying an activeFlags entry.
+func nativeThreadStatus(status string) map[string]any {
+	switch status {
+	case "waitingApproval":
+		return map[string]any{"type": "active", "activeFlags": []any{"waitingOnApproval"}}
+	case "waitingUserInput":
+		return map[string]any{"type": "active", "activeFlags": []any{"waitingOnUserInput"}}
+	}
+	return map[string]any{"type": status}
+}
+
 func TestBusyDiscoveryKeepsQueueRoutesWithoutGrantingMutation(t *testing.T) {
 	for _, status := range []string{"active", "waitingApproval", "waitingUserInput", "unknown", "systemError", "unrecognized"} {
 		t.Run(status, func(t *testing.T) {
@@ -34,9 +46,9 @@ func TestBusyDiscoveryKeepsQueueRoutesWithoutGrantingMutation(t *testing.T) {
 					case "thread/loaded/list":
 						result = map[string]any{"data": []string{"session"}}
 					case "thread/list":
-						result = map[string]any{"data": []any{map[string]any{"id": "session", "status": map[string]any{"type": status}}}}
+						result = map[string]any{"data": []any{map[string]any{"id": "session", "status": nativeThreadStatus(status)}}}
 					case "thread/read":
-						result = resumedThread("session", status)
+						result = map[string]any{"thread": map[string]any{"id": "session", "status": nativeThreadStatus(status)}}
 					case "turn/start":
 						starts.Add(1)
 						result = map[string]any{"turn": map[string]any{"id": "unexpected-turn"}}
@@ -62,6 +74,9 @@ func TestBusyDiscoveryKeepsQueueRoutesWithoutGrantingMutation(t *testing.T) {
 				t.Fatalf("discovery failed: %+v %v", sessions, err)
 			}
 			queueable := status == "active" || status == "waitingApproval" || status == "waitingUserInput"
+			if queueable && sessions[0].Status != status {
+				t.Fatalf("native status mapped to %q, want %q", sessions[0].Status, status)
+			}
 			if slices.Contains(sessions[0].Capabilities, protocol.ActionSend) != queueable ||
 				slices.Contains(sessions[0].Capabilities, protocol.CapabilityResumeSend) != queueable {
 				t.Fatalf("incorrect queue routes: %+v", sessions[0])

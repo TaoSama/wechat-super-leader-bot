@@ -1,4 +1,4 @@
-import { ControlPlaneStatusResponse, NodeStatus, ScopedSession, CommandRecord, CommandStatus, ActionType, SessionCapability } from "../types";
+import { ControlPlaneStatusResponse, NodeStatus, ScopedSession, CommandRecord, CommandStatus, ActionType, SessionCapability, ApprovalDecision } from "../types";
 import { normalizeDesktopObservation } from "../features/sessions/session-observation";
 import { normalizeSendAvailability } from "../features/sessions/send-availability";
 import { isTerminalHistoryTarget } from "../features/sessions/terminal-session";
@@ -7,6 +7,7 @@ import { parseConsoleGoals } from "../features/leader/goal-contract";
 import { normalizeInputReceipt, TERMINAL_SESSION_ID } from "../features/sessions/input-receipt";
 import { parseAutomations } from "../features/notifications/automation-contract";
 import { parseDeliveries } from "../features/notifications/delivery-contract";
+import { APPROVAL_DECISIONS, APPROVAL_REQUEST_ID, normalizePendingApprovals } from "../features/sessions/pending-approvals";
 
 const VALID_COMMAND_STATUSES: ReadonlySet<CommandStatus> = new Set([
   "admitting",
@@ -64,6 +65,7 @@ export function normalizeSession(raw: unknown): ScopedSession | null {
     (obj.desktopObservation !== undefined && obj.sendAvailability !== undefined
       ? { source: "codex-desktop" as const, status: "unknown" as const, availability: "unavailable" as const }
       : undefined);
+  const pendingApprovals = normalizePendingApprovals(obj.pendingApprovals);
   return {
     id: obj.id,
     nodeId: obj.nodeId,
@@ -89,6 +91,7 @@ export function normalizeSession(raw: unknown): ScopedSession | null {
       ? { historySource: "terminal-transcript" as const } :
       obj.historySource === "wechat-codex" && provider === "wechat-codex" && capabilities.length === 1 && capabilities[0] === "read"
         ? { historySource: "wechat-codex" as const } : {}),
+    ...(pendingApprovals ? { pendingApprovals } : {}),
   };
 }
 
@@ -104,10 +107,14 @@ export function normalizeCommand(raw: unknown): CommandRecord | null {
     ? rawStatus
     : "uncertain";
 
-  const action: ActionType = obj.action === "send" || obj.action === "interrupt" ? obj.action : "read";
+  const action: ActionType = obj.action === "send" || obj.action === "interrupt" || obj.action === "approve" ? obj.action : "read";
   const expectedTurnId = typeof obj.expectedTurnId === "string" && obj.expectedTurnId ? obj.expectedTurnId : undefined;
-  // An interrupt targets exactly one native turn and never carries input or a terminal route.
-  if (action === "interrupt" && (!expectedTurnId || obj.prompt !== undefined || obj.sendRoute === "terminal-pane" ||
+  const approvalRequestId = typeof obj.approvalRequestId === "string" && APPROVAL_REQUEST_ID.test(obj.approvalRequestId) ? obj.approvalRequestId : undefined;
+  const approvalDecision = APPROVAL_DECISIONS.has(obj.approvalDecision as ApprovalDecision) ? obj.approvalDecision as ApprovalDecision : undefined;
+  // An approval answer names exactly one observed request and one decision; other actions never carry them.
+  if (action === "approve" ? !approvalRequestId || !approvalDecision : obj.approvalRequestId !== undefined || obj.approvalDecision !== undefined) return null;
+  // Interrupt and approve target exactly one native turn and never carry input or a terminal route.
+  if ((action === "interrupt" || action === "approve") && (!expectedTurnId || obj.prompt !== undefined || obj.sendRoute === "terminal-pane" ||
       obj.sessionId.startsWith("terminal:") || obj.turnId !== undefined && obj.turnId !== expectedTurnId)) return null;
   const inputReceipt = normalizeInputReceipt(obj.inputReceipt);
   const terminalSend = action === "send" && (obj.sendRoute === "terminal-pane" || obj.sessionId.startsWith("terminal:"));
@@ -135,6 +142,7 @@ export function normalizeCommand(raw: unknown): CommandRecord | null {
     error: typeof obj.error === "string" ? obj.error : undefined,
     turnId: typeof obj.turnId === "string" ? obj.turnId : undefined,
     ...(expectedTurnId ? { expectedTurnId } : {}),
+    ...(approvalRequestId && approvalDecision ? { approvalRequestId, approvalDecision } : {}),
     sendRoute: obj.sendRoute === "desktop-owner" || obj.sendRoute === "control-socket" || obj.sendRoute === "app-server-resume" || obj.sendRoute === "terminal-pane" || obj.sendRoute === "claude-resume" ? obj.sendRoute : undefined,
     inputReceipt,
     expiresAt: typeof obj.expiresAt === "string" ? obj.expiresAt : "",

@@ -5,6 +5,7 @@ import { commandSummary, type CommandSummary } from "../commands/public.js";
 import { IStore, CreateCommandResult, ConflictError, ActivePlanLimitError } from "./interface.js";
 import { MAX_ACTIVE_PLANS_PER_CHAT } from "../leader/contracts.js";
 import { MemoryMessageImages, type StoredMessageImage } from "../sessions/message-images.js";
+import { MemoryInboundAttachments, type StoredInboundAttachment } from "../sessions/inbound-attachments.js";
 import { sameSkillRefs } from "../skills/catalog.js";
 import { nextCommandState, inspectionLimit, validateStoredCommandInput } from "./command-state.js";
 import { validateNodeSessionInventory } from "./node-sessions.js";
@@ -44,6 +45,14 @@ import {
 
 export class MemoryStore implements IStore {
   private messageImages = new MemoryMessageImages();
+  private inboundAttachments = new MemoryInboundAttachments();
+  recordInboundAttachment(attachment: StoredInboundAttachment) { return this.inboundAttachments.recordInboundAttachment(attachment); }
+  listInboundAttachments(chatId: string, receivedAfter: number, now: number, limit: number) {
+    return this.inboundAttachments.listInboundAttachments(chatId, receivedAfter, now, limit);
+  }
+  getInboundAttachment(chatId: string, attachmentId: string, now: number) {
+    return this.inboundAttachments.getInboundAttachment(chatId, attachmentId, now);
+  }
   recordMessageImages(chatId: string, messageId: string, images: StoredMessageImage[], expiresAt: number) {
     return this.messageImages.recordMessageImages(chatId, messageId, images, expiresAt);
   }
@@ -598,9 +607,10 @@ export class MemoryStore implements IStore {
     }
 
     existingLink.consumedAt ??= validNow.iso;
+    const { chatId: _ignored, ...sessionFields } = normalizedSession;
     this.consoleSessions.set(
       normalizedSession.tokenHash,
-      cloneConsoleSessionRecord(normalizedSession)
+      cloneConsoleSessionRecord({ ...sessionFields, ...(existingLink.chatId === undefined ? {} : { chatId: existingLink.chatId }) })
     );
     return true;
   }

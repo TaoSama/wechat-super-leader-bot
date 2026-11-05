@@ -14,17 +14,23 @@ export interface UploadedImageItem {
   };
 }
 
-export function validateImageBytes(bytes: Buffer): ImageMime {
-  if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES) {
-    throw new Error("WeChat image must be a Buffer between 1 byte and 8 MiB");
-  }
+export function sniffImageMime(bytes: Buffer): ImageMime | undefined {
   if (bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return "image/png";
   if (bytes.length >= 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return "image/jpeg";
   const signature = bytes.subarray(0, 6).toString("ascii");
   if (signature === "GIF87a" || signature === "GIF89a") return "image/gif";
   if (bytes.length >= 12 && bytes.toString("ascii", 0, 4) === "RIFF" &&
       bytes.toString("ascii", 8, 12) === "WEBP") return "image/webp";
-  throw new Error("WeChat image has an unsupported file signature");
+  return undefined;
+}
+
+export function validateImageBytes(bytes: Buffer): ImageMime {
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES) {
+    throw new Error("WeChat image must be a Buffer between 1 byte and 8 MiB");
+  }
+  const mime = sniffImageMime(bytes);
+  if (!mime) throw new Error("WeChat image has an unsupported file signature");
+  return mime;
 }
 
 export class ImageUploader {

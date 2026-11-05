@@ -21,7 +21,8 @@ it("separates goal, reason, budgets and evidence; retains the entire cross-machi
   expect(card).toHaveTextContent("turn-1"); expect(card).toHaveTextContent("turn-2");
   fireEvent.click(within(card).getByRole("button", { name: "打开目标动作 2 的会话 mini / same-session" }));
   expect(props.onOpenSession).toHaveBeenCalledExactlyOnceWith(sessions[1]);
-  expect(within(card).queryByRole("button", { name: /确认|重发|取消/ })).toBeNull();
+  // Only the explicit console authorization controls; never confirm or resend.
+  expect(within(card).queryAllByRole("button", { name: /确认|重发|取消/ }).map(button => button.textContent)).toEqual(["取消目标", "修改（取消后重建）"]);
 });
 it("only announces model completion with all supported criteria; live replacement preserves the expanded card", () => {
   const { card, goal, props, expand, rerender } = setup(); expand();
@@ -44,7 +45,8 @@ it("shows queued actions without inventing a turn or goal completion", () => {
   expect(card).toHaveTextContent("使用动作 1 的已记录结果");
   expect(card).toHaveTextContent("尚未证实"); expect(card).toHaveTextContent("持续推进中");
   expect(card).not.toHaveTextContent("turn-2");
-  expect(within(card).queryByRole("button", { name: /确认|重发|取消/ })).toBeNull();
+  // Only the explicit console authorization controls; never confirm or resend.
+  expect(within(card).queryAllByRole("button", { name: /确认|重发|取消/ }).map(button => button.textContent)).toEqual(["取消目标", "修改（取消后重建）"]);
 });
 it("shows blocked unsent actions and missing exact targets without replay or wrong-machine navigation", () => {
   const { card, goal, props, expand, rerender } = setup();
@@ -55,7 +57,7 @@ it("shows blocked unsent actions and missing exact targets without replay or wro
   const button = within(card).getByRole("button", { name: "打开目标动作 2 的会话 missing / same-session" });
   expect(button).toBeDisabled(); fireEvent.click(button); expect(props.onOpenSession).not.toHaveBeenCalled();
 });
-it("uses projection time for expiry and puts goals ahead of fixed plans without adding empty panels", () => {
+it("uses projection time for expiry and puts goals ahead of fixed plans and keeps the goal entry point when empty", () => {
   const { card, goal, props, rerender } = setup(); goal.expiresAt = FIXTURE_NOW;
   rerender(<GoalsSection {...props} />); expect(card).toHaveTextContent("授权到期 · 状态待核对");
   rerender(<GoalsSection {...props} goals={{ ...props.goals, hasMore: true }} schedulerEnabled={false} />);
@@ -66,5 +68,7 @@ it("uses projection time for expiry and puts goals ahead of fixed plans without 
   const headings = [...document.querySelectorAll(".leader-grid h2")];
   expect(headings[0]).toHaveTextContent("持续目标"); expect(headings[1]).toHaveTextContent("任务计划");
   rerender(<LeaderOverview data={{ ...data, goals: emptyGoals() }} nodes={[]} selectedNodeId={null} onSelectNodeId={vi.fn()} onOpenSession={vi.fn()} onBrowseSessions={vi.fn()} />);
-  expect(screen.queryByRole("heading", { name: /持续目标/ })).toBeNull();
+  // Without goals the panel stays as the console entry point for creating one.
+  expect(screen.getByRole("heading", { level: 2, name: /持续目标/ })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "新建持续目标" })).toBeInTheDocument();
 });

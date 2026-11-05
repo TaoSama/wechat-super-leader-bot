@@ -4,16 +4,19 @@ import { initNotificationTables } from "./notification-postgres.js";
 import { initExecutionTables } from "./execution-postgres.js";
 import { initConsoleAuthTables } from "./console-postgres.js";
 import { initMessageImageTables } from "./message-images-postgres.js";
+import { initInboundAttachmentTables } from "./inbound-attachments-postgres.js";
 import { initNotificationCandidateState } from "./notification-candidates-postgres.js";
 
 const INITIAL_SCHEMA_VERSION = 1;
 const KNOWN_SESSION_OBSERVATION_VERSION = 2;
 const MULTIPLE_ACTIVE_PLANS_VERSION = 3;
+const SESSION_CONTROL_AND_ATTACHMENTS_VERSION = 4;
 const SCHEMA_MIGRATION_LOCK = "controller-schema-migrations";
 const SCHEMA_MIGRATIONS = [
   { version: INITIAL_SCHEMA_VERSION, apply: migrateInitialSchema },
   { version: KNOWN_SESSION_OBSERVATION_VERSION, apply: migrateKnownSessionObservations },
   { version: MULTIPLE_ACTIVE_PLANS_VERSION, apply: migrateMultipleActivePlans },
+  { version: SESSION_CONTROL_AND_ATTACHMENTS_VERSION, apply: migrateSessionControlAndAttachments },
 ];
 
 export async function initializeDatabase(pool: pg.Pool): Promise<void> {
@@ -139,4 +142,14 @@ async function migrateKnownSessionObservations(client: pg.PoolClient): Promise<v
 async function migrateMultipleActivePlans(client: pg.PoolClient): Promise<void> {
   await client.query("DROP INDEX IF EXISTS leader_executions_active_chat_idx");
   await client.query("CREATE INDEX IF NOT EXISTS leader_executions_active_chat_created_idx ON leader_executions (chat_id, created_at, id) WHERE status='active'");
+}
+
+// Approval answers, console chat binding and inbound attachments are additive and nullable.
+async function migrateSessionControlAndAttachments(client: pg.PoolClient): Promise<void> {
+  await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS approval_request_id VARCHAR(128)");
+  await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS approval_decision VARCHAR(16)");
+  await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS attachments JSONB");
+  await client.query("ALTER TABLE console_links ADD COLUMN IF NOT EXISTS chat_id TEXT");
+  await client.query("ALTER TABLE console_sessions ADD COLUMN IF NOT EXISTS chat_id TEXT");
+  await initInboundAttachmentTables(client);
 }

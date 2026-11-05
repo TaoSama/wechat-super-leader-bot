@@ -27,6 +27,7 @@ import { ConsoleAuthError, ConsoleAuthService } from "../console/auth.js";
 import { createConsoleAuthRouter, extractSessionCookie, checkOriginMatches } from "../console/routes.js";
 import { isConsoleRead, isConsoleMessage, isSameOriginMessage } from "../console/access.js";
 import { createSessionRouter } from "../console/sessions.js";
+import { createAuthorizationRouter } from "../console/authorizations.js";
 import { interruptRunningTurn } from "../sessions/turn-interrupt.js";
 import { StatusEvents } from "./status-events.js";
 import { readConsoleExecutions } from "../console/executions.js";
@@ -34,6 +35,7 @@ import { readConsoleGoals } from "../console/goals.js";
 import { createNotificationRouter } from "../notifications/routes.js";
 import { hashConsoleToken } from "../console/types.js";
 import { createMediaRouter } from "../sessions/media-routes.js";
+import { createAttachmentUploadRouter, createDaemonAttachmentRouter } from "../sessions/attachment-routes.js";
 import { createMessageReplyRouter } from "../sessions/message-reply-routes.js";
 import { consoleLinkRequestId, restoreConsoleLinkReply } from "../console/link-reply.js";
 import { createReadResponseCompression } from "./response-compression.js";
@@ -122,7 +124,7 @@ export class ControllerServer {
       onChanged: () => this.statusEvents?.changed(),
     });
     this.directLeader = new LeaderOrchestrator(store, this.hub, this.commands, businessModel, now,
-      requestId => this.consoleAuth.issueLink(requestId), this.executions, this.goals, this.taskNotifications.automations,
+      (requestId, chatId) => this.consoleAuth.issueLink(requestId, chatId), this.executions, this.goals, this.taskNotifications.automations,
       this.taskNotifications.background, { isAllowed: chatId => this.config.allowedChatIds.has(chatId),
         goalsAvailable: Boolean(leaderModel), settings: this.settings,
         consoleLinkResolver: requestId => this.consoleAuth.recoverLink(requestId),
@@ -162,6 +164,7 @@ export class ControllerServer {
         }
         res.locals.consoleSessionToken = cookie;
         res.locals.commandAuthority = {type:"console",tokenHash:hashConsoleToken(cookie),expiresAt:consoleSession.expiresAt};
+        if (consoleSession.chatId) res.locals.consoleChatId = consoleSession.chatId;
         res.locals.verifyStatusAuth = async () => Boolean(await this.consoleAuth.verifySession(cookie));
         if (isConsoleMessage(req)) {
           if (!isSameOriginMessage(req, origin)) {
@@ -249,6 +252,10 @@ export class ControllerServer {
       this.app.use("/v1/background-artifacts", this.taskNotifications.backgroundArtifacts.router());
     }
 
+    // Node-token authenticated; never reachable with the Gateway or console credentials.
+    this.app.use("/v1/daemon/attachments", createDaemonAttachmentRouter(this.store, token => this.hub.authenticateToken(token),
+      () => this.config.allowedChatIds, this.now));
+
     // Public liveness endpoint
     this.app.get("/health", (req: Request, res: Response) => {
       res.json({
@@ -270,6 +277,7 @@ export class ControllerServer {
       } }));
     apiRouter.use(createDirectToolsRouter(this.directLeader.direct, chatId => this.config.allowedChatIds.has(chatId)));
     apiRouter.use(createMediaRouter(this.store, () => this.config.allowedChatIds, this.now));
+    apiRouter.use(createAttachmentUploadRouter(this.store, () => this.config.allowedChatIds, this.now));
     apiRouter.use(createMessageReplyRouter(this.store, () => this.config.allowedChatIds,
       requestId => this.consoleAuth.recoverLink(requestId)));
     apiRouter.use("/notifications", createNotificationRouter(this.store, () => this.config.allowedChatIds, this.now));
@@ -284,6 +292,7 @@ export class ControllerServer {
       gateway: this.gatewaySettings,
       allowedChats: () => this.config.allowedChatIds,
     }));
+    apiRouter.use(createAuthorizationRouter(this.directLeader.console));
     apiRouter.get("/chats/notification-interest", async (_req: Request, res: Response) => {
       res.json({ chatIds: [...this.config.allowedChatIds], interested: await this.taskNotifications.notificationInterest() });
     });

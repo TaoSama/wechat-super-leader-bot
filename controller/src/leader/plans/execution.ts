@@ -4,6 +4,7 @@ import { PlanSchema, type Plan } from "../contracts.js";
 import { validateChatId } from "../state.js";
 import { type CommandRecord } from "../../types.js";
 import { sameSkillRefs } from "../../skills/catalog.js";
+import { sameAttachments } from "../../sessions/inbound-attachments.js";
 import { ExecutionInputSchema, normalizeExecutionInput } from "./input.js";
 
 export const EXECUTION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -114,7 +115,8 @@ export function matchesExecutionCommand(execution: ExecutionRecord, index: numbe
   return command.requestId === executionRequestId(execution, index) && command.action === "send" &&
     command.nodeId === action.nodeId && command.sessionId === action.sessionId && command.prompt === executionPrompt(execution, index) &&
     command.sendRoute === action.sendRoute && sameSkillRefs(command.skills, action.skills) &&
-    (command.deliveryMode ?? "next-turn") === (action.deliveryMode ?? "next-turn") && command.expectedTurnId === action.expectedTurnId;
+    (command.deliveryMode ?? "next-turn") === (action.deliveryMode ?? "next-turn") && command.expectedTurnId === action.expectedTurnId &&
+    sameAttachments(command.attachments, action.attachments);
 }
 
 export function executionPrompt(execution: ExecutionRecord, index: number): string {

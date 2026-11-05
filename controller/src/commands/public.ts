@@ -17,7 +17,9 @@ export function publicCommand(command: CommandRecord): PublicCommand {
     status: command.status, output: command.output, error: command.error,
     turnId: command.turnId, inputReceipt: command.inputReceipt,
     deliveryMode: command.deliveryMode, expectedTurnId: command.expectedTurnId,
+    approvalRequestId: command.approvalRequestId, approvalDecision: command.approvalDecision,
     expiresAt: command.expiresAt, createdAt: command.createdAt, updatedAt: command.updatedAt,
+    ...(command.attachments ? { attachments: command.attachments } : {}),
   };
 }
 

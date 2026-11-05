@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { validateChatId } from "../leader/state.js";
 
 export const CONSOLE_TOKEN_HASH_HEX_LENGTH = 64;
 const SHA256_HEX_REGEX = /^[0-9a-f]{64}$/;
@@ -16,12 +17,16 @@ export interface ConsoleLinkRecord {
   expiresAt: string;
   /** First successful login time; the link remains reusable until expiresAt. */
   consumedAt?: string;
+  /** WeChat chat that requested the link; sessions inherit it as their write scope. */
+  chatId?: string;
 }
 
 export interface ConsoleSessionRecord {
   tokenHash: string;
   createdAt: string;
   expiresAt: string;
+  /** Inherited from the consumed link; absent for links issued without a chat. */
+  chatId?: string;
 }
 
 export interface IConsoleAuthStore {
@@ -78,6 +83,7 @@ export function normalizeConsoleLinkRecord(record: ConsoleLinkRecord): ConsoleLi
     const consumedAt = validateIsoTimestamp(record.consumedAt, "consumedAt");
     normalized.consumedAt = consumedAt.iso;
   }
+  if (record.chatId !== undefined) normalized.chatId = validateChatId(record.chatId);
   return normalized;
 }
 
@@ -95,22 +101,18 @@ export function normalizeConsoleSessionRecord(record: ConsoleSessionRecord): Con
     tokenHash,
     createdAt: createdAt.iso,
     expiresAt: expiresAt.iso,
+    ...(record.chatId === undefined ? {} : { chatId: validateChatId(record.chatId) }),
   };
 }
 
 export function cloneConsoleLinkRecord(record: ConsoleLinkRecord): ConsoleLinkRecord {
-  return record.consumedAt !== undefined
-    ? {
-        tokenHash: record.tokenHash,
-        createdAt: record.createdAt,
-        expiresAt: record.expiresAt,
-        consumedAt: record.consumedAt,
-      }
-    : {
-        tokenHash: record.tokenHash,
-        createdAt: record.createdAt,
-        expiresAt: record.expiresAt,
-      };
+  return {
+    tokenHash: record.tokenHash,
+    createdAt: record.createdAt,
+    expiresAt: record.expiresAt,
+    ...(record.consumedAt === undefined ? {} : { consumedAt: record.consumedAt }),
+    ...(record.chatId === undefined ? {} : { chatId: record.chatId }),
+  };
 }
 
 export function cloneConsoleSessionRecord(record: ConsoleSessionRecord): ConsoleSessionRecord {
@@ -118,5 +120,6 @@ export function cloneConsoleSessionRecord(record: ConsoleSessionRecord): Console
     tokenHash: record.tokenHash,
     createdAt: record.createdAt,
     expiresAt: record.expiresAt,
+    ...(record.chatId === undefined ? {} : { chatId: record.chatId }),
   };
 }

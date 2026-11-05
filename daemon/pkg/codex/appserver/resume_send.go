@@ -117,7 +117,7 @@ func (a *AppServerAdapter) startTurn(ctx context.Context, rc *rpcConn, sessionID
 	}
 	result, err := rc.call(ctx, "turn/start", map[string]any{
 		"threadId": sessionID,
-		"input":    []map[string]any{{"type": "text", "text": prompt}},
+		"input":    codex.TurnInput(ctx, map[string]any{"type": "text", "text": prompt}),
 	}, a.rpcTimeout)
 	if err != nil {
 		if errors.Is(err, errInvalidRPCResponse) {

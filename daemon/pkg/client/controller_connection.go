@@ -156,12 +156,13 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 	// the last successful snapshot with its original observation timestamps.
 	catalog := d.discoverSkills()
 	hello := protocol.DaemonHelloMessage{
-		Type:          "hello",
-		Version:       1,
-		NodeID:        d.cfg.NodeID,
-		Sessions:      d.cachedSessions(),
-		Skills:        catalog,
-		DeliveryModes: []protocol.DeliveryMode{protocol.DeliveryNextTurn, protocol.DeliverySteer},
+		Type:             "hello",
+		Version:          1,
+		NodeID:           d.cfg.NodeID,
+		Sessions:         d.cachedSessions(),
+		Skills:           catalog,
+		DeliveryModes:    []protocol.DeliveryMode{protocol.DeliveryNextTurn, protocol.DeliverySteer},
+		InputAttachments: true,
 	}
 	if err := sendJSON(hello); err != nil {
 		return fmt.Errorf("failed to send hello: %w", err)

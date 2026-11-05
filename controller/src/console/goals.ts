@@ -15,6 +15,8 @@ const GoalItemSchema = z.object({
   id: z.string().uuid(), status: z.enum(["active", "blocked", "completed", "cancelled", "expired"]),
   objective: z.string(), objectiveTruncated: z.boolean(), createdAt: timestamp, expiresAt: timestamp,
   maxActions: number, maxDecisions: z.number().int().min(1).max(24), decisionAttempts: z.number().int().min(0).max(24),
+  // Prefills a cancel-and-recreate form; constraints stay private to the WeChat authorization.
+  durationMinutes: z.number().int().min(1).max(1440),
   reason: z.string().max(1000),
   targets: z.array(z.object({ nodeId: z.string().min(1).max(64), sessionId: z.string().min(1).max(64) }).strict()).min(1).max(4),
   criteria: z.array(z.object({ index: z.number().int().min(1).max(8), text: z.string().min(1).max(500),
@@ -57,6 +59,7 @@ export async function readConsoleGoals(store: IStore, chatIds: readonly string[]
     return { id: goal.id, status: goal.status, objective: objective.text, objectiveTruncated: objective.truncated,
       createdAt: goal.createdAt, expiresAt: goal.expiresAt, maxActions: goal.proposal.maxActions,
       maxDecisions: goal.proposal.maxDecisions, decisionAttempts: view.decisionAttempts,
+      durationMinutes: goal.proposal.durationMinutes,
       reason: goalReason(view.blockedReason ?? final?.reason ?? "尚未记录决策"), targets: goal.proposal.targets.map(({ nodeId, sessionId }) => ({ nodeId, sessionId })),
       criteria: goal.proposal.criteria.map((text, index) => ({ index: index + 1, text, supported,
         actions: supported && final?.type === "complete" ? final.criteria.find(item => item.criterion === index + 1)!.actions : [] })),

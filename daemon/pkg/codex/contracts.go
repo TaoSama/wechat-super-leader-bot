@@ -68,3 +68,23 @@ func IsUncertain(err error) bool {
 	var uncertain *UncertainError
 	return errors.As(err, &uncertain)
 }
+
+// ErrApprovalUnreachable means the target thread is not loaded on this
+// control server, so its pending approvals can neither be read nor answered here.
+var ErrApprovalUnreachable = errors.New("approval target is not reachable on this control server")
+
+// ErrApprovalNotPending means no matching native approval request was replayed;
+// it may already have been answered elsewhere. Nothing was sent.
+var ErrApprovalNotPending = errors.New("approval request is no longer pending; no decision sent")
+
+// ApprovalReader lists pending native approval requests without answering them.
+type ApprovalReader interface {
+	PendingApprovals(context.Context, string) ([]protocol.PendingApproval, error)
+}
+
+// ApprovalAnswerer answers one exact pending approval (session, turn, request)
+// with accept or decline. A nil error means the server reported the request
+// resolved; *UncertainError means the answer may have been applied.
+type ApprovalAnswerer interface {
+	AnswerApproval(ctx context.Context, sessionID, turnID, requestID, decision string) error
+}

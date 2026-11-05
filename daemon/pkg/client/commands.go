@@ -175,11 +175,20 @@ func (d *Daemon) executeVolatileCommand(ctx context.Context, cmd protocol.Contro
 			res = protocol.DaemonResultMessage{Type: "result", CommandID: cmdID, Status: protocol.StatusFailed, Error: prepareErr.Error()}
 			break
 		}
+		// Claude Code input is text only, so its images are referenced by path like files.
+		attachments, attachErr := d.materializeAttachments(execCtx, cmd, isClaudeSession(cmd.SessionID))
+		if attachErr != nil {
+			res = protocol.DaemonResultMessage{Type: "result", CommandID: cmdID, Status: protocol.StatusFailed, Error: "attachments unavailable; no input sent: " + attachErr.Error()}
+			break
+		}
 		if cmd.IsExpired() || execCtx.Err() != nil {
+			attachments.release(false)
 			res = protocol.DaemonResultMessage{Type: "result", CommandID: cmdID, Status: protocol.StatusFailed, Error: "command expired before skill task dispatch"}
 			break
 		}
-		ackOutput, err := d.sendPrompt(execCtx, cmd, prompt)
+		sendCtx, sendPromptText := attachments.apply(execCtx, prompt)
+		ackOutput, err := d.sendPrompt(sendCtx, cmd, sendPromptText)
+		attachments.release(err == nil || codex.IsUncertain(err) || execCtx.Err() != nil)
 		if err != nil {
 			if codex.IsUncertain(err) || execCtx.Err() != nil {
 				// Turn dispatch is uncertain (turn may have started on server)
@@ -215,6 +224,9 @@ func (d *Daemon) executeVolatileCommand(ctx context.Context, cmd protocol.Contro
 
 	case protocol.ActionInterrupt:
 		res = d.interruptTurn(execCtx, cmd)
+
+	case protocol.ActionApprove:
+		res = d.answerApproval(execCtx, cmd)
 
 	default:
 		res = protocol.DaemonResultMessage{

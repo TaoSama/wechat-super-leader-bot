@@ -157,7 +157,8 @@ export class ExecutionScheduler {
       if (this.stopped) return;
       try {
         await this.commands.submit({ nodeId: action.nodeId, sessionId: action.sessionId, prompt: input?.prompt ?? action.prompt,
-          ...(action.skills ? { skills: action.skills } : {}), deliveryMode:action.deliveryMode,expectedTurnId:action.expectedTurnId,action: "send", requestId: executionRequestId(execution, index) },
+          ...(action.skills ? { skills: action.skills } : {}), ...(action.attachments ? { attachments: action.attachments } : {}),
+          deliveryMode:action.deliveryMode,expectedTurnId:action.expectedTurnId,action: "send", requestId: executionRequestId(execution, index) },
         0, async () => {
           const snapshot = await this.store.getExecution(id);
           const view = snapshot && await readExecutionView(this.store, snapshot, this.now());
