@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
@@ -16,18 +16,35 @@ const MAX_CHECK_OUTPUT_BYTES = 64 * 1024;
  */
 const BWRAP_TRIAL = ["--new-session", "--die-with-parent", "--unshare-user", "--unshare-pid", "--unshare-net",
   "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--", "/bin/true"];
+/**
+ * Linux admin-managed settings, the only source the CLI honors sandbox.bwrapPath from.
+ * The image keeps bwrap off PATH there because Codex would otherwise use it.
+ */
+export const CLAUDE_MANAGED_SETTINGS_PATH = "/etc/claude-code/managed-settings.json";
 
 export interface ClaudeSandboxCheckOptions {
   claudePath?: string;
   artifactRoot: string;
   privateRoots?: string[];
   platform?: NodeJS.Platform;
+  managedSettingsPath?: string;
 }
 
 interface SandboxStatus { enabled?: unknown; strictMode?: unknown; unavailableReason?: unknown }
 
 function refuse(reason: string): never {
   throw new Error(`BACKGROUND_EXECUTOR=claude refused: the Claude Code sandbox is unavailable (${reason}); background tasks never run unsandboxed`);
+}
+
+/** The bubblewrap the CLI launches: managed sandbox.bwrapPath when set, otherwise bwrap on PATH. */
+function sandboxBwrap(managedSettingsPath: string): string {
+  let configured: unknown;
+  try { configured = JSON.parse(readFileSync(managedSettingsPath, "utf8"))?.sandbox?.bwrapPath; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return refuse("Claude Code managed settings are unreadable");
+  }
+  try { return executable(typeof configured === "string" ? configured : "bwrap", "bubblewrap"); }
+  catch { return refuse("bubblewrap is not installed"); }
 }
 
 /**
@@ -56,8 +73,7 @@ export async function verifyClaudeSandbox(options: ClaudeSandboxCheckOptions): P
     }
     if (status.strictMode !== true) refuse("unsandboxed commands are not disabled");
     if ((options.platform ?? process.platform) !== "linux") return;
-    let bwrap: string;
-    try { bwrap = executable("bwrap", "bubblewrap"); } catch { return refuse("bubblewrap is not installed"); }
+    const bwrap = sandboxBwrap(options.managedSettingsPath ?? CLAUDE_MANAGED_SETTINGS_PATH);
     try { await run(bwrap, BWRAP_TRIAL, { timeout: CHECK_TIMEOUT_MS, maxBuffer: MAX_CHECK_OUTPUT_BYTES, env: workerEnvironment({}) }); }
     catch { refuse("bubblewrap cannot create the user, PID and network namespaces or mount /proc; check the seccomp profile and systempaths"); }
   } finally { rmSync(scratch, { recursive: true, force: true }); }

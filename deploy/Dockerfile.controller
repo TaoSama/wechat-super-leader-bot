@@ -26,12 +26,16 @@ RUN apt-get update \
 FROM node:24-bookworm-slim
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.revision=$VCS_REF
-RUN apt-get update \
+# Claude Code's Linux sandbox needs bubblewrap and socat. Codex prefers any bwrap on PATH
+# over its bundled launcher and cannot start its sandbox with the Debian one, so bwrap is
+# diverted off PATH and Claude Code finds it through sandbox.bwrapPath in managed settings.
+RUN mkdir -p /usr/libexec/claude-sandbox \
+    && dpkg-divert --local --rename --divert /usr/libexec/claude-sandbox/bwrap --add /usr/bin/bwrap \
+    && apt-get update \
     && apt-get install -y --no-install-recommends python3 curl python3-bs4 python3-html2text bubblewrap socat \
     && rm -rf /var/lib/apt/lists/*
 # Install on the target platform so the Codex and Claude Code native binaries match the deployed CPU.
-# Claude Code's Linux sandbox uses the bubblewrap and socat packages above; the
-# controller refuses BACKGROUND_EXECUTOR=claude at startup when that sandbox cannot start.
+# The controller refuses BACKGROUND_EXECUTOR=claude at startup when the Claude sandbox cannot start.
 RUN npm install --global @openai/codex@0.163.0 @anthropic-ai/claude-code@2.1.311 \
     && npm cache clean --force \
     && mkdir -p /var/lib/super-leader-runtime/settings /var/lib/super-leader-runtime/background/workers /var/lib/super-leader-runtime/background/artifacts \
@@ -45,6 +49,7 @@ COPY --from=controller-build --chown=node:node /work/controller/node_modules ./n
 COPY --from=controller-build --chown=node:node /work/controller/dist ./dist
 COPY --from=web-build --chown=node:node /web/dist ./web
 COPY deploy/skills/ /etc/codex/skills/
+COPY deploy/claude/managed-settings.json /etc/claude-code/managed-settings.json
 RUN chmod -R go-w /etc/codex/skills
 USER node
 CMD ["node", "dist/index.js"]

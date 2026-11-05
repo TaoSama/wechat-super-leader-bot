@@ -53,7 +53,26 @@ describe("Claude sandbox startup check", () => {
     const f = fakeClaude(READY);
     const savedPath = process.env.PATH;
     process.env.PATH = path.dirname(f.options.claudePath);
-    try { await expect(verifyClaudeSandbox({ ...f.options, platform: "linux" })).rejects.toThrow(/bubblewrap is not installed/); }
-    finally { process.env.PATH = savedPath; }
+    try {
+      await expect(verifyClaudeSandbox({ ...f.options, platform: "linux", managedSettingsPath: path.join(path.dirname(f.options.claudePath), "absent.json") }))
+        .rejects.toThrow(/bubblewrap is not installed/);
+    } finally { process.env.PATH = savedPath; }
+  });
+  it("trials the bubblewrap that managed settings point Claude Code at, off PATH", async () => {
+    const f = fakeClaude(READY);
+    const root = path.dirname(f.options.claudePath);
+    const bwrap = path.join(root, "bwrap-off-path"), trial = path.join(root, "trial.json"), managed = path.join(root, "managed-settings.json");
+    fs.writeFileSync(bwrap, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(trial)}, JSON.stringify(process.argv.slice(2)));\n`, { mode: 0o700 });
+    fs.writeFileSync(managed, JSON.stringify({ sandbox: { bwrapPath: bwrap } }));
+    const savedPath = process.env.PATH;
+    process.env.PATH = path.join(root, "empty");
+    try {
+      await expect(verifyClaudeSandbox({ ...f.options, platform: "linux", managedSettingsPath: managed })).resolves.toBeUndefined();
+      expect(JSON.parse(fs.readFileSync(trial, "utf8"))).toEqual(expect.arrayContaining(["--unshare-user", "--unshare-pid", "--proc"]));
+      fs.writeFileSync(managed, JSON.stringify({ sandbox: { bwrapPath: path.join(root, "missing-bwrap") } }));
+      await expect(verifyClaudeSandbox({ ...f.options, platform: "linux", managedSettingsPath: managed })).rejects.toThrow(/bubblewrap is not installed/);
+      fs.writeFileSync(managed, "{not json");
+      await expect(verifyClaudeSandbox({ ...f.options, platform: "linux", managedSettingsPath: managed })).rejects.toThrow(/managed settings are unreadable/);
+    } finally { process.env.PATH = savedPath; }
   });
 });
