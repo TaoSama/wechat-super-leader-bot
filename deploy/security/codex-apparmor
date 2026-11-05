@@ -11,8 +11,8 @@
 # Claude Code sandbox: https://code.claude.com/docs/en/sandboxing
 # Targets Codex 0.163.0 and Claude Code 2.1.311, isolated PID namespace, UID 1000.
 # The controller also sets systempaths=unconfined so bubblewrap can mount a fresh
-# /proc for its PID namespace; the /proc and /sys denials below still apply.
-# This profile is unchanged by the Claude sandbox: mount and pivot_root already cover it.
+# /proc for its PID namespace. That removes Docker's masked paths, so the kernel
+# information files it masks are denied below; the /proc and /sys write denials still apply.
 # Revalidate policy if upgrading Codex, Claude Code, Docker, kernel or changing network/PID mode.
 # Install to /etc/apparmor.d/super-leader-codex so the AppArmor service restores it on boot.
 # Load with: apparmor_parser -Kr /etc/apparmor.d/super-leader-codex
@@ -63,6 +63,9 @@ profile super-leader-codex flags=(attach_disconnected,mediate_deleted) {
   deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w,  # deny everything except shm* in /proc/sys/kernel/
   deny @{PROC}/sysrq-trigger rwklx,
   deny @{PROC}/kcore rwklx,
+  # Docker masks these by default; systempaths=unconfined (Claude Code sandbox) unmasks them.
+  deny @{PROC}/{interrupts,keys,latency_stats,sched_debug,timer_list,timer_stats} rwklx,
+  deny @{PROC}/{acpi,asound,scsi}/** rwklx,
 
   # bubblewrap mounts and pivots only after creating its own user/mount namespaces.
   # The kernel still denies mounts in the container parent namespace (no CAP_SYS_ADMIN).

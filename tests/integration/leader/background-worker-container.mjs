@@ -20,6 +20,10 @@ const RUNTIME_ROOT = '/var/lib/super-leader-runtime';
 const WORKER_ROOT = `${RUNTIME_ROOT}/background/workers`;
 const ARTIFACT_ROOT = `${RUNTIME_ROOT}/background/artifacts`;
 const RESOURCE_SAMPLE_MS = 100;
+// Controller-only environment; no process the worker shell can see may expose it.
+const CANARY_ENV = 'SUPER_LEADER_PROBE_CANARY';
+const CANARY_PREFIX = 'canary-not-a-secret-';
+const SYNTHETIC_KEY = 'synthetic-probe-key';
 const IDLE_OBSERVATION_MS = 5_000;
 const memoryMiB = Number(values['memory-mib']), concurrency = Number(values.concurrency);
 assert.ok(Number.isInteger(memoryMiB) && memoryMiB >= 128 && memoryMiB <= 8192, 'Invalid memory budget');
@@ -59,7 +63,9 @@ async function verifyContainer() {
   try {
     child = spawn('docker', ['run', '--rm', '--init', '--name', name, '--read-only', '--cap-drop', 'ALL',
       '--security-opt', 'no-new-privileges:true', '--security-opt', `seccomp=${policy}`,
-      '--security-opt', 'apparmor=super-leader-codex', '--user', '1000:1000', '--memory', `${memoryMiB}m`,
+      // Production hardening: systempaths=unconfined lets the Claude sandbox mount a fresh /proc.
+      '--security-opt', 'apparmor=super-leader-codex', '--security-opt', 'systempaths=unconfined',
+      '--env', `${CANARY_ENV}=${CANARY_PREFIX}${id}`, '--user', '1000:1000', '--memory', `${memoryMiB}m`,
       '--memory-swap', `${memoryMiB}m`, '--cpus', '2',
       '--pids-limit', '512', '--tmpfs', '/tmp:size=64m,mode=1777',
       '--mount', `type=volume,src=${runtime},dst=${RUNTIME_ROOT}`,
@@ -95,6 +101,7 @@ async function fixture() {
   const { CodexWorkerRuntime } = await import('/app/dist/background/worker/index.js');
   const { provider } = await readInput();
   const rootStatus = fs.readFileSync('/proc/self/status', 'utf8');
+  assert.ok(process.env[CANARY_ENV]?.startsWith(CANARY_PREFIX), 'controller canary is set');
   assert.match(rootStatus, /CapEff:\s+0+\n/);
   assert.match(rootStatus, /NoNewPrivs:\s+1\n/);
   assert.match(fs.readFileSync('/proc/self/attr/current', 'utf8'), /super-leader-codex/);
@@ -127,7 +134,7 @@ async function fixture() {
   await new Promise(resolve => fixtureServer.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${fixtureServer.address().port}`;
   const runtime = new CodexWorkerRuntime({ root: WORKER_ROOT, artifactRoot: ARTIFACT_ROOT,
-    ...(provider ?? { baseUrl: `${url}/v1`, model: 'synthetic-linux-probe', apiKey: 'synthetic-probe-key' }),
+    ...(provider ?? { baseUrl: `${url}/v1`, model: 'synthetic-linux-probe', apiKey: SYNTHETIC_KEY }),
     timeoutMs: 120_000, maxConcurrent: concurrency, onError: () => {} });
   const wait = async (workerId, invocationId) => {
     const until = Date.now() + 125_000;
@@ -155,7 +162,7 @@ async function fixture() {
         probeStage = `worker-round-${round}`;
         const invocationId = randomUUID();
         const isolationChecks = provider ? ''
-          : `,outsideHidden:denied('${WORKER_ROOT}/outside.txt'),siblingsHidden:denied('${siblingProbe}'),homeHidden:denied('${home}/secret-probe'),controllerHidden:denied('/app/package.json'),artifactHidden:denied('${ARTIFACT_ROOT}/outside.txt'),procHidden:denied('/proc/1/environ')&&denied('/proc/self/environ')`;
+          : `,outsideHidden:denied('${WORKER_ROOT}/outside.txt'),siblingsHidden:denied('${siblingProbe}'),homeHidden:denied('${home}/secret-probe'),controllerHidden:denied('/app/package.json'),artifactHidden:denied('${ARTIFACT_ROOT}/outside.txt'),procSecretsHidden:fs.readdirSync('/proc').filter(p=>/^\\d+$/.test(p)).every(p=>{try{const e=fs.readFileSync('/proc/'+p+'/environ','utf8');return !e.includes('${CANARY_PREFIX}')&&!e.includes('${SYNTHETIC_KEY}')}catch{return true}})`;
         const js = round === 1
           ? `const fs=require('node:fs');const denied=p=>{try{fs.readFileSync(p);return false}catch{return true}};const report={marker:${JSON.stringify(marker)},round:1,keyHidden:!process.env.CODEX_API_KEY&&!process.env.OPENAI_API_KEY&&!process.env.CODEX_HOME${isolationChecks},network:await (await fetch('${url}/network')).text()};fs.writeFileSync('seed.txt',report.marker);fs.writeFileSync('report.json',JSON.stringify(report));`
           : `const fs=require('node:fs');const report=JSON.parse(fs.readFileSync('report.json','utf8'));if(fs.readFileSync('seed.txt','utf8')!==report.marker)throw Error('seed mismatch');report.round=2;report.resumed=true;fs.writeFileSync('report.json',JSON.stringify(report));`;
@@ -171,7 +178,7 @@ async function fixture() {
         const report = JSON.parse(fs.readFileSync(artifacts.find(item => item.name === 'report.json').path, 'utf8'));
         assert.equal(report.marker, marker); assert.equal(report.round, round);
         const hiddenKeys = provider ? ['keyHidden']
-          : ['keyHidden', 'outsideHidden', 'siblingsHidden', 'homeHidden', 'controllerHidden', 'artifactHidden', 'procHidden'];
+          : ['keyHidden', 'outsideHidden', 'siblingsHidden', 'homeHidden', 'controllerHidden', 'artifactHidden', 'procSecretsHidden'];
         for (const key of hiddenKeys) assert.equal(report[key], true, key);
         assert.equal(report.network, 'network-fixture-ok');
         if (round === 2) assert.equal(report.resumed, true);

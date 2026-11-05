@@ -45,7 +45,10 @@ services:
       - seccomp:${CODEX_SECCOMP_PATH:-./deploy/security/codex-seccomp.json}
       - apparmor:super-leader-codex
       # Lets bubblewrap mount a fresh /proc for the Claude sandbox's PID namespace
-      # instead of exposing the controller's /proc; AppArmor keeps the /proc and /sys denials.
+      # instead of exposing the controller's /proc. It also lifts Docker's masked and
+      # read-only /proc and /sys paths for the whole container, including Codex workers;
+      # super-leader-codex denies reads of the masked kernel information files and
+      # writes to /proc and /sys instead (reload the profile on the host after changes).
       - systempaths=unconfined
     tmpfs: ["/tmp:size=64m,mode=1777"]
     stop_grace_period: 30s

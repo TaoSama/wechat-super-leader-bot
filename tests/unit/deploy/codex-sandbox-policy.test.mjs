@@ -75,7 +75,9 @@ test('the container retains Docker restrictions outside the namespace setup path
   assert.match(apparmor, /^  mount,$/m);
   assert.match(apparmor, /^  pivot_root,$/m);
   assert.doesNotMatch(apparmor, /flags=\([^)]*(?:complain|unconfined)/);
-  for (const resource of ['@{PROC}/sysrq-trigger', '@{PROC}/kcore', '/sys/kernel/security/**']) {
+  for (const resource of ['@{PROC}/sysrq-trigger', '@{PROC}/kcore', '/sys/kernel/security/**',
+    // systempaths=unconfined removes Docker's masks over these kernel information files.
+    '@{PROC}/{interrupts,keys,latency_stats,sched_debug,timer_list,timer_stats}', '@{PROC}/{acpi,asound,scsi}/**']) {
     assert.ok(apparmor.includes(`deny ${resource} rwklx,`), resource);
   }
   assert.match(apparmor, /ptrace \(trace,tracedby,read,readby\) peer=super-leader-codex,/);
