@@ -62,16 +62,44 @@ integration("Postgres automation persistence", () => {
     expect((await restored.pendingOutbox(now))[0].text).toBe("exact result");
     expect((await restored.get(schedule.id, authority.chatId))?.activeRunId).toBeUndefined();
   });
-  it("persists unknown dispatch after a process disappears and does not claim another occurrence", async () => {
+  it("persists unknown dispatch after a process disappears, reports it and claims only later occurrences", async () => {
     const schedule = await create(); now += 60_000;
     await repository.claimDue(now, "disappeared-process", 20); now += CLAIM_LEASE_MS + 1;
     const restarted = new PostgresAutomationRepository(pool);
     const [inspection] = await restarted.claimRunning(now, "new-process", 20);
     expect(inspection.run.status).toBe("dispatching");
     await restarted.finish(inspection.run.id, "new-process", { status: "unknown", error: "No command receipt exists" }, now);
+    expect((await restarted.get(schedule.id, authority.chatId))?.activeRunId).toBeUndefined();
+    expect((await restarted.pendingOutbox(now)).map(item => [item.runId, item.kind])).toEqual([[inspection.run.id, "blocked"]]);
+    expect(await restarted.claimRunning(now + CLAIM_LEASE_MS + 1, "new-process", 20)).toEqual([]);
     now += 10 * 60_000;
-    expect(await restarted.claimDue(now, "new-process", 20)).toEqual([]);
-    expect((await restarted.listRuns(schedule.id, authority.chatId))[0].status).toBe("unknown");
+    const [next] = await restarted.claimDue(now, "new-process", 20);
+    expect(next.run.id).not.toBe(inspection.run.id);
+    const runs = await restarted.listRuns(schedule.id, authority.chatId);
+    expect(runs.map(run => [run.id, run.status])).toEqual([[next.run.id, "dispatching"], [inspection.run.id, "unknown"]]);
+    await restarted.finish(next.run.id, "new-process", { status: "completed", result: { text: "later report" } }, now);
+    expect((await restarted.pendingOutbox(now)).map(item => item.kind).sort()).toEqual(["blocked", "completed"]);
+  });
+  it("releases schedules that older releases left blocked by an unknown run", async () => {
+    const cron = await create();
+    const once = await service().create({ kind: "reminder", title: "legacy one-shot", text: "test", timezone: "UTC",
+      timing: { type: "at", at: new Date(start + 60_000).toISOString() }, retention: "latest", businessTtlMs: 86_400_000 }, authority);
+    now += 60_000;
+    const claimed = await repository.claimDue(now, "legacy", 20);
+    expect(claimed).toHaveLength(2);
+    for (const { run } of claimed) {
+      await pool.query("UPDATE automation_runs SET state='unknown',data=jsonb_set(data,'{status}','\"unknown\"') WHERE id=$1", [run.id]);
+    }
+    await initAutomationTables(pool);
+    expect(await repository.get(cron.id, authority.chatId)).toMatchObject({ status: "active" });
+    expect((await repository.get(cron.id, authority.chatId))?.activeRunId).toBeUndefined();
+    expect(await repository.get(once.id, authority.chatId)).toMatchObject({ status: "completed", nextAt: null });
+    const columns = await pool.query("SELECT id,state,active_run_id FROM automation_schedules ORDER BY id");
+    expect(columns.rows.every(row => row.active_run_id === null)).toBe(true);
+    expect(columns.rows.find(row => row.id === once.id)?.state).toBe("completed");
+    expect((await repository.listRuns(cron.id, authority.chatId))[0].status).toBe("unknown");
+    now += 60_000;
+    expect((await repository.claimDue(now, "after-repair", 20)).map(item => item.schedule.id)).toEqual([cron.id]);
   });
   it("recovers a real durable command receipt after a crash without dispatching again", async () => {
     const schedule = await service().create({ kind: "session", title: "recover once", prompt: "work", nodeId: "n", sessionId: "s", monitor: false,

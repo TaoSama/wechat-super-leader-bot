@@ -51,7 +51,8 @@ export interface AutomationRun {
 }
 export interface AutomationOutbox {
   id: string; scheduleId: string; runId: string; chatId: string;
-  kind: "completed" | "failed" | "recovered";
+  /** `blocked` reports an unknown run outcome that needs the owner's inspection. */
+  kind: "completed" | "failed" | "recovered" | "blocked";
   text: string; createdAt: number; expiresAt: number;
   status: "pending" | "published" | "superseded" | "expired";
   bodyClearedAt?: number;
@@ -68,7 +69,7 @@ export interface AutomationRunner {
 }
 export interface AutomationSupplement {
   runId: string; scheduleId: string; chatId: string; invocationId: string;
-  text: string; kind: AutomationOutbox["kind"]; createdAt: number; expiresAt: number;
+  text: string; kind: Exclude<AutomationOutbox["kind"], "blocked">; createdAt: number; expiresAt: number;
 }
 export interface AutomationRepository {
   create(schedule: Schedule): Promise<Schedule>;

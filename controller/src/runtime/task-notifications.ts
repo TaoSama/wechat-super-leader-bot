@@ -149,7 +149,7 @@ export class TaskNotifications {
           source: { type: "automation", id: item.scheduleId }, kind: item.kind, text: item.text,
           createdAt: item.createdAt, expiresAt: item.expiresAt,
           business: { category: item.supplement ? "background-result" : schedule?.kind === "reminder" ? "reminder" : "scheduled-result",
-            ...(!item.supplement && schedule?.retention === "latest" ? { supersedes: `automation:${item.scheduleId}` } : {}) } });
+            ...(!item.supplement && item.kind !== "blocked" && schedule?.retention === "latest" ? { supersedes: `automation:${item.scheduleId}` } : {}) } });
         if (plan.status === "preparing") this.preparationRetries.set(plan.id, { retryAt: this.now() + SUMMARY_RETRY_MS, expiresAt: plan.expiresAt });
         await this.automations.repository.markPublished(item.id);
         this.publicationRetries.delete(item.id);

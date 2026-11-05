@@ -84,7 +84,7 @@ export class MemoryAutomationRepository implements AutomationRepository {
     const schedule = this.schedules.get(run.scheduleId)!;
     const item = finishRun(schedule, run, outcome, now);
     if (item && schedule.status !== "cancelled") {
-      if (schedule.retention === "latest") for (const old of this.outbox.values()) if (old.scheduleId === schedule.id && old.status === "pending" && !old.supplement) old.status = "superseded";
+      if (schedule.retention === "latest") for (const old of this.outbox.values()) if (old.scheduleId === schedule.id && old.status === "pending" && !old.supplement && old.kind !== "blocked") old.status = "superseded";
       this.outbox.set(item.id, item);
     }
     return true;
