@@ -232,7 +232,7 @@ function assertGoalProjection(group) {
   assert.deepEqual(Object.keys(group).sort(), ['hasMore', 'items', 'limit', 'observedAt']);
   assert.equal(group.limit, 12); assert(Number.isSafeInteger(group.observedAt));
   assert.equal(typeof group.hasMore, 'boolean'); assert(group.items.length <= 12);
-  const fields = ['actions', 'createdAt', 'criteria', 'decisionAttempts', 'expiresAt', 'id', 'maxActions', 'maxDecisions', 'objective', 'objectiveTruncated', 'reason', 'status', 'targets'];
+  const fields = ['actions', 'createdAt', 'criteria', 'decisionAttempts', 'durationMinutes', 'expiresAt', 'id', 'maxActions', 'maxDecisions', 'objective', 'objectiveTruncated', 'reason', 'status', 'targets'];
   const actionKeys = new Set(['index', 'target', 'prompt', 'promptTruncated', 'sourceActions', 'status', 'commandId', 'turnId']);
   for (const goal of group.items) {
     assert.deepEqual(Object.keys(goal).sort(), fields);
