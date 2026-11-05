@@ -26,6 +26,17 @@ function setup() {
 const watched = (f: ReturnType<typeof setup>) => ({ ...f.spec, sources: [{ nodeId: "mini", automationId: "daily", offsetMs: -3_600_000, windowMs: 60_000 }] });
 
 describe("24-hour isolated background workers", () => {
+  it("records the configured executor on new workers and exposes it publicly", async () => {
+    const { publicBackgroundWorker } = await import("../src/background/public.js");
+    const f = setup();
+    const legacy = await f.service.register(f.run, f.spec);
+    expect(legacy.executorKind).toBeUndefined();
+    expect(publicBackgroundWorker(legacy)).not.toHaveProperty("executor");
+    const claude = new BackgroundService({ ...f.options, executorKind: "claude" });
+    const worker = await claude.register({ ...f.run, id: randomUUID() }, f.spec);
+    expect((await f.repository.get(worker.id))?.executorKind).toBe("claude");
+    expect(publicBackgroundWorker(worker)).toMatchObject({ executor: "claude" });
+  });
   it.each([undefined, 2 * 3_600_000])("starts partial analysis at the default one-hour or explicit deadline (%s)", async deadlineMs => {
     const f = setup();
     const spec = BackgroundSpecSchema.parse({ prompt: "汇总跨机器任务结果", sources: watched(f).sources, deadlineMs });

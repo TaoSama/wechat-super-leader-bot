@@ -16,6 +16,8 @@ import { createAutomationRunner } from "./automation-runner.js";
 import { BackgroundExecution } from "./background.js";
 import { consoleDelivery } from "../console/deliveries.js";
 import type { LocalSettingsService } from "../settings/local-service.js";
+import type { AutomationRun } from "../automations/contracts.js";
+import type { WorkerExecutorKind } from "../background/worker/contracts.js";
 
 const DEFAULT_TICK_MS = 5_000;
 const SUMMARY_RETRY_MS = 60_000;
@@ -52,7 +54,8 @@ export class TaskNotifications {
     const backgroundProvider = config.background;
     this.results = new ResultDeliveryService(deliveries, {
       // Short results need no model. Initialize the independent provider only when a summary is requested.
-      model: model ?? (backgroundProvider ? {
+      // A Claude background executor has no HTTP provider for summaries.
+      model: model ?? (backgroundProvider?.baseUrl ? {
         complete: (...args: Parameters<LeaderModel["complete"]>) => new HttpLeaderModel({
           baseUrl: backgroundProvider.baseUrl, apiKey: backgroundProvider.apiKey, model: backgroundProvider.model,
         }).complete(...args),
@@ -198,10 +201,16 @@ export class TaskNotifications {
   async snapshot() {
     const chatIds = [...this.config.allowedChatIds];
     return {
-      automations: (await Promise.all(chatIds.map(id => this.automations.repository.list(id)))).flat(),
+      automations: (await Promise.all(chatIds.map(id => this.automations.repository.list(id)))).flat()
+        .map(schedule => schedule.kind === "background" && this.backgroundExecution
+          ? { ...schedule, executor: this.backgroundExecution.executorKind } : schedule),
       deliveries: (await this.results.repository.list(chatIds)).map(consoleDelivery),
       fallbackDeliveries: (await Promise.all(chatIds.map(id => this.fallbackRepository.list(id)))).flat(),
     };
+  }
+  /** The executor recorded when a background run's worker was created. */
+  async runExecutor(run: AutomationRun): Promise<WorkerExecutorKind | undefined> {
+    return (await this.backgroundExecution?.service.repository.getByRun(run.id))?.executorKind;
   }
   async notificationInterest(): Promise<string[]> {
     const result: string[] = [];
