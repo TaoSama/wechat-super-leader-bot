@@ -598,9 +598,10 @@ export class MemoryStore implements IStore {
     }
 
     existingLink.consumedAt ??= validNow.iso;
+    const { chatId: _ignored, ...sessionFields } = normalizedSession;
     this.consoleSessions.set(
       normalizedSession.tokenHash,
-      cloneConsoleSessionRecord(normalizedSession)
+      cloneConsoleSessionRecord({ ...sessionFields, ...(existingLink.chatId === undefined ? {} : { chatId: existingLink.chatId }) })
     );
     return true;
   }

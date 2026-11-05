@@ -1,5 +1,10 @@
-import { ArrowUpRight, ChevronDown, Focus } from "lucide-react";
-import type { ConsoleGoals } from "../goal-contract";
+import { useState } from "react";
+import { ArrowUpRight, ChevronDown, Focus, Plus } from "lucide-react";
+import type { ConsoleGoal, ConsoleGoals } from "../goal-contract";
+import type { AuthorizationReceipt } from "../../../api/authorizations";
+import { goalDraftFromGoal } from "../authorization-forms";
+import { GoalForm } from "./GoalForm";
+import { AuthorizationCancel } from "./AuthorizationCancel";
 import type { ScopedSession } from "../../../types";
 import { formatTimestamp } from "../../../format";
 
@@ -8,14 +13,27 @@ const LABELS = { active: "持续推进中", blocked: "需要处理", completed: 
 const ACTIONS = { waiting: "等待发送资格", claimed: "已领取 · 回执待核对", queued: "已排队 · 尚未发送", pending: "等待受理", accepted: "已受理 · 尚未完成",
   completed: "精确完成", failed: "失败", uncertain: "结果存疑 · 不重发", blocked: "已暂停", cancelled: "后续已取消", expired: "授权已过期" };
 
+type GoalFormState = { mode: "new" } | { mode: "edit" | "copy"; goal: ConsoleGoal };
+const isOpen = (goal: ConsoleGoal) => goal.status === "active" || goal.status === "blocked";
+
 export function GoalsSection({ goals, sessions, selectedNodeId, schedulerEnabled, onOpenSession }: Props) {
+  const [form, setForm] = useState<GoalFormState | null>(null);
+  const [notice, setNotice] = useState<string>();
+  const done = (receipt: AuthorizationReceipt) => { setForm(null); setNotice(receipt.message); };
   const items = goals.items.filter(goal => !selectedNodeId || goal.targets.some(target => target.nodeId === selectedNodeId));
   return <section className="execution-section goal-section" aria-labelledby="goals-heading">
     <div className="section-heading"><div><p className="eyebrow">ONE GOAL · CONTINUOUS FOLLOW-THROUGH</p><h2 id="goals-heading">持续目标 <span>{items.length}</span></h2></div><Focus size={22} aria-hidden="true" /></div>
-    <p className="section-description">确认一次，在授权范围内根据结果继续规划。动作完成不等于目标完成；确认与取消仍在微信中进行。</p>
+    <p className="section-description">确认一次，在授权范围内根据结果继续规划。动作完成不等于目标完成；可在此新建、取消或重建本聊天的目标，进度通知仍发送到微信。</p>
+    {!form && <button type="button" className="ui-button secondary" onClick={() => { setNotice(undefined); setForm({ mode: "new" }); }}><Plus size={14} aria-hidden="true" />新建持续目标</button>}
+    {notice && <p className="execution-window" role="status">{notice}</p>}
+    {form && <GoalForm key={form.mode === "new" ? "new" : `${form.mode}-${form.goal.id}`} sessions={sessions}
+      initial={form.mode === "new" ? undefined : goalDraftFromGoal(form.goal)}
+      replacingId={form.mode === "edit" ? form.goal.id : undefined}
+      objectiveTruncated={form.mode !== "new" && form.goal.objectiveTruncated}
+      onDone={done} onClose={() => setForm(null)} />}
     {goals.hasMore && <p className="execution-window">这里只显示最近 {goals.limit} 条，进行中优先，不是全部历史。</p>}
     {!schedulerEnabled && <p className="execution-window">调度未启用，已有记录不代表当前正在推进。</p>}
-    {!items.length && <div className="empty-panel" role="status"><h3>当前窗口没有这台机器的持续目标</h3><p>更换机器筛选查看其他目标。</p></div>}
+    {!items.length && <div className="empty-panel" role="status"><h3>{goals.items.length ? "当前窗口没有这台机器的持续目标" : "当前窗口没有持续目标"}</h3><p>{goals.items.length ? "更换机器筛选查看其他目标。" : "微信或控制台确认的持续目标将在这里显示。"}</p></div>}
     <div className="execution-list">{items.map(goal => {
       const completionUnverified = goal.status === "completed" && goal.criteria.some(criterion => !criterion.supported);
       const expired = (goal.status === "active" || goal.status === "blocked") && goal.expiresAt <= goals.observedAt;
@@ -31,6 +49,11 @@ export function GoalsSection({ goals, sessions, selectedNodeId, schedulerEnabled
           <span className="execution-expand-label">展开完成条件与动作证据</span>
         </summary><div className="execution-content">
           <p className="execution-plan-id">目标 {goal.id}</p>
+          <div className="authorization-actions">
+            {isOpen(goal) && <AuthorizationCancel kind="goal" id={goal.id} onDone={done} />}
+            <button type="button" className="ui-button ghost" onClick={() => { setNotice(undefined); setForm({ mode: isOpen(goal) ? "edit" : "copy", goal }); }}>
+              {isOpen(goal) ? "修改（取消后重建）" : "复制为新目标"}</button>
+          </div>
           <p className="execution-caution">“条件已满足”是模型依据已记录结果作出的判断，不是独立业务验收。取消只停止后续派发，不停止原会话已有任务。</p>
           <h3 className="goal-subheading">完成条件</h3>
           <ol className="goal-criteria">{goal.criteria.map(criterion => <li key={criterion.index}><span>{criterion.text}</span><small>{criterion.supported ? `模型依据：动作 ${criterion.actions.join("、")}` : "尚未证实"}</small></li>)}</ol>

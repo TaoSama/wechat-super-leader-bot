@@ -39,7 +39,8 @@ export class ConsoleAuthService {
     return this.publicUrlOrigin;
   }
 
-  async issueLink(requestId: string): Promise<ConsoleLinkIssued> {
+  /** A chat-bound link lets its sessions manage that chat's plans and goals; unbound links stay limited to session writes. */
+  async issueLink(requestId: string, chatId?: string): Promise<ConsoleLinkIssued> {
     if (!this.publicUrlOrigin) {
       throw new ConsoleAuthError("Console public URL is not configured", 503);
     }
@@ -53,6 +54,7 @@ export class ConsoleAuthService {
       tokenHash,
       createdAt,
       expiresAt,
+      ...(chatId === undefined ? {} : { chatId }),
     });
 
     if (Date.parse(record.expiresAt) <= nowMs) {

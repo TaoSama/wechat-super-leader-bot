@@ -188,3 +188,16 @@
   .automation-detail-toolbar { margin-bottom: 16px; }
   .automation-detail-metadata { grid-template-columns: 1fr 1fr; }
 }
+.authorization-form { display: flex; flex-direction: column; gap: 8px; margin: 12px 0 20px; padding: 16px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface-2); }
+.authorization-form h3 { font-size: 15px; }
+.authorization-form label, .authorization-form legend { font-size: 12px; color: var(--text-secondary); }
+.authorization-form textarea, .authorization-form input:not([type="checkbox"]), .authorization-form select { width: 100%; min-height: 40px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-0); color: var(--text); font: inherit; }
+.authorization-form fieldset { display: flex; flex-direction: column; gap: 6px; border: 0; padding: 0; margin: 4px 0; }
+.authorization-steps { display: flex; flex-direction: column; gap: 12px; list-style: none; padding: 0; margin: 0; }
+.authorization-step { display: flex; flex-direction: column; gap: 6px; padding: 12px; border-radius: 12px; background: var(--surface-0); }
+.authorization-step-heading, .authorization-row, .authorization-actions { display: flex; align-items: center; gap: 8px; }
+.authorization-step-heading { justify-content: space-between; }
+.authorization-actions { flex-wrap: wrap; justify-content: flex-end; margin: 8px 0; }
+.authorization-check { display: flex; align-items: center; gap: 8px; }
+.authorization-budgets { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+.authorization-budgets label { display: flex; flex-direction: column; gap: 4px; }

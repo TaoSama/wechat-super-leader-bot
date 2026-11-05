@@ -18,7 +18,7 @@ export const PLAN_TTL_MS = 10 * 60 * 1000;
 export const MAX_PLAN_ACTIONS = 4;
 // Per-chat concurrency cap for confirmed fixed plans; each plan still orders its own steps.
 export const MAX_ACTIVE_PLANS_PER_CHAT = 3;
-const MAX_GOAL_TARGETS = 4;
+export const MAX_GOAL_TARGETS = 4;
 const MAX_SESSION_CANDIDATES = 8;
 export const MAX_RESULT_CODE_POINTS = 1000;
 export const MAX_RESULT_JSON_CHARS = 3000;
@@ -104,7 +104,9 @@ export const LeaderDataSchema = z.object({
   pendingGoal: GoalProposalSchema.optional(),
   steerGeneration: SteerGenerationSchema.default(0),
   commandIds: z.array(z.string()).max(MAX_COMMAND_IDS).default([]),
-  receipts: z.array(z.object({ messageId: z.string(), inputHash: z.string(), text: z.string(), commandId: z.string().optional(), images: ReplyImagesSchema.optional() })).max(MAX_RECEIPTS).default([]),
+  receipts: z.array(z.object({ messageId: z.string(), inputHash: z.string(), text: z.string(), commandId: z.string().optional(), images: ReplyImagesSchema.optional(),
+    // Console authorizations record their origin and the plan/goal they created or cancelled.
+    source: z.literal("console").optional(), authorizationId: z.string().uuid().optional() })).max(MAX_RECEIPTS).default([]),
   inflight: z.object({ messageId: z.string(), inputHash: z.string(), expiresAt: z.number(), plan: PlanSchema.optional(), goal: GoalProposalSchema.optional() }).optional(),
   directPreview: z.object({ id: z.string(), messageId: z.string(), followupMessageId: z.string().optional() }).optional(),
   directContext: z.object({ messageId: z.string(), inputHash: z.string(), expiresAt: z.number(),
@@ -116,7 +118,7 @@ export const LeaderDataSchema = z.object({
 export type LeaderData = z.infer<typeof LeaderDataSchema>;
 export type LeaderReply = { text: string; commandId?: string; images?: ReplyImage[] };
 export type ConsoleLinkIssued = { url: string; expiresAt: string };
-export type ConsoleLinkIssuer = (requestId: string) => Promise<ConsoleLinkIssued>;
+export type ConsoleLinkIssuer = (requestId: string, chatId: string) => Promise<ConsoleLinkIssued>;
 export const SYSTEM_PROMPT = `你是用户的 Super Leader Agent，通过已有会话协调各机器上的 Leader/Agent，不创建隔离环境。
 用户明确要求把原会话图片发到当前微信时，调用send_session_images，不以本地图片路径或商品链接代替图片附件，不再声称无法取回已记录图片。只能选择已发现的原会话；没有指定会话且上文无法消歧时先澄清。图片工具不向原会话派发任务；发送成功须由微信回执证明，准备完成不等于发送完成。
 发送默认deliveryMode=next-turn：已知目标忙碌或暂时离线时持久等待，恢复后按会话顺序派发。只有用户本轮明确要求补充当前执行轮次才可deliveryMode=steer；expectedTurnId必须来自本聊天已核实accepted命令的准确turnId或用户明确指定的准确ID，不能猜最新轮次。steer没有准确轮次时先核对进度，不能默默新开一轮；任何核对失败不能自动改成next-turn。

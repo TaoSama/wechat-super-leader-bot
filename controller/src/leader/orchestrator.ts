@@ -1,5 +1,6 @@
 import { REPORT_PROGRESS_TOOL, progressText, type QueryProgressReporter } from "../notifications/model-progress.js";
 import { DirectToolExecutor } from "./direct-executor.js";
+import { ConsoleAuthorizations } from "./console-authorization.js";
 import { consoleLinkRequestId, redactConsoleLinkSecrets, redactIssuedConsoleLink, restoreConsoleLinkReply, type ConsoleLinkResolver, type ConsoleLinkRedactor } from "../console/link-reply.js";
 import { traceEvent, traceSpan } from "../runtime/telemetry.js";
 import type { LocalSettingsService } from "../settings/local-service.js";
@@ -94,6 +95,7 @@ export class LeaderOrchestrator {
   private executions: ExecutionScheduler;
   private goals: GoalConversation;
   readonly direct: DirectToolExecutor;
+  readonly console: ConsoleAuthorizations;
   constructor(private store: IStore, private hub: Hub, private commands: Pick<CommandService, "submit">,
     private model: LeaderModel, private now: () => number = Date.now, private consoleLinkIssuer?: ConsoleLinkIssuer,
     executions?: ExecutionScheduler, goals?: GoalScheduler, private automations?: AutomationService,
@@ -107,6 +109,13 @@ export class LeaderOrchestrator {
       goals: this.goals, executions: this.executions,
       save: (chatId, revision, data) => this.save(chatId, revision, data),
       callTool: (...args) => this.callTool(...args), preview: plan => this.preview(plan),
+      executePlan: (chatId, revision, plan, data) => this.executePlan(chatId, revision, plan, data, true),
+      confirmGoal: (chatId, revision, goal, data) => this.confirmGoal(chatId, revision, goal, data, true),
+    });
+    this.console = new ConsoleAuthorizations({ store, now, isAllowed: directOptions.isAllowed ?? (() => true),
+      goalsAvailable: directOptions.goalsAvailable ?? true, goals: this.goals, executions: this.executions,
+      save: (chatId, revision, data) => this.save(chatId, revision, data),
+      propose: (call, chatId, data, titles, signal) => this.callTool(call, chatId, data, [], { requestId: "console" }, signal, titles),
       executePlan: (chatId, revision, plan, data) => this.executePlan(chatId, revision, plan, data, true),
       confirmGoal: (chatId, revision, goal, data) => this.confirmGoal(chatId, revision, goal, data, true),
     });
@@ -711,7 +720,7 @@ export class LeaderOrchestrator {
         }
         try {
           if (!linkContext.cachedLinkPromise) {
-            linkContext.cachedLinkPromise = this.consoleLinkIssuer(linkContext.requestId);
+            linkContext.cachedLinkPromise = this.consoleLinkIssuer(linkContext.requestId, chatId);
           }
           const issued = await linkContext.cachedLinkPromise;
           linkContext.issuedLink = issued;
