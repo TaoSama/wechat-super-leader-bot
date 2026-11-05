@@ -50,9 +50,25 @@ func desktopTurnMetadataSnapshot(fields map[string]json.RawMessage) ([]byte, err
 // Only identities, statuses and canonical membership survive this projection.
 // Items, output, instructions and all other fields are discarded before retain.
 func desktopTurnMetadataValue(path []any, raw json.RawMessage) (json.RawMessage, bool, error) {
+	target := desktopTurnMetadataTarget(path)
+	if target == nil {
+		return nil, false, nil
+	}
+	if err := json.Unmarshal(raw, target); err != nil {
+		return nil, true, err
+	}
+	encoded, err := json.Marshal(target)
+	if err != nil || len(encoded) > desktopObservedTurnMetadataLimit {
+		return nil, true, errors.New("observed turn metadata exceeds bounds")
+	}
+	return encoded, true, nil
+}
+
+// Stream projection and typed metadata decoding share the same path whitelist.
+func desktopTurnMetadataTarget(path []any) any {
 	var target any
 	if len(path) == 0 {
-		return nil, false, nil
+		return nil
 	}
 	switch path[0] {
 	case "turns":
@@ -99,17 +115,7 @@ func desktopTurnMetadataValue(path []any, raw json.RawMessage) (json.RawMessage,
 			}
 		}
 	}
-	if target == nil {
-		return nil, false, nil
-	}
-	if err := json.Unmarshal(raw, target); err != nil {
-		return nil, true, err
-	}
-	encoded, err := json.Marshal(target)
-	if err != nil || len(encoded) > desktopObservedTurnMetadataLimit {
-		return nil, true, errors.New("observed turn metadata exceeds bounds")
-	}
-	return encoded, true, nil
+	return target
 }
 
 func (p *desktopProjection) patchTurnMetadata(patch desktopPatch) {

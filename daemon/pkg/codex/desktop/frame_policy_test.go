@@ -68,7 +68,7 @@ func TestDesktopBudgetedFrameInboundPolicy(t *testing.T) {
 		}
 		defer budget.release()
 		var header [4]byte
-		binary.LittleEndian.PutUint32(header[:], uint32(desktopInboundFrameLimit+1))
+		binary.LittleEndian.PutUint32(header[:], uint32(desktopSubscriptionFrameLimit+1))
 		connection := &desktopFramePolicyConn{reader: bytes.NewReader(header[:])}
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
@@ -80,13 +80,16 @@ func TestDesktopBudgetedFrameInboundPolicy(t *testing.T) {
 			t.Fatalf("oversized frame consumed body/budget: err=%v reads=%v slots=%d", err, connection.readSizes, len(budget.slots))
 		}
 	})
-	t.Run("exact limit remains accepted", func(t *testing.T) {
-		body := bytes.Repeat([]byte(" "), desktopInboundFrameLimit)
-		copy(body, []byte(`{"type":"broadcast","version":11,"method":"thread-stream-state-changed"}`))
+	t.Run("old inbound limit remains accepted", func(t *testing.T) {
+		body := bytes.Repeat([]byte("x"), desktopInboundFrameLimit)
+		copy(body, []byte(`{"type":"broadcast","version":11,"method":"thread-stream-state-changed","ignored":"`))
+		copy(body[len(body)-2:], []byte(`"}`))
 		var header [4]byte
 		binary.LittleEndian.PutUint32(header[:], uint32(len(body)))
 		connection := &desktopFramePolicyConn{reader: bytes.NewReader(append(header[:], body...))}
-		budget := newDesktopFrameBudget(1, time.Second)
+		// Race instrumentation still scans the complete frame; exercise the
+		// production body budget rather than an unrelated shorter test timeout.
+		budget := newDesktopFrameBudget(1, desktopFrameBodyTimeout)
 		projected := false
 		err := (&desktopConn{Conn: connection}).readBudgeted(context.Background(), budget, func(message desktopEnvelope) error {
 			projected = message.Method == desktopStateChanged && message.Version == 11 && len(budget.slots) == 1

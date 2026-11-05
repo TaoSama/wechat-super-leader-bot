@@ -53,6 +53,8 @@ export interface ReplyDeliveryState {
   inFlight: boolean;
   failureReason?: "AttachmentExpired" | "AttachmentUnavailable";
   renewalRejected?: true;
+  /** Explicit WeChat refusals of this delivery; bounded so a persistent refusal cannot drain the budget. */
+  rejectedAttempts?: number;
 }
 
 export type UnsupportedInboundKind = "image" | "file" | "video" | "voice" | "unknown";

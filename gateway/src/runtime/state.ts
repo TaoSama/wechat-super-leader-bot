@@ -8,6 +8,7 @@ import type { ContextPolicy } from "./context-policy.js";
 
 export const MAX_PROCESSED_MESSAGE_KEYS = 1000;
 export const MAX_REPLY_DELIVERIES = 1000;
+export const MAX_REJECTED_REPLY_ATTEMPTS = 3;
 
 export function resolvePath(inputPath: string): string {
   if (inputPath.startsWith("~/") || inputPath === "~") {
@@ -184,7 +185,8 @@ export class StateManager extends DeliveryState {
                 (!["AttachmentExpired", "AttachmentUnavailable"].includes(item.failureReason) ||
                  item.inFlight || item.acknowledgedChunks === item.totalChunks) ||
               item.renewalRejected !== undefined && (item.renewalRejected !== true || !key.startsWith("renewal:") ||
-                item.inFlight || item.acknowledgedChunks === item.totalChunks)) {
+                item.inFlight || item.acknowledgedChunks === item.totalChunks) ||
+              item.rejectedAttempts !== undefined && (!Number.isSafeInteger(item.rejectedAttempts) || item.rejectedAttempts <= 0)) {
             throw new Error("Invalid reply delivery state");
           }
           this.replyDeliveries[key] = { ...item };
@@ -327,6 +329,10 @@ export class StateManager extends DeliveryState {
     return this.replyDeliveries[deliveryKey]?.inFlight === true;
   }
 
+  public hasExhaustedReplyRejections(deliveryKey: string): boolean {
+    return (this.replyDeliveries[deliveryKey]?.rejectedAttempts ?? 0) >= MAX_REJECTED_REPLY_ATTEMPTS;
+  }
+
   public hasPermanentReplyFailure(deliveryKey: string): boolean {
     const item = this.replyDeliveries[deliveryKey];
     return item?.failureReason !== undefined || item?.renewalRejected === true;
@@ -422,8 +428,10 @@ export class StateManager extends DeliveryState {
     }
     const previousProgress = this.sentReplyProgress[deliveryKey];
     const count = chunkIndex + (acknowledged ? 1 : 0);
+    const rejected = !inFlight && !acknowledged && !renewalRejected;
     this.replyDeliveries[deliveryKey] = { ...previous, acknowledgedChunks: count, inFlight,
-      ...(renewalRejected ? { renewalRejected: true as const } : {}) };
+      ...(renewalRejected ? { renewalRejected: true as const } : {}),
+      ...(rejected ? { rejectedAttempts: (previous.rejectedAttempts ?? 0) + 1 } : {}) };
     if (count > 0) this.sentReplyProgress[deliveryKey] = count;
     try { this.saveState(); }
     catch (error) {

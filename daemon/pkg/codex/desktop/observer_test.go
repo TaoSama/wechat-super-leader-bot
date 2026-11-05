@@ -135,15 +135,19 @@ func TestDesktopProjectionRejectsRevisionGapsAndMalformedPatches(t *testing.T) {
 		{"bad status path", desktopPatchChange(2, 3, map[string]any{"op": "remove", "path": []any{"threadRuntimeStatus", false}}), false},
 		{"too deep type path", desktopPatchChange(2, 3, map[string]any{"op": "remove", "path": []any{"threadRuntimeStatus", "type", "extra"}}), false},
 		{"identity patch", desktopPatchChange(2, 3, map[string]any{"op": "replace", "path": []any{"id"}, "value": "other"}), false},
+		{"late identity patch", desktopPatchChange(2, 3,
+			map[string]any{"op": "replace", "path": []any{"threadRuntimeStatus", "type"}, "value": "idle"},
+			map[string]any{"op": "replace", "path": []any{"id"}, "value": "other"}), false},
 		{"root removal", desktopPatchChange(2, 3, map[string]any{"op": "remove", "path": []any{}}), false},
 		{"root wrong id", desktopPatchChange(2, 3, map[string]any{"op": "replace", "path": []any{}, "value": map[string]any{"id": "other", "hostId": "local"}}), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			projection := &desktopProjection{owner: "owner", initialized: !tc.uninitialized, revision: 2, status: "active"}
+			before := *projection
 			published := false
 			err := applyDesktopChange(desktopStateEnvelope(t, tc.change), "observer-client", map[string]*desktopProjection{"session": projection},
 				func(string, protocol.DesktopObservation) { published = true })
-			if err == nil || published || projection.revision != 2 {
+			if err == nil || published || !reflect.DeepEqual(*projection, before) {
 				t.Fatalf("error = %v, published = %v, revision = %d", err, published, projection.revision)
 			}
 		})

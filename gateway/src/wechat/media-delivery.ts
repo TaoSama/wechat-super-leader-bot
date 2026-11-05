@@ -1,7 +1,7 @@
 import { LocalSendDeferredError } from "../runtime/context-policy.js";
 import { createHash } from "node:crypto";
 import type { StateManager } from "../runtime/state.js";
-import { ILinkSendReceiptError } from "./send-receipt.js";
+import { isRejectedSendReceipt } from "./send-receipt.js";
 import { MAX_IMAGE_BYTES, MAX_REPLY_IMAGES, validateImageBytes, type ImageMime, type UploadedImageItem } from "./media-upload.js";
 import { beforeAbort } from "../runtime/abort.js";
 
@@ -76,8 +76,7 @@ export async function sendImageReply(options: {
     try {
       await beforeAbort(options.sendImage(uploaded, clientId, signal), signal);
     } catch (error) {
-      if (error instanceof ILinkSendReceiptError &&
-          (error.reason === "RejectedRet" || error.reason === "RejectedErrcode")) {
+      if (isRejectedSendReceipt(error)) {
         stateManager.rejectReplyChunk(deliveryKey, index);
       }
       throw error;

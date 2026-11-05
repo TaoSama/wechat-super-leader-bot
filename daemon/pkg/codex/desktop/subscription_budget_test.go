@@ -222,7 +222,7 @@ func TestDesktopSubscriptionBudgetOversizedHeaderBypassesOccupiedSlots(t *testin
 		defer budget.release()
 	}
 	reader := &isolationHeaderReader{}
-	binary.LittleEndian.PutUint32(reader.header[:], desktopInboundFrameLimit+1)
+	binary.LittleEndian.PutUint32(reader.header[:], desktopSubscriptionFrameLimit+1)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	err := (&desktopConn{Conn: reader}).readBudgeted(ctx, budget, func(desktopEnvelope) error {

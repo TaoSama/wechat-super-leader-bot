@@ -3,6 +3,7 @@ import { performance } from "node:perf_hooks";
 import { createMessageTrace, currentTrace, runWithTrace, traceEvent, traceSpan } from "./runtime/telemetry.js";
 import { StateManager } from "./runtime/state.js";
 import { ILinkClient } from "./wechat/client.js";
+import { isRejectedSendReceipt } from "./wechat/send-receipt.js";
 import { ControllerClient, ChatNotAllowedError } from "./controller/client.js";
 import { PermanentImageDownloadError } from "./controller/image-client.js";
 import { PermanentReplyUnavailableError } from "./controller/reply-client.js";
@@ -518,6 +519,12 @@ export class WeChatGateway {
       let receiptStatus = "error";
       traceEvent("delivery.start", { source: item.source });
       try {
+        // A restart can resume a delivery whose final refusal was recorded before its outbox expired.
+        if (this.hasExhaustedReplyRejections(item.deliveryKey)) {
+          receiptStatus = "rejected";
+          await this.expireRejectedReply(item);
+          return;
+        }
         const deadline = Date.now() + REPLY_TIMEOUT_MS;
         if (reply.images?.length) {
           await this.ilink.sendImageReply(item.chatId, reply.images, { deliveryKey: `image-reply:${item.deliveryKey}`,
@@ -542,6 +549,11 @@ export class WeChatGateway {
           receiptStatus = "expired";
           this.stateManager.updateOutbox(item.deliveryKey, { status: "expired" });
           await this.ackEngineReply(item, "expired");
+          return;
+        }
+        if (isRejectedSendReceipt(error) && this.hasExhaustedReplyRejections(item.deliveryKey)) {
+          receiptStatus = "rejected";
+          await this.expireRejectedReply(item);
           return;
         }
         if (this.hasQuarantinedInboundReply(item.deliveryKey)) {
@@ -580,7 +592,8 @@ export class WeChatGateway {
               await traceSpan("delivery.recovery.outbox.remove", async () => this.stateManager.removeOutbox(item.deliveryKey));
             });
           } catch (error) { firstError ??= error; }
-        } else if (item.kind === "reply" && item.source === "engine" && (item.status === "uncertain" || item.status === "expired")) {
+        } else if (item.kind === "reply" && item.source === "engine" && !item.engineAcked &&
+            (item.status === "uncertain" || item.status === "expired")) {
           const status = item.status;
           try {
             await this.withRecoveryTrace(item, () => traceSpan("delivery.recovery.ack", () => this.ackEngineReply(item, status)));
@@ -661,6 +674,18 @@ export class WeChatGateway {
     if (!this.replyEngine) throw new ReplyEngineUnavailableError();
     await this.replyEngine.ackReply(this.stateManager.account!.accountId, item.chatId, item.messageId, status);
     this.stateManager.updateOutbox(item.deliveryKey, { engineAcked: true });
+  }
+
+  private hasExhaustedReplyRejections(deliveryKey: string): boolean {
+    return !this.hasQuarantinedInboundReply(deliveryKey) &&
+      (this.stateManager.hasExhaustedReplyRejections(deliveryKey) ||
+       this.stateManager.hasExhaustedReplyRejections(`image-reply:${deliveryKey}`));
+  }
+
+  /** A persistently refused reply becomes terminal so retries cannot drain the shared send budget. */
+  private async expireRejectedReply(item: DeliveryOutboxItem): Promise<void> {
+    this.stateManager.updateOutbox(item.deliveryKey, { status: "expired" });
+    await this.ackEngineReply(item, "expired");
   }
 
   private hasQuarantinedInboundReply(deliveryKey: string): boolean {
