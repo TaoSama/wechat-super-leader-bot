@@ -189,6 +189,14 @@ it("confirms a frozen resume goal after its native session becomes loaded idle",
   expect(f.commands.submit).not.toHaveBeenCalled();
 });
 
+it("freezes claude-resume for a goal on an existing Claude Code session", async () => {
+  const f = fixture();
+  const id = "claude:11111111-2222-4333-8444-555555555555";
+  Object.assign(f.sessions[0], { id, provider: "claude-code", loaded: false, status: "active", capabilities: ["read", "resume-send"] });
+  const { pending } = await f.propose({ ...request(), targets: [{ nodeId: "air", sessionId: id }] });
+  expect(pending.targets[0]).toMatchObject({ sessionId: id, sendRoute: "claude-resume" });
+});
+
 it("does not persist an unseen goal if preview rendering fails after a successful proposal", async () => {
   const f = fixture(), original = await f.propose(), value = request();
   value.objective = "替换预览但不应授权";

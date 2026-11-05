@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 export function parseNotificationCycle(line: string): Record<string, unknown> | undefined {
   if (!line.startsWith("{")) return undefined;
   const event = JSON.parse(line) as Record<string, unknown>;
-  if (!["notification_cycle_ready", "notification_cycle_failed", "notification_cycle_recovered"].includes(event.event as string)) return undefined;
+  if (!["notification_cycle_ready", "notification_cycle_failed", "notification_cycle_recovered", "notification_cycle_restored",
+    "notification_cycle_restore_discarded", "notification_cycle_persist_failed"].includes(event.event as string)) return undefined;
   assert.equal(event.service, "gateway");
   assert.equal(typeof event.timestamp, "string");
   assert.equal(new Date(event.timestamp as string).toISOString(), event.timestamp);
@@ -11,7 +12,11 @@ export function parseNotificationCycle(line: string): Record<string, unknown> | 
     "timedOut", "parentAborted", "httpStatus", "errorName", "causeCodes"];
   const fields = event.event === "notification_cycle_failed" ? [...requestFields, "errorType", "consecutiveFailures",
     "totalFailures", "lastSucceededAt", "retryScheduled", "retryDelayMs", "failedRequests", "unresolvedFailures",
-    "recoveryEvidenceOverflow"] : event.event === "notification_cycle_recovered" ? ["totalFailures", "elapsedMs", "recoveredOperations"] : [];
+    "recoveryEvidenceOverflow"] : event.event === "notification_cycle_recovered" ? ["totalFailures", "elapsedMs", "recoveredOperations"]
+    : event.event === "notification_cycle_restored" ? ["unresolvedFailures", "totalFailures", "ageMs", "lastFailureAgeMs",
+      "recoveryEvidenceOverflow"]
+    : event.event === "notification_cycle_restore_discarded" ? ["reason", "ageMs", "unresolvedFailures", "errorName", "causeCodes"]
+    : event.event === "notification_cycle_persist_failed" ? ["errorName", "causeCodes"] : [];
   function validate(record: Record<string, unknown>, allowed: string[]): void {
     for (const [key, value] of Object.entries(record)) {
       assert.ok(allowed.includes(key), `unexpected notification cycle field: ${key}`);

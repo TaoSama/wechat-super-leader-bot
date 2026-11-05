@@ -20,6 +20,7 @@ const (
 	desktopControlClient = "super-leader-desktop-controller"
 	desktopReadSettings  = "thread-follower-read-model-settings"
 	desktopStartTurn     = "thread-follower-start-turn"
+	desktopInterruptTurn = "thread-follower-interrupt-turn"
 	desktopControlSlots  = 2
 )
 

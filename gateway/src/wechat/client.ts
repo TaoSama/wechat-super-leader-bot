@@ -15,6 +15,7 @@ import { deliverFileReply, type FileReplyOptions } from "./file-delivery.js";
 import { beforeAbort } from "../runtime/abort.js";
 import { CHANNEL_VERSION } from "./protocol.js";
 import { RequestDiagnostics } from "../runtime/request-diagnostics.js";
+import { ITEM_TYPE_TEXT, parseInboundContent } from "./inbound-content.js";
 export { CHANNEL_VERSION } from "./protocol.js";
 
 // Only used to reconstruct deliveries written by the short-lived citation-sanitizing
@@ -23,7 +24,6 @@ export const DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com";
 export const MESSAGE_TYPE_INBOUND_TEXT = 1;
 export const MESSAGE_TYPE_OUTBOUND_TEXT = 2;
 export const MESSAGE_STATE_OUTBOUND = 2;
-export const ITEM_TYPE_TEXT = 1;
 
 export interface ILinkPollBatch {
   nextSyncBuf: string;
@@ -243,19 +243,10 @@ export class ILinkClient {
 
       const sender = String(msg.from_user_id || "unknown");
       const itemList = Array.isArray(msg.item_list) ? msg.item_list : [];
-      let textContent = "";
-      for (const rawItem of itemList) {
-        if (typeof rawItem === "object" && rawItem !== null) {
-          const item = rawItem as Record<string, unknown>;
-          if (item.type === ITEM_TYPE_TEXT && typeof item.text_item === "object" && item.text_item !== null) {
-            const textItem = item.text_item as Record<string, unknown>;
-            if (typeof textItem.text === "string") {
-              textContent += textItem.text;
-            }
-          }
-        }
-      }
-      if (!textContent) continue;
+      const content = parseInboundContent(itemList);
+      if (!content) continue;
+      // Legacy deterministic IDs hashed only the sender's text; unsupported content hashes its kinds.
+      const identityText = content.unsupportedKinds ? `unsupported:${content.unsupportedKinds.join(",")}` : content.ownText;
 
       const contextToken = typeof msg.context_token === "string" && msg.context_token ? msg.context_token : undefined;
 
@@ -284,7 +275,7 @@ export class ILinkClient {
         // Without a stable ID, only retries of the same page position are identifiable.
         // Keep positions distinct so identical commands are not silently merged across pages.
         const rawDigest = crypto.createHash("sha256")
-          .update(`${account.accountId}:${sender}:${createTimeMs}:${currentSyncBuf}:${msgIdx}:${textContent}`, "utf8")
+          .update(`${account.accountId}:${sender}:${createTimeMs}:${currentSyncBuf}:${msgIdx}:${identityText}`, "utf8")
           .digest("hex").slice(0, 24);
         messageId = `det:${rawDigest}`;
         deliveryKey = this.stateManager.computeDeliveryKey(sender, messageId);
@@ -296,11 +287,12 @@ export class ILinkClient {
 
       messages.push({
         chatId: sender,
-        text: textContent,
+        text: content.text,
         messageId,
         deliveryKey,
         contextToken,
         createdAtMs,
+        ...(content.unsupportedKinds ? { unsupportedKinds: content.unsupportedKinds } : {}),
       });
     }
 

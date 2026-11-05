@@ -49,17 +49,22 @@ func validDispatchEndpoint(endpoint string) bool {
 	})
 }
 
+// dispatchRoute reports routes whose mutation is bound to a durable claim.
+func dispatchRoute(route protocol.SendRoute) bool {
+	return route == protocol.RouteDesktopOwner || route == protocol.RouteAppServerResume || route == protocol.RouteClaudeResume
+}
+
 // A claim carries only preallocated UUIDs. Every bound identity has the exact
 // endpoint selected before mutation; only desktop identities have an owner.
 func validateDispatch(identity protocol.DispatchIdentity, requireBound bool) error {
-	if (identity.Route != protocol.RouteDesktopOwner && identity.Route != protocol.RouteAppServerResume) || !validDispatchText(identity.SessionID) ||
+	if !dispatchRoute(identity.Route) || !validDispatchText(identity.SessionID) ||
 		!validDispatchUUID(identity.ClientUserMessageID) || !validDispatchUUID(identity.RequestID) {
 		return ErrDispatchIdentity
 	}
 	if !requireBound && identity.OwnerID == "" && identity.ConnectionID == "" && identity.Endpoint == "" {
 		return nil
 	}
-	if identity.Route == protocol.RouteAppServerResume {
+	if identity.Route == protocol.RouteAppServerResume || identity.Route == protocol.RouteClaudeResume {
 		if identity.OwnerID != "" || identity.ConnectionID != "" || !validDispatchEndpoint(identity.Endpoint) {
 			return ErrDispatchIdentity
 		}
@@ -74,7 +79,7 @@ func validateDispatch(identity protocol.DispatchIdentity, requireBound bool) err
 // BindDispatch commits the immutable route before the native mutation write.
 // A completed or restart-recovered claim can never be rebound for execution.
 func (j *Journal) BindDispatch(cmd protocol.ControllerCommandMessage, identity protocol.DispatchIdentity) error {
-	if cmd.Action != protocol.ActionSend || (cmd.SendRoute != protocol.RouteDesktopOwner && cmd.SendRoute != protocol.RouteAppServerResume) ||
+	if cmd.Action != protocol.ActionSend || !dispatchRoute(cmd.SendRoute) ||
 		identity.Route != cmd.SendRoute || identity.SessionID != cmd.SessionID {
 		return ErrDispatchIdentity
 	}

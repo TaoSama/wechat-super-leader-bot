@@ -26,6 +26,14 @@ export function validateCommandTurnBinding(cmd: CommandRecord, status: CommandRe
   if (status === "input-written" || inputReceipt !== undefined || cmd.inputReceipt !== undefined) {
     throw new ConflictError("Read and native commands cannot carry terminal input receipts");
   }
+  if (cmd.action === "interrupt") {
+    // An interrupt never starts a turn: only its exact target may confirm completion.
+    if (status === "accepted" || (status === "completed") !== (turnId !== undefined) ||
+        turnId !== undefined && turnId !== cmd.expectedTurnId) {
+      throw new ConflictError("Interrupt result does not match its exact target turn");
+    }
+    return;
+  }
   if (cmd.action === "read") {
     if (status === "accepted" || turnId !== undefined) {
       throw new ConflictError("Read command cannot accept or bind a turn");
@@ -65,7 +73,9 @@ export function nextCommandState(cmd: CommandRecord, status: CommandRecord["stat
 /** Reject malformed persisted proof before it can be displayed, ACKed or inspected. */
 export function validateStoredCommandInput(cmd: CommandRecord): void {
   if (cmd.deliveryMode !== undefined) DeliveryModeSchema.parse(cmd.deliveryMode);
-  if (cmd.deliveryMode === "steer" ? !isValidTurnId(cmd.expectedTurnId) : cmd.expectedTurnId !== undefined) throw new ConflictError("Invalid command delivery identity");
+  const exactTurn = cmd.deliveryMode === "steer" || cmd.action === "interrupt";
+  if (exactTurn ? !isValidTurnId(cmd.expectedTurnId) : cmd.expectedTurnId !== undefined) throw new ConflictError("Invalid command delivery identity");
+  if (cmd.action === "interrupt" && (cmd.deliveryMode !== undefined || cmd.prompt !== undefined || cmd.skills?.length)) throw new ConflictError("Invalid interrupt command");
   if (cmd.authority !== undefined) CommandAuthoritySchema.parse(cmd.authority);
   if (cmd.status === "admitting" && (cmd.action !== "send" || !cmd.authority || !cmd.sendRoute || cmd.sendRoute === "terminal-pane" ||
       cmd.turnId !== undefined || cmd.inputReceipt !== undefined)) throw new ConflictError("Invalid admitting command");

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type pg from "pg";
 import { BackgroundService, MemoryBackgroundRepository, PostgresBackgroundRepository, initBackgroundTables } from "../background/index.js";
-import { CodexWorkerRuntime } from "../background/worker/index.js";
+import { ClaudeCliExecutor, CodexWorkerRuntime } from "../background/worker/index.js";
 import type { AutomationRepository, AutomationRunner, Schedule } from "../automations/contracts.js";
 import type { NodeHub } from "../nodes/hub.js";
 import type { Config } from "./config.js";
@@ -22,7 +22,10 @@ export class BackgroundExecution {
     private readonly now: () => number = Date.now, private readonly changed: () => void = () => {}, settings?: LocalSettingsService) {
     if (!config.background) throw new Error("Background execution is disabled");
     const repository = pool ? new PostgresBackgroundRepository(pool) : new MemoryBackgroundRepository();
+    const claude = config.background.claude;
     this.runtime = new CodexWorkerRuntime({ ...config.background,
+      ...(claude ? { executor: new ClaudeCliExecutor({ artifactRoot: config.background.artifactRoot, claudePath: claude.path,
+        model: claude.model, apiKey: claude.apiKey, oauthToken: claude.oauthToken }) } : {}),
       ...(settings ? { runtimeSettings: () => {
         const view = settings.capture();
         return { ...view.model("background", config.background!.model), systemPrompt: view.prompt("background-worker") };

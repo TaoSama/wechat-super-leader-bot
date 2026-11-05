@@ -323,3 +323,31 @@ docker-compose --env-file /dev/null --profile wechat \
 
 旧版 actionlint（如 1.7.12）尚未识别 GitHub 新增的 `concurrency.queue`；可针对这一项
 使用 `-ignore 'unexpected key "queue"'` 检查其余规则，并以 GitHub 实际工作流解析为准。
+
+## Claude Code 后台执行器（opt-in）
+
+后台任务默认使用 Codex（`BACKGROUND_EXECUTOR` 未设置或为 `codex`）；生产镜像和
+`compose.production.yaml` 不传递 Claude 相关变量，因此合并本功能不改变生产行为。
+设置 `BACKGROUND_EXECUTOR=claude` 后，Controller 以 `claude -p` 执行后台任务：
+
+| 变量 | 说明 |
+|------|------|
+| `BACKGROUND_CLAUDE_API_KEY` / `BACKGROUND_CLAUDE_OAUTH_TOKEN` | 二选一，仅作为 `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` 注入子进程 |
+| `BACKGROUND_CLAUDE_MODEL` | 可选，未设置时使用 CLI 默认模型；控制台的后台模型设置不作用于 Claude |
+| `BACKGROUND_CLAUDE_PATH` | 可选，默认 `claude` |
+
+每轮使用 `--permission-mode dontAsk`、限定工具集、`--setting-sources user`（配置目录即隔离的
+worker home）和 `--settings`：开启 Bash sandbox 且禁止回退到非 sandbox 执行，Edit 只允许工作区，
+Read/Edit 拒绝 worker home、artifact root、`/etc/super-leader` 和 `/proc`。结构化结果用与 Codex
+相同的 schema 校验，缺失或无效即判为未验证完成；`session_id` 作为续接 ID。
+
+生产启用前需完成（均未在本仓库实现或验证）：
+
+1. 在 `deploy/Dockerfile.controller` 安装固定版本的 `@anthropic-ai/claude-code`，并安装其 Linux
+   sandbox 依赖（bubblewrap、socat）；镜像内确认 sandbox 实际生效，sandbox 不可用时不得启用。
+2. 在 `compose.production.yaml` 透传上述变量，凭证只放 `.runtime/controller.env`。
+3. 复核 seccomp 与 `super-leader-codex` AppArmor profile：bubblewrap 需要的 user namespace
+   与 mount 能力可能被当前策略拒绝，放宽前需单独评审。
+4. 用真实 CLI 核对 `--settings` 能通过校验（`-p` 模式下校验失败的设置会被静默忽略）、
+   `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` 确实从 Bash 子进程移除凭证，以及 sandbox 内 Bash 的
+   网络策略是否满足任务需要（Codex worker 允许 shell 联网）。

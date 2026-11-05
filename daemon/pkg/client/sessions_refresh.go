@@ -84,6 +84,7 @@ func (d *Daemon) cachedSessions() []protocol.Session {
 			terminals[i].SendAvailability = &availability
 		}
 	}
+	sessions = append(sessions, d.claudeSessionsLocked()...)
 	return append(sessions, terminals...)
 }
 

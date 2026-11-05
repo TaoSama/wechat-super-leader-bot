@@ -4,7 +4,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createReliabilityPostgresFixture } from "../../../tests/support/reliability-postgres.mjs";
 import { createExecution } from "../../src/leader/plans/execution.js";
 import { createTerminalNotification, normalizeNotification } from "../../src/notifications/contracts.js";
-import { initExecutionTables } from "../../src/store/execution-postgres.js";
+import { initExecutionTables, pgCreateLockedExecution } from "../../src/store/execution-postgres.js";
+import { MAX_ACTIVE_PLANS_PER_CHAT } from "../../src/leader/contracts.js";
+import { ActivePlanLimitError } from "../../src/store/interface.js";
 import { initGoalTables } from "../../src/store/goal-postgres.js";
 import { initializeDatabase } from "../../src/store/migrations.js";
 
@@ -85,7 +87,7 @@ describe.skipIf(process.env.RUN_POSTGRES_INTEGRATION !== "1" && !suppliedDatabas
     await withSchema(async pool => {
       const statements: Statement[] = [], migrationPool = traced(pool, statements);
       await Promise.all([initializeDatabase(migrationPool), initializeDatabase(migrationPool)]);
-      expect((await pool.query("SELECT version FROM controller_schema_migrations ORDER BY version")).rows).toEqual([{ version: 1 }, { version: 2 }]);
+      expect((await pool.query("SELECT version FROM controller_schema_migrations ORDER BY version")).rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
       expect(statements.filter(({ sql }) => sql.startsWith("CREATE TABLE IF NOT EXISTS leader_notifications"))).toHaveLength(1);
       await seedHistory(pool, false);
       const identities = () => pool.query(`SELECT relname,oid::text,relfilenode::text FROM pg_class
@@ -123,7 +125,7 @@ describe.skipIf(process.env.RUN_POSTGRES_INTEGRATION !== "1" && !suppliedDatabas
         FOR EACH ROW EXECUTE FUNCTION reject_session_backfill()`);
       const statements: Statement[] = [], migrationPool = traced(pool, statements);
       await expect(initializeDatabase(migrationPool)).rejects.toThrow("synthetic observation backfill failure");
-      expect((await pool.query("SELECT version FROM controller_schema_migrations ORDER BY version")).rows).toEqual([{ version: 1 }]);
+      expect((await pool.query("SELECT version FROM controller_schema_migrations ORDER BY version")).rows).toEqual([{ version: 1 }, { version: 3 }]);
       expect((await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema()
         AND table_name='known_sessions' AND column_name='observed_order'`)).rows).toEqual([]);
       expect((await pool.query("SELECT count(*)::int AS count FROM node_sessions")).rows[0].count).toBe(2);
@@ -131,13 +133,42 @@ describe.skipIf(process.env.RUN_POSTGRES_INTEGRATION !== "1" && !suppliedDatabas
       await pool.query("DROP TRIGGER reject_session_backfill ON known_sessions");
       await pool.query("DROP FUNCTION reject_session_backfill()");
       statements.length = 0; await initializeDatabase(migrationPool);
-      expect((await pool.query("SELECT version FROM controller_schema_migrations ORDER BY version")).rows).toEqual([{ version: 1 }, { version: 2 }]);
+      expect((await pool.query("SELECT version FROM controller_schema_migrations ORDER BY version")).rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
       expect((await pool.query("SELECT data FROM known_sessions ORDER BY session_id")).rows).toEqual([{ data: imported }, { data: retained }]);
       expect((await pool.query("SELECT count(*)::int AS count FROM known_sessions WHERE observed_order>0")).rows[0].count).toBe(2);
       expect((await pool.query("SELECT * FROM node_sessions")).rows).toEqual([]);
       expect(statements.filter(({ sql }) => sql.includes("leader_notifications"))).toEqual([]);
       const restart = statements.length; await initializeDatabase(migrationPool);
       expect(statements.slice(restart).filter(({ sql }) => sql.includes("known_sessions") || sql.includes("node_sessions"))).toEqual([]);
+    });
+  }, TEST_TIMEOUT_MS);
+
+  it("upgrades version 2 to multiple active plans per chat and caps concurrent creation under the chat lock", async () => {
+    await withSchema(async pool => {
+      await initializeDatabase(pool);
+      await pool.query("DELETE FROM controller_schema_migrations WHERE version=3");
+      await pool.query("DROP INDEX leader_executions_active_chat_created_idx");
+      await pool.query("CREATE UNIQUE INDEX leader_executions_active_chat_idx ON leader_executions (chat_id) WHERE status='active'");
+      const plan = (index: number, chatId = "synthetic-plan-chat") => createExecution(chatId, {
+        id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`, expiresAt: NOW + 60_000,
+        actions: [{ nodeId: "fixture", sessionId: `fixture-${index}`, prompt: "synthetic", sendRoute: "control-socket" }],
+      }, NOW + index);
+      expect((await pgCreateLockedExecution(pool, plan(1))).created).toBe(true);
+      await expect(pgCreateLockedExecution(pool, plan(2))).rejects.toMatchObject({ code: "23505" });
+      await initializeDatabase(pool);
+      expect((await pool.query("SELECT version FROM controller_schema_migrations ORDER BY version")).rows)
+        .toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
+      const indexes = (await pool.query(`SELECT indexname,indexdef FROM pg_indexes WHERE schemaname=current_schema()
+        AND tablename='leader_executions' AND indexname LIKE 'leader_executions_active_chat%'`)).rows;
+      expect(indexes.map(({ indexname }) => indexname)).toEqual(["leader_executions_active_chat_created_idx"]);
+      expect(indexes[0].indexdef).not.toContain("UNIQUE");
+      const attempts = Array.from({ length: MAX_ACTIVE_PLANS_PER_CHAT + 1 }, (_, index) => pgCreateLockedExecution(pool, plan(index + 2)));
+      const results = await Promise.allSettled(attempts);
+      expect(results.filter(result => result.status === "fulfilled")).toHaveLength(MAX_ACTIVE_PLANS_PER_CHAT - 1);
+      for (const result of results) if (result.status === "rejected") expect(result.reason).toBeInstanceOf(ActivePlanLimitError);
+      expect((await pool.query("SELECT count(*)::int AS count FROM leader_executions WHERE chat_id='synthetic-plan-chat' AND status='active'"))
+        .rows[0].count).toBe(MAX_ACTIVE_PLANS_PER_CHAT);
+      expect((await pgCreateLockedExecution(pool, plan(99, "synthetic-other-chat"))).created).toBe(true);
     });
   }, TEST_TIMEOUT_MS);
 
@@ -172,7 +203,7 @@ describe.skipIf(process.env.RUN_POSTGRES_INTEGRATION !== "1" && !suppliedDatabas
         return { ...fields, source: { type: "plan", id: executionId } };
       }));
       await expect(pool.query("UPDATE leader_notifications SET execution_id=NULL WHERE id=$1", [lastId])).rejects.toMatchObject({ code: "23514" });
-      expect((await pool.query("SELECT version FROM controller_schema_migrations ORDER BY version")).rows).toEqual([{ version: 1 }, { version: 2 }]);
+      expect((await pool.query("SELECT version FROM controller_schema_migrations ORDER BY version")).rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
     });
   }, TEST_TIMEOUT_MS);
 });

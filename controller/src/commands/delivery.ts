@@ -5,6 +5,7 @@ const ROUTE_DELIVERY_MODES: Readonly<Record<SendRoute, readonly DeliveryMode[]>>
   "app-server-resume": ["next-turn", "steer"],
   "desktop-owner": ["next-turn"],
   "terminal-pane": ["next-turn"],
+  "claude-resume": ["next-turn"],
 };
 
 /** Route support is independent of live readiness and node protocol negotiation. */

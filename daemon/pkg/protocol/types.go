@@ -31,6 +31,8 @@ var ErrTurnObservationLimit = errors.New("Turn observation exceeds the native re
 const (
 	ActionRead ActionType = "read"
 	ActionSend ActionType = "send"
+	// ActionInterrupt stops one exact running native turn; it never sends input.
+	ActionInterrupt ActionType = "interrupt"
 	// CapabilityResumeSend is an admission hint, never an executable action.
 	CapabilityResumeSend ActionType = "resume-send"
 )
@@ -193,8 +195,13 @@ func (c *ControllerCommandMessage) Validate(expectedNodeID string, now time.Time
 	if strings.TrimSpace(c.SessionID) == "" {
 		return errors.New("sessionId is required")
 	}
-	if c.Action != ActionRead && c.Action != ActionSend {
+	if c.Action != ActionRead && c.Action != ActionSend && c.Action != ActionInterrupt {
 		return fmt.Errorf("unsupported action %q", c.Action)
+	}
+	if c.Action == ActionInterrupt {
+		if err := c.validateInterrupt(); err != nil {
+			return err
+		}
 	}
 	if c.Action == ActionSend && strings.TrimSpace(c.Prompt) == "" {
 		return errors.New("prompt is required for send action")
@@ -202,7 +209,7 @@ func (c *ControllerCommandMessage) Validate(expectedNodeID string, now time.Time
 	if err := c.validateDelivery(); err != nil {
 		return err
 	}
-	if c.SendRoute != "" && (c.Action != ActionSend || (c.SendRoute != RouteControlSocket && c.SendRoute != RouteDesktopOwner && c.SendRoute != RouteTerminalPane && c.SendRoute != RouteAppServerResume)) {
+	if c.SendRoute != "" && c.Action != ActionInterrupt && (c.Action != ActionSend || (c.SendRoute != RouteControlSocket && c.SendRoute != RouteDesktopOwner && c.SendRoute != RouteTerminalPane && c.SendRoute != RouteAppServerResume && c.SendRoute != RouteClaudeResume)) {
 		return errors.New("invalid send route")
 	}
 	if c.SendRoute == RouteTerminalPane && !strings.HasPrefix(c.SessionID, "terminal:") {
@@ -210,6 +217,13 @@ func (c *ControllerCommandMessage) Validate(expectedNodeID string, now time.Time
 	}
 	if c.SendRoute == RouteAppServerResume && (!ValidHistoryIdentity(c.SessionID) || strings.HasPrefix(c.SessionID, "terminal:")) {
 		return errors.New("app-server-resume requires a native session")
+	}
+	claudeTarget := strings.HasPrefix(c.SessionID, ClaudeSessionPrefix)
+	if c.Action == ActionSend && claudeTarget != (c.SendRoute == RouteClaudeResume) {
+		return errors.New("claude-resume is the only send route for a Claude Code session")
+	}
+	if c.SendRoute == RouteClaudeResume && (!ValidHistoryIdentity(c.SessionID) || c.DeliveryMode == DeliverySteer) {
+		return errors.New("claude-resume requires a Claude Code session and next-turn delivery")
 	}
 	if len(c.Skills) > 0 && c.Action != ActionSend {
 		return errors.New("only send accepts skill references")

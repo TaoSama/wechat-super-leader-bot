@@ -197,6 +197,21 @@ test("invalid capacities and reduced restart capacity reject overflow without re
   assert.equal(fs.readFileSync(path, "utf8"), before);
 });
 
+test("unsupported content is durable with empty text only when its kinds are present", t => {
+  const { inbox, reload, path } = fixture(t);
+  const media = inbound("media", { text: "", unsupportedKinds: ["image", "voice"] });
+  inbox.put(media);
+  assert.deepEqual(reload().list(), [media]);
+  assert.throws(() => inbox.put(inbound("empty", { text: "" })), /Invalid inbound inbox string/);
+  assert.throws(() => inbox.put(inbound("text-with-kinds", { unsupportedKinds: ["file"] })), /Invalid inbound inbox string/);
+  for (const kinds of [[], ["image", "image"], ["sticker"]]) {
+    assert.throws(() => inbox.put(inbound("bad-kinds", { text: "", unsupportedKinds: kinds as never })), /unsupported kinds/);
+  }
+  fs.writeFileSync(path, JSON.stringify({ version: 1, fingerprint: "account-one",
+    items: [{ ...inbound("tampered"), text: "", unsupportedKinds: "image" }] }));
+  assert.throws(() => reload(), /unsupported kinds/);
+});
+
 test("a lock left with this process PID by a previous instance is reclaimed without waiting", t => {
   const { path, inbox, reload } = fixture(t);
   const lockPath = `${path}.lock`;

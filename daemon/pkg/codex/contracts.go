@@ -36,6 +36,13 @@ type SteerSender interface {
 	SteerPrompt(context.Context, string, string, string) (string, error)
 }
 
+// TurnInterrupter asks the runtime to stop one exact running turn. A nil error
+// means the runtime acknowledged the request; *UncertainError means it may have
+// been performed; any other error means it definitely was not.
+type TurnInterrupter interface {
+	InterruptTurn(context.Context, string, string) error
+}
+
 type HistoryReader interface {
 	ReadHistory(context.Context, string, string, int) (protocol.SessionHistory, error)
 }

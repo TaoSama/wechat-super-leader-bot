@@ -172,6 +172,9 @@ func (d *Daemon) preferredHistorySource(sessionID string) string {
 	if isTerminalSession(sessionID) {
 		return protocol.HistorySourceTerminal
 	}
+	if isClaudeSession(sessionID) {
+		return protocol.HistorySourceClaude
+	}
 	// A native paginated reader can return the latest bounded page without
 	// hydrating the desktop owner's entire conversation state first.
 	if reader, ok := d.adapter.(interface{ PagedHistoryAvailable() bool }); ok && reader.PagedHistoryAvailable() {
@@ -213,13 +216,13 @@ func (d *Daemon) readRoutedHistory(ctx context.Context, msg protocol.ReadHistory
 		return history, err
 	}
 	switch binding.source {
-	case protocol.HistorySourceDesktop, protocol.HistorySourceTerminal:
+	case protocol.HistorySourceDesktop, protocol.HistorySourceTerminal, protocol.HistorySourceClaude:
 		history, err = d.readFileOrDesktopHistory(ctx, msg, binding, cursor, limit)
 		if err != nil {
 			return history, err
 		}
 	case protocol.HistorySourceControl:
-		if isTerminalSession(msg.SessionID) {
+		if isTerminalSession(msg.SessionID) || isClaudeSession(msg.SessionID) {
 			return history, errors.New(protocol.HistoryUnavailable)
 		}
 		reader, ok := d.adapter.(codex.HistoryReader)
@@ -256,7 +259,7 @@ func (d *Daemon) readRoutedHistory(ctx context.Context, msg protocol.ReadHistory
 		return history, err
 	}
 	history.Source, history.HistoryContext = binding.source, binding.token
-	if binding.source != protocol.HistorySourceTerminal {
+	if binding.source != protocol.HistorySourceTerminal && binding.source != protocol.HistorySourceClaude {
 		d.overlayDesktopActiveHistory(msg.SessionID, &history)
 	}
 	return history, nil
@@ -293,6 +296,12 @@ func (d *Daemon) overlayDesktopActiveHistory(sessionID string, history *protocol
 func (d *Daemon) readFileOrDesktopHistory(ctx context.Context, msg protocol.ReadHistoryMessage, binding *historyBinding, cursor string, limit int) (protocol.SessionHistory, error) {
 	var history protocol.SessionHistory
 	reader := d.desktopHistory
+	if binding.source == protocol.HistorySourceClaude {
+		reader = nil
+		if d.claude != nil && isClaudeSession(msg.SessionID) {
+			reader = d.claude
+		}
+	}
 	if binding.source == protocol.HistorySourceTerminal {
 		reader = d.terminalHistory
 		available := false
@@ -345,5 +354,8 @@ func (d *Daemon) resetHistory() {
 	}
 	if d.terminalHistory != nil {
 		d.terminalHistory.Reset()
+	}
+	if d.claude != nil {
+		d.claude.Reset()
 	}
 }

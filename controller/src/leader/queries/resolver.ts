@@ -7,6 +7,7 @@ export type NLActionType =
   | "list_nodes"
   | "read_session"
   | "send_session"
+  | "interrupt_session"
   | "clarification"
   | "unknown";
 
@@ -30,6 +31,10 @@ export interface ResolverContext {
 const terminalInputRequiresConfirmation = (): NLIntent => ({ action: "unknown",
   replyText: "规则模式仅支持读取终端观测；终端非原子输入请使用模型模式生成独立单步并确认，或在控制台明确发送。输入写入不代表执行完成。" });
 
+// Requires an explicit target: a stop request is never resolved from previous context.
+const INTERRUPT_PATTERN = /^(?:请|帮我)?(?:停止|中断|终止|停掉)\s*(?:会话\s*)?(.*?)\s*(?:会话)?\s*(?:的)?\s*(?:当前|正在运行的?|正在执行的?)?\s*(?:这一轮|轮次|执行|运行|任务)?\s*[。！!]?$/i;
+const PLAN_CANCELLATION_TARGET = /^(?:后续|计划)/;
+
 const READ_VERBS = "(?:查看|读取|看看|查一下|汇报|报告|同步|讲讲|说一下|检查)";
 const READ_SUBJECTS = "(?:输出|日志|内容|情况|执行到哪|跑成什么样|结果|tail|log|进度|进展|状态)";
 const READ_QUERY_SUFFIX = `\\s*(?:的)?\\s*(?:最新)?${READ_SUBJECTS}[？?。]*$`;
@@ -51,6 +56,9 @@ export class NaturalLanguageResolver {
     // An explicit dispatch owns its task body; query words inside it are prompt content.
     const sendIntent = this.resolveSendIntent(raw, ctx);
     if (sendIntent) return sendIntent;
+
+    const interruptIntent = this.resolveInterruptIntent(raw, ctx);
+    if (interruptIntent) return interruptIntent;
 
     // 1. List / Query nodes/machines
     if (
@@ -132,6 +140,21 @@ export class NaturalLanguageResolver {
       action: "unknown",
       replyText: "当前未发现任何活跃会话，无法读取输出。可用“查看会话列表”检查接入情况。",
     };
+  }
+
+  private resolveInterruptIntent(raw: string, ctx: ResolverContext): NLIntent | null {
+    const match = raw.match(INTERRUPT_PATTERN);
+    if (!match) return null;
+    const target = match[1].trim();
+    if (PLAN_CANCELLATION_TARGET.test(target)) return null;
+    if (!target) return { action: "clarification", clarificationMessage: "请指明要停止哪个会话当前正在运行的轮次。" };
+    const targetCheck = this.findTargetSession(target, ctx);
+    if (targetCheck.explicitTargetNotFound) {
+      return { action: "unknown", replyText: `未找到指定的目标 '${targetCheck.explicitTargetNotFound}'，未发送停止请求。` };
+    }
+    if (targetCheck.clarificationMessage) return { action: "clarification", clarificationMessage: targetCheck.clarificationMessage };
+    if (!targetCheck.session) return null;
+    return { action: "interrupt_session", nodeId: targetCheck.session.nodeId, sessionId: targetCheck.session.id };
   }
 
   private resolveSendIntent(raw: string, ctx: ResolverContext): NLIntent | null {

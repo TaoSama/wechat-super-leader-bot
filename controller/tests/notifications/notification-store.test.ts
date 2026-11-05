@@ -67,6 +67,9 @@ class NotificationPool {
       this.executions.set(record.id, row);
       return this.result([row]);
     }
+    if (query === "SELECT count(*)::int AS count FROM leader_executions WHERE chat_id=$1 AND status='active'") {
+      return { rows: [{ count: [...this.executions.values()].filter(row => row.chat_id === params[0] && row.status === "active").length }] };
+    }
     if (query.startsWith("SELECT * FROM leader_executions WHERE id=$1")) {
       const row = this.executions.get(params[0] as string);
       return this.result(row ? [row] : []);

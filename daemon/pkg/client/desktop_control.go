@@ -21,6 +21,12 @@ func (d *Daemon) sendPrompt(ctx context.Context, cmd protocol.ControllerCommandM
 	if isTerminalSession(cmd.SessionID) {
 		return "", errors.New("terminal sessions are read-only; no input was sent")
 	}
+	if isClaudeSession(cmd.SessionID) || cmd.SendRoute == protocol.RouteClaudeResume {
+		if !isClaudeSession(cmd.SessionID) || cmd.SendRoute != protocol.RouteClaudeResume || cmd.DeliveryMode == protocol.DeliverySteer {
+			return "", errors.New("Claude Code sessions accept only next-turn claude-resume sends; no input sent")
+		}
+		return d.sendClaude(ctx, cmd, prompt)
+	}
 	if cmd.DeliveryMode == protocol.DeliverySteer {
 		return d.steerPrompt(ctx, cmd, prompt)
 	}
@@ -86,6 +92,12 @@ func (d *Daemon) turnInspector(msg protocol.InspectTurnMessage) (codex.TurnInspe
 					return nil, errors.New("original control adapter cannot inspect turns")
 				}
 				return inspector, nil
+			}
+			if identity.Route == protocol.RouteClaudeResume {
+				if d.claude == nil || identity.Endpoint != d.claude.Endpoint() {
+					return nil, errors.New("original Claude Code executable unavailable")
+				}
+				return d.claude, nil
 			}
 			if identity.Route == protocol.RouteAppServerResume {
 				sender, ok := d.adapter.(codex.ResumeSender)

@@ -52,6 +52,10 @@ func daemonServiceArgs(binPath string, cfg *config.Config, tokenFilePath string)
 		args = append(args, "--terminal-send-mode", cfg.TerminalSendMode)
 	}
 	args = append(args, config.TerminalHistoryArgs(cfg.TerminalHistoryRoots)...)
+	if cfg.ClaudeProjectsRoot != "" {
+		args = append(args, "--claude-projects-root", cfg.ClaudeProjectsRoot, "--claude-path", cfg.ClaudePath,
+			"--claude-permission-mode", cfg.ClaudePermissionMode)
+	}
 	for _, root := range cfg.SkillRoots {
 		args = append(args, "--skill-root", root)
 	}

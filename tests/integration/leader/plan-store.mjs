@@ -14,6 +14,7 @@ export async function verifyPlanStore({ stores, reopenStore }) {
   assert.equal(stores.length, 2, 'Two independent PostgreSQL clients are required');
   assert.equal(typeof reopenStore, 'function', 'A new-store factory is required for reconnect verification');
   const { createExecution, EXECUTION_CLAIM_MS } = await import('../../../controller/dist/leader/plans/execution.js');
+  const { MAX_ACTIVE_PLANS_PER_CHAT } = await import('../../../controller/dist/leader/contracts.js');
   const fixtureTag = randomUUID();
   const tracked = new Map();
   let reopened, failure;
@@ -41,16 +42,16 @@ export async function verifyPlanStore({ stores, reopenStore }) {
     assert.deepEqual((await stores[1].createExecutionIfAbsent(retry)).execution, original, 'Retry reset authorization timestamps');
     const different = make('other-plan');
     different.chatId = original.chatId;
-    await assert.rejects(stores[1].createExecutionIfAbsent(different), { name: 'ConflictError' });
+    assert.equal((await stores[1].createExecutionIfAbsent(different)).created, true, 'Second distinct plan in one chat must be admitted');
     await assert.rejects(stores[1].createExecutionIfAbsent({ ...original, chatId: `${original.chatId}-other` }), { name: 'ConflictError' });
     const editedPlan = structuredClone(original);
     editedPlan.plan.actions[0].prompt = 'edited confirmed plan';
     await assert.rejects(stores[1].createExecutionIfAbsent(editedPlan), { name: 'ConflictError' });
 
-    const contenders = [make('chat-race'), make('chat-race')];
-    const raced = await Promise.allSettled(stores.map((store, index) => store.createExecutionIfAbsent(contenders[index])));
-    assert.equal(raced.filter(result => result.status === 'fulfilled').length, 1, 'Distinct plans in one chat must have one active winner');
-    for (const result of raced) if (result.status === 'rejected') assert.equal(result.reason.name, 'ConflictError');
+    const contenders = Array.from({ length: MAX_ACTIVE_PLANS_PER_CHAT + 2 }, () => make('chat-race'));
+    const raced = await Promise.allSettled(contenders.map((execution, index) => stores[index % stores.length].createExecutionIfAbsent(execution)));
+    assert.equal(raced.filter(result => result.status === 'fulfilled').length, MAX_ACTIVE_PLANS_PER_CHAT, 'Concurrent plans in one chat must stop at the active plan cap');
+    for (const result of raced) if (result.status === 'rejected') assert.equal(result.reason.name, 'ActivePlanLimitError');
     const activeRace = await stores[0].getLatestExecution(contenders[0].chatId);
     assert.equal(activeRace.status, 'active');
     assert(contenders.some(execution => execution.id === activeRace.id));

@@ -1,6 +1,7 @@
 import { type CommandAuthority, type CommandRecord, type PostCommandRequest, type SendRoute, type Session } from "../types.js";
 import { sameSkillRefs } from "../skills/catalog.js";
 import { selectSendRoute } from "../sessions/send-eligibility.js";
+import { isClaudeCodeSession, isClaudeSessionId } from "../sessions/claude.js";
 
 export const QUEUE_BATCH_SIZE = 64;
 export const QUEUE_TICK_MS = 1000;
@@ -18,6 +19,10 @@ export function queueSendRoute(session: Session, expected?: SendRoute): SendRout
   if (live.ready) return !expected || live.route === expected ? live.route : undefined;
   let route: SendRoute | undefined;
   if (session.id.startsWith("terminal:") || session.provider.startsWith("terminal")) return undefined;
+  if (isClaudeSessionId(session.id) || session.provider === "claude-code") {
+    route = isClaudeCodeSession(session) && session.capabilities.includes("resume-send") ? "claude-resume" : undefined;
+    return !expected || route === expected ? route : undefined;
+  }
   if (session.sendAvailability?.route === "desktop-owner") route = "desktop-owner";
   else if (expected === "app-server-resume" && session.loaded === true &&
     ["active", "waitingApproval", "waitingUserInput"].includes(session.status) && session.capabilities.includes("resume-send")) route = expected;
