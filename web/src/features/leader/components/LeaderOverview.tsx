@@ -65,7 +65,7 @@ export function LeaderOverview({ data, nodes, selectedNodeId, onSelectNodeId, on
       })}
     </div>
     <div className="leader-grid">
-      {data.goals.items.length > 0 && <GoalsSection goals={data.goals} sessions={data.sessions} selectedNodeId={selectedNodeId} schedulerEnabled={mode === "model"} onOpenSession={onOpenSession} />}
+      <GoalsSection goals={data.goals} sessions={data.sessions} selectedNodeId={selectedNodeId} schedulerEnabled={mode === "model"} onOpenSession={onOpenSession} />
       <ExecutionsSection executions={data.executions} sessions={data.sessions} selectedNodeId={selectedNodeId} schedulerEnabled={mode === "model"} onOpenSession={onOpenSession} />
       <DeliveriesSection items={data.deliveries ?? []} />
       <div className="leader-command-anchor" ref={commandsRef} tabIndex={-1} aria-label="指令动态">

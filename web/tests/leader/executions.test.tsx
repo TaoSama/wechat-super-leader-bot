@@ -30,7 +30,7 @@ it("counts only exact completion and keeps ordered cross-machine predecessors wh
   expect(card).toHaveTextContent("依赖步骤 1 · 仅精确完成才解锁");
   fireEvent.click(within(card).getByRole("button", { name: "打开计划步骤 2 的会话 mini / same-session" }));
   expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(sessions[1]);
-  expect(within(card).queryByRole("button", { name: /取消|确认|重试|重发/ })).toBeNull();
+  expect(within(card).queryAllByRole("button", { name: /取消|确认|重试|重发/ }).map(button => button.textContent)).toEqual(["取消计划", "修改（取消后重建）"]);
 });
 it("explains uncertainty and pauses the whole plan without inventing completion or resend actions", () => {
   const plan = executionFixture(); plan.steps[0].status = "uncertain";
@@ -94,9 +94,10 @@ it("places plans before commands and distinguishes empty-window from a filter wi
   const { container, rerender } = render(<LeaderOverview data={data} nodes={[]} selectedNodeId={null}
     onSelectNodeId={vi.fn()} onOpenSession={vi.fn()} onBrowseSessions={vi.fn()} />);
   const headings = [...container.querySelectorAll(".leader-grid h2")];
-  expect(headings[0]).toHaveTextContent("任务计划");
-  expect(headings[1]).toHaveTextContent("成果交付");
-  expect(headings[2]).toHaveTextContent("指令动态");
+  expect(headings[0]).toHaveTextContent("持续目标");
+  expect(headings[1]).toHaveTextContent("任务计划");
+  expect(headings[2]).toHaveTextContent("成果交付");
+  expect(headings[3]).toHaveTextContent("指令动态");
   rerender(<ExecutionsSection executions={data.executions} sessions={sessions} selectedNodeId="other" schedulerEnabled={true} onOpenSession={vi.fn()} />);
   expect(screen.getByText("当前窗口没有包含这台机器的计划")).toBeInTheDocument();
   rerender(<ExecutionsSection executions={emptyExecutions()} sessions={sessions} selectedNodeId={null} schedulerEnabled={true} onOpenSession={vi.fn()} />);

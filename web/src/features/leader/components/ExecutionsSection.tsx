@@ -1,6 +1,11 @@
-import { ArrowUpRight, ChevronDown, ListChecks } from "lucide-react";
+import { useState } from "react";
+import { ArrowUpRight, ChevronDown, ListChecks, Plus } from "lucide-react";
 import type { ConsoleExecution, ConsoleExecutionStep, ConsoleExecutions, ScopedSession } from "../../../types";
 import { formatTimestamp } from "../../../format";
+import type { AuthorizationReceipt } from "../../../api/authorizations";
+import { planDraftFromExecution, truncatedPlanSteps } from "../authorization-forms";
+import { PlanForm } from "./PlanForm";
+import { AuthorizationCancel } from "./AuthorizationCancel";
 
 interface Props {
   executions: ConsoleExecutions;
@@ -55,11 +60,23 @@ function ResultSources({ step }: { step: ConsoleExecutionStep }) {
   </div>;
 }
 
+type PlanFormState = { mode: "new" } | { mode: "edit" | "copy"; plan: ConsoleExecution };
+
 export function ExecutionsSection({ executions, sessions, selectedNodeId, schedulerEnabled, onOpenSession }: Props) {
+  const [form, setForm] = useState<PlanFormState | null>(null);
+  const [notice, setNotice] = useState<string>();
+  const done = (receipt: AuthorizationReceipt) => { setForm(null); setNotice(receipt.message); };
   const plans = executions.items.filter(plan => !selectedNodeId || plan.steps.some(step => step.nodeId === selectedNodeId));
   return <section className="execution-section" aria-labelledby="executions-heading">
     <div className="section-heading"><div><p className="eyebrow">CONFIRMED PLANS</p><h2 id="executions-heading">任务计划 <span>{plans.length}</span></h2></div><ListChecks size={22} aria-hidden="true" /></div>
-    <p className="section-description">最多 {executions.limit} 条 · 进行中优先 · 快照 {time(executions.observedAt)}。仅展示已确认计划；确认、取消仍在发起计划的微信聊天中进行。</p>
+    <p className="section-description">最多 {executions.limit} 条 · 进行中优先 · 快照 {time(executions.observedAt)}。仅展示已确认计划；可在此新建、取消或重建本聊天的计划，进度通知仍发送到微信。</p>
+    {!form && <button type="button" className="ui-button secondary" onClick={() => { setNotice(undefined); setForm({ mode: "new" }); }}><Plus size={14} aria-hidden="true" />新建计划</button>}
+    {notice && <p className="execution-window" role="status">{notice}</p>}
+    {form && <PlanForm key={form.mode === "new" ? "new" : `${form.mode}-${form.plan.id}`} sessions={sessions}
+      initial={form.mode === "new" ? undefined : planDraftFromExecution(form.plan)}
+      replacingId={form.mode === "edit" ? form.plan.id : undefined}
+      truncatedSteps={form.mode === "new" ? [] : truncatedPlanSteps(form.plan)}
+      onDone={done} onClose={() => setForm(null)} />}
     {executions.hasMore && <p className="execution-window" role="note">还有更多计划未显示；当前是最多 {executions.limit} 条的窗口，不是全部历史。</p>}
     {!schedulerEnabled && <p className="execution-window" role="note">调度未启用；当前模式不自动推进计划，已有回执保持原状态。</p>}
     {selectedNodeId && <p className="execution-filter-note">筛选包含 {selectedNodeId} 的计划；跨机步骤及其前驱完整保留。</p>}
@@ -82,6 +99,11 @@ export function ExecutionsSection({ executions, sessions, selectedNodeId, schedu
           <span className="execution-expand-label">展开有序步骤与依赖</span>
         </summary>
           <div className="execution-content"><p className="execution-plan-id">计划 {plan.id}</p>
+            <div className="authorization-actions">
+              {plan.status === "active" && <AuthorizationCancel kind="plan" id={plan.id} onDone={done} />}
+              <button type="button" className="ui-button ghost" onClick={() => { setNotice(undefined); setForm({ mode: plan.status === "active" ? "edit" : "copy", plan }); }}>
+                {plan.status === "active" ? "修改（取消后重建）" : "复制为新计划"}</button>
+            </div>
             {completionUnverified && <p className="execution-caution">持久状态与步骤回执尚未一致，不能确认计划完成；请核验原回执。</p>}
             {paused && <p className="execution-caution">{paused}</p>}
             <ol className="execution-steps">{plan.steps.map(step => {

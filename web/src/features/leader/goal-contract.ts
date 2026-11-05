@@ -7,6 +7,8 @@ export interface ConsoleGoalAction {
 export interface ConsoleGoal {
   id: string; status: GoalStatus; objective: string; objectiveTruncated: boolean; createdAt: number; expiresAt: number;
   maxActions: number; maxDecisions: number; decisionAttempts: number; reason: string;
+  /** Authorized duration; prefills a cancel-and-recreate form. Older controllers omit it. */
+  durationMinutes?: number;
   targets: { nodeId: string; sessionId: string }[];
   criteria: { index: number; text: string; supported: boolean; actions: number[] }[];
   actions: ConsoleGoalAction[];
@@ -14,7 +16,8 @@ export interface ConsoleGoal {
 export interface ConsoleGoals { observedAt: number; limit: 12; hasMore: boolean; items: ConsoleGoal[] }
 const STATUS = new Set(["active", "blocked", "completed", "cancelled", "expired"]);
 const ACTION_STATUS = new Set(["waiting", "claimed", "queued", "pending", "accepted", "completed", "failed", "uncertain", "blocked", "cancelled", "expired"]);
-const GOAL_LIMIT = 12, ACTION_LIMIT = 12, DECISION_LIMIT = 24, TEXT_LIMIT = 512;
+export const ACTION_LIMIT = 12, DECISION_LIMIT = 24, DURATION_LIMIT_MINUTES = 1440;
+const GOAL_LIMIT = 12, TEXT_LIMIT = 512;
 const MAX_DATE_MS = 8_640_000_000_000_000;
 const fail = (): never => { throw new Error("持续目标状态格式无效，无法确认目标进度"); };
 const record = (raw: unknown, keys: string[]): Record<string, unknown> => {
@@ -40,7 +43,7 @@ function indices(raw: unknown, minLength: number, maxLength: number, maxIndex: n
   return result;
 }
 function parseGoal(raw: unknown): ConsoleGoal {
-  const goal = record(raw, ["id", "status", "objective", "objectiveTruncated", "createdAt", "expiresAt", "maxActions", "maxDecisions", "decisionAttempts", "reason", "targets", "criteria", "actions"]);
+  const goal = record(raw, ["id", "status", "objective", "objectiveTruncated", "createdAt", "expiresAt", "maxActions", "maxDecisions", "decisionAttempts", "reason", "targets", "criteria", "actions", "durationMinutes"]);
   const id = text(goal.id, 1, 36), status = text(goal.status, 1, 16) as GoalStatus;
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id) || !STATUS.has(status)) return fail();
   const createdAt = integer(goal.createdAt, 0, MAX_DATE_MS), expiresAt = integer(goal.expiresAt, 0, MAX_DATE_MS);
@@ -74,7 +77,8 @@ function parseGoal(raw: unknown): ConsoleGoal {
   });
   return { id, status, objective: text(goal.objective, 1, TEXT_LIMIT), objectiveTruncated: bool(goal.objectiveTruncated),
     createdAt, expiresAt, maxActions, maxDecisions, decisionAttempts: integer(goal.decisionAttempts, 0, maxDecisions),
-    reason: text(goal.reason, 1, 1000), targets, criteria, actions };
+    reason: text(goal.reason, 1, 1000), targets, criteria, actions,
+    ...(goal.durationMinutes === undefined ? {} : { durationMinutes: integer(goal.durationMinutes, 1, DURATION_LIMIT_MINUTES) }) };
 }
 /** Both transports require this projection; missing data never means zero active goals. */
 export function parseConsoleGoals(raw: unknown): ConsoleGoals {
