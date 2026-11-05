@@ -246,7 +246,9 @@ export class ILinkClient {
       const content = parseInboundContent(itemList);
       if (!content) continue;
       // Legacy deterministic IDs hashed only the sender's text; unsupported content hashes its kinds.
-      const identityText = content.unsupportedKinds ? `unsupported:${content.unsupportedKinds.join(",")}` : content.ownText;
+      // Media-only messages hash their CDN references so distinct pictures stay distinct.
+      const identityText = content.unsupportedKinds ? `unsupported:${content.unsupportedKinds.join(",")}`
+        : content.ownText || `media:${crypto.createHash("sha256").update(JSON.stringify(content.media ?? [])).digest("hex")}`;
 
       const contextToken = typeof msg.context_token === "string" && msg.context_token ? msg.context_token : undefined;
 
@@ -293,6 +295,7 @@ export class ILinkClient {
         contextToken,
         createdAtMs,
         ...(content.unsupportedKinds ? { unsupportedKinds: content.unsupportedKinds } : {}),
+        ...(content.media ? { media: content.media } : {}),
       });
     }
 

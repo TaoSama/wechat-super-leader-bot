@@ -19,6 +19,7 @@ export function publicCommand(command: CommandRecord): PublicCommand {
     deliveryMode: command.deliveryMode, expectedTurnId: command.expectedTurnId,
     approvalRequestId: command.approvalRequestId, approvalDecision: command.approvalDecision,
     expiresAt: command.expiresAt, createdAt: command.createdAt, updatedAt: command.updatedAt,
+    ...(command.attachments ? { attachments: command.attachments } : {}),
   };
 }
 

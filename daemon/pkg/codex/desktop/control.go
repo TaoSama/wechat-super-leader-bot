@@ -218,7 +218,7 @@ func (p *preparedDesktopSend) Dispatch(ctx context.Context, prompt string) (stri
 	}
 	params := map[string]any{"conversationId": p.identity.SessionID, "turnStart": map[string]any{
 		"request": map[string]any{"threadId": p.identity.SessionID, "clientUserMessageId": p.identity.ClientUserMessageID,
-			"input": []any{map[string]any{"type": "text", "text": prompt, "text_elements": []any{}}}},
+			"input": codex.TurnInput(ctx, map[string]any{"type": "text", "text": prompt, "text_elements": []any{}})},
 		"context": map[string]any{"inheritThreadSettings": true, "useUserMessageAdmission": false},
 	}}
 	response, writeAttempted, err := p.targeted(ctx, desktopStartTurn, 2, p.identity.RequestID, params)

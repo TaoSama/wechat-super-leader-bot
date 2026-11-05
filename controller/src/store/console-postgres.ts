@@ -26,9 +26,6 @@ export async function initConsoleAuthTables(client: pg.PoolClient): Promise<void
       expires_at TIMESTAMPTZ NOT NULL
     );
   `);
-  // Additive and nullable: links issued before chat binding keep working read-only.
-  await client.query("ALTER TABLE console_links ADD COLUMN IF NOT EXISTS chat_id TEXT;");
-  await client.query("ALTER TABLE console_sessions ADD COLUMN IF NOT EXISTS chat_id TEXT;");
   await client.query(
     "CREATE INDEX IF NOT EXISTS console_links_expires_at_idx ON console_links (expires_at);"
   );

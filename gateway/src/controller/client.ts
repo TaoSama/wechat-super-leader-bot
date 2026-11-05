@@ -6,6 +6,8 @@ import { CHAT_AUTHORIZATION_TIMEOUT_MS, DEFAULT_CONTROLLER_TIMEOUT_MS, DEFAULT_C
 import { NotificationClient } from "./notification-client.js";
 import { NOTIFICATION_TIMEOUT_MS, type NotificationDeferReason } from "./notification-contract.js";
 import { downloadControllerImage } from "./image-client.js";
+import { uploadInboundAttachment, type StoredAttachmentReference } from "./attachment-client.js";
+import type { DownloadedMedia } from "../wechat/cdn-download.js";
 import type { ImageAttachment } from "../wechat/media-delivery.js";
 import { getControllerMessageReply, parseControllerReply } from "./reply-client.js";
 import { ControllerDirectTools, type ControllerToolCall } from "./direct-tools.js";
@@ -99,6 +101,11 @@ export class ControllerClient {
   public downloadImage(request: { chatId: string; messageId: string; image: ImageAttachment }, signal?: AbortSignal): Promise<Buffer> {
     return downloadControllerImage({ baseUrl: this.baseUrl, token: this.token, fetchImpl: this.fetchImpl,
       timeoutMs: this.timeoutMs }, request, signal);
+  }
+
+  public uploadAttachment(request: { chatId: string; messageId: string; ordinal: number; media: DownloadedMedia },
+    signal?: AbortSignal): Promise<StoredAttachmentReference> {
+    return uploadInboundAttachment({ baseUrl: this.baseUrl, token: this.token, fetchImpl: this.fetchImpl }, request, signal);
   }
 
   public async assertChatAllowed(chatId: string): Promise<void> {

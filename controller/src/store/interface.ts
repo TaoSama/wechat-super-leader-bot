@@ -7,6 +7,7 @@ import type { ExecutionConfirmationAuthority } from "../leader/plans/confirmatio
 import type { Notification, StoredNotification, NotificationReceiptStatus, NotificationDeferReason, NotificationSource } from "../notifications/contracts.js";
 import type { GoalRecord, GoalConfirmationAuthority, CreateGoalResult } from "../leader/goals/goal.js";
 import type { MessageImageStore } from "../sessions/message-images.js";
+import type { InboundAttachmentStore } from "../sessions/inbound-attachments.js";
 import type { CommandSummary } from "../commands/public.js";
 import {
   ConsoleLinkRecord,
@@ -43,7 +44,7 @@ export interface CreateCommandResult {
   command: CommandRecord;
 }
 
-export interface IStore extends IConsoleAuthStore, MessageImageStore {
+export interface IStore extends IConsoleAuthStore, MessageImageStore, InboundAttachmentStore {
   init(): Promise<void>;
   close(): Promise<void>;
 

@@ -41,6 +41,7 @@ type steerFixture struct {
 	fallbacks   atomic.Int32
 	ackMode     string
 	result      map[string]any
+	images      []string
 }
 
 func newSteerFixture(t *testing.T, fixture *steerFixture) string {
@@ -140,10 +141,11 @@ func (f *steerFixture) serve(t *testing.T, conn *websocket.Conn) {
 			result = map[string]any{"thread": map[string]any{"id": steerSessionID, "status": map[string]any{"type": "active"}}}
 		case "turn/steer":
 			f.steers.Add(1)
-			want := map[string]any{
-				"threadId": steerSessionID, "expectedTurnId": steerTurnID,
-				"input": []any{map[string]any{"type": "text", "text": steerPrompt}},
+			input := []any{map[string]any{"type": "text", "text": steerPrompt}}
+			for _, path := range f.images {
+				input = append(input, map[string]any{"type": "localImage", "path": path})
 			}
+			want := map[string]any{"threadId": steerSessionID, "expectedTurnId": steerTurnID, "input": input}
 			if !reflect.DeepEqual(request.Params, want) {
 				t.Errorf("turn/steer parameters = %#v, want %#v", request.Params, want)
 				return
@@ -218,6 +220,18 @@ func TestSteerPromptNativeProtocolAndNoFallback(t *testing.T) {
 					fixture.connections.Load(), fixture.steers.Load(), fixture.fallbacks.Load())
 			}
 		})
+	}
+}
+
+func TestSteerPromptCarriesLocalImagesAfterText(t *testing.T) {
+	images := []string{"/private/attachments/1-image.png"}
+	fixture := &steerFixture{result: map[string]any{"turnId": steerTurnID}, images: images}
+	adapter := NewAppServerAdapter(newSteerFixture(t, fixture))
+	adapter.rpcTimeout = steerRPCTimeout
+	ctx, cancel := context.WithTimeout(codex.WithLocalImages(context.Background(), images), steerFixtureTimeout)
+	defer cancel()
+	if turnID, err := adapter.SteerPrompt(ctx, steerSessionID, steerPrompt, steerTurnID); err != nil || turnID != steerTurnID {
+		t.Fatalf("turn=%q err=%v", turnID, err)
 	}
 }
 

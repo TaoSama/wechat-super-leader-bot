@@ -6,6 +6,7 @@ import { ILinkClient } from "./wechat/client.js";
 import { isRejectedSendReceipt } from "./wechat/send-receipt.js";
 import { ControllerClient, ChatNotAllowedError } from "./controller/client.js";
 import { PermanentImageDownloadError } from "./controller/image-client.js";
+import { downloadInboundMedia } from "./wechat/cdn-download.js";
 import { PermanentReplyUnavailableError } from "./controller/reply-client.js";
 import { DEFAULT_MESSAGE_MAX_CHARS } from "./wechat/markdown.js";
 import { HealthTracker, sanitizeErrorType } from "./runtime/health.js";
@@ -31,7 +32,9 @@ import { QueryProgress, MAX_PROGRESS_CHARS, type ProgressSink } from "./leader/p
 import { rememberNotificationStage } from "./runtime/request-diagnostics.js";
 import { NotificationCycleDiagnostics } from "./runtime/notification-diagnostics.js";
 
-export const UNSUPPORTED_MEDIA_REPLY = "目前只支持文字和语音消息，图片、文件、视频等内容暂时无法处理，请改用文字描述。";
+export const UNSUPPORTED_MEDIA_REPLY = "暂时无法处理这条消息。目前支持文字、语音、图片和文件，视频等内容暂不支持；如果发送的是图片或文件，可能是接收失败，请稍后重发或改用文字描述。";
+/** Appended to text when its attached media could not be stored, so the leader does not assume it exists. */
+export const MEDIA_FAILED_NOTE = "\n（用户随消息发送的图片或文件未能接收，请勿假设已收到附件。）";
 const MIN_NOTIFICATION_INTERVAL_MS = 1;
 const NOTIFICATION_INTEREST_CACHE_MS = 30_000;
 
@@ -87,6 +90,7 @@ export class WeChatGateway {
   private replyOutboxCursor = 0;
   private readonly notificationAbort = new AbortController();
   private readonly notificationDiagnostics?: NotificationCycleDiagnostics;
+  private readonly mediaFetch?: typeof fetch;
 
   constructor(options: {
     stateManager: StateManager;
@@ -98,7 +102,10 @@ export class WeChatGateway {
     resultClient?: ResultClient;
     resultOutbox?: FileResultOutbox;
     notificationDiagnostics?: NotificationCycleDiagnostics;
+    /** CDN fetch for inbound media; defaults to the global fetch. */
+    mediaFetch?: typeof fetch;
   }) {
+    this.mediaFetch = options.mediaFetch;
     this.notificationDiagnostics = options.notificationDiagnostics;
     this.replyEngine = options.replyEngine;
     this.stateManager = options.stateManager;
@@ -111,8 +118,8 @@ export class WeChatGateway {
     this.inboundRunner = new InboundRunner({ inbox: this.inbox,
       process: msg => runWithTrace(createMessageTrace(msg.chatId, msg.messageId), async () => { await this.processMessage(msg); }),
       steer: async msg => {
-        // Unsupported content waits for the running turn and then gets its own notice.
-        if (msg.unsupportedKinds?.length) return false;
+        // Unsupported content gets its own notice; media must be stored before any leader sees it.
+        if (msg.unsupportedKinds?.length || msg.media?.length) return false;
         await this.queryStarts.get(msg.chatId);
         return this.replyEngine?.steer?.(this.stateManager.account!.accountId,
           { chatId: msg.chatId, messageId: msg.messageId, text: msg.text }, this.controller) ?? false;
@@ -366,9 +373,18 @@ export class WeChatGateway {
         await this.flushRepliesOnce(undefined, msg.chatId);
         this.stateManager.assertOutboxCapacity(msg.deliveryKey);
       }
-      if (msg.unsupportedKinds?.length) {
+      const mediaStored = msg.media?.length ? await this.storeInboundMedia(msg) : true;
+      if (msg.media?.length && !msg.text && mediaStored) {
+        // An attachment alone is held as chat context for the next text; no reply spends the send budget.
         ready();
-        traceEvent("message.unsupported", { reason: msg.unsupportedKinds.join(",") });
+        this.stateManager.recordProcessedMessageKey(msg.deliveryKey, { preserveReplyEvidence: true });
+        outcome = "processed";
+        this.healthTracker?.recordMessageProgress();
+        return outcome;
+      }
+      if (msg.unsupportedKinds?.length || !mediaStored && !msg.text) {
+        ready();
+        traceEvent("message.unsupported", { reason: msg.unsupportedKinds?.join(",") ?? "media_unavailable" });
         // The fixed notice is durable like any reply, so restart recovery resends it without duplicates.
         this.stateManager.putOutbox({ kind: "reply", source: "unsupported-media", chatId: msg.chatId, messageId: msg.messageId,
           deliveryKey: msg.deliveryKey, splitMaxChars: this.splitMaxChars, status: "pending" });
@@ -379,7 +395,7 @@ export class WeChatGateway {
         return outcome;
       }
       this.ilink.sendTyping(msg.chatId);
-      const request = { chatId: msg.chatId, messageId: msg.messageId, text: msg.text };
+      const request = { chatId: msg.chatId, messageId: msg.messageId, text: mediaStored ? msg.text : msg.text + MEDIA_FAILED_NOTE };
       const progress = this.progressSink(msg.chatId);
       const queryProgress = new QueryProgress(request, progress);
       let source: DeliveryOutboxItem["source"] = this.replyEngine ? "engine" : "controller";
@@ -435,6 +451,23 @@ export class WeChatGateway {
       if (this.queryStarts.get(msg.chatId) === starting) this.queryStarts.delete(msg.chatId);
       traceEvent("message.processing.end", { outcome });
       this.activeInboundChats.delete(msg.chatId);
+    }
+  }
+
+  /** Stores every attachment of one message, or reports false so the sender gets a notice. Aborted only by stop(). */
+  private async storeInboundMedia(msg: InboundWeChatMessage): Promise<boolean> {
+    try {
+      for (const [ordinal, ref] of (msg.media ?? []).entries()) {
+        const media = await traceSpan("message.media.download", () => downloadInboundMedia(ref,
+          { fetchImpl: this.mediaFetch, signal: this.notificationAbort.signal }), { kind: ref.kind });
+        await traceSpan("message.media.store", () => this.controller.uploadAttachment({ chatId: msg.chatId,
+          messageId: msg.messageId, ordinal, media }, this.notificationAbort.signal));
+      }
+      return true;
+    } catch (error) {
+      if (this.notificationAbort.signal.aborted) throw error;
+      traceEvent("message.media.failed", { reason: sanitizeErrorType(error) });
+      return false;
     }
   }
 

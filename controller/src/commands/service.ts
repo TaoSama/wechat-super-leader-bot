@@ -87,6 +87,10 @@ export class CommandService {
       return (await this.store.getCommand(previous.commandId))!;
     }
     if (request.action === "interrupt" || request.action === "approve") return this.submitInterrupt(request, waitMs, assertDispatchAllowed, authority);
+    // Attachment bytes are only readable through the owning chat; other authorities cannot carry them.
+    if (request.attachments?.length && authority.type !== "chat" && authority.type !== "plan") {
+      throw new CommandError(403, "Attachments require chat or plan authorization");
+    }
     let sendRoute: SendRoute | undefined;
     let readyAtSubmission = false;
     if (request.action === "send") {
@@ -254,7 +258,8 @@ export class CommandService {
       const delivery = await this.hub.sendCommand({type:"command",commandId:record.commandId,nodeId:record.nodeId,sessionId:record.sessionId,
         action:record.action,prompt:record.prompt,expiresAt:record.expiresAt,skills:record.skills,...(record.sendRoute ? {sendRoute:record.sendRoute}:{}),
         ...(record.deliveryMode ? {deliveryMode:record.deliveryMode}:{}),...(record.expectedTurnId ? {expectedTurnId:record.expectedTurnId}: {}),
-        ...(record.approvalRequestId ? {approvalRequestId:record.approvalRequestId,approvalDecision:record.approvalDecision}: {})}, transmission.signal);
+        ...(record.approvalRequestId ? {approvalRequestId:record.approvalRequestId,approvalDecision:record.approvalDecision}: {}),
+        ...(record.attachments?.length ? {attachments:record.attachments}:{})}, transmission.signal);
       if (!delivery.delivered) await this.store.updateCommandStatus(record.commandId,delivery.rejected ? "failed" : "uncertain",undefined,
         delivery.rejected ? delivery.error : "Transport did not confirm command delivery");
       else if (waitMs>0) await waiter.wait();

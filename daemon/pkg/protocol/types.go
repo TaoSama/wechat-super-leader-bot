@@ -92,6 +92,8 @@ type DaemonHelloMessage struct {
 	Sessions      []Session      `json:"sessions"`
 	Skills        []skills.Skill `json:"skills"`
 	DeliveryModes []DeliveryMode `json:"deliveryModes,omitempty"`
+	// InputAttachments advertises that send commands may carry attachments.
+	InputAttachments bool `json:"inputAttachments,omitempty"`
 }
 
 // DaemonHeartbeatMessage: {type:"heartbeat",sessions:[Session]}
@@ -148,6 +150,8 @@ type ControllerCommandMessage struct {
 	// Approval fields are only valid for ActionApprove.
 	ApprovalRequestID string `json:"approvalRequestId,omitempty"`
 	ApprovalDecision  string `json:"approvalDecision,omitempty"`
+	// Attachments are part of the durable payload identity.
+	Attachments []CommandAttachment `json:"attachments,omitempty"`
 }
 
 // ParseExpiry parses ExpiresAt in RFC3339Nano or RFC3339 format.
@@ -220,6 +224,9 @@ func (c *ControllerCommandMessage) Validate(expectedNodeID string, now time.Time
 	if err := c.validateDelivery(); err != nil {
 		return err
 	}
+	if err := c.validateAttachments(); err != nil {
+		return err
+	}
 	if c.SendRoute != "" && c.Action != ActionInterrupt && c.Action != ActionApprove && (c.Action != ActionSend || (c.SendRoute != RouteControlSocket && c.SendRoute != RouteDesktopOwner && c.SendRoute != RouteTerminalPane && c.SendRoute != RouteAppServerResume && c.SendRoute != RouteClaudeResume)) {
 		return errors.New("invalid send route")
 	}
@@ -269,6 +276,9 @@ func (c *ControllerCommandMessage) PayloadFingerprint() string {
 	}
 	if c.ApprovalRequestID != "" || c.ApprovalDecision != "" {
 		fields = append(fields, c.ApprovalRequestID, c.ApprovalDecision)
+	}
+	if len(c.Attachments) > 0 {
+		fields = append(fields, c.Attachments)
 	}
 	encoded, err := json.Marshal(fields)
 	if err != nil {

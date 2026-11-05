@@ -237,3 +237,16 @@ test("an expired, partially written lock is still reclaimed", t => {
   inbox.put(inbound("after-expired-partial"));
   assert.equal(fs.existsSync(lockPath), false);
 });
+
+test("media references survive restart, alone or with text, and malformed references are refused", t => {
+  const { inbox, reload, path } = fixture(t);
+  const media = [{ kind: "image" as const, encryptQueryParam: "param", aesKeyHex: "2b7e151628aed2a6abf7158809cf4f3c" }];
+  const messages = [inbound("m1", { text: "", media }), inbound("m2", { media: [{ kind: "file", fullUrl: "https://novac2c.cdn.weixin.qq.com/x",
+    aesKeyHex: "2b7e151628aed2a6abf7158809cf4f3c", fileName: "a.pdf" }] })];
+  for (const item of messages) inbox.put(item);
+  assert.deepEqual(reload().list(), messages);
+  const raw = JSON.parse(fs.readFileSync(path, "utf8"));
+  raw.items[0].media[0].aesKeyHex = "not-hex";
+  fs.writeFileSync(path, JSON.stringify(raw));
+  assert.throws(() => reload().list(), /Invalid inbound inbox/);
+});

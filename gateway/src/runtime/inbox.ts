@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { InboundWeChatMessage, UnsupportedInboundKind } from "../types.js";
+import type { InboundMediaRef, InboundWeChatMessage, UnsupportedInboundKind } from "../types.js";
+import { MAX_INBOUND_MEDIA, MAX_MEDIA_FILE_NAME_CHARS, MAX_MEDIA_PARAM_CHARS } from "../wechat/inbound-content.js";
 import { OutboxBackpressureError } from "./delivery-state.js";
 import { resolvePath, writePrivateJsonSync } from "./state.js";
 
@@ -13,7 +14,8 @@ const MAX_ITEMS = 10_000;
 const LOCK_WAIT_TIMEOUT_MS = 10_000;
 const LOCK_RETRY_DELAY_MS = 10;
 const LOCK_STALE_AFTER_MS = 60_000;
-const MESSAGE_FIELDS = new Set(["chatId", "text", "messageId", "deliveryKey", "contextToken", "createdAtMs", "unsupportedKinds"]);
+const MESSAGE_FIELDS = new Set(["chatId", "text", "messageId", "deliveryKey", "contextToken", "createdAtMs", "unsupportedKinds", "media"]);
+const MEDIA_FIELDS = new Set(["kind", "fullUrl", "encryptQueryParam", "aesKeyHex", "fileName"]);
 const UNSUPPORTED_KINDS = new Set<UnsupportedInboundKind>(["image", "file", "video", "voice", "unknown"]);
 const STATE_FIELDS = new Set(["version", "fingerprint", "items"]);
 // Lock files this process currently holds; any other record with our PID is stale.
@@ -44,13 +46,40 @@ function unsupportedKinds(value: unknown): UnsupportedInboundKind[] {
   return [...value] as UnsupportedInboundKind[];
 }
 
+function optionalString(value: unknown, maxChars: number): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.trim() || value.length > maxChars || /[\u0000-\u001f\u007f]/u.test(value)) {
+    throw new Error("Invalid inbound inbox media");
+  }
+  return value;
+}
+
+function media(value: unknown): InboundMediaRef[] {
+  if (!Array.isArray(value) || !value.length || value.length > MAX_INBOUND_MEDIA) throw new Error("Invalid inbound inbox media");
+  return value.map(item => {
+    const raw = object(item, MEDIA_FIELDS);
+    if (raw.kind !== "image" && raw.kind !== "file") throw new Error("Invalid inbound inbox media");
+    const fullUrl = optionalString(raw.fullUrl, MAX_MEDIA_PARAM_CHARS);
+    const encryptQueryParam = optionalString(raw.encryptQueryParam, MAX_MEDIA_PARAM_CHARS);
+    const aesKeyHex = optionalString(raw.aesKeyHex, 32);
+    const fileName = optionalString(raw.fileName, MAX_MEDIA_FILE_NAME_CHARS);
+    if ((!fullUrl && !encryptQueryParam) || (aesKeyHex !== undefined && !/^[0-9a-f]{32}$/u.test(aesKeyHex)) ||
+        (raw.kind === "file" && !aesKeyHex)) throw new Error("Invalid inbound inbox media");
+    return { kind: raw.kind, ...(fullUrl ? { fullUrl } : {}), ...(encryptQueryParam ? { encryptQueryParam } : {}),
+      ...(aesKeyHex ? { aesKeyHex } : {}), ...(fileName ? { fileName } : {}) };
+  });
+}
+
 function message(value: unknown): InboundWeChatMessage {
   const raw = object(value, MESSAGE_FIELDS);
   // Unsupported content carries no text; every other message must keep its full text.
   const kinds = raw.unsupportedKinds === undefined ? undefined : unsupportedKinds(raw.unsupportedKinds);
-  if (kinds && raw.text !== "") throw new Error("Invalid inbound inbox string");
+  const refs = raw.media === undefined ? undefined : media(raw.media);
+  if (kinds && (raw.text !== "" || refs)) throw new Error("Invalid inbound inbox string");
+  // Media may arrive alone; otherwise every message must keep its full text.
+  const textless = kinds !== undefined || (refs !== undefined && raw.text === "");
   const result: InboundWeChatMessage = {
-    chatId: string(raw.chatId, ID_MAX_BYTES), text: kinds ? "" : string(raw.text, INBOUND_INBOX_TEXT_MAX_BYTES),
+    chatId: string(raw.chatId, ID_MAX_BYTES), text: textless ? "" : string(raw.text, INBOUND_INBOX_TEXT_MAX_BYTES),
     messageId: string(raw.messageId, ID_MAX_BYTES), deliveryKey: string(raw.deliveryKey, ID_MAX_BYTES),
   };
   if (raw.contextToken !== undefined) result.contextToken = string(raw.contextToken, CONTEXT_MAX_BYTES);
@@ -59,6 +88,7 @@ function message(value: unknown): InboundWeChatMessage {
     result.createdAtMs = raw.createdAtMs as number;
   }
   if (kinds) result.unsupportedKinds = kinds;
+  if (refs) result.media = refs;
   return result;
 }
 

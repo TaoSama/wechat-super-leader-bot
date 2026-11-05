@@ -5,6 +5,7 @@ import { InputReceiptSchema, TerminalSessionIdSchema, type InputReceipt } from "
 import { isTerminalHistoryTarget, isTerminalSession } from "./sessions/terminal.js";
 import { CLAUDE_SESSION_ID_PATTERN, isClaudeCodeSession, isClaudeSessionId } from "./sessions/claude.js";
 import { ApprovalDecisionSchema, ApprovalRequestIdSchema, PendingApprovalsSchema, type ApprovalDecision } from "./sessions/approval-contracts.js";
+import { CommandAttachmentsSchema, type AttachmentRef } from "./sessions/inbound-attachments.js";
 
 export const ActionTypeSchema = z.enum(["read", "send", "interrupt", "approve"]);
 export type ActionType = z.infer<typeof ActionTypeSchema>;
@@ -177,6 +178,8 @@ export const DaemonHelloMessageSchema = z.object({
   skills: SkillCatalogSchema,
   // Missing on legacy v1 nodes; only an explicit steer advertisement grants support.
   deliveryModes: z.array(DeliveryModeSchema).max(DeliveryModeSchema.options.length).optional(),
+  // Legacy nodes ignore unknown command fields, so attachments go only to nodes that advertise them.
+  inputAttachments: z.boolean().optional(),
 });
 export type DaemonHelloMessage = z.infer<typeof DaemonHelloMessageSchema>;
 
@@ -277,6 +280,7 @@ export const ControllerCommandMessageSchema = z.object({
   expectedTurnId: TurnIdSchema.optional(),
   approvalRequestId: ApprovalRequestIdSchema.optional(),
   approvalDecision: ApprovalDecisionSchema.optional(),
+  attachments: CommandAttachmentsSchema.optional(),
 }).refine(value => value.action !== "read" || value.sendRoute === undefined, "Read commands cannot carry a send route")
   .refine(value => value.action !== "read" || value.deliveryMode === undefined,"Read commands cannot carry delivery mode")
   .refine(hasValidTurnTarget, "Only steer, interrupt and approve require an exact expected turn ID")
@@ -319,7 +323,9 @@ export const PostCommandRequestSchema = z
     expectedTurnId: TurnIdSchema.optional(),
     approvalRequestId: ApprovalRequestIdSchema.optional(),
     approvalDecision: ApprovalDecisionSchema.optional(),
+    attachments: CommandAttachmentsSchema.optional(),
   }).strict()
+  .refine(value => value.action === "send" || value.attachments === undefined, "Only send commands carry attachments")
   .refine(value => value.action !== "read" || value.deliveryMode === undefined,"Read commands cannot carry delivery mode")
   .refine(hasValidTurnTarget, "Only steer, interrupt and approve require an exact expected turn ID")
   .refine(
@@ -362,6 +368,8 @@ export interface CommandRecord {
   approvalRequestId?: string;
   approvalDecision?: ApprovalDecision;
   authority?: CommandAuthority;
+  /** Frozen inbound attachment descriptors; the daemon fetches bytes with node authentication. */
+  attachments?: AttachmentRef[];
   queueOrder?: number;
   expiresAt: string;
   createdAt: string;

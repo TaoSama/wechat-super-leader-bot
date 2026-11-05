@@ -59,9 +59,22 @@ export interface ReplyDeliveryState {
 
 export type UnsupportedInboundKind = "image" | "file" | "video" | "voice" | "unknown";
 
+export type InboundMediaKind = "image" | "file";
+
+/** A CDN reference to inbound media. Only strings are persisted; bytes are fetched when processed. */
+export interface InboundMediaRef {
+  kind: InboundMediaKind;
+  /** Server-provided complete download URL, preferred when present. */
+  fullUrl?: string;
+  encryptQueryParam?: string;
+  /** Raw AES-128 key as 32 lowercase hex characters; absent means the CDN object is plaintext. */
+  aesKeyHex?: string;
+  fileName?: string;
+}
+
 export interface InboundWeChatMessage {
   chatId: string;
-  /** Empty only when unsupportedKinds is present. */
+  /** Empty only when unsupportedKinds or media is present. */
   text: string;
   messageId: string;
   deliveryKey: string;
@@ -69,6 +82,8 @@ export interface InboundWeChatMessage {
   createdAtMs?: number;
   /** Content the gateway cannot forward yet; the sender gets a fixed notice instead of a leader reply. */
   unsupportedKinds?: UnsupportedInboundKind[];
+  /** Images and files to store as chat attachments before the leader sees the text. */
+  media?: InboundMediaRef[];
 }
 
 export interface ControllerMessageRequest {

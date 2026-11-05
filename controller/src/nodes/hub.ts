@@ -34,6 +34,7 @@ export interface ConnectedNode {
   sessions: Session[];
   skills: Skill[];
   deliveryModes: DeliveryMode[];
+  inputAttachments: boolean;
   isHelloCompleted: boolean;
   heartbeatTimer?: NodeJS.Timeout;
   inspection?: { commandId: string; turnId?: string; deadline: number };
@@ -122,6 +123,11 @@ export class NodeHub {
     return mode === "next-turn" || node.deliveryModes.includes(mode);
   }
 
+  supportsInputAttachments(nodeId: string): boolean {
+    const node = this.nodes.get(nodeId);
+    return !!node && this.isNodeConnected(nodeId) && node.inputAttachments;
+  }
+
   getNodeSession(nodeId: string, sessionId: string): Session | null {
     const node = this.nodes.get(nodeId);
     if (!node || !node.isHelloCompleted) return null;
@@ -191,6 +197,7 @@ export class NodeHub {
       sessions: [],
       skills: [],
       deliveryModes: [],
+      inputAttachments: false,
       isHelloCompleted: false,
     };
     this.nodes.set(nodeId, nodeRecord);
@@ -318,6 +325,7 @@ export class NodeHub {
       node.sessions = msg.sessions;
       node.skills = msg.skills;
       node.deliveryModes = msg.deliveryModes ?? [];
+      node.inputAttachments = msg.inputAttachments === true;
       node.lastHeartbeat = new Date();
       node.isHelloCompleted = true;
       this.sessionsChanged(nodeId);
@@ -463,7 +471,8 @@ export class NodeHub {
         type:"inspect_command",commandId:cmd.commandId,nodeId:cmd.nodeId,sessionId:cmd.sessionId,action:cmd.action,
         prompt:cmd.prompt,expiresAt:cmd.expiresAt,skills:cmd.skills,sendRoute:cmd.sendRoute,
         deliveryMode:cmd.deliveryMode,expectedTurnId:cmd.expectedTurnId,
-        ...(cmd.approvalRequestId ? {approvalRequestId:cmd.approvalRequestId,approvalDecision:cmd.approvalDecision} : {})};
+        ...(cmd.approvalRequestId ? {approvalRequestId:cmd.approvalRequestId,approvalDecision:cmd.approvalDecision} : {}),
+        ...(cmd.attachments?.length ? {attachments:cmd.attachments} : {})};
       node.ws.send(JSON.stringify(message), error => {
         if (error) {
           if (node.inspection === inspection) node.inspection = undefined;
@@ -515,6 +524,9 @@ export class NodeHub {
     // Recheck the current connection after any asynchronous admission or queue claim.
     if (cmd.deliveryMode === "steer" && !this.supportsDeliveryMode(cmd.nodeId, "steer")) {
       return { delivered: false, rejected: true, error: "Target node does not support steer delivery" };
+    }
+    if (cmd.attachments?.length && !this.supportsInputAttachments(cmd.nodeId)) {
+      return { delivered: false, rejected: true, error: "Target node does not support image or file attachments" };
     }
 
     return this.commandTransport.send(node.ws, cmd, signal);

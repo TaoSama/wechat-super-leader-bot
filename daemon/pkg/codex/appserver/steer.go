@@ -42,7 +42,7 @@ func (a *AppServerAdapter) SteerPrompt(ctx context.Context, sessionID, prompt, e
 	}
 	result, err := rc.call(ctx, "turn/steer", map[string]any{
 		"threadId": sessionID, "expectedTurnId": expectedTurnID,
-		"input": []map[string]any{{"type": "text", "text": prompt}},
+		"input": codex.TurnInput(ctx, map[string]any{"type": "text", "text": prompt}),
 	}, a.rpcTimeout)
 	if err != nil {
 		if errors.Is(err, errInvalidRPCResponse) {

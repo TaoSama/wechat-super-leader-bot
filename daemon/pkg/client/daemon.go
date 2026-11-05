@@ -2,6 +2,7 @@ package client
 
 import (
 	"log"
+	"net/http"
 	"sync"
 	"time"
 
@@ -71,10 +72,12 @@ type Daemon struct {
 	historyContexts    *historyContexts
 	historyRequests    *historyRequests
 	mediaState         *mediaState
-	claude             *claude.Adapter
-	claudeSnapshot     []protocol.Session
-	claudeWatchers     sync.WaitGroup
-	approvals          approvalCache
+	// attachmentClient overrides the HTTP client used to fetch command attachments.
+	attachmentClient *http.Client
+	claude           *claude.Adapter
+	claudeSnapshot   []protocol.Session
+	claudeWatchers   sync.WaitGroup
+	approvals        approvalCache
 }
 
 func NewDaemon(cfg *config.Config, adapter codex.SessionAdapter) *Daemon {

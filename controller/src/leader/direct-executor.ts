@@ -32,6 +32,7 @@ import { goalConfirmation } from "./goals/conversation.js";
 import { traceSpan } from "../runtime/telemetry.js";
 import type { LocalSettingsService, LocalRuntimeSettings } from "../settings/local-service.js";
 import { DIRECT_EXTRA_TOOLS } from "../settings/local-registry.js";
+import { recentAttachmentContext } from "../sessions/inbound-attachments.js";
 import { consoleLinkRequestId, redactConsoleLinkSecrets as sanitize, redactIssuedConsoleLink, restoreConsoleLinkReply, type ConsoleLinkResolver, type ConsoleLinkRedactor } from "../console/link-reply.js";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -81,7 +82,13 @@ export class DirectToolExecutor {
       annotations: { readOnlyHint: this.isReadOnly(tool.function.name) } }));
     return { tools, instructions: settings?.prompt("direct") ?? DIRECT_TOOL_INSTRUCTIONS,
       context: { history: state.history.map(item => ({ ...item, content: sanitize(item.content) })), memories: state.memories,
-        pending: state.pending ?? null, pendingGoal: state.pendingGoal ?? null } };
+        pending: state.pending ?? null, pendingGoal: state.pendingGoal ?? null,
+        ...await this.attachmentContext(request.chatId) } };
+  }
+
+  private async attachmentContext(chatId: string) {
+    const attachments = await recentAttachmentContext(this.options.store, chatId, this.options.now());
+    return attachments.length ? { attachments } : {};
   }
 
   private wrapper(schema: unknown) {

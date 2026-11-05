@@ -42,6 +42,8 @@ import {
 
 import { initializeDatabase } from "./migrations.js";
 import { recordMessageImages, getMessageImage } from "./message-images-postgres.js";
+import { recordInboundAttachment, listInboundAttachments, getInboundAttachment } from "./inbound-attachments-postgres.js";
+import { AttachmentRefSchema, type StoredInboundAttachment } from "../sessions/inbound-attachments.js";
 import type { StoredMessageImage } from "../sessions/message-images.js";
 import { ReplyImagesSchema } from "../sessions/media-contracts.js";
 import { pgListQueuedCommands, pgClaimQueuedCommand, pgAdmitCommand, pgFailAdmittingCommand, pgRequeueClaimedCommand, pgCancelQueuedCommand } from "./command-queue-postgres.js";
@@ -70,6 +72,13 @@ export class PostgresStore implements IStore {
   getMessageImage(chatId: string, messageId: string, imageId: string, now: number) {
     return getMessageImage(this.pool, chatId, messageId, imageId, now);
   }
+  recordInboundAttachment(attachment: StoredInboundAttachment) { return recordInboundAttachment(this.pool, attachment); }
+  listInboundAttachments(chatId: string, receivedAfter: number, now: number, limit: number) {
+    return listInboundAttachments(this.pool, chatId, receivedAfter, now, limit);
+  }
+  getInboundAttachment(chatId: string, attachmentId: string, now: number) {
+    return getInboundAttachment(this.pool, chatId, attachmentId, now);
+  }
 
   constructor(databaseUrl?: string) {
     this.pool = new Pool({ connectionString: databaseUrl });
@@ -94,8 +103,8 @@ export class PostgresStore implements IStore {
       INSERT INTO commands (
         command_id, request_id, node_id, session_id, action, prompt,
         status, output, error, expires_at, created_at, updated_at, skills, turn_id, send_route, input_receipt,delivery_mode,expected_turn_id,authority,
-        approval_request_id,approval_decision
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15, $16::jsonb,$17,$18,$19::jsonb,$20,$21)
+        approval_request_id,approval_decision,attachments
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15, $16::jsonb,$17,$18,$19::jsonb,$20,$21,$22::jsonb)
       ON CONFLICT (request_id) DO NOTHING
       RETURNING *;
       `,
@@ -118,6 +127,7 @@ export class PostgresStore implements IStore {
         cmd.inputReceipt ? JSON.stringify(cmd.inputReceipt) : null,
         cmd.deliveryMode ?? null, cmd.expectedTurnId ?? null, cmd.authority ? JSON.stringify(cmd.authority) : null,
         cmd.approvalRequestId ?? null, cmd.approvalDecision ?? null,
+        cmd.attachments?.length ? JSON.stringify(cmd.attachments) : null,
       ]
     );
 
@@ -257,7 +267,7 @@ export class PostgresStore implements IStore {
 
   private commandSummarySelect(): string {
     return `SELECT command_id,request_id,node_id,session_id,action,prompt,skills,send_route,status,
-      turn_id,input_receipt,delivery_mode,expected_turn_id,approval_request_id,approval_decision,authority,expires_at,created_at,updated_at,
+      turn_id,input_receipt,delivery_mode,expected_turn_id,approval_request_id,approval_decision,authority,attachments,expires_at,created_at,updated_at,
       output IS NOT NULL AS has_output, left(output,$1) AS output_preview,
       octet_length(output)>octet_length(left(output,$1)) AS output_truncated, left(error,$1) AS error FROM commands`;
   }
@@ -410,7 +420,7 @@ export class PostgresStore implements IStore {
   }
   private notificationCommandReader(client: Pick<pg.PoolClient, "query">, metadataOnly = false): Pick<IStore, "findCommandByRequestId"> {
     return { findCommandByRequestId: async requestId => {
-      const columns = metadataOnly ? `command_id,request_id,node_id,session_id,action,prompt,status,expires_at,created_at,updated_at,skills,turn_id,send_route,input_receipt,delivery_mode,expected_turn_id,approval_request_id,approval_decision,authority,queue_order,CASE WHEN status='completed' THEN substring(output from 1 for ${PROGRESS_OUTPUT_LIMIT}) END AS output` : "*";
+      const columns = metadataOnly ? `command_id,request_id,node_id,session_id,action,prompt,status,expires_at,created_at,updated_at,skills,turn_id,send_route,input_receipt,delivery_mode,expected_turn_id,approval_request_id,approval_decision,authority,attachments,queue_order,CASE WHEN status='completed' THEN substring(output from 1 for ${PROGRESS_OUTPUT_LIMIT}) END AS output` : "*";
       const progressStatus = metadataOnly ? " AND status IN ('admitting','queued','pending','accepted','completed')" : "";
       const result = await client.query(`SELECT ${columns} FROM commands WHERE request_id = $1${progressStatus}`, [requestId]);
       return result.rows[0] ? this.mapCommandRow(result.rows[0]) : null;
@@ -532,6 +542,7 @@ export class PostgresStore implements IStore {
       ...(r.approval_decision == null ? {} : { approvalDecision: ApprovalDecisionSchema.parse(r.approval_decision) }),
       ...(r.authority == null ? {} : { authority: typeof r.authority === "string" ? JSON.parse(r.authority) : r.authority }),
       ...(r.queue_order == null ? {} : { queueOrder: Number(r.queue_order) }),
+      ...(r.attachments == null ? {} : { attachments: AttachmentRefSchema.array().parse(typeof r.attachments === "string" ? JSON.parse(r.attachments) : r.attachments) }),
       turnId: r.turn_id || undefined,
       ...(r.input_receipt == null ? {} : { inputReceipt: InputReceiptSchema.parse(typeof r.input_receipt === "string" ? JSON.parse(r.input_receipt) : r.input_receipt) }),
       ...(r.send_route == null || r.send_route === "" ? {} : { sendRoute: SendRouteSchema.parse(r.send_route) }),

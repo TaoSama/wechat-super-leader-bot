@@ -1,5 +1,6 @@
 import { type CommandAuthority, type CommandRecord, type PostCommandRequest, type SendRoute, type Session } from "../types.js";
 import { sameSkillRefs } from "../skills/catalog.js";
+import { sameAttachments } from "../sessions/inbound-attachments.js";
 import { selectSendRoute } from "../sessions/send-eligibility.js";
 import { isClaudeCodeSession, isClaudeSessionId } from "../sessions/claude.js";
 
@@ -11,7 +12,8 @@ export function sameCommandPayload(a: CommandRecord, b: PostCommandRequest): boo
   return a.nodeId === b.nodeId && a.sessionId === b.sessionId && a.action === b.action &&
     (a.prompt ?? "") === (b.prompt ?? "") && sameSkillRefs(a.skills, b.skills) &&
     (a.deliveryMode ?? "next-turn") === (b.deliveryMode ?? "next-turn") && a.expectedTurnId === b.expectedTurnId &&
-    a.approvalRequestId === b.approvalRequestId && a.approvalDecision === b.approvalDecision;
+    a.approvalRequestId === b.approvalRequestId && a.approvalDecision === b.approvalDecision &&
+    sameAttachments(a.attachments, b.attachments);
 }
 
 /** Historical capability is target identity evidence only. Dispatch always rechecks live authority. */

@@ -35,6 +35,7 @@ import { readConsoleGoals } from "../console/goals.js";
 import { createNotificationRouter } from "../notifications/routes.js";
 import { hashConsoleToken } from "../console/types.js";
 import { createMediaRouter } from "../sessions/media-routes.js";
+import { createAttachmentUploadRouter, createDaemonAttachmentRouter } from "../sessions/attachment-routes.js";
 import { createMessageReplyRouter } from "../sessions/message-reply-routes.js";
 import { consoleLinkRequestId, restoreConsoleLinkReply } from "../console/link-reply.js";
 import { createReadResponseCompression } from "./response-compression.js";
@@ -251,6 +252,10 @@ export class ControllerServer {
       this.app.use("/v1/background-artifacts", this.taskNotifications.backgroundArtifacts.router());
     }
 
+    // Node-token authenticated; never reachable with the Gateway or console credentials.
+    this.app.use("/v1/daemon/attachments", createDaemonAttachmentRouter(this.store, token => this.hub.authenticateToken(token),
+      () => this.config.allowedChatIds, this.now));
+
     // Public liveness endpoint
     this.app.get("/health", (req: Request, res: Response) => {
       res.json({
@@ -272,6 +277,7 @@ export class ControllerServer {
       } }));
     apiRouter.use(createDirectToolsRouter(this.directLeader.direct, chatId => this.config.allowedChatIds.has(chatId)));
     apiRouter.use(createMediaRouter(this.store, () => this.config.allowedChatIds, this.now));
+    apiRouter.use(createAttachmentUploadRouter(this.store, () => this.config.allowedChatIds, this.now));
     apiRouter.use(createMessageReplyRouter(this.store, () => this.config.allowedChatIds,
       requestId => this.consoleAuth.recoverLink(requestId)));
     apiRouter.use("/notifications", createNotificationRouter(this.store, () => this.config.allowedChatIds, this.now));
