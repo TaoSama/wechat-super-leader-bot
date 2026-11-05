@@ -1,11 +1,12 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { join, posix } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parseArgs } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { TransferFailure, TransferProcesses, errorCategory } from './transfer-process.mjs';
+import { TransferFailure, TransferProcesses, errorCategory, sshArguments } from './transfer-process.mjs';
+import { probeRelease } from './probe-release.mjs';
 import { createSenderTelemetry } from './transfer-telemetry.mjs';
 import { DIAGNOSTIC_FILES, DIAGNOSTIC_PAYLOAD_LIMIT, REMOTE_FILES, manifestFor, quoteShell } from './transfer-files.mjs';
 import { manifestArtifactName, manifestIdentity, readTransferManifest, verifyLocalManifest } from './transfer-manifest.mjs';
@@ -15,8 +16,6 @@ const FIRST_TELEMETRY_MS = 1_000;
 const PROGRESS_UNAVAILABLE_CATEGORIES = new Set(['dns', 'timeout', 'network_connect', 'network_closed']);
 const REMOTE_OPERATION_MS = 30_000;
 const CLEANUP_MS = 8_000;
-const SSH_CONNECT_SECONDS = 5;
-const REMOTE_EXECUTION_RESERVE_MS = 1_000;
 const MIN_OPERATION_MS = 2_000;
 const DIAGNOSTIC_MS = 60_000;
 const DIAGNOSTIC_RESERVE_MS = 10_000;
@@ -29,7 +28,8 @@ const ACTIVATION_POLL_MS = 5_000;
 const ACTIVATION_WAIT_MS = 20 * 60_000;
 
 export function transferConfiguration(values, env = process.env) {
-  const config = { diagnostic: values.diagnostic === true, root: values['release-root'],
+  const config = { diagnostic: values.diagnostic === true, probe: values.probe === true,
+    force: env.GITHUB_EVENT_NAME === 'workflow_dispatch', root: values['release-root'],
     key: values['key-file'], knownHosts: values['known-hosts-file'], host: env.DEPLOY_HOST,
     user: env.DEPLOY_USER, port: Number(env.DEPLOY_PORT || 22), path: env.DEPLOY_PATH,
     revision: env.REVISION, run: env.GITHUB_RUN_ID, attempt: env.GITHUB_RUN_ATTEMPT,
@@ -37,12 +37,13 @@ export function transferConfiguration(values, env = process.env) {
     envFile: env.DEPLOY_ENV_FILE || '.runtime/controller.env', repository: env.GITHUB_REPOSITORY, githubToken: env.GH_TOKEN };
   const validPath = value => typeof value === 'string' && /^\/[A-Za-z0-9._/-]+$/.test(value) &&
     value !== '/' && posix.normalize(value) === value && !value.split('/').includes('..');
-  if (!/^[0-9a-f]{40}$/.test(config.revision ?? '') || !/^[1-9][0-9]*$/.test(config.run ?? '') ||
+  const inspectionOnly = config.diagnostic || config.probe;
+  if ((config.diagnostic && config.probe) || !/^[0-9a-f]{40}$/.test(config.revision ?? '') || !/^[1-9][0-9]*$/.test(config.run ?? '') ||
     !/^[1-9][0-9]*$/.test(config.attempt ?? '') || !/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(config.host ?? '') ||
     !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(config.user ?? '') || !Number.isInteger(config.port) ||
     config.port < 1 || config.port > 65535 || !validPath(config.path) ||
-    !config.key || !config.knownHosts || (config.diagnostic ? config.root !== undefined : !config.root) ||
-    (config.diagnostic ? values['manifest-file'] !== undefined || values['manifest-artifact-id'] !== undefined :
+    !config.key || !config.knownHosts || (inspectionOnly ? config.root !== undefined : !config.root) ||
+    (inspectionOnly ? values['manifest-file'] !== undefined || values['manifest-artifact-id'] !== undefined :
       !config.manifestFile || !/^[1-9][0-9]*$/.test(values['manifest-artifact-id'] ?? '') ||
       !Number.isSafeInteger(config.manifestArtifactId) || config.manifestArtifactId <= 0) ||
     !/^[A-Za-z0-9._/-]+$/.test(config.envFile) || config.envFile.split('/').includes('..')) {
@@ -81,12 +82,7 @@ export class ReleaseTransfer {
   }
 
   sshArgs(timeoutMs = REMOTE_OPERATION_MS) {
-    const c = this.config;
-    const connectSeconds = Math.max(1, Math.min(SSH_CONNECT_SECONDS,
-      Math.floor((timeoutMs - REMOTE_EXECUTION_RESERVE_MS) / 1000)));
-    return ['-F', '/dev/null', '-i', c.key, '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
-      '-o', 'IdentityAgent=none', '-o', 'StrictHostKeyChecking=yes', '-o', `UserKnownHostsFile=${c.knownHosts}`,
-      '-o', `ConnectTimeout=${connectSeconds}`, '-o', 'ConnectionAttempts=1', '-o', 'LogLevel=ERROR'];
+    return sshArguments(this.config, timeoutMs);
   }
 
   async remote(op, payload = this.files, cleanup = false) {
@@ -226,7 +222,9 @@ export class ReleaseTransfer {
     if (activation.exit_code !== 0) throw new TransferFailure('remote_command');
     const window = /^gateway_context_window_ms=([0-9]+)$/m.exec(activation.output);
     if (window && Number.isSafeInteger(Number(window[1]))) this.log('runtime_verified', { gateway_context_window_ms: Number(window[1]) });
-    this.log('deployment_verified');
+    const skipped = /^deployment_result=activation_skipped$/m.test(activation.output) ||
+      /deployment already healthy[^\n]*skipping recreation/.test(activation.output);
+    this.log(skipped ? 'activation_skipped' : 'deployment_verified');
   }
 
   async diagnostic() {
@@ -265,6 +263,11 @@ export class ReleaseTransfer {
   }
 
   async execute() {
+    if (this.config.probe) {
+      const result = await probeRelease(this.config, { processes: this.processes, signal: this.signal });
+      this.log(result.decision, { reason: result.reason });
+      return result;
+    }
     let localRoot, stageAttempted = false, failure, timer;
     this.log('cleanup_state', { cleanup: 'unconfirmed' });
     try {
@@ -328,14 +331,14 @@ export class ReleaseTransfer {
 }
 
 async function main() {
-  const { values } = parseArgs({ options: { diagnostic: { type: 'boolean' }, 'release-root': { type: 'string' },
+  const { values } = parseArgs({ options: { diagnostic: { type: 'boolean' }, probe: { type: 'boolean' }, 'release-root': { type: 'string' },
     'key-file': { type: 'string' }, 'known-hosts-file': { type: 'string' }, 'credentials-root': { type: 'string' },
     'manifest-file': { type: 'string' }, 'manifest-artifact-id': { type: 'string' },
     help: { type: 'boolean', short: 'h' } } });
   if (values.help) {
     console.log('Usage: node scripts/deploy/transfer-release.mjs\n' +
       '  (--credentials-root PATH | --key-file PATH --known-hosts-file PATH)\n' +
-      '  (--release-root PATH --manifest-file PATH --manifest-artifact-id ID | --diagnostic)\nUses existing DEPLOY_*, REVISION and GITHUB_RUN_ID/GITHUB_RUN_ATTEMPT inputs.');
+      '  (--release-root PATH --manifest-file PATH --manifest-artifact-id ID | --diagnostic | --probe)\nUses existing DEPLOY_*, REVISION and GITHUB_RUN_ID/GITHUB_RUN_ATTEMPT inputs.');
     return;
   }
   const abort = new AbortController();
@@ -354,7 +357,13 @@ async function main() {
       await writeFile(values['key-file'], privateKey.endsWith('\n') ? privateKey : `${privateKey}\n`, { mode: 0o600, flag: 'wx' });
       await writeFile(values['known-hosts-file'], process.env.DEPLOY_KNOWN_HOSTS, { mode: 0o600, flag: 'wx' });
     }
-    await new ReleaseTransfer(transferConfiguration(values), { signal: abort.signal }).execute();
+    const result = await new ReleaseTransfer(transferConfiguration(values), { signal: abort.signal }).execute();
+    if (values.probe) {
+      if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT,
+        `deploy_required=${result.decision === 'deploy_required'}\n`);
+      if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY,
+        `Production preflight: ${result.decision} (${result.reason}) for ${result.revision}.\n`);
+    }
   } finally {
     try {
       // SSH cleanup must finish before its authentication files disappear.

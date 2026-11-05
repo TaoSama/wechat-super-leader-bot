@@ -39,7 +39,7 @@ test('manifest uses fixed basenames, exact bytes and streaming SHA256; rejects l
       sha256: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad' }]);
     await symlink(join(root, 'controller.tar'), join(root, 'gateway.tar'));
     await assert.rejects(manifestFor(root, ['gateway.tar']), { category: 'local_file' });
-    assert.equal(new Set(RELEASE_FILES).size, 10);
+    assert.equal(new Set(RELEASE_FILES).size, 11);
     assert.ok(RELEASE_FILES.every(name => !name.includes('/')));
   } finally { await rm(root, { recursive: true, force: true }); }
 });
