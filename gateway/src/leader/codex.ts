@@ -442,7 +442,7 @@ export class CodexReplyEngine implements GatewayReplyEngine {
     const consoleQuery = isConsoleLinkQuery(request.text);
     // A console-link request has a one-shot issuance side effect. Once the
     // Controller call is dispatched, an ordinary transport/provider failure
-    // cannot prove that no link was issued, so recovery must stay pinned.
+    // cannot prove that no link was issued, so the entry stays pinned until Gateway's terminal receipt.
     let consoleCallDispatched = false;
     try {
       if (directoryQuery || consoleQuery) {

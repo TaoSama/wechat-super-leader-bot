@@ -105,10 +105,12 @@ function validateText(content: string, limit: number): void {
 }
 
 /**
- * An entry stays pinned until Gateway records a terminal receipt. Gateway sends
- * that receipt only after durably marking the inbound processed (and it keeps
- * uncertain/expired outbox records), so replay dedupe then no longer depends on
- * this entry. A crashed turn stays "started" and pending, so it is never rerun.
+ * An entry stays pinned until Gateway records a terminal receipt; until then a
+ * crashed "started" turn replays its frozen reply instead of rerunning. Gateway
+ * sends that receipt only after durably marking the inbound processed, and it
+ * never removes uncertain/expired outbox records, so replay dedupe no longer
+ * depends on this entry. Accepted entries rely on the bounded processed-key
+ * window, as completed accepted entries always have.
  */
 export function isPinnedReplyEntry(entry: Pick<ReplyJournal[string], "delivery">): boolean {
   return (entry.delivery ?? "pending") === "pending";
