@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { WorkerExecutionRequest, WorkerExecutor } from "./contracts.js";
 import { isClaudeEffort, isClaudeModel } from "./claude-models.js";
+import { CLAUDE_DENIED_DOMAINS, claudeDeniedHosts } from "./claude-network.js";
 import { parseOutput } from "./output.js";
 import { executable, runWorkerProcess, workerEnvironment } from "./process.js";
 
@@ -11,11 +12,6 @@ export const CLAUDE_WORKER_TOOLS = ["Bash", "Read", "Edit", "Write", "Glob", "Gr
 /** Tools allowed everywhere. Read, Glob and Grep stay limited to the workspace (the working directory). */
 const UNSCOPED_TOOLS = ["Bash", "WebFetch", "WebSearch"] as const;
 const PROTECTED_ROOTS = ["/etc/super-leader", "/proc"] as const;
-/**
- * Sandboxed Bash may reach public hosts through the sandbox proxy, like the
- * Codex worker's shell, but never the Compose services or cloud metadata.
- */
-export const CLAUDE_DENIED_DOMAINS = ["postgres", "controller", "gateway", "169.254.169.254", "metadata.google.internal"] as const;
 // Session settings only come from the isolated config dir; workspace-written
 // project or local settings must never widen the worker's permissions.
 export const CLAUDE_SETTING_SOURCES = "user";
@@ -68,14 +64,19 @@ export function claudeTempEnvironment(temp: string) { return { TMPDIR: temp, CLA
 /** Claude permission rules address absolute paths with a leading `//`. */
 function subtree(root: string): string { return `/${root.replace(/\/+$/, "")}/**`; }
 
+/**
+ * `deniedHosts` defaults to the fixed names; each turn adds the addresses they
+ * resolve to (see claudeDeniedHosts).
+ */
 export function claudeWorkerSettings(request: Pick<WorkerExecutionRequest, "workspace" | "home">, artifactRoot: string,
-  privateRoots: readonly string[] = []) {
+  privateRoots: readonly string[] = [], deniedHosts: readonly string[] = CLAUDE_DENIED_DOMAINS) {
   const denied = [request.home, artifactRoot, ...PROTECTED_ROOTS].map(subtree);
   const temp = claudeTempRoot(request.workspace);
   return {
     permissions: {
       allow: [...UNSCOPED_TOOLS, `Read(${subtree(request.workspace)})`, `Edit(${subtree(request.workspace)})`],
-      deny: denied.flatMap(rule => [`Read(${rule})`, `Edit(${rule})`]),
+      // WebFetch runs outside the sandbox and ignores sandbox.network, so it gets the same denials.
+      deny: [...denied.flatMap(rule => [`Read(${rule})`, `Edit(${rule})`]), ...deniedHosts.map(host => `WebFetch(domain:${host})`)],
       // File tools start from nothing outside the workspace (the working directory) in every permission mode.
       blockReadsOutsideWorkingDirectories: true,
     },
@@ -86,7 +87,9 @@ export function claudeWorkerSettings(request: Pick<WorkerExecutionRequest, "work
       enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
       // A bind-mounted container /proc would expose other processes' environments.
       enableWeakerNestedSandbox: false,
-      network: { allowedDomains: ["*"], deniedDomains: [...CLAUDE_DENIED_DOMAINS] },
+      // Public hosts stay reachable through the sandbox proxy, like the Codex worker's
+      // shell; the Compose peers, this container and cloud metadata do not.
+      network: { allowedDomains: ["*"], deniedDomains: [...deniedHosts] },
       // The narrower allowRead re-opens only this worker's workspace and temp
       // directory inside the private roots. With the credential scrub on, the
       // CLI ignores a deny on the temp root itself, so every entry under it is
@@ -112,7 +115,7 @@ export class ClaudeCliExecutor implements WorkerExecutor {
     if (request.signal.aborted) throw new Error("Worker execution cancelled before launch");
     const command = executable(this.options.claudePath ?? "claude", "Claude");
     const schema = JSON.stringify(JSON.parse(readFileSync(request.schemaPath, "utf8")));
-    const settings = claudeWorkerSettings(request, this.options.artifactRoot, this.options.privateRoots);
+    const settings = claudeWorkerSettings(request, this.options.artifactRoot, this.options.privateRoots, await claudeDeniedHosts());
     // A console choice applies only when it names a Claude model; a stored Codex model never reaches the CLI.
     const model = isClaudeModel(request.model) ? request.model : this.options.model;
     const effort = isClaudeEffort(request.reasoningEffort) ? request.reasoningEffort : undefined;

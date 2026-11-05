@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { ClaudeCliExecutor, CodexWorkerRuntime, type WorkerInput, type WorkerRuntimeStatus } from "../../../src/background/worker/index.js";
+import { CLAUDE_DENIED_DOMAINS } from "../../../src/background/worker/claude-network.js";
 
 // Process contract checks include interpreter startup and durable filesystem I/O.
 const CLI_EXECUTION_TIMEOUT_MS = 10_000;
@@ -121,9 +122,14 @@ describe("Claude CLI process contract", () => {
     const canonicalWorkspace = fs.realpathSync(f.workspace);
     const home = path.join(path.dirname(canonicalWorkspace), "home");
     const temp = settings.sandbox.filesystem.allowRead[1];
+    const deniedDomains = settings.sandbox.network.deniedDomains;
+    // Peer and container names, loopback and metadata spellings, and this host's own addresses (IP literals bypass name checks).
+    expect(deniedDomains).toEqual(expect.arrayContaining([...CLAUDE_DENIED_DOMAINS, "127.0.0.1", "[::1]", "super-leader-gateway",
+      ...Object.values(os.networkInterfaces()).flatMap(items => items ?? []).map(item => item.family === "IPv6" ? `[${item.address.split("%")[0]}]` : item.address)]));
+    expect(settings.permissions.deny).toEqual(expect.arrayContaining(deniedDomains.map((host: string) => `WebFetch(domain:${host})`)));
     expect(settings.sandbox).toEqual({ enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true,
       allowUnsandboxedCommands: false, enableWeakerNestedSandbox: false,
-      network: { allowedDomains: ["*"], deniedDomains: ["postgres", "controller", "gateway", "169.254.169.254", "metadata.google.internal"] },
+      network: { allowedDomains: ["*"], deniedDomains },
       // Every shared temp entry stays closed; only this worker's turn-scoped temp directory is reopened.
       filesystem: { denyRead: [f.options.artifactRoot, f.options.root, path.join(os.tmpdir(), "*")], allowRead: [canonicalWorkspace, temp],
         allowWrite: [temp] } });

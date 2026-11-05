@@ -23,6 +23,7 @@ const ARTIFACT_ROOT = `${RUNTIME_ROOT}/background/artifacts`;
 const SETTINGS_ROOT = `${RUNTIME_ROOT}/settings`;
 const KEY_PREFIX = 'sk-ant-synthetic-probe-';
 const PEER_TEMP = '/tmp/slc-peer-probe';
+const LOCAL_MARKER = 'LOCAL_LISTENER_REACHED';
 // Rules that exist only for the Claude Code sandbox; removing them must make startup refuse Claude.
 const CLAUDE_ONLY_RULES = new Set([0x30020011, 0x70020011, 0x20020000]);
 let probeStage = 'bootstrap';
@@ -163,6 +164,14 @@ async function fixture() {
   const key = `${KEY_PREFIX}${randomUUID()}`;
   const { state, server } = anthropicFixture();
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  // Stands in for the controller API, which listens on every address of the container.
+  const local = http.createServer((_req, res) => res.end(LOCAL_MARKER));
+  await new Promise(resolve => local.listen(0, '0.0.0.0', resolve));
+  const localPort = local.address().port;
+  const ownAddress = Object.values(os.networkInterfaces()).flat().find(item => item && !item.internal && item.family === 'IPv4')?.address;
+  assert.ok(ownAddress, 'container has a non-loopback address');
+  // Encoded so the command text names no host; a command naming denied hosts was not auto-approved in testing.
+  const localHosts = Buffer.from(JSON.stringify(['127.0.0.1', 'localhost', '0.0.0.0', ownAddress, 'super-leader-gateway'])).toString('base64');
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
   const runtime = new CodexWorkerRuntime({ root: WORKER_ROOT, artifactRoot: ARTIFACT_ROOT, model: 'claude-cli-default',
     timeoutMs: WORKER_TIMEOUT_MS, maxConcurrent: 1, onError: () => {},
@@ -200,7 +209,10 @@ const report={marker:${JSON.stringify(marker)},round:1,keyHidden:!Object.values(
  artifactHidden:denied('${ARTIFACT_ROOT}/outside.txt'),peerTempHidden:denied('${PEER_TEMP}/secret-probe'),settingsHidden:denied('${SETTINGS_ROOT}/secret-probe.json'),
  userNamespaceDenied:cp.spawnSync('unshare',['-U','true']).status!==0,settingsWriteDenied:!wrote('${SETTINGS_ROOT}/sandbox-write'),
  tmpOverwriteDenied:!wrote('${PEER_TEMP}-file'),tempPrivate:String(process.env.TMPDIR).startsWith('/tmp/slc-')&&wrote(process.env.TMPDIR+'/probe'),proxied:!!process.env.HTTPS_PROXY,
- composeServiceDenied:cp.spawnSync('curl',['-s','-o','/dev/null','-w','%{http_code}','-m','5','http://postgres:5432/']).stdout.toString()==='403'};
+ composeServiceDenied:cp.spawnSync('curl',['-s','-o','/dev/null','-w','%{http_code}','-m','5','http://postgres:5432/']).stdout.toString()==='403',
+ localDenied:JSON.parse(Buffer.from('${localHosts}','base64').toString()).every(h=>{const r=cp.spawnSync('curl',['-s','-m','5','-w','\\n%{http_code}','--noproxy','','-x',process.env.HTTP_PROXY,'http://'+h+':${localPort}/']).stdout.toString();return r.endsWith('\\n403')&&!r.includes('${LOCAL_MARKER}')}),
+ directLocalDenied:!cp.spawnSync('curl',['-s','-m','5','http://'+JSON.parse(Buffer.from('${localHosts}','base64').toString())[2]+':${localPort}/']).stdout.toString().includes('${LOCAL_MARKER}'),
+ kernelInfoHidden:${values['skip-apparmor'] ? 'true' : "['/proc/interrupts','/proc/latency_stats','/proc/timer_list','/proc/keys'].every(denied)"}};
 fs.writeFileSync('seed.txt',report.marker);fs.writeFileSync('report.json',JSON.stringify(report));`;
     const round2 = `const fs=require('node:fs');const report=JSON.parse(fs.readFileSync('report.json','utf8'));if(fs.readFileSync('seed.txt','utf8')!==report.marker)throw Error('seed mismatch');report.round=2;report.resumed=true;fs.writeFileSync('report.json',JSON.stringify(report));`;
     const output = { status: 'completed', summary: 'Claude Linux probe completed', nextCheckAt: null, attachments: ['report.json'] };
@@ -212,6 +224,7 @@ fs.writeFileSync('seed.txt',report.marker);fs.writeFileSync('report.json',JSON.s
         ...(round === 1 ? [
           { id: `${prefix}read_sibling`, name: 'Read', input: { file_path: `${sibling}/secret-probe` } },
           { id: `${prefix}read_settings`, name: 'Read', input: { file_path: `${SETTINGS_ROOT}/secret-probe.json` } },
+          { id: `${prefix}fetch_local`, name: 'WebFetch', input: { url: `http://127.0.0.1:${localPort}/`, prompt: 'Return the page' } },
           { id: `${prefix}write_settings`, name: 'Write', input: { file_path: `${SETTINGS_ROOT}/tool-write`, content: 'x' } },
         ] : [])];
       state.output = { id: `${prefix}output`, input: output };
@@ -230,6 +243,9 @@ fs.writeFileSync('seed.txt',report.marker);fs.writeFileSync('report.json',JSON.s
       const bash = resultText(state.results.get(`${prefix}bash`));
       assert.equal(state.results.get(`${prefix}bash`)?.is_error ?? false, false, `Bash failed: ${bash.slice(0, 300)}`);
       if (round === 1) {
+        const fetched = resultText(state.results.get(`${prefix}fetch_local`));
+        assert.doesNotMatch(fetched, new RegExp(LOCAL_MARKER), `fetch_local: ${fetched.slice(0, 300)}`);
+        assert.match(fetched, /denied|not allowed|blocked|refuse/i, `fetch_local: ${fetched.slice(0, 300)}`);
         for (const id of ['read_sibling', 'read_settings', 'write_settings']) {
           const text = resultText(state.results.get(`${prefix}${id}`));
           assert.match(text, /denied|refuse|outside/i, `${id}: ${text.slice(0, 300)}`);
@@ -244,7 +260,8 @@ fs.writeFileSync('seed.txt',report.marker);fs.writeFileSync('report.json',JSON.s
       const report = JSON.parse(fs.readFileSync(artifacts.find(item => item.name === 'report.json').path, 'utf8'));
       assert.equal(report.marker, marker); assert.equal(report.round, round);
       for (const name of ['keyHidden', 'procKeyHidden', 'siblingHidden', 'homeHidden', 'artifactHidden', 'peerTempHidden', 'tmpOverwriteDenied', 'settingsHidden',
-        'userNamespaceDenied', 'settingsWriteDenied', 'tempPrivate', 'proxied', 'composeServiceDenied']) {
+        'userNamespaceDenied', 'settingsWriteDenied', 'tempPrivate', 'proxied', 'composeServiceDenied',
+        'localDenied', 'directLocalDenied', 'kernelInfoHidden']) {
         assert.equal(report[name], true, name);
       }
       assert.equal(fs.readFileSync(`${PEER_TEMP}-file`, 'utf8'), 'non-secret peer temp file', 'sandboxed Bash overwrote shared temp');
@@ -261,5 +278,6 @@ fs.writeFileSync('seed.txt',report.marker);fs.writeFileSync('report.json',JSON.s
   } finally {
     await runtime.shutdown();
     await new Promise(resolve => server.close(resolve));
+    await new Promise(resolve => local.close(resolve));
   }
 }
