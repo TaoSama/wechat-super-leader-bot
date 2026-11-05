@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { WorkerArtifact, WorkerInspectOptions } from "./worker/contracts.js";
+import type { WorkerArtifact, WorkerExecutorKind, WorkerInspectOptions } from "./worker/contracts.js";
 import type { AutomationRun, RunnerOutcome, RunResult } from "../automations/contracts.js";
 
 export const WORKER_LIFETIME_MS = 24 * 60 * 60 * 1_000;
@@ -68,6 +68,8 @@ export interface BackgroundWorker {
   prompts: BackgroundPrompt[]; invocations: BackgroundInvocation[]; activeInvocationId?: string;
   initialOutcome?: RunnerOutcome; initialAcceptedAt?: number; initialDiscardedAt?: number;
   leaseOwner?: string; leaseUntil: number; updatedAt: number; cleanedAt?: number; suspendedAt?: number; cancelRequestedAt?: number;
+  /** Executor configured when the worker was created; absent on workers created before it was recorded. */
+  executorKind?: WorkerExecutorKind;
 }
 export interface BackgroundRepository {
   create(worker: BackgroundWorker): Promise<BackgroundWorker>;
@@ -87,6 +89,7 @@ export interface BackgroundServiceOptions {
   isStopping?: () => boolean;
   getScheduleStatus?: (scheduleId: string, chatId: string) => Promise<"active" | "paused" | "cancelled" | "completed" | undefined>;
   turnTimeoutMs?: number;
+  executorKind?: WorkerExecutorKind;
   now?: () => number; onError?: (error: unknown, context: string) => void;
 }
 export type BackgroundRun = Pick<AutomationRun, "id" | "scheduleId" | "chatId" | "scheduledAt">;

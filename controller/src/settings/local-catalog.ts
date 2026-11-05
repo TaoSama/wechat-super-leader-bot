@@ -3,6 +3,7 @@ import { LocalSettingsError } from "./local-contracts.js";
 import { revision } from "./local-storage.js";
 import { cancelBodySafely, readBoundedStream } from "../leader/model/transport.js";
 import { LocalCliMetadata } from "./local-cli-metadata.js";
+import { CLAUDE_DEFAULT_MODEL_LABEL, CLAUDE_EFFORT_LEVELS, CLAUDE_MODEL_ALIASES, isClaudeModel } from "../background/worker/claude-models.js";
 
 const CATALOG_CACHE_MS = 5 * 60_000;
 const CATALOG_TIMEOUT_MS = 10_000;
@@ -87,4 +88,20 @@ export class LocalModelCatalogs {
       fetchedAt: new Date(this.now()).toISOString(), source: `${endpoint.origin}${endpoint.pathname}（当前推理身份）`,
       version: revision(models).slice(0, 16), stale: false };
   }
+}
+
+export const CLAUDE_PROVIDER_LABEL = "Claude Code CLI";
+
+/** The Claude CLI publishes no model list; offer its stable aliases plus the configured model. */
+export function claudeModelCatalog(scope: LocalModelScopeId, configuredModel: string, now: number): LocalModelCatalog {
+  const efforts = [...CLAUDE_EFFORT_LEVELS];
+  const models: LocalModelCatalog["models"] = [
+    { id: CLAUDE_DEFAULT_MODEL_LABEL, label: "CLI 默认模型", reasoningEfforts: efforts, metadataSource: "cli-bundled" },
+    ...CLAUDE_MODEL_ALIASES.map(alias => ({ ...alias, reasoningEfforts: efforts, metadataSource: "cli-bundled" as const })),
+  ];
+  if (isClaudeModel(configuredModel) && !models.some(item => item.id === configuredModel)) {
+    models.push({ id: configuredModel, label: configuredModel, reasoningEfforts: efforts, metadataSource: "cli-bundled" });
+  }
+  return { scope, models, fetchedAt: new Date(now).toISOString(), source: `${CLAUDE_PROVIDER_LABEL} 模型别名`,
+    version: revision(models).slice(0, 16), stale: false };
 }

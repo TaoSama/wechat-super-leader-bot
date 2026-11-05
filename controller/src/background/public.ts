@@ -8,7 +8,8 @@ export function publicBackgroundWorker(worker: BackgroundWorker) {
     task: worker.spec.prompt.slice(0, TASK_PREVIEW_CHARS), createdAt: worker.createdAt, expiresAt: worker.expiresAt,
     deadlineAt: worker.deadlineAt, nextCheckAt: worker.nextCheckAt, checkCount: worker.checkCount,
     executing: !!worker.activeInvocationId, pendingFollowups: worker.prompts.filter(item => !item.deliveredAt && !item.cancelledAt).length,
-    sources: worker.spec.sources.map(({ nodeId, automationId }) => ({ nodeId, automationId })) };
+    sources: worker.spec.sources.map(({ nodeId, automationId }) => ({ nodeId, automationId })),
+    ...(worker.executorKind ? { executor: worker.executorKind } : {}) };
 }
 
 export function publicBackgroundDetails(worker: BackgroundWorker) {

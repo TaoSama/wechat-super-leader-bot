@@ -40,7 +40,8 @@ export class BackgroundService {
     return this.repository.create({ id: randomUUID(), runId: run.id, scheduleId: run.scheduleId,
       chatId: run.chatId, scheduledAt: run.scheduledAt, spec: parsed, createdAt: now, expiresAt: now + WORKER_LIFETIME_MS,
       deadlineAt: run.scheduledAt + parsed.deadlineMs, phase: "observing", checkCount: 0, nextCheckAt: now,
-      observations: [], prompts: [], invocations: [], leaseUntil: 0, updatedAt: now });
+      observations: [], prompts: [], invocations: [], leaseUntil: 0, updatedAt: now,
+      ...(this.options.executorKind ? { executorKind: this.options.executorKind } : {}) });
   }
   async inspect(run: BackgroundRun, spec?: BackgroundSpec): Promise<RunnerOutcome> {
     const worker = await this.repository.getByRun(run.id);

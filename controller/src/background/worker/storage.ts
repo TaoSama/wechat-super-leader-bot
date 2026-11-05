@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { z } from "zod";
-import type { WorkerInput, WorkerRuntimeStatus } from "./contracts.js";
+import { DEFAULT_WORKER_EXECUTOR, type WorkerExecutorKind, type WorkerInput, type WorkerRuntimeStatus } from "./contracts.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_CAPACITY_RECOVERY_GENERATIONS = 64;
@@ -20,7 +20,7 @@ export interface Receipt extends WorkerRuntimeStatus {
   launchDeadlineAt?: number;
   executionDeadlineAt?: number;
 }
-interface WorkerState { workerId: string; threadId?: string }
+interface WorkerState { workerId: string; threadId?: string; executor?: WorkerExecutorKind }
 interface LaunchClaim { ownerPid: number; decision?: "launch" | "cancel" }
 const receiptSchema = z.object({
   workerId: z.string().regex(UUID), invocationId: z.string().regex(UUID),
@@ -161,11 +161,17 @@ export class WorkerStorage {
     return !!readJson(path.join(this.root, "tombstones", `${workerId}.json`));
   }
   state(dir: string): WorkerState | undefined { return readJson<WorkerState>(path.join(dir, "state.json")); }
-  setThread(dir: string, threadId: string): void {
+  /** The stored session only when the given executor created it; other kinds start a new session. */
+  resumableThread(dir: string, executor: WorkerExecutorKind): string | undefined {
+    const state = this.state(dir);
+    return state?.threadId && (state.executor ?? DEFAULT_WORKER_EXECUTOR) === executor ? state.threadId : undefined;
+  }
+  setThread(dir: string, threadId: string, executor: WorkerExecutorKind): void {
     validId(threadId);
     const state = this.state(dir)!;
-    if (state.threadId && state.threadId !== threadId) throw new Error("Codex changed worker thread identity");
-    writeJson(path.join(dir, "state.json"), { ...state, threadId });
+    const resumable = this.resumableThread(dir, executor);
+    if (resumable && resumable !== threadId) throw new Error("Worker executor changed its thread identity");
+    writeJson(path.join(dir, "state.json"), { ...state, threadId, executor });
   }
   receiptPath(dir: string, invocationId: string): string {
     validId(invocationId); return path.join(dir, "invocations", `${invocationId}.json`);

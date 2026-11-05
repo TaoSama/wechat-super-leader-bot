@@ -1,13 +1,21 @@
 import path from "node:path";
+import { WORKER_EXECUTOR_KINDS, type WorkerExecutorKind } from "../background/worker/contracts.js";
+import { CLAUDE_DEFAULT_MODEL_LABEL, isClaudeModel } from "../background/worker/claude-models.js";
 
-export const BACKGROUND_EXECUTOR_KINDS = ["codex", "claude"] as const;
-export type BackgroundExecutorKind = typeof BACKGROUND_EXECUTOR_KINDS[number];
+export const BACKGROUND_EXECUTOR_KINDS = WORKER_EXECUTOR_KINDS;
+export type BackgroundExecutorKind = WorkerExecutorKind;
 
 export interface ClaudeBackgroundConfig {
   path: string;
   model?: string;
+  /** Anthropic-compatible endpoint origin; unset means the official API. */
+  baseUrl?: string;
+  /** Exactly one credential: x-api-key, bearer token or Claude OAuth token. */
   apiKey?: string;
+  authToken?: string;
   oauthToken?: string;
+  /** Controller state the worker's Bash sandbox must not read, apart from its own workspace. */
+  privateRoots: string[];
 }
 
 export interface BackgroundConfig {
@@ -26,7 +34,6 @@ export interface BackgroundConfig {
 
 const DEFAULT_TURN_TIMEOUT_MS = 10 * 60_000;
 const MAX_TURN_TIMEOUT_MS = 60 * 60_000;
-const CLAUDE_DEFAULT_MODEL_LABEL = "claude-cli-default";
 
 function loadExecutorKind(env: NodeJS.ProcessEnv): BackgroundExecutorKind {
   const raw = env.BACKGROUND_EXECUTOR?.trim() || "codex";
@@ -36,18 +43,45 @@ function loadExecutorKind(env: NodeJS.ProcessEnv): BackgroundExecutorKind {
   return raw as BackgroundExecutorKind;
 }
 
-function loadClaudeConfig(env: NodeJS.ProcessEnv): ClaudeBackgroundConfig {
-  const apiKey = env.BACKGROUND_CLAUDE_API_KEY?.trim();
-  const oauthToken = env.BACKGROUND_CLAUDE_OAUTH_TOKEN?.trim();
-  if (!apiKey && !oauthToken) {
-    throw new Error("BACKGROUND_EXECUTOR=claude requires BACKGROUND_CLAUDE_API_KEY or BACKGROUND_CLAUDE_OAUTH_TOKEN");
+/**
+ * The Anthropic SDK appends `/v1/messages` to its base URL, so an OpenAI-style
+ * `/v1` suffix shared with the Codex provider is removed.
+ */
+function claudeBaseUrl(raw: string): string {
+  let url: URL;
+  try { url = new URL(raw); } catch { throw new Error("Invalid BACKGROUND_CLAUDE_BASE_URL"); }
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+    throw new Error("Invalid BACKGROUND_CLAUDE_BASE_URL");
   }
-  if (apiKey && oauthToken) {
-    throw new Error("Set only one of BACKGROUND_CLAUDE_API_KEY or BACKGROUND_CLAUDE_OAUTH_TOKEN");
+  return `${url.origin}${url.pathname.replace(/\/+$/, "").replace(/\/v1$/, "")}`;
+}
+
+function loadClaudeConfig(env: NodeJS.ProcessEnv, privateRoots: string[], gateway: { baseUrl?: string; apiKey?: string }): ClaudeBackgroundConfig {
+  const explicit = {
+    apiKey: env.BACKGROUND_CLAUDE_API_KEY?.trim(),
+    authToken: env.BACKGROUND_CLAUDE_AUTH_TOKEN?.trim(),
+    oauthToken: env.BACKGROUND_CLAUDE_OAUTH_TOKEN?.trim(),
+  };
+  const set = Object.entries(explicit).filter(([, value]) => value);
+  if (set.length > 1) {
+    throw new Error("Set only one of BACKGROUND_CLAUDE_API_KEY, BACKGROUND_CLAUDE_AUTH_TOKEN or BACKGROUND_CLAUDE_OAUTH_TOKEN");
   }
+  // Without a Claude-specific credential, reuse the background model gateway's key as an x-api-key.
+  const credential = set.length ? Object.fromEntries(set) as Partial<typeof explicit>
+    : gateway.apiKey ? { apiKey: gateway.apiKey } : undefined;
+  if (!credential) {
+    throw new Error("BACKGROUND_EXECUTOR=claude requires BACKGROUND_CLAUDE_API_KEY, BACKGROUND_CLAUDE_AUTH_TOKEN, " +
+      "BACKGROUND_CLAUDE_OAUTH_TOKEN or a background model provider key");
+  }
+  // The gateway URL is inherited only with the gateway key, so a Claude-specific
+  // credential is never sent to an endpoint it was not configured for.
+  const rawBaseUrl = env.BACKGROUND_CLAUDE_BASE_URL?.trim() || (set.length ? "" : gateway.baseUrl);
   const model = env.BACKGROUND_CLAUDE_MODEL?.trim();
+  if (model && !isClaudeModel(model)) {
+    throw new Error("Invalid BACKGROUND_CLAUDE_MODEL; expected a Claude alias (sonnet, opus, haiku) or a claude-* model name");
+  }
   return { path: env.BACKGROUND_CLAUDE_PATH?.trim() || "claude", ...(model ? { model } : {}),
-    ...(apiKey ? { apiKey } : { oauthToken }) };
+    ...(rawBaseUrl ? { baseUrl: claudeBaseUrl(rawBaseUrl) } : {}), ...credential, privateRoots };
 }
 
 export function loadBackgroundConfig(env: NodeJS.ProcessEnv,
@@ -76,10 +110,12 @@ export function loadBackgroundConfig(env: NodeJS.ProcessEnv,
     throw new Error("Background artifact storage must be separate from worker storage");
   }
   const executorKind = loadExecutorKind(env);
-  const claude = executorKind === "claude" ? loadClaudeConfig(env) : undefined;
   const model = env.BACKGROUND_MODEL_NAME?.trim() || leader?.model;
   const baseUrl = env.BACKGROUND_MODEL_BASE_URL?.trim() || leader?.baseUrl;
   const apiKey = env.BACKGROUND_MODEL_API_KEY?.trim() || leader?.apiKey;
+  // Claude reuses the background provider's Anthropic-compatible gateway unless its own endpoint is set.
+  const claude = executorKind === "claude"
+    ? loadClaudeConfig(env, [controllerDataRoot ? path.resolve(controllerDataRoot) : resolvedRoot], { baseUrl, apiKey }) : undefined;
   if (!claude && (!model || !baseUrl || !apiKey)) throw new Error("Background execution requires a model provider");
   const integer = (name: string, fallback: number, max: number): number => {
     const raw = env[name];

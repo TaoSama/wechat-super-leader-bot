@@ -31,6 +31,41 @@ function completing(): WorkerExecutor {
 }
 
 describe("isolated resumable worker runtime", () => {
+  it("resumes only sessions created by the same executor kind", async () => {
+    const claudeThread = "33333333-3333-4333-8333-333333333333";
+    const codex = completing();
+    const f = fixture(codex);
+    await f.runtime.start(f.input);
+    await terminal(f.runtime, f.input);
+    expect(JSON.parse(fs.readFileSync(path.join(f.dir, "state.json"), "utf8"))).toMatchObject({ threadId, executor: "codex" });
+    const seen: (string | undefined)[] = [];
+    const claude: WorkerExecutor = { kind: "claude", execute: vi.fn(async request => {
+      seen.push(request.threadId); await request.onThread(claudeThread); return result();
+    }) };
+    const switched = new CodexWorkerRuntime({ ...f.options, executor: claude });
+    for (const invocationId of [randomUUID(), randomUUID()]) {
+      const next = { ...f.input, invocationId }, expected = seen.length ? claudeThread : undefined;
+      expect((await switched.start(next)).threadId).toBe(expected);
+      expect(await terminal(switched, next)).toMatchObject({ status: "completed", threadId: claudeThread });
+    }
+    // A Codex thread ID never reaches `claude --resume`; the second Claude turn resumes its own session.
+    expect(seen).toEqual([undefined, claudeThread]);
+    expect(JSON.parse(fs.readFileSync(path.join(f.dir, "state.json"), "utf8"))).toMatchObject({ threadId: claudeThread, executor: "claude" });
+  });
+  it("treats a legacy worker state without an executor kind as Codex", async () => {
+    const f = fixture(completing());
+    await f.runtime.start(f.input);
+    await terminal(f.runtime, f.input);
+    const state = JSON.parse(fs.readFileSync(path.join(f.dir, "state.json"), "utf8"));
+    fs.writeFileSync(path.join(f.dir, "state.json"), JSON.stringify({ workerId: state.workerId, threadId }));
+    const resumed: (string | undefined)[] = [];
+    const codex: WorkerExecutor = { execute: vi.fn(async request => { resumed.push(request.threadId); await request.onThread(threadId); return result(); }) };
+    const next = { ...f.input, invocationId: randomUUID() };
+    const runtime = new CodexWorkerRuntime({ ...f.options, executor: codex });
+    await runtime.start(next);
+    await terminal(runtime, next);
+    expect(resumed).toEqual([threadId]);
+  });
   it.each(["invalid-name", "missing-state", "missing-invocations", "malformed-state", "worker-symlink", "dangling-symlink",
     "receipt-json", "receipt-identity", "receipt-input", "receipt-shape", "receipt-symlink", "receipt-hash"])(
     "keeps healthy workers dispatching while retaining damaged metadata (%s) for inspection", async kind => {

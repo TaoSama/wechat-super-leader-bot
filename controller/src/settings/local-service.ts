@@ -3,7 +3,9 @@ import type { LeaderModel, ModelMessage, ModelTool } from "../leader/model/contr
 import { HttpLeaderModel, type HttpLeaderModelOptions } from "../leader/model/client.js";
 import { LOCAL_PROMPTS, LOCAL_TOOLS, LOCAL_TOOL_VALIDATORS } from "./local-registry.js";
 import { LocalSettingsStorage, revision } from "./local-storage.js";
-import { LocalModelCatalogs } from "./local-catalog.js";
+import { CLAUDE_PROVIDER_LABEL, LocalModelCatalogs, claudeModelCatalog } from "./local-catalog.js";
+import { isClaudeModel } from "../background/worker/claude-models.js";
+import type { WorkerExecutorKind } from "../background/worker/contracts.js";
 import { assertEditedArguments, parseCompatibleTool } from "./local-tools.js";
 import { LocalSettingsDataSchema, LocalSettingsError, MAX_RESOURCE_BYTES, RESOURCE_EFFECT, type LocalSettingsData,
   type LocalModelChoice, type LocalModelScopeId, type LocalResourceDocument, type ModelProvider } from "./local-contracts.js";
@@ -12,7 +14,8 @@ export { LocalSettingsError } from "./local-contracts.js";
 const RESOURCE_VERSION = "controller@1.0.0";
 const REGISTRY_REVISION = revision([LOCAL_PROMPTS, LOCAL_TOOLS]);
 interface Options {
-  root?: string; leader?: ModelProvider; background?: ModelProvider & { codexPath?: string }; codexPath?: string;
+  root?: string; leader?: ModelProvider; background?: ModelProvider & { codexPath?: string; executorKind?: WorkerExecutorKind };
+  codexPath?: string;
   now?: () => number; fetchImpl?: typeof fetch;
 }
 
@@ -86,12 +89,19 @@ export class LocalSettingsService {
     return provider;
   }
   resolveModel(scope: LocalModelScopeId): LocalModelChoice { return this.capture().model(scope, this.provider(scope).model); }
+  /** Claude background workers run through the CLI, which has no HTTP model provider. */
+  private claudeScope(scope: LocalModelScopeId): boolean {
+    return scope === "background" && this.options.background?.executorKind === "claude";
+  }
   private modelScope(scope: LocalModelScopeId) {
     const provider = scope === "controller" ? this.options.leader : this.options.background;
     const choice = this.capture().model(scope, provider?.model ?? "未配置");
-    return { id: scope, label: scope === "controller" ? "内部协调" : "后台任务", ...choice,
+    const claude = this.claudeScope(scope);
+    // A model saved for the Codex executor does not run on Claude; show the model Claude actually uses.
+    const shown = claude && !isClaudeModel(choice.model) ? { model: provider!.model, reasoningEffort: choice.reasoningEffort } : choice;
+    return { id: scope, label: scope === "controller" ? "内部协调" : "后台任务", ...shown,
       revision: revision([scope, choice, provider?.baseUrl ?? null]), editable: !!provider, effect: RESOURCE_EFFECT,
-      provider: provider ? new URL(provider.baseUrl).origin : "未配置" };
+      provider: claude ? CLAUDE_PROVIDER_LABEL : provider ? new URL(provider.baseUrl).origin : "未配置" };
   }
   async snapshot() {
     return { scopes: [this.modelScope("controller"), this.modelScope("background")], diagnostics: [
@@ -101,6 +111,7 @@ export class LocalSettingsService {
   }
   async models(scope: LocalModelScopeId, refresh = false) {
     this.assertScope(scope);
+    if (this.claudeScope(scope)) return claudeModelCatalog(scope, this.provider(scope).model, this.now());
     return this.catalogs.get(scope, this.provider(scope), refresh);
   }
   private assertScope(scope: string): asserts scope is LocalModelScopeId {

@@ -31,6 +31,26 @@ function save(service: LocalSettingsService, id: string, content: string) {
 const listed = (service: LocalSettingsService, name: string) => JSON.parse(service.readResource(`controller.tool.${name}`).content);
 
 describe("Controller persistent runtime settings", () => {
+  it("serves a Claude CLI background scope without an HTTP provider", async () => {
+    const f = fixture();
+    const claude = { model: "claude-cli-default", baseUrl: "", apiKey: "", executorKind: "claude" as const };
+    const service = new LocalSettingsService({ ...f.options, background: claude });
+    let scope = (await service.snapshot()).scopes.find(item => item.id === "background")!;
+    expect(scope).toMatchObject({ provider: "Claude Code CLI", model: "claude-cli-default", editable: true });
+    const catalog = await service.models("background");
+    expect(catalog.models.map(item => item.id)).toEqual(["claude-cli-default", "sonnet", "opus", "haiku"]);
+    expect(catalog.models[1].reasoningEfforts).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(f.fetchImpl).not.toHaveBeenCalled();
+    scope = await service.updateModel({ scope: "background", model: "opus", reasoningEffort: "high", expectedRevision: scope.revision });
+    expect(scope).toMatchObject({ model: "opus", reasoningEffort: "high" });
+    await expect(service.updateModel({ scope: "background", model: "worker", reasoningEffort: null, expectedRevision: scope.revision }))
+      .rejects.toThrow(/目录/);
+    // A choice saved while Codex ran background tasks is not shown as the Claude model.
+    const codex = new LocalSettingsService(f.options);
+    const codexScope = (await codex.snapshot()).scopes.find(item => item.id === "background")!;
+    await codex.updateModel({ scope: "background", model: "new-future-model", reasoningEffort: null, expectedRevision: codexScope.revision });
+    expect((await service.snapshot()).scopes.find(item => item.id === "background")).toMatchObject({ model: "claude-cli-default" });
+  });
   it("persists actual prompt text with CAS across service recreation and freezes an existing model conversation", async () => {
     const f = fixture(), seen: ModelMessage[][] = [];
     const delegate = { complete: vi.fn(async (messages: ModelMessage[]) => { seen.push(messages); return { content: "ok", toolCalls: [] }; }) };
