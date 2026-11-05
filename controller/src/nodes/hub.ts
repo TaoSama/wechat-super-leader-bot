@@ -462,7 +462,8 @@ export class NodeHub {
         nodeId: cmd.nodeId, sessionId: cmd.sessionId, turnId: cmd.turnId } : {
         type:"inspect_command",commandId:cmd.commandId,nodeId:cmd.nodeId,sessionId:cmd.sessionId,action:cmd.action,
         prompt:cmd.prompt,expiresAt:cmd.expiresAt,skills:cmd.skills,sendRoute:cmd.sendRoute,
-        deliveryMode:cmd.deliveryMode,expectedTurnId:cmd.expectedTurnId};
+        deliveryMode:cmd.deliveryMode,expectedTurnId:cmd.expectedTurnId,
+        ...(cmd.approvalRequestId ? {approvalRequestId:cmd.approvalRequestId,approvalDecision:cmd.approvalDecision} : {})};
       node.ws.send(JSON.stringify(message), error => {
         if (error) {
           if (node.inspection === inspection) node.inspection = undefined;

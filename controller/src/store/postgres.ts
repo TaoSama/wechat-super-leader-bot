@@ -1,3 +1,4 @@
+import { ApprovalDecisionSchema } from "../sessions/approval-contracts.js";
 import { PROGRESS_OUTPUT_LIMIT, progressNotificationBudgetAvailable, progressNotificationContext, type ProgressContext, type ProgressDraft } from "../notifications/progress.js";
 import { notificationCommands, planNotificationRequestIds, goalNotificationRequestIds } from "../notifications/presentation.js";
 import { notificationFromRow, type NotificationRow } from "./notification-postgres.js";
@@ -92,8 +93,9 @@ export class PostgresStore implements IStore {
       `
       INSERT INTO commands (
         command_id, request_id, node_id, session_id, action, prompt,
-        status, output, error, expires_at, created_at, updated_at, skills, turn_id, send_route, input_receipt,delivery_mode,expected_turn_id,authority
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15, $16::jsonb,$17,$18,$19::jsonb)
+        status, output, error, expires_at, created_at, updated_at, skills, turn_id, send_route, input_receipt,delivery_mode,expected_turn_id,authority,
+        approval_request_id,approval_decision
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15, $16::jsonb,$17,$18,$19::jsonb,$20,$21)
       ON CONFLICT (request_id) DO NOTHING
       RETURNING *;
       `,
@@ -115,6 +117,7 @@ export class PostgresStore implements IStore {
         cmd.sendRoute ?? null,
         cmd.inputReceipt ? JSON.stringify(cmd.inputReceipt) : null,
         cmd.deliveryMode ?? null, cmd.expectedTurnId ?? null, cmd.authority ? JSON.stringify(cmd.authority) : null,
+        cmd.approvalRequestId ?? null, cmd.approvalDecision ?? null,
       ]
     );
 
@@ -254,7 +257,7 @@ export class PostgresStore implements IStore {
 
   private commandSummarySelect(): string {
     return `SELECT command_id,request_id,node_id,session_id,action,prompt,skills,send_route,status,
-      turn_id,input_receipt,delivery_mode,expected_turn_id,authority,expires_at,created_at,updated_at,
+      turn_id,input_receipt,delivery_mode,expected_turn_id,approval_request_id,approval_decision,authority,expires_at,created_at,updated_at,
       output IS NOT NULL AS has_output, left(output,$1) AS output_preview,
       octet_length(output)>octet_length(left(output,$1)) AS output_truncated, left(error,$1) AS error FROM commands`;
   }
@@ -407,7 +410,7 @@ export class PostgresStore implements IStore {
   }
   private notificationCommandReader(client: Pick<pg.PoolClient, "query">, metadataOnly = false): Pick<IStore, "findCommandByRequestId"> {
     return { findCommandByRequestId: async requestId => {
-      const columns = metadataOnly ? `command_id,request_id,node_id,session_id,action,prompt,status,expires_at,created_at,updated_at,skills,turn_id,send_route,input_receipt,delivery_mode,expected_turn_id,authority,queue_order,CASE WHEN status='completed' THEN substring(output from 1 for ${PROGRESS_OUTPUT_LIMIT}) END AS output` : "*";
+      const columns = metadataOnly ? `command_id,request_id,node_id,session_id,action,prompt,status,expires_at,created_at,updated_at,skills,turn_id,send_route,input_receipt,delivery_mode,expected_turn_id,approval_request_id,approval_decision,authority,queue_order,CASE WHEN status='completed' THEN substring(output from 1 for ${PROGRESS_OUTPUT_LIMIT}) END AS output` : "*";
       const progressStatus = metadataOnly ? " AND status IN ('admitting','queued','pending','accepted','completed')" : "";
       const result = await client.query(`SELECT ${columns} FROM commands WHERE request_id = $1${progressStatus}`, [requestId]);
       return result.rows[0] ? this.mapCommandRow(result.rows[0]) : null;
@@ -525,6 +528,8 @@ export class PostgresStore implements IStore {
       error: r.error || undefined,
       ...(r.delivery_mode == null ? {} : { deliveryMode: r.delivery_mode }),
       ...(r.expected_turn_id == null ? {} : { expectedTurnId: r.expected_turn_id }),
+      ...(r.approval_request_id == null ? {} : { approvalRequestId: r.approval_request_id }),
+      ...(r.approval_decision == null ? {} : { approvalDecision: ApprovalDecisionSchema.parse(r.approval_decision) }),
       ...(r.authority == null ? {} : { authority: typeof r.authority === "string" ? JSON.parse(r.authority) : r.authority }),
       ...(r.queue_order == null ? {} : { queueOrder: Number(r.queue_order) }),
       turnId: r.turn_id || undefined,

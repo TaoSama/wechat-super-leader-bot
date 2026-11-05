@@ -6,7 +6,23 @@
 import type { ConsoleGoals } from "./features/leader/goal-contract";
 import type { ConsoleAutomation } from "./features/notifications/automation-contract";
 import type { ConsoleDelivery } from "./features/notifications/delivery-contract";
-export type ActionType = "read" | "send" | "interrupt";
+export type ActionType = "read" | "send" | "interrupt" | "approve";
+export type ApprovalKind = "commandExecution" | "fileChange" | "permissions" | "userInput" | "other";
+export type ApprovalDecision = "accept" | "decline";
+
+/** Read-only telemetry about one native approval request observed on a session. */
+export interface PendingApproval {
+  requestId: string;
+  kind: ApprovalKind;
+  turnId?: string;
+  itemId?: string;
+  command?: string;
+  cwd?: string;
+  reason?: string;
+  grantRoot?: string;
+  startedAt?: string;
+  answerable: boolean;
+}
 export type SessionCapability = "read" | "send" | "resume-send";
 
 export type CommandStatus =
@@ -74,6 +90,7 @@ export interface ScopedSession {
   desktopObservation?: DesktopObservation;
   sendAvailability?: SendAvailability;
   historySource?: "terminal-transcript" | "wechat-codex";
+  pendingApprovals?: PendingApproval[];
 }
 
 export interface HistoryItem {
@@ -118,6 +135,8 @@ export interface CommandRecord {
   error?: string;
   turnId?: string;
   expectedTurnId?: string;
+  approvalRequestId?: string;
+  approvalDecision?: ApprovalDecision;
   sendRoute?: SendRoute;
   inputReceipt?: InputReceipt;
   expiresAt: string;

@@ -17,6 +17,7 @@ export interface ToolAuthorization {
   backgroundOperations?: ("create" | "follow_up" | "extend")[];
   sendImages?: boolean;
   interruptSession?: boolean;
+  approvalDecision?: "none" | "accept" | "decline";
   memoryOperations?: ("remember" | "forget")[];
 }
 export interface ControllerToolCall extends ControllerMessageRequest {

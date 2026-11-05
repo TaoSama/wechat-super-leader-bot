@@ -216,6 +216,9 @@ func (d *Daemon) executeVolatileCommand(ctx context.Context, cmd protocol.Contro
 	case protocol.ActionInterrupt:
 		res = d.interruptTurn(execCtx, cmd)
 
+	case protocol.ActionApprove:
+		res = d.answerApproval(execCtx, cmd)
+
 	default:
 		res = protocol.DaemonResultMessage{
 			Type:      "result",

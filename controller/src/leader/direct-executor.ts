@@ -24,6 +24,7 @@ import { sendSessionImages } from "./queries/session-images.js";
 import type { MediaHub } from "../sessions/message-images.js";
 import type { Hub } from "./orchestrator.js";
 import { DirectToolRejectedError } from "./direct-errors.js";
+import { approvalAuthorizationFailure } from "./session-approval.js";
 import { DirectToolJournal } from "./direct-journal.js";
 import { CancelPlanArgumentsSchema, DIRECT_TOOL_INSTRUCTIONS, DirectAuthorizationSchema,
   type DirectCall, type DirectRequest, type DirectToolResult } from "./direct-contracts.js";
@@ -91,7 +92,7 @@ export class DirectToolExecutor {
 
   private isReadOnly(name: string) {
     return !["execute_plan", "execute_goal", "propose_plan", "propose_goal", "remember", "forget", "get_console_link",
-      "confirm_pending", "cancel_plan", "cancel_goal", "send_session_images", "interrupt_session", "create_automation", "update_automation", "follow_up_background_task", "extend_background_task"].includes(name);
+      "confirm_pending", "cancel_plan", "cancel_goal", "send_session_images", "interrupt_session", "answer_approval", "create_automation", "update_automation", "follow_up_background_task", "extend_background_task"].includes(name);
   }
 
   async call(request: DirectCall): Promise<DirectToolResult> {
@@ -364,7 +365,7 @@ export class DirectToolExecutor {
           reply = { text: goalPreview(data.pendingGoal, node => o.hub.getNodeSkills(node), (node, session) => o.hub.getNodeSession(node, session)?.title) }; result = reply;
         } else if (name === "list_sessions" && parseSessionDirectoryQuery(request.text)) {
           reply = { text: titles.render("") };
-        } else if (name === "interrupt_session" && result && typeof result === "object" && "receipt" in result && typeof result.receipt === "string") {
+        } else if ((name === "interrupt_session" || name === "answer_approval") && result && typeof result === "object" && "receipt" in result && typeof result.receipt === "string") {
           reply = { text: result.receipt, ...("commandId" in result && typeof result.commandId === "string" ? { commandId: result.commandId } : {}) };
         } else if (name === "get_console_link" && link.issuedLink) {
           reply = { text: `控制台登录链接（签发后1小时内可重复登录）：\n${link.issuedLink.url}` };
@@ -417,6 +418,13 @@ export class DirectToolExecutor {
     if (["propose_plan", "propose_goal"].includes(name)) require(auth.intent === "preview");
     if (name === "send_session_images") require(auth.sendImages);
     if (name === "interrupt_session") require(auth.interruptSession);
+    if (name === "answer_approval") {
+      const target = ToolArguments.answer_approval.safeParse(request.arguments);
+      require(target.success);
+      const failure = target.success ? approvalAuthorizationFailure(request.text, auth.approvalDecision,
+        this.options.hub.getNodeSession(target.data.nodeId, target.data.sessionId), target.data) : undefined;
+      if (failure) throw new DirectToolRejectedError(403, failure);
+    }
     if (name === "remember" || name === "forget") require(auth.memoryOperations.includes(name));
     if (name === "follow_up_background_task") require(auth.backgroundOperations.includes("follow_up"));
     if (name === "extend_background_task") require(auth.backgroundOperations.includes("extend"));

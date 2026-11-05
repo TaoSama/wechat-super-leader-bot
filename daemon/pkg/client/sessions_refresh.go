@@ -33,6 +33,9 @@ func cloneSessions(sessions []protocol.Session) []protocol.Session {
 			availability := *sessions[i].SendAvailability
 			copy[i].SendAvailability = &availability
 		}
+		if sessions[i].PendingApprovals != nil {
+			copy[i].PendingApprovals = append([]protocol.PendingApproval(nil), sessions[i].PendingApprovals...)
+		}
 	}
 	return copy
 }
@@ -114,6 +117,10 @@ func (d *Daemon) refreshControlSnapshot(ctx context.Context, updates chan<- stru
 	}
 	if err != nil || readErr != nil {
 		log.Printf("[daemon:%s] session discovery unavailable; retaining last observed snapshot", d.cfg.NodeID)
+		return
+	}
+	d.attachPendingApprovals(ctx, sessions)
+	if ctx.Err() != nil {
 		return
 	}
 	d.snapshotMu.Lock()

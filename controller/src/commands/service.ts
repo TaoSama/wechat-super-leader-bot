@@ -9,8 +9,10 @@ import { QUEUE_BATCH_SIZE, QUEUE_TICK_MS, queueSendRoute, sameAuthority, sameCom
 import { matchesGoalCommand } from "../leader/goals/goal.js";
 import { routeSupportsDeliveryMode } from "./delivery.js";
 import { isPlanCommandAuthorized } from "./plan-authorization.js";
+import { findAnswerableApproval } from "../sessions/approval.js";
 
 export const TERMINAL_INTERRUPT_UNSUPPORTED = "终端会话暂不支持中断";
+export const TERMINAL_APPROVAL_UNSUPPORTED = "终端会话暂不支持远程审批";
 const INTERRUPT_AUTHORITY_TYPES: ReadonlySet<CommandAuthority["type"]> = new Set(["admin", "chat", "console"]);
 
 export class CommandError extends Error {
@@ -84,7 +86,7 @@ export class CommandService {
       await this.store.markExpiredActiveCommandsUncertain();
       return (await this.store.getCommand(previous.commandId))!;
     }
-    if (request.action === "interrupt") return this.submitInterrupt(request, waitMs, assertDispatchAllowed, authority);
+    if (request.action === "interrupt" || request.action === "approve") return this.submitInterrupt(request, waitMs, assertDispatchAllowed, authority);
     let sendRoute: SendRoute | undefined;
     let readyAtSubmission = false;
     if (request.action === "send") {
@@ -122,10 +124,11 @@ export class CommandService {
     return (await this.store.getCommand(record.commandId))!;
   }
 
-  /** Interrupts bypass the per-session send queue: they target one live turn and never start input. */
+  /** Interrupts and approvals bypass the per-session send queue: they target one live turn and never start input. */
   private async submitInterrupt(request: PostCommandRequest, waitMs: number, assertDispatchAllowed: (() => Promise<void>) | undefined,
     authority: CommandAuthority): Promise<CommandRecord> {
-    if (!INTERRUPT_AUTHORITY_TYPES.has(authority.type)) throw new CommandError(403, "This authorization cannot interrupt a session turn");
+    if (!INTERRUPT_AUTHORITY_TYPES.has(authority.type)) throw new CommandError(403, request.action === "approve"
+      ? "This authorization cannot answer a session approval" : "This authorization cannot interrupt a session turn");
     if (authority.type === "chat" && !this.isChatAllowed(authority.chatId)) throw new CommandError(403, "CHAT_NOT_ALLOWED");
     const sendRoute = this.interruptRoute(request);
     const now = new Date();
@@ -149,11 +152,14 @@ export class CommandService {
     return (await this.store.getCommand(record.commandId))!;
   }
 
-  private interruptRoute(request: Pick<PostCommandRequest, "nodeId" | "sessionId">, expected?: SendRoute): SendRoute {
+  private interruptRoute(request: Pick<PostCommandRequest, "nodeId" | "sessionId" | "action" | "expectedTurnId" | "approvalRequestId">, expected?: SendRoute): SendRoute {
     if (!this.hub.isNodeConnected(request.nodeId)) throw new CommandError(503, "Target node is offline");
     const session = this.hub.getNodeSession(request.nodeId, request.sessionId);
     if (!session) throw new CommandError(404, "Target session is unavailable");
-    if (isTerminalSession(session)) throw new CommandError(400, TERMINAL_INTERRUPT_UNSUPPORTED);
+    if (isTerminalSession(session)) throw new CommandError(400, request.action === "approve" ? TERMINAL_APPROVAL_UNSUPPORTED : TERMINAL_INTERRUPT_UNSUPPORTED);
+    if (request.action === "approve" && !findAnswerableApproval(session, request.expectedTurnId, request.approvalRequestId)) {
+      throw new CommandError(409, "Approval request is not pending on this session turn");
+    }
     const route = queueSendRoute(session);
     if (!route || route === "terminal-pane") throw new CommandError(400, "Target does not support this action");
     if (expected && route !== expected) throw new CommandError(409, "Target route changed before interrupt transmission");
@@ -247,7 +253,8 @@ export class CommandService {
     try {
       const delivery = await this.hub.sendCommand({type:"command",commandId:record.commandId,nodeId:record.nodeId,sessionId:record.sessionId,
         action:record.action,prompt:record.prompt,expiresAt:record.expiresAt,skills:record.skills,...(record.sendRoute ? {sendRoute:record.sendRoute}:{}),
-        ...(record.deliveryMode ? {deliveryMode:record.deliveryMode}:{}),...(record.expectedTurnId ? {expectedTurnId:record.expectedTurnId}: {})}, transmission.signal);
+        ...(record.deliveryMode ? {deliveryMode:record.deliveryMode}:{}),...(record.expectedTurnId ? {expectedTurnId:record.expectedTurnId}: {}),
+        ...(record.approvalRequestId ? {approvalRequestId:record.approvalRequestId,approvalDecision:record.approvalDecision}: {})}, transmission.signal);
       if (!delivery.delivered) await this.store.updateCommandStatus(record.commandId,delivery.rejected ? "failed" : "uncertain",undefined,
         delivery.rejected ? delivery.error : "Transport did not confirm command delivery");
       else if (waitMs>0) await waiter.wait();
