@@ -34,7 +34,11 @@ function fixture(t) {
       Config: { Image: image, Env: ['SECRET=must-not-appear', 'GATEWAY_CONTEXT_WINDOW_MS=82800000'],
         Labels: { 'com.docker.compose.project': 'super-leader', 'com.docker.compose.service': service,
           'com.docker.compose.project.working_dir': root, 'org.opencontainers.image.revision': REVISION } },
-      HostConfig: { Memory: 1024 }, Mounts: [{ Source: '/runtime', Destination: '/data' }],
+      HostConfig: { Memory: 1024 }, Mounts: [
+        { Type: 'bind', Source: '/runtime', Destination: '/data', Mode: 'rw', RW: true, Propagation: 'rprivate' },
+        { Type: 'volume', Name: `${service}-cache`, Source: `/volumes/${service}-cache`, Destination: '/cache',
+          Driver: 'local', Mode: 'z', RW: true, FutureOptions: { storage: 'local', labels: ['cache'] } },
+      ],
       NetworkSettings: { Networks: { default: { Aliases: [service], IPAddress: '172.1.0.2', EndpointID: 'ephemeral' } } },
     };
     state.images[image] = { Id: IMAGE_ID, Os: 'linux', Architecture: 'amd64',
@@ -116,8 +120,48 @@ test('only an accepted receipt and matching live runtime can skip, with private 
 test('new revision and changed deployment bundle cannot reuse a receipt', t => {
   const f = fixture(t); f.record();
   assert.equal(f.probe(['--revision', 'c'.repeat(40)]).reason, 'revision_changed');
-  writeFileSync(join(f.bundle, 'compose.yaml'), 'changed');
-  assert.equal(f.probe().reason, 'bundle_changed');
+  for (const name of ['compose.yaml', 'release-state.py']) {
+    writeFileSync(join(f.bundle, name), 'changed');
+    assert.equal(f.probe().reason, 'bundle_changed', name);
+    writeFileSync(join(f.bundle, name), name + '\n');
+  }
+});
+
+test('mount order changes repeatedly match receipts recorded in either order', t => {
+  const f = fixture(t);
+  for (const recordedOrder of ['original', 'reversed']) {
+    if (recordedOrder === 'reversed') {
+      for (const container of Object.values(f.state.containers)) container.Mounts.reverse();
+      f.save();
+    }
+    f.record();
+    const accepted = readFileSync(f.receipt, 'utf8');
+    for (const service of ['controller', 'gateway', 'controller', 'gateway']) {
+      f.state.containers[service].Mounts.reverse(); f.save();
+      assert.deepEqual(f.probe(), { schema: 1, revision: REVISION,
+        decision: 'duplicate_skipped', reason: 'healthy_receipt_match' }, `${recordedOrder}: ${service}`);
+      assert.equal(readFileSync(f.receipt, 'utf8'), accepted);
+    }
+  }
+});
+
+test('mount order equivalence preserves duplicate mount entries', t => {
+  const f = fixture(t);
+  const mounts = f.state.containers.controller.Mounts;
+  mounts.push(structuredClone(mounts[1])); f.save(); f.record();
+  mounts.reverse(); f.save();
+  assert.equal(f.probe().reason, 'healthy_receipt_match');
+  mounts.shift(); f.save();
+  assert.equal(f.probe().decision, 'deploy_required');
+});
+
+test('mount order ignores shared endpoints while preserving distinct options', t => {
+  const f = fixture(t);
+  const mounts = f.state.containers.controller.Mounts;
+  mounts[1] = { ...structuredClone(mounts[0]), Mode: 'ro', RW: false };
+  f.save(); f.record();
+  mounts.reverse(); f.save();
+  assert.equal(f.probe().reason, 'healthy_receipt_match');
 });
 
 for (const [name, mutate] of [
@@ -132,8 +176,17 @@ for (const [name, mutate] of [
   ['stopped service', f => { f.state.containers.gateway.State.Status = 'exited'; }],
   ['window', f => { f.state.containers.gateway.Config.Env = ['GATEWAY_CONTEXT_WINDOW_MS=86400000']; }],
   ['environment', f => { f.state.containers.controller.Config.Env.push('CHANGED=1'); }],
+  ['environment order', f => { f.state.containers.controller.Config.Env.reverse(); }],
   ['host configuration', f => { f.state.containers.controller.HostConfig.Memory = 2048; }],
-  ['mount', f => { f.state.containers.controller.Mounts[0].Source = '/elsewhere'; }],
+  ['mount source', f => { f.state.containers.controller.Mounts[0].Source = '/elsewhere'; }],
+  ['mount destination', f => { f.state.containers.controller.Mounts[0].Destination = '/elsewhere'; }],
+  ['mount type', f => { f.state.containers.controller.Mounts[0].Type = 'volume'; }],
+  ['mount writable flag', f => { f.state.containers.controller.Mounts[0].RW = false; }],
+  ['mount mode', f => { f.state.containers.controller.Mounts[0].Mode = 'ro'; }],
+  ['mount name', f => { f.state.containers.controller.Mounts[1].Name = 'another-cache'; }],
+  ['mount propagation', f => { f.state.containers.controller.Mounts[0].Propagation = 'rshared'; }],
+  ['mount driver', f => { f.state.containers.controller.Mounts[1].Driver = 'another-driver'; }],
+  ['unknown mount field', f => { f.state.containers.controller.Mounts[1].FutureOptions.storage = 'remote'; }],
   ['network membership', f => { f.state.containers.controller.NetworkSettings.Networks.extra = { Aliases: ['extra'] }; }],
   ['missing service', f => { delete f.state.containers.gateway; }],
 ]) {

@@ -114,8 +114,9 @@ def runtime(release_dir, revision):
             networks = {name: {key: network.get(key) for key in
                               ('Aliases', 'Links', 'IPAMConfig', 'DriverOpts')}
                         for name, network in container['NetworkSettings']['Networks'].items()}
+            # Docker mount order is arbitrary; retain every field and duplicate.
             snapshot = {'Config': config, 'HostConfig': container['HostConfig'],
-                        'Mounts': container['Mounts'], 'Networks': networks}
+                        'Mounts': sorted(container['Mounts'], key=canonical), 'Networks': networks}
             result[service] = {'image_id': image_id, 'runtime_sha256': digest(canonical(snapshot))}
         except (KeyError, TypeError, AttributeError) as error:
             raise StateError('docker_response') from error
