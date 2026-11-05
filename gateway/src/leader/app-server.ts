@@ -30,7 +30,7 @@ export interface AppServerTurn {
   readonly threadId: string;
   readonly turnId: string;
   readonly events: AsyncIterable<ThreadEvent>;
-  steer(text: string, expectedTurnId: string): Promise<void>;
+  steer(text: string, expectedTurnId: string, localImages?: readonly string[]): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -314,10 +314,15 @@ export async function readAppServerThreadHistory(options: CodexOptions, threadId
   }
 }
 
+/** Text first, then images in arrival order; the app-server reads each local file itself. */
+function userInput(text: string, localImages: readonly string[]) {
+  return [{ type: "text", text, text_elements: [] }, ...localImages.map(file => ({ type: "localImage", path: file }))];
+}
+
 /** One isolated native process owns one query, including all its steered input. */
 export async function startAppServerTurn(options: CodexOptions, threadOptions: ThreadOptions,
   threadId: string | undefined, input: string, signal: AbortSignal,
-  onThreadStarted?: ThreadStartedHandler): Promise<AppServerTurn> {
+  onThreadStarted?: ThreadStartedHandler, localImages: readonly string[] = []): Promise<AppServerTurn> {
   if (signal.aborted) throw new Error("Codex app-server turn aborted");
   const config = { ...options.config,
     ...(threadOptions.modelReasoningEffort ? { model_reasoning_effort: threadOptions.modelReasoningEffort } : {}),
@@ -344,7 +349,7 @@ export async function startAppServerTurn(options: CodexOptions, threadOptions: T
     connection.queue.push({ type: "thread.started", thread_id: connection.threadId });
     connection.queue.push({ type: "turn.started" });
     const started = object(await connection.rpc("turn/start", { threadId: connection.threadId,
-      input: [{ type: "text", text: input, text_elements: [] }] }));
+      input: userInput(input, localImages) }));
     connection.turnId = string(object(started.turn).id);
     if (!connection.turnId) throw new Error("Codex app-server returned no turn ID");
     return { threadId: connection.threadId, turnId: connection.turnId,
@@ -353,10 +358,10 @@ export async function startAppServerTurn(options: CodexOptions, threadOptions: T
         try { yield* connection.queue.read(); drained = true; }
         finally { if (!drained) await connection.close(); }
       } },
-      async steer(text, expectedTurnId) {
+      async steer(text, expectedTurnId, images = []) {
         if (expectedTurnId !== connection.turnId) throw new AppServerRejectedError(-32602);
         const accepted = object(await connection.rpc("turn/steer", { threadId: connection.threadId, expectedTurnId,
-          input: [{ type: "text", text, text_elements: [] }] }));
+          input: userInput(text, images) }));
         if (accepted.turnId !== expectedTurnId) throw new Error("Codex app-server steer receipt did not match the active turn");
       }, close: () => connection.close() };
   } catch (error) { await connection.close(); throw error; }

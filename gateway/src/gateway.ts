@@ -6,7 +6,7 @@ import { ILinkClient } from "./wechat/client.js";
 import { isRejectedSendReceipt } from "./wechat/send-receipt.js";
 import { ControllerClient, ChatNotAllowedError } from "./controller/client.js";
 import { PermanentImageDownloadError } from "./controller/image-client.js";
-import { downloadInboundMedia } from "./wechat/cdn-download.js";
+import { downloadInboundMedia, type DownloadedMedia } from "./wechat/cdn-download.js";
 import { PermanentReplyUnavailableError } from "./controller/reply-client.js";
 import { DEFAULT_MESSAGE_MAX_CHARS } from "./wechat/markdown.js";
 import { HealthTracker, sanitizeErrorType } from "./runtime/health.js";
@@ -119,8 +119,9 @@ export class WeChatGateway {
       process: msg => runWithTrace(createMessageTrace(msg.chatId, msg.messageId), async () => { await this.processMessage(msg); }),
       steer: async msg => {
         // Unsupported content gets its own notice; media must be stored before any leader sees it.
-        if (msg.unsupportedKinds?.length || msg.media?.length) return false;
+        if (msg.unsupportedKinds?.length) return false;
         await this.queryStarts.get(msg.chatId);
+        if (msg.media?.length) return this.steerMedia(msg);
         return this.replyEngine?.steer?.(this.stateManager.account!.accountId,
           { chatId: msg.chatId, messageId: msg.messageId, text: msg.text }, this.controller) ?? false;
       },
@@ -373,7 +374,7 @@ export class WeChatGateway {
         await this.flushRepliesOnce(undefined, msg.chatId);
         this.stateManager.assertOutboxCapacity(msg.deliveryKey);
       }
-      const mediaStored = msg.media?.length ? await this.storeInboundMedia(msg) : true;
+      const mediaStored = msg.media?.length ? await this.storeInboundMedia(msg) !== undefined : true;
       if (msg.media?.length && !msg.text && mediaStored) {
         // An attachment alone is held as chat context for the next text; no reply spends the send budget.
         ready();
@@ -454,21 +455,45 @@ export class WeChatGateway {
     }
   }
 
-  /** Stores every attachment of one message, or reports false so the sender gets a notice. Aborted only by stop(). */
-  private async storeInboundMedia(msg: InboundWeChatMessage): Promise<boolean> {
+  /**
+   * Stores every attachment of one message as chat context and hands its images to the leader.
+   * Undefined means storage failed, so the sender gets a notice. Aborted only by stop().
+   */
+  private async storeInboundMedia(msg: InboundWeChatMessage): Promise<DownloadedMedia[] | undefined> {
+    const stored: DownloadedMedia[] = [];
     try {
       for (const [ordinal, ref] of (msg.media ?? []).entries()) {
         const media = await traceSpan("message.media.download", () => downloadInboundMedia(ref,
           { fetchImpl: this.mediaFetch, signal: this.notificationAbort.signal }), { kind: ref.kind });
         await traceSpan("message.media.store", () => this.controller.uploadAttachment({ chatId: msg.chatId,
           messageId: msg.messageId, ordinal, media }, this.notificationAbort.signal));
+        stored.push(media);
       }
-      return true;
     } catch (error) {
       if (this.notificationAbort.signal.aborted) throw error;
       traceEvent("message.media.failed", { reason: sanitizeErrorType(error) });
-      return false;
+      return undefined;
     }
+    const images = stored.filter(media => media.kind === "image");
+    if (images.length && this.replyEngine?.stageImages) {
+      // The attachment record already exists; a local staging failure only costs the leader the pixels.
+      try {
+        await traceSpan("message.media.stage", () => this.replyEngine!.stageImages!(this.stateManager.account!.accountId,
+          msg.chatId, msg.messageId, images));
+      } catch (error) { traceEvent("message.media.stage.failed", { reason: sanitizeErrorType(error) }); }
+    }
+    return stored;
+  }
+
+  /** Images sent while this chat's turn runs join that turn instead of waiting until it has answered. */
+  private async steerMedia(msg: InboundWeChatMessage): Promise<boolean> {
+    const engine = this.replyEngine;
+    const accountId = this.stateManager.account!.accountId;
+    if (!engine?.steer || !engine.stageImages || !engine.hasActiveTurn?.(accountId, msg.chatId) ||
+        !msg.media?.some(ref => ref.kind === "image")) return false;
+    // A failure here falls back to normal processing, which retries storage and reports it.
+    if (!await this.storeInboundMedia(msg)) return false;
+    return engine.steer(accountId, { chatId: msg.chatId, messageId: msg.messageId, text: msg.text }, this.controller);
   }
 
   private progressSink(chatId: string): ProgressSink {

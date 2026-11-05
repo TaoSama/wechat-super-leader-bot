@@ -4,7 +4,7 @@ import { beforeAbort } from "../runtime/abort.js";
 import { transferTimeoutMs } from "../runtime/transfer-budget.js";
 import type { InboundMediaKind, InboundMediaRef } from "../types.js";
 import { MAX_MEDIA_FILE_NAME_CHARS } from "./inbound-content.js";
-import { sniffImageMime } from "./media-upload.js";
+import { sniffImageMime, type ImageMime } from "./media-upload.js";
 
 export const MAX_INBOUND_IMAGE_BYTES = 10 * 1024 * 1024;
 export const MAX_INBOUND_FILE_BYTES = 20 * 1024 * 1024;
@@ -16,7 +16,7 @@ const DEFAULT_IMAGE_NAME = "image";
 const DEFAULT_FILE_NAME = "attachment";
 const FALLBACK_FILE_MIME = "application/octet-stream";
 
-const IMAGE_EXTENSIONS: Record<string, string> = {
+export const IMAGE_EXTENSIONS: Record<ImageMime, string> = {
   "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp",
 };
 const FILE_MIMES: Record<string, string> = {

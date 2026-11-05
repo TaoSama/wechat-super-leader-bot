@@ -4,7 +4,7 @@ import { realpathSync } from "node:fs";
 import { RuntimeResourceError, disabledWorkspaceSkills } from "../settings/resources.js";
 import type { GatewaySettings } from "../settings/service.js";
 import { createRequire } from "node:module";
-import { type CodexOptions, type ThreadOptions, type ThreadEvent, type TurnOptions } from "@openai/codex-sdk";
+import { type CodexOptions, type Input, type ThreadOptions, type ThreadEvent, type TurnOptions } from "@openai/codex-sdk";
 import type { ControllerClient } from "../controller/client.js";
 import type { ControllerMessageRequest, ControllerMessageResponse } from "../types.js";
 import { ControllerToolRejectedError } from "../controller/direct-tools.js";
@@ -22,6 +22,8 @@ import { buildLeaderPrompt as prompt } from "./prompt.js";
 import { isConsoleLinkQuery, parseSessionDirectoryQuery } from "@super-leader/wechat-text";
 import { combineReplyText, restoreConsoleReply } from "./reply-content.js";
 import { startAppServerTurn, AppServerRejectedError, type AppServerTurn } from "./app-server.js";
+import { claimInboundImages, inboundImageNote, releaseInboundImages, stageInboundImages, INBOUND_IMAGE_DIRECTORY,
+  type InboundImage } from "./inbound-images.js";
 
 const DEFAULT_TIMEOUT_MS = 300000;
 const MAX_TIMEOUT_MS = 315000;
@@ -38,7 +40,7 @@ const JOURNAL_LOCKS = new Map<string, Promise<void>>();
 const ACTIVE_REPLIES = new Map<string, { inputHash: string; reply: Promise<ControllerMessageResponse> }>();
 
 interface ThreadRunner {
-  runStreamed(input: string, options: TurnOptions & { signal: AbortSignal }): Promise<{ events: AsyncIterable<ThreadEvent> }>;
+  runStreamed(input: Input, options: TurnOptions & { signal: AbortSignal }): Promise<{ events: AsyncIterable<ThreadEvent> }>;
 }
 interface CodexClient {
   startThread(options: ThreadOptions): ThreadRunner;
@@ -92,6 +94,8 @@ function permissionOverrides(workspace: LeaderWorkspace, codexPath?: string, ski
     [HEADLESS_SKILLS_ROOT, "read"],
     ...(skillsRoot ? [[skillsRoot, "read"], [path.join(workspace.workspacePath, ".agents"), "deny"]] : []),
     [workspace.workspacePath, "write"],
+    // The model may inspect received images but cannot swap the files a later turn attaches.
+    [path.join(workspace.workspacePath, INBOUND_IMAGE_DIRECTORY), "read"],
     [workspace.codexHome, "deny"],
     [path.join(workspace.workspacePath, ".replies.json"), "deny"],
     [path.join(workspace.workspacePath, ".thread.json"), "deny"],
@@ -214,9 +218,25 @@ export class CodexReplyEngine implements GatewayReplyEngine {
     return reply;
   }
 
+  /** Keeps a message's images for this chat's current or next leader turn. */
+  public async stageImages(accountId: string, chatId: string, messageId: string, images: readonly InboundImage[]): Promise<void> {
+    if (!messageId?.trim()) throw new Error("A stable message ID is required");
+    if (!images.length) return;
+    await this.withJournalLock(accountId, chatId, async () => {
+      const workspace = await this.store.forChat(accountId, chatId);
+      const staged = stageInboundImages(workspace, messageId, images, Date.now());
+      traceEvent("codex.images.staged", { itemCount: staged });
+    });
+  }
+
+  public hasActiveTurn(accountId: string, chatId: string): boolean {
+    return this.active.has(hash(JSON.stringify([accountId, chatId])));
+  }
+
+  /** Empty text steers only the images staged for this message into the running turn. */
   public async steer(accountId: string, request: ControllerMessageRequest,
     _controller: ControllerToolClient): Promise<boolean> {
-    if (!request.messageId?.trim() || !request.text?.trim()) throw new Error("A stable message ID and text are required");
+    if (!request.messageId?.trim() || typeof request.text !== "string") throw new Error("A stable message ID and text are required");
     const existing = await this.withJournalLock(accountId, request.chatId, async () => {
       const workspace = await this.store.findChat(accountId, request.chatId);
       return workspace?.getReplyJournal()[hash(request.messageId)];
@@ -236,6 +256,7 @@ export class CodexReplyEngine implements GatewayReplyEngine {
     if (!query.accepting || !query.native || !query.workspace || !query.control) return false;
     const workspace = query.workspace;
     const key = hash(request.messageId);
+    let images: string[] = [];
     const releaseAuthority = query.control.beginAppend();
     try {
       const existing = await this.withJournalLock(accountId, request.chatId, async () => {
@@ -246,20 +267,27 @@ export class CodexReplyEngine implements GatewayReplyEngine {
           return previous;
         }
         reserveJournalEntry(journal);
+        const claimed = claimInboundImages(workspace, request.messageId, Date.now());
+        if (!request.text.trim() && !claimed.length) return null;
         journal[key] = { inputHash: hash(request.text), stage: "started", delivery: "pending", reply: { text: "" },
           steering: { rootMessageId: query.request.messageId, threadId: query.native!.threadId,
             turnId: query.native!.turnId, status: "submitting" } };
         workspace.setReplyJournal(journal);
+        images = claimed;
         return undefined;
       });
+      if (existing === null) return false;
       if (existing) return Boolean(existing.steering);
       try {
-        await query.native.steer(`<current_user_message>${JSON.stringify({ messageId: request.messageId, text: redactConsoleCredentials(request.text) })}</current_user_message>
-后续业务工具调用填写 requestMessageId 为当前实际 messageId，按完整合并的本轮原文重新选择工具和参数，不复用补充消息之前的旧参数。`, query.native.turnId);
+        await query.native.steer(`<current_user_message>${JSON.stringify({ messageId: request.messageId, text: redactConsoleCredentials(request.text) })}</current_user_message>${inboundImageNote(images.length)}
+后续业务工具调用填写 requestMessageId 为当前实际 messageId，按完整合并的本轮原文重新选择工具和参数，不复用补充消息之前的旧参数。`, query.native.turnId, images);
       } catch (error) {
         await this.withJournalLock(accountId, request.chatId, async () => {
           const latest = workspace.getReplyJournal();
-          if (error instanceof AppServerRejectedError) delete latest[key];
+          if (error instanceof AppServerRejectedError) {
+            delete latest[key];
+            releaseInboundImages(workspace, request.messageId, Date.now());
+          }
           else {
             query.uncertain = true;
             query.control!.invalidateAuthority();
@@ -270,7 +298,8 @@ export class CodexReplyEngine implements GatewayReplyEngine {
         return !(error instanceof AppServerRejectedError);
       }
       try {
-        query.control.appendRequest(request);
+        // Images alone carry no business authority; only real text joins the request batch.
+        if (request.text.trim()) query.control.appendRequest(request);
         query.supplemented = true;
         await this.withJournalLock(accountId, request.chatId, async () => {
           const latest = workspace.getReplyJournal();
@@ -460,7 +489,7 @@ export class CodexReplyEngine implements GatewayReplyEngine {
         });
         outcome = { reply, stage: "completed", ...(hasConsoleCredential(reply.text)
           ? { provenance: "controller-console" as const, consoleText: reply.text } : {}) };
-      } else outcome = await this.nativeTurn(workspace, request, controller, async result => {
+      } else outcome = await this.nativeTurn(accountId, workspace, request, controller, async result => {
         try { await saveOutcome(result); }
         catch (cause) { publicationError = { cause }; throw cause; }
         published = result;
@@ -472,6 +501,11 @@ export class CodexReplyEngine implements GatewayReplyEngine {
       outcome = { reply: { text: FAILED_REPLY },
         stage: consoleCallDispatched && !(error instanceof ControllerToolRejectedError) ? "started" : "failed" };
     }
+    if (outcome.stage === "failed") {
+      // Nothing ran with certainty, so this turn's images wait for the next one.
+      try { await this.withJournalLock(accountId, request.chatId, async () => releaseInboundImages(workspace, request.messageId, Date.now())); }
+      catch { traceEvent("codex.images.release.failed"); }
+    }
     if (publicationError) throw publicationError.cause;
     // An exit/cleanup failure cannot revoke or overwrite an already delivered,
     // durable turn result. Receipts use the independent journal lock.
@@ -482,7 +516,7 @@ export class CodexReplyEngine implements GatewayReplyEngine {
     return outcome.reply;
   }
 
-  private async nativeTurn(workspace: LeaderWorkspace, request: ControllerMessageRequest,
+  private async nativeTurn(accountId: string, workspace: LeaderWorkspace, request: ControllerMessageRequest,
     controller: ControllerToolClient,
     onCompleted: (result: NativeOutcome) => Promise<void>, releaseExecution: () => void,
     query: ActiveQuery, options: ReplyEngineTurnOptions): Promise<NativeOutcome> {
@@ -556,12 +590,17 @@ export class CodexReplyEngine implements GatewayReplyEngine {
       traceEvent("codex.thread.selected", { recovery: threadId !== undefined,
         threadId: threadId ? nativeId(threadId) : undefined });
       const memory = await traceSpan("codex.memory.read", async () => workspace.readMemory());
+      const images = await this.withJournalLock(accountId, request.chatId,
+        async () => claimInboundImages(workspace, request.messageId, Date.now()));
+      if (images.length) traceEvent("codex.images.attached", { itemCount: images.length });
+      const input = prompt(memory, request, control.instructions, frozen?.systemPrompt) + inboundImageNote(images.length);
       nativeEvents = new NativeEventTrace();
       let events: AsyncIterable<ThreadEvent>;
       if (this.options.sdkFactory) {
         const client = this.options.sdkFactory(settings);
         const thread = threadId ? client.resumeThread(threadId, threadOptions) : client.startThread(threadOptions);
-        events = (await traceSpan("codex.run_streamed", () => thread.runStreamed(prompt(memory, request, control.instructions, frozen?.systemPrompt), {
+        events = (await traceSpan("codex.run_streamed", () => thread.runStreamed(images.length
+          ? [{ type: "text", text: input }, ...images.map(file => ({ type: "local_image" as const, path: file }))] : input, {
           signal: abort.signal,
           onLifecycleEvent: event => {
             nativeEvents?.observeProcess(event);
@@ -574,8 +613,8 @@ export class CodexReplyEngine implements GatewayReplyEngine {
         query.resolveReady(false);
       } else {
         native = await traceSpan("codex.run_streamed", () => (this.options.appServerFactory ?? startAppServerTurn)(
-          settings, threadOptions, threadId, prompt(memory, request, control.instructions, frozen?.systemPrompt), abort.signal,
-          startedThreadId => traceSpan("codex.thread.save", async () => { workspace.setThreadId(startedThreadId); })));
+          settings, threadOptions, threadId, input, abort.signal,
+          startedThreadId => traceSpan("codex.thread.save", async () => { workspace.setThreadId(startedThreadId); }), images));
         await traceSpan("codex.thread.save", async () => workspace.setThreadId(native!.threadId));
         query.workspace = workspace;
         query.native = native;

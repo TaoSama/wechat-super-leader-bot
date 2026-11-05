@@ -1,5 +1,6 @@
 import type { ControllerClient } from "../controller/client.js";
 import type { ControllerMessageRequest, ControllerMessageResponse } from "../types.js";
+import type { InboundImage } from "./inbound-images.js";
 
 export const CONFLICT_REPLY = "这条消息的编号与已处理消息相同，但内容不同。为避免误执行，我没有处理新内容；请重新发送一条消息。";
 
@@ -28,7 +29,10 @@ export interface GatewayReplyEngine {
   readonly requestBudgetMs: number;
   reply(accountId: string, request: ControllerMessageRequest,
     controller: ControllerToolClient, options?: ReplyEngineTurnOptions): Promise<ControllerMessageResponse>;
-  /** True means this inbound belongs to an existing query and has no separate final reply. */
+  /** Keeps inbound images so the chat's current or next turn sees their pixels. */
+  stageImages?(accountId: string, chatId: string, messageId: string, images: readonly InboundImage[]): Promise<void>;
+  hasActiveTurn?(accountId: string, chatId: string): boolean;
+  /** True means this inbound belongs to an existing query and has no separate final reply. Empty text steers staged images only. */
   steer?(accountId: string, request: ControllerMessageRequest,
     controller: ControllerToolClient): Promise<boolean>;
   getReply(accountId: string, chatId: string, messageId: string,

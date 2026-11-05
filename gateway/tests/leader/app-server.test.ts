@@ -377,3 +377,20 @@ test("handshake request timeout cleans up without waiting indefinitely", async c
   context.mock.timers.tick(30_001);
   await rejection;
 });
+
+test("turn start and steer send inbound images as local image parts after the text", async context => {
+  const fake = await fixture(context);
+  const abort = new AbortController();
+  const turn = await startAppServerTurn({ codexPathOverride: fake.executable, env: { PATH: process.env.PATH ?? "" } },
+    { workingDirectory: "/chat" }, undefined, "看图", abort.signal, undefined, ["/chat/.inbound-images/a.png"]);
+  await turn.steer("再看这张", turn.turnId, ["/chat/.inbound-images/b.jpg"]);
+  for await (const _event of turn.events) { /* drain */ }
+  await turn.close();
+  const records = await fake.records();
+  const start = records.find(record => record.method === "turn/start");
+  const steer = records.find(record => record.method === "turn/steer");
+  assert.deepEqual(start.params.input, [{ type: "text", text: "看图", text_elements: [] },
+    { type: "localImage", path: "/chat/.inbound-images/a.png" }]);
+  assert.deepEqual(steer.params.input, [{ type: "text", text: "再看这张", text_elements: [] },
+    { type: "localImage", path: "/chat/.inbound-images/b.jpg" }]);
+});
