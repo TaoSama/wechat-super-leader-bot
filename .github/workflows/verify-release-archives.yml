@@ -1,0 +1,55 @@
+name: Verify release archives
+
+on:
+  pull_request:
+    paths:
+      - .dockerignore
+      - deploy/**
+      - controller/**
+      - gateway/**
+      - web/**
+      - packages/**
+      - scripts/clean-build.mjs
+      - tests/live/release-archive-compression.py
+      - .github/workflows/verify-release-archives.yml
+  workflow_dispatch:
+
+concurrency:
+  group: verify-release-archives-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: Measure real linux/amd64 release archives
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Record job setup start
+        run: echo "ARCHIVE_PROBE_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+      - name: Check out the exact measurement revision
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          ref: ${{ env.REVISION }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Measure archives without deployment
+        run: >-
+          python3 tests/live/release-archive-compression.py --run
+          --revision "$REVISION"
+          --output "$RUNNER_TEMP/release-archive-measurement/report.json"
+      - name: Retain small measurement report and command logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-archive-measurement-${{ env.REVISION }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/release-archive-measurement/report.json
+            ${{ runner.temp }}/release-archive-measurement/report-logs/*.log
+          if-no-files-found: warn
+          retention-days: 7

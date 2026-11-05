@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { ACTIVATION_LOG, ACTIVATION_STATUS, REMOTE_FILES } from '../../../scripts/deploy/transfer-files.mjs';
+import { stopTestProcess, withTestCleanup } from '../../support/cleanup.mjs';
 
 const REVISION = 'a'.repeat(40);
 const SCRIPT = fileURLToPath(new URL('../../../scripts/deploy/remote-release.sh', import.meta.url));
@@ -19,6 +20,8 @@ const PREVIOUS_ENV = RELEASE_ENV.replaceAll(REVISION, 'b'.repeat(40));
 const OWNER = 'synthetic-owner';
 const STATUS_WAIT_MS = 10_000;
 const POLL_MS = 50;
+const SESSION_SETUP_DELAY_MS = 300;
+const RECREATE_GATE_WAIT_MS = 30_000;
 
 function writeReleaseBundle(stage) {
   mkdirSync(stage, { recursive: true });
@@ -68,9 +71,14 @@ if (args[0] === 'compose') {
       (args.includes('config') && process.env.TEST_MUTATE_ENV_ON_PREFLIGHT)) {
     writeFileSync(join(root, '.runtime/controller.env'), 'SECRET=changed\\n');
   }
-  if (args.includes('--force-recreate') && process.env.TEST_RECREATE_MS) {
+  if (args.includes('--force-recreate') && (process.env.TEST_RECREATE_MS || process.env.TEST_RECREATE_GATE)) {
+    const deadline = Date.now() + ${RECREATE_GATE_WAIT_MS};
+    while (process.env.TEST_RECREATE_GATE && !existsSync(process.env.TEST_RECREATE_GATE)) {
+      if (Date.now() >= deadline) throw new Error('Timed out waiting for recreate gate');
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${POLL_MS});
+    }
     // Block like a long stop_grace_period, then write to stderr as Compose does.
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.TEST_RECREATE_MS));
+    if (process.env.TEST_RECREATE_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.TEST_RECREATE_MS));
     console.error('Container super-leader-gateway Recreated');
   }
 } else if (args[0] === 'load') {
@@ -365,11 +373,22 @@ async function waitForStatus(stage) {
 
 test('detached activation finishes its rollback after the launching session is killed and its pipes close', async () => {
   const fixture = releaseFixture();
-  try {
+  const gate = join(fixture.root, 'recreate-gate');
+  let launcher, activationFinished = false;
+  await withTestCleanup(async () => {
     copyFileSync(SCRIPT, join(fixture.stage, 'remote-release.sh'));
     writeFileSync(join(fixture.stage, '.transfer-owner'), OWNER);
-    const env = fixture.env({ TEST_HEALTH: 'unhealthy', TEST_RECREATE_MS: '1500' });
-    const launcher = spawn('python3', ['-', fixture.stage, OWNER, 'activate',
+    const startup = join(fixture.root, 'python-startup');
+    mkdirSync(startup);
+    writeFileSync(join(startup, 'sitecustomize.py'), `import os,time
+setsid=os.setsid
+def delayed_setsid():
+ time.sleep(${SESSION_SETUP_DELAY_MS / 1000})
+ return setsid()
+os.setsid=delayed_setsid
+`);
+    const env = fixture.env({ TEST_HEALTH: 'unhealthy', TEST_RECREATE_GATE: gate, PYTHONPATH: startup });
+    launcher = spawn('python3', ['-', fixture.stage, OWNER, 'activate',
       Buffer.from(JSON.stringify(fixture.args)).toString('base64')], { detached: true, env, stdio: ['pipe', 'pipe', 'ignore'] });
     launcher.stdin.end(REMOTE_FILES);
     let stdout = '';
@@ -388,7 +407,9 @@ test('detached activation finishes its rollback after the launching session is k
     assert.equal(helper(fixture, 'activate', fixture.args, env).status, 78, 'a second launch is refused while the first holds the lock');
     assert.deepEqual(JSON.parse(helper(fixture, 'activation', [], env).stdout), { exit_code: null });
 
+    writeFileSync(gate, 'continue');
     assert.equal(await waitForStatus(fixture.stage), '1');
+    activationFinished = true;
     const log = readFileSync(join(fixture.stage, ACTIVATION_LOG), 'utf8');
     assert.match(log, /Container super-leader-gateway Recreated/);
     assert.match(log, /restoring the previous image selection/);
@@ -401,7 +422,14 @@ test('detached activation finishes its rollback after the launching session is k
     const cleaned = helper(fixture, 'cleanup', [], env);
     assert.equal(cleaned.status, 0, cleaned.stderr);
     assert.equal(existsSync(fixture.stage), false, 'completed stage and its activation evidence are removable');
-  } finally { fixture.cleanup(); }
+  }, [
+    { label: 'release recreate gate', cleanup: () => writeFileSync(gate, 'continue') },
+    { label: 'owned activation completion', cleanup: async () => {
+      if (launcher?.pid && !activationFinished) await waitForStatus(fixture.stage);
+    } },
+    { label: 'activation launcher', cleanup: () => stopTestProcess(launcher) },
+    { label: 'release fixture', cleanup: () => fixture.cleanup() },
+  ]);
 });
 
 test('detached activation publishes a successful exit status with the runtime verification output', async () => {

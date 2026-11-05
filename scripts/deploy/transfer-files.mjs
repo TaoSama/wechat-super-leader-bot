@@ -93,14 +93,25 @@ elif op=='activate':
  except BlockingIOError:sys.exit(78)
  try:output=os.open(log,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
  except FileExistsError:sys.exit(77)
+ ready_read,ready_write=os.pipe()
  if os.fork()==0:
+  os.close(ready_read)
   os.setsid()
   os.dup2(os.open(os.devnull,os.O_RDONLY),0);os.dup2(output,1);os.dup2(output,2)
-  try:code=subprocess.call([script]+files)
-  except OSError:code=126
+  try:os.write(ready_write,b'1');ready=True
+  except BrokenPipeError:ready=False
+  finally:os.close(ready_write)
+  if ready:
+   try:code=subprocess.call([script]+files)
+   except OSError:code=126
+  else:code=77
   with open(status+'.tmp','w') as f:f.write(str(code));f.flush();os.fsync(f.fileno())
   os.replace(status+'.tmp',status)
   os._exit(0)
+ os.close(ready_write)
+ # A cancelled SSH session must not kill a child already acknowledged as started.
+ ready=os.read(ready_read,1);os.close(ready_read)
+ if ready!=b'1':sys.exit(77)
  print(json.dumps({'started':True}))
 elif op=='activation':
  if not os.path.isfile(log):sys.exit(77)
