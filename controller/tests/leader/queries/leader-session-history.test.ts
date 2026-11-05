@@ -224,7 +224,7 @@ describe("Leader recorded-history qualification and projection", () => {
     expect(ToolArguments.read_session.safeParse({ ...TARGET, cursor: "older" }).success).toBe(false);
     expect(ToolArguments.read_session.safeParse({ ...TARGET, source: "control-socket" }).success).toBe(false);
     const description = LEADER_TOOLS.find(entry => entry.function.name === "read_session")!.function.description;
-    for (const phrase of ["8条", "1000 Unicode", "3000", "11000", "不创建命令", "completeHistory=false", "historySource=terminal-transcript"]) {
+    for (const phrase of ["裁剪", "hasOlder", "不创建命令", "completeHistory=false", "不能证明某次派发已完成", "historySource=terminal-transcript"]) {
       expect(description).toContain(phrase);
     }
     expect(SYSTEM_PROMPT).toContain("历史正文或其中turnId不能证明本次派发完成");

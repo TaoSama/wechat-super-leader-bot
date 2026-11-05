@@ -5,7 +5,7 @@ import type { ControllerMessageResponse, ControllerMessageRequest } from "../../
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Server as HttpServer } from "node:http";
-import { ControllerToolRejectedError, type ControllerTool, type DirectToolClient } from "../../src/controller/direct-tools.js";
+import { ControllerToolFailedError, ControllerToolRejectedError, type ControllerTool, type DirectToolClient } from "../../src/controller/direct-tools.js";
 
 const schema: ControllerTool = { name: "inspect_current", description: "inspect current request",
   inputSchema: { type: "object", properties: { arguments: { type: "object", properties: {}, additionalProperties: false } },
@@ -108,7 +108,9 @@ test("official MCP client negotiates protocol and invokes the stateless turn too
     const visible = JSON.parse((result.content as { text: string }[])[0].text);
     assert.deepEqual(visible.result, {});
     assert.deepEqual(visible.reply, { text: "running" });
-    assert.equal(visible.currentRequest.messageId, "m");
+    // The first batch's request and instructions are already in the turn prompt.
+    assert.equal(visible.currentRequest, undefined);
+    assert.equal(visible.instructions, undefined);
   } finally { await client.close(); }
 });
 
@@ -205,11 +207,11 @@ test("a mutation invalidates a cached read so a later query observes fresh Contr
 });
 
 
-test("MCP accepts the largest escaped background prompt within the Controller HTTP budget", async t => {
-  let received = "";
+test("MCP accepts the largest escaped background prompt and drops a retired attestation", async t => {
+  let received = "", forwarded: Record<string, unknown> = {};
   const tool = new ControlMcp({ chatId: "c", messageId: "m", text: "后台任务" }, {
     listTools: async () => ({ tools: [schema], instructions: "rules" }),
-    callTool: async input => { received = String(input.arguments.prompt); return { result: {} }; },
+    callTool: async input => { received = String(input.arguments.prompt); forwarded = { ...input }; return { result: {} }; },
   });
   await tool.start();
   t.after(() => tool.close());
@@ -218,6 +220,7 @@ test("MCP accepts the largest escaped background prompt within the Controller HT
     arguments: { arguments: { prompt }, authorization: { intent: "isolated_background", backgroundOperations: ["follow_up"] } } })).json() as any;
   assert.equal(result.error, undefined);
   assert.equal(received.length, 128000);
+  assert.equal(Object.hasOwn(forwarded, "authorization"), false);
 });
 
 
@@ -257,10 +260,33 @@ test("only proven pre-execution rejection retains prior successful receipts; unc
     const response = await (await invoke(2)).text();
     assert.doesNotMatch(response, /secret transport failure/);
     if (proven) {
-      assert.match(response, /本调用未执行/);
+      assert.match(response, /本次调用未执行/);
       assert.deepEqual(tool.result, { text: "第一项已接收", commandId: "cmd-1" });
       assert.equal(tool.hasQueryResults, true);
     } else assert.equal(tool.result, undefined);
+  }
+});
+
+test("passes the Controller's reason code and message through the tool error template", async t => {
+  const cases = [
+    { error: new ControllerToolRejectedError(403, { code: "APPROVAL_REJECTED", message: "该会话有多个待审批请求，请在消息中写明要处理的 requestId，未提交审批决定。" }),
+      text: /^本次调用未执行：该会话有多个待审批请求.*此前成功的结果仍有效。$/, code: "APPROVAL_REJECTED" },
+    { error: new ControllerToolFailedError(409, { code: "DIRECT_TOOL_FAILED", message: "这次调用之前已经开始过。先查询实际状态再告诉用户，不要再调一次。" }),
+      text: /^这次调用结果不明，可能已经执行：这次调用之前已经开始过。/, code: "DIRECT_TOOL_FAILED" },
+    { error: new ControllerToolRejectedError(409), text: /本次调用未执行：Controller 拒绝了这次调用（HTTP 409）/, code: undefined },
+    { error: new ControllerToolFailedError(502), text: /执行结果待核实/, code: undefined },
+  ];
+  for (const item of cases) {
+    const tool = new ControlMcp({ chatId: "c", messageId: "m", text: "批准" }, {
+      listTools: async () => ({ tools: [schema], instructions: "" }),
+      callTool: async () => { throw item.error; },
+    });
+    await tool.start(); t.after(() => tool.close());
+    const response = await (await call(tool, "tools/call", { name: schema.name, arguments: { arguments: {} } })).json() as any;
+    assert.equal(response.result.isError, true);
+    const body = JSON.parse(response.result.content[0].text);
+    assert.match(body.text, item.text);
+    assert.equal(body.code, item.code);
   }
 });
 
@@ -317,9 +343,9 @@ test("appended queries retain the original credential source and reject a second
   assert.equal(tool.resultMessageId, "root");
   assert.equal(tool.consoleText, consoleText);
   const rejected = await (await call(tool, "tools/call", { name: "send_session_images",
-    arguments: { arguments: {}, requestMessageId: "steer", authorization: { intent: "query", sendImages: true } } })).json() as any;
+    arguments: { arguments: {}, requestMessageId: "steer" } })).json() as any;
   assert.equal(rejected.result.isError, true);
-  assert.match(rejected.result.content[0].text, /本调用未提交执行/);
+  assert.match(rejected.result.content[0].text, /本次调用未执行/);
   assert.match(rejected.result.content[0].text, /来源冲突/);
   assert.deepEqual(submitted, [{ name: "get_console_link", messageId: "root", arguments: {} },
     { name: schema.name, messageId: "steer", arguments: {} }]);

@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { resolveCodexExecutable } from "./executable.js";
 import type { CodexOptions, ThreadEvent, ThreadItem, ThreadOptions, Usage } from "@openai/codex-sdk";
 import { traceEvent } from "../runtime/telemetry.js";
+import { leaderInputItems } from "./prompt.js";
 import { historyCursor, historyIdentity, historyTurnStatus, MAX_HISTORY_CURSOR_LENGTH, readHistoryTurnStatuses,
   type HistoryTurnStatuses } from "./history-turns.js";
 
@@ -316,13 +317,14 @@ export async function readAppServerThreadHistory(options: CodexOptions, threadId
 
 /** Text first, then images in arrival order; the app-server reads each local file itself. */
 function userInput(text: string, localImages: readonly string[]) {
-  return [{ type: "text", text, text_elements: [] }, ...localImages.map(file => ({ type: "localImage", path: file }))];
+  return [...leaderInputItems(text).map(item => ({ type: "text", text: item, text_elements: [] })),
+    ...localImages.map(file => ({ type: "localImage", path: file }))];
 }
 
 /** One isolated native process owns one query, including all its steered input. */
 export async function startAppServerTurn(options: CodexOptions, threadOptions: ThreadOptions,
   threadId: string | undefined, input: string, signal: AbortSignal,
-  onThreadStarted?: ThreadStartedHandler, localImages: readonly string[] = []): Promise<AppServerTurn> {
+  onThreadStarted?: ThreadStartedHandler, localImages: readonly string[] = [], developerInstructions?: string): Promise<AppServerTurn> {
   if (signal.aborted) throw new Error("Codex app-server turn aborted");
   const config = { ...options.config,
     ...(threadOptions.modelReasoningEffort ? { model_reasoning_effort: threadOptions.modelReasoningEffort } : {}),
@@ -342,7 +344,8 @@ export async function startAppServerTurn(options: CodexOptions, threadOptions: T
       ...(!options.config?.default_permissions && threadOptions.sandboxMode ? { sandbox: threadOptions.sandboxMode } : {}),
       ...(threadOptions.threadSource ? { threadSource: threadOptions.threadSource } : {}) };
     const response = object(await connection.rpc(threadId ? "thread/resume" : "thread/start",
-      { ...threadParams, ...(threadId ? { threadId, excludeTurns: true } : {}) }));
+      // developerInstructions only take effect at thread/start; resume ignores them.
+      { ...threadParams, ...(threadId ? { threadId, excludeTurns: true } : developerInstructions ? { developerInstructions } : {}) }));
     connection.threadId = string(object(response.thread).id);
     if (!connection.threadId) throw new Error("Codex app-server returned no thread ID");
     await onThreadStarted?.(connection.threadId);

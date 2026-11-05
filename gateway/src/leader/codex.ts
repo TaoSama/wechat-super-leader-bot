@@ -18,7 +18,7 @@ import { DEFAULT_CONTROLLER_TIMEOUT_MS, DEFAULT_CONTROLLER_MAX_RETRIES } from ".
 import { HEADLESS_CODEX_CONFIG, HEADLESS_SKILLS_ROOT } from "./headless-config.js";
 import { traceEvent, traceSpan } from "../runtime/telemetry.js";
 import { NativeEventTrace, nativeId } from "./native-events.js";
-import { buildLeaderPrompt as prompt } from "./prompt.js";
+import { buildLeaderPrompt as prompt, buildStaticLayers, staticLayersRevision } from "./prompt.js";
 import { isConsoleLinkQuery, parseSessionDirectoryQuery } from "@super-leader/wechat-text";
 import { combineReplyText, restoreConsoleReply } from "./reply-content.js";
 import { startAppServerTurn, AppServerRejectedError, type AppServerTurn } from "./app-server.js";
@@ -280,7 +280,7 @@ export class CodexReplyEngine implements GatewayReplyEngine {
       if (existing) return Boolean(existing.steering);
       try {
         await query.native.steer(`<current_user_message>${JSON.stringify({ messageId: request.messageId, text: redactConsoleCredentials(request.text) })}</current_user_message>${inboundImageNote(images.length)}
-后续业务工具调用填写 requestMessageId 为当前实际 messageId，按完整合并的本轮原文重新选择工具和参数，不复用补充消息之前的旧参数。`, query.native.turnId, images);
+用户补充了消息。之后的工具调用把 requestMessageId 填成这条消息的 messageId，并按最新原文重新选参数。`, query.native.turnId, images);
       } catch (error) {
         await this.withJournalLock(accountId, request.chatId, async () => {
           const latest = workspace.getReplyJournal();
@@ -586,19 +586,22 @@ export class CodexReplyEngine implements GatewayReplyEngine {
       const threadOptions: ThreadOptions = { model: frozen?.model ?? this.options.model,
         ...(frozen?.reasoningEffort ? { modelReasoningEffort: frozen.reasoningEffort } : {}), workingDirectory: workspace.workspacePath,
         approvalPolicy: "never", skipGitRepoCheck: true, webSearchMode: "live" };
-      const threadId = workspace.getThreadId();
+      const threadState = workspace.getThreadState();
+      const threadId = threadState?.threadId;
       traceEvent("codex.thread.selected", { recovery: threadId !== undefined,
         threadId: threadId ? nativeId(threadId) : undefined });
       const memory = await traceSpan("codex.memory.read", async () => workspace.readMemory());
       const images = await this.withJournalLock(accountId, request.chatId,
         async () => claimInboundImages(workspace, request.messageId, Date.now()));
       if (images.length) traceEvent("codex.images.attached", { itemCount: images.length });
-      const input = prompt(memory, request, control.instructions, frozen?.systemPrompt) + inboundImageNote(images.length);
+      const promptOptions = { controllerInstructions: control.staticInstructions, controllerContext: control.contextInstructions,
+        systemPrompt: frozen?.systemPrompt, imageNote: inboundImageNote(images.length).trim() };
       nativeEvents = new NativeEventTrace();
       let events: AsyncIterable<ThreadEvent>;
       if (this.options.sdkFactory) {
         const client = this.options.sdkFactory(settings);
         const thread = threadId ? client.resumeThread(threadId, threadOptions) : client.startThread(threadOptions);
+        const input = prompt(memory, request, promptOptions);
         events = (await traceSpan("codex.run_streamed", () => thread.runStreamed(images.length
           ? [{ type: "text", text: input }, ...images.map(file => ({ type: "local_image" as const, path: file }))] : input, {
           signal: abort.signal,
@@ -612,10 +615,23 @@ export class CodexReplyEngine implements GatewayReplyEngine {
         }))).events;
         query.resolveReady(false);
       } else {
+        // A new thread takes the static layers as developer instructions, which Codex re-injects after compaction.
+        // Resume cannot replace them, so a thread that predates the record or whose revision changed gets them in
+        // every turn input from then on; a single input turn may not survive compaction.
+        const staticLayers = buildStaticLayers(promptOptions.controllerInstructions, promptOptions.systemPrompt);
+        const staticRevision = staticLayersRevision(staticLayers);
+        const recorded = threadState?.staticLayers;
+        const includeStatic = threadId !== undefined && !(recorded?.source === "start" && recorded.revision === staticRevision);
+        const savedStatic = threadId === undefined ? { revision: staticRevision, source: "start" as const }
+          : includeStatic ? { revision: staticRevision, source: "input" as const } : undefined;
+        traceEvent("codex.static_layers", { revision: staticRevision.slice(0, 12), newThread: threadId === undefined, includeStatic });
         native = await traceSpan("codex.run_streamed", () => (this.options.appServerFactory ?? startAppServerTurn)(
-          settings, threadOptions, threadId, input, abort.signal,
-          startedThreadId => traceSpan("codex.thread.save", async () => { workspace.setThreadId(startedThreadId); }), images));
-        await traceSpan("codex.thread.save", async () => workspace.setThreadId(native!.threadId));
+          settings, threadOptions, threadId, prompt(memory, request, { ...promptOptions, includeStatic }), abort.signal,
+          startedThreadId => traceSpan("codex.thread.save", async () => { workspace.setThreadId(startedThreadId, savedStatic); }), images,
+          threadId === undefined ? staticLayers : undefined));
+        if (native.threadId !== threadId || savedStatic !== undefined) {
+          await traceSpan("codex.thread.save", async () => workspace.setThreadId(native!.threadId, savedStatic));
+        }
         query.workspace = workspace;
         query.native = native;
         query.control = control;

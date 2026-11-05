@@ -14,6 +14,9 @@ export interface EditableResource {
   editable: boolean;
   reason?: string;
   effect?: string;
+  /** The saved content was based on an older default. */
+  stale?: boolean;
+  defaultContent?: string;
 }
 interface Props {
   resource: EditableResource;
@@ -66,6 +69,7 @@ function ResourceEditorContent({ resource, onSave, onReload, onDirtyChange, onSa
       {current.effect && <div><dt>生效方式</dt><dd>{current.effect}</dd></div>}
     </dl>
     {(current.reason || !current.editable) && <p className="settings-note">{current.reason || "当前资源仅供查看"}</p>}
+    {current.stale && <div className="settings-comparison" role="status"><p className="notice">默认内容已更新，这里仍是你之前保存的版本，系统不会自动替换。核对下方新默认内容，决定是否合并后保存；保存后不再提示。</p>{current.defaultContent !== undefined && <details><summary>新默认内容</summary><pre>{current.defaultContent}</pre></details>}</div>}
     <label className="settings-editor-label" htmlFor={editorId}>{current.kind === "tool" ? "工具 Schema" : "文件内容"}</label>
     <textarea id={editorId} className="settings-code-editor" value={draft} onChange={event => { setDraft(event.target.value); setSaved(false); }} readOnly={!current.editable} disabled={busy} spellCheck={false} autoCapitalize="off" autoCorrect="off" />
     {error && <div role="alert" className="settings-error">{error}{onReload && <button type="button" className="text-button" disabled={busy} onClick={() => void reread()}>读取最新内容</button>}</div>}

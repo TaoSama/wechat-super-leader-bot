@@ -94,3 +94,14 @@ it("冲突后读取最新内容保留草稿与对照，再由用户显式保存"
   await screen.findByText("已保存");
   expect(save).toHaveBeenLastCalledWith(latest, "my draft");
 }, 15000);
+it("过期覆盖值显示新默认内容，保存后不再提示", async () => {
+  const stale = { ...resource, content: "旧版覆盖", stale: true, defaultContent: "新版默认正文" };
+  const save = vi.fn(async (current: EditableResource, content: string) => ({ ...current, content, revision: "v2", stale: false, defaultContent: undefined }));
+  render(<ResourceEditor resource={stale} onSave={save} />);
+  expect(screen.getByText(/默认内容已更新/)).toBeInTheDocument();
+  expect(screen.getByText("新版默认正文")).toBeInTheDocument();
+  expect(screen.getByLabelText("文件内容")).toHaveValue("旧版覆盖");
+  fireEvent.change(screen.getByLabelText("文件内容"), { target: { value: "合并后的内容" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  await waitFor(() => expect(screen.queryByText(/默认内容已更新/)).not.toBeInTheDocument());
+});

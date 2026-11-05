@@ -8,6 +8,9 @@ import { LocalSettingsService, executorModelChoice } from "../../src/settings/lo
 import { assertEditedArguments, parseCompatibleTool } from "../../src/settings/local-tools.js";
 import { SYSTEM_PROMPT, LEADER_TOOLS, LeaderDataSchema } from "../../src/leader/contracts.js";
 import { DIRECT_TOOL_INSTRUCTIONS, DirectCallSchema } from "../../src/leader/direct-contracts.js";
+import { BACKGROUND_INSTRUCTIONS } from "../../src/leader/background-tools.js";
+import { PROGRESS_SYSTEM_PROMPT } from "../../src/notifications/model-progress.js";
+import { AUTOMATION_INSTRUCTIONS } from "../../src/automations/instructions.js";
 import { LeaderOrchestrator } from "../../src/leader/orchestrator.js";
 import { MemoryStore } from "../../src/store/memory.js";
 import type { ModelMessage, ModelTool } from "../../src/leader/model/contracts.js";
@@ -79,7 +82,7 @@ describe("Controller persistent runtime settings", () => {
     await model.complete([...messages], []);
     expect(seen.map(items => items[0].content)).toEqual([SYSTEM_PROMPT, SYSTEM_PROMPT, "新的内部协调SP"]);
     expect(messages[0].content).toBe(SYSTEM_PROMPT);
-    expect(f.service.listResources().filter(item => item.kind === "prompt")).toHaveLength(12);
+    expect(f.service.listResources().filter(item => item.kind === "prompt")).toHaveLength(13);
     expect(f.service.readResource("controller.prompt.background-worker")).toMatchObject({ editable: true, scope: "background", language: "markdown" });
     expect(() => f.service.readResource("../../secrets")).toThrow(/未知/);
   });
@@ -237,6 +240,58 @@ if [ "$1" = '--version' ]; then printf '%s\\n' 'codex-cli 0.163.0'; else printf 
   });
 });
 
+describe("composite prompts and default revisions", () => {
+  it("builds direct instructions from every embedded prompt's current edit until direct itself is saved", () => {
+    const f = fixture();
+    expect(f.service.capture().prompt("direct")).toBe(DIRECT_TOOL_INSTRUCTIONS);
+    save(f.service, "controller.prompt.leader", "编辑后的协调SP");
+    expect(f.service.capture().prompt("direct")).toBe(DIRECT_TOOL_INSTRUCTIONS);
+    save(f.service, "controller.prompt.automation-tools", "编辑后的定时工具说明");
+    save(f.service, "controller.prompt.background-tools", "编辑后的后台工具说明");
+    const direct = f.service.capture().prompt("direct");
+    const ownRules = DIRECT_TOOL_INSTRUCTIONS.slice(0, DIRECT_TOOL_INSTRUCTIONS.indexOf(AUTOMATION_INSTRUCTIONS));
+    expect(direct).toBe(`${ownRules}编辑后的定时工具说明\n\n编辑后的后台工具说明`);
+    for (const piece of [SYSTEM_PROMPT, AUTOMATION_INSTRUCTIONS, BACKGROUND_INSTRUCTIONS]) expect(direct).not.toContain(piece);
+    expect(f.service.readResource("controller.prompt.direct").content).toBe(direct);
+    expect(f.service.readResource("controller.prompt.background-tools").reason).toMatch(/微信业务工具协议提示词/);
+    save(f.service, "controller.prompt.direct", "整份业务工具SP");
+    save(f.service, "controller.prompt.leader", "再次编辑协调SP");
+    expect(f.service.capture().prompt("direct")).toBe("整份业务工具SP");
+  });
+
+  it("records the default an override was based on and reports stale overrides without replacing them", () => {
+    const f = fixture(), id = "controller.prompt.progress";
+    const saved = save(f.service, id, "旧版进展SP");
+    expect(saved.stale).toBe(false);
+    expect(saved.defaultContent).toBeUndefined();
+    const file = path.join(f.root, "runtime-settings.json"), data = JSON.parse(fs.readFileSync(file, "utf8"));
+    expect(data.resourceBases[id]).toMatch(/^[a-f0-9]{64}$/);
+    data.resourceBases[id] = "0".repeat(64);
+    data.resources["controller.prompt.goal"] = "早期保存且没有基线的覆盖值";
+    fs.writeFileSync(file, JSON.stringify(data));
+    const stale = f.service.readResource(id);
+    expect(stale).toMatchObject({ stale: true, content: "旧版进展SP" });
+    expect(stale.defaultContent).toBe(PROGRESS_SYSTEM_PROMPT);
+    expect(f.service.readResource("controller.prompt.goal").stale).toBe(true);
+    expect(f.service.listResources().find(item => item.id === id)).toMatchObject({ stale: true });
+    expect(f.service.listResources().some(item => "defaultContent" in item)).toBe(false);
+    expect(f.service.capture().prompt("progress")).toBe("旧版进展SP");
+    expect(save(f.service, id, "核对新默认后的进展SP").stale).toBe(false);
+    expect(f.service.readResource("controller.prompt.leader").stale).toBe(false);
+  });
+
+  it("model-mode system messages use the same composition as prompt()", () => {
+    const f = fixture(), suffix = "\n当前时间：测试时间。";
+    expect(f.service.capture().transformPrompt(`${AUTOMATION_INSTRUCTIONS}${suffix}`)).toBe(`${AUTOMATION_INSTRUCTIONS}${suffix}`);
+    save(f.service, "controller.prompt.automation-tools", "编辑后的定时工具说明");
+    const view = f.service.capture();
+    expect(view.transformPrompt(`${AUTOMATION_INSTRUCTIONS}${suffix}`)).toBe(`编辑后的定时工具说明${suffix}`);
+    expect(view.transformPrompt(DIRECT_TOOL_INSTRUCTIONS)).toBe(view.prompt("direct"));
+    expect(view.transformPrompt(BACKGROUND_INSTRUCTIONS)).toBe(BACKGROUND_INSTRUCTIONS);
+    expect(view.transformPrompt("用户原文")).toBe("用户原文");
+  });
+});
+
 describe("direct runtime consumer", () => {
   it("keeps each message's schema/SP across service restart and a long turn, with no snapshot in conversation history", async () => {
     const f = fixture(), store = new MemoryStore();
@@ -261,7 +316,7 @@ describe("direct runtime consumer", () => {
     await expect(create().call(call(request.messageId, "旧轮允许长偏好"))).resolves.toBeDefined();
     const newRequest = { ...request, messageId: "new-message" };
     expect((await create().list(newRequest)).instructions).toBe("新业务工具SP");
-    await expect(create().call(call(newRequest.messageId, "新轮拒绝长偏好"))).rejects.toThrow(/configured tool schema/);
+    await expect(create().call(call(newRequest.messageId, "新轮拒绝长偏好"))).rejects.toMatchObject({ code: "INVALID_ARGUMENTS" });
     const state = LeaderDataSchema.parse((await store.getLeaderState(request.chatId))?.data);
     expect(JSON.stringify(state.history)).not.toContain("runtime-settings");
     expect(JSON.stringify(state.history)).not.toContain("新业务工具SP");

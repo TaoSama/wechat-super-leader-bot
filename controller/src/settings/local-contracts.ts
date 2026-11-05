@@ -15,12 +15,16 @@ export interface LocalModelCatalog {
 export interface LocalResource {
   id: string; kind: "prompt" | "tool"; title: string; scope: string; path: string;
   revision: string; version: string; editable: boolean; effect: string; reason?: string;
+  /** The saved override was based on an older default. */
+  stale: boolean;
 }
-export interface LocalResourceDocument extends LocalResource { content: string; language: string }
+export interface LocalResourceDocument extends LocalResource { content: string; language: string; defaultContent?: string }
 export interface LocalSettingsData {
   format: 1;
   models: Partial<Record<LocalModelScopeId, LocalModelChoice>>;
   resources: Record<string, string>;
+  /** Revision of the default each override was based on; missing for overrides saved before this was recorded. */
+  resourceBases?: Record<string, string>;
 }
 export const LocalSettingsDataSchema = z.object({
   format: z.literal(1),
@@ -29,6 +33,7 @@ export const LocalSettingsDataSchema = z.object({
     background: z.object({ model: z.string().trim().min(1).max(200), reasoningEffort: z.string().regex(/^[a-z_]{1,32}$/).nullable() }).strict().optional(),
   }).strict(),
   resources: z.record(z.string(), z.string()),
+  resourceBases: z.record(z.string(), z.string().regex(/^[a-f0-9]{64}$/)).optional(),
 }).strict();
 export class LocalSettingsError extends Error {
   constructor(readonly statusCode: number, message: string, readonly code: string) { super(message); }

@@ -4,8 +4,8 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { controllerContextInstructions } from "../controller/direct-context.js";
-import { ControllerToolRejectedError, type ControllerTool, type ControllerToolList,
-  type ControllerToolResult, type DirectToolClient, type ToolAuthorization } from "../controller/direct-tools.js";
+import { ControllerToolFailedError, ControllerToolRejectedError, type ControllerTool, type ControllerToolList,
+  type ControllerToolResult, type DirectToolClient } from "../controller/direct-tools.js";
 import { validateImageAttachments, type ImageAttachment } from "../wechat/media-delivery.js";
 import type { ControllerMessageRequest, ControllerMessageResponse } from "../types.js";
 import { currentTrace, runWithTrace, traceEvent, traceSpan } from "../runtime/telemetry.js";
@@ -15,7 +15,10 @@ import { DEFAULT_PROGRESS_TOOL, parseProgressTool, validateProgressArguments, ty
 const BODY_LIMIT = 1024 * 1024;
 const MAX_CONTROLLER_REQUEST_CHARS = 16000;
 const PROGRESS_TOOL_NAME = "report_progress";
+const CONTROLLER_UNCERTAIN_TEXT = "这次调用结果不明，可能已经执行，执行结果待核实。告诉用户结果待确认，不要再调一次。";
 const ASSET_TOOLS = new Set(["get_console_link", "send_session_images"]);
+// Older leader threads may still send the retired attestation; it is dropped, never forwarded.
+const WRAPPER_KEYS = new Set(["arguments", "requestMessageId", "authorization"]);
 export const CONTROL_TOKEN_ENV = "LEADER_TURN_MCP_TOKEN";
 export function hasConsoleCredential(text: string): boolean { return /#login=[A-Za-z0-9_.~%-]+/.test(text); }
 export function redactConsoleCredentials(text: string): string {
@@ -24,8 +27,8 @@ export function redactConsoleCredentials(text: string): string {
 function freezeRequestBatch(requests: readonly ControllerMessageRequest[]): ControllerMessageRequest {
   const latest = requests[requests.length - 1];
   if (requests.length === 1) return latest;
-  const text = "以下是同一轮请求中尚未提交执行的用户原始消息，按接收时间从早到晚排列。请先整体理解所有消息，再执行一次当前意图；后面的消息对前面的修改、限制或撤销优先，不能先执行已被后文替换或禁止的操作。所有消息原文如下：\n\n" +
-    requests.map((request, index) => `【原始消息 ${index + 1}，messageId=${JSON.stringify(request.messageId)}】\n${request.text}`).join("\n\n");
+  const text = "本轮有多条尚未提交的用户消息，按接收先后排列，后面的说法优先：\n\n" +
+    requests.map((request, index) => `【消息 ${index + 1}，messageId=${JSON.stringify(request.messageId)}】\n${request.text}`).join("\n\n");
   return Object.freeze({ chatId: latest.chatId, messageId: latest.messageId, text });
 }
 interface Batch {
@@ -42,12 +45,18 @@ class StaleAuthorityError extends ControllerToolRejectedError { constructor() { 
 class ReplyAssetSourceError extends ControllerToolRejectedError { constructor() { super(409); } }
 interface ResponseEntry { value: ControllerToolResult; messageId: string }
 /** Business authority belongs to frozen, accepted originals, never to model rewrites. */
+const contextText = (listed: ControllerToolList) =>
+  listed.context === undefined ? "" : controllerContextInstructions(listed.context);
+
 export class ControlMcp {
   public readonly token = randomBytes(32).toString("hex");
   public url = "";
-  public instructions = "";
   private tools: ControllerTool[] = [];
   private initialListing?: ControllerToolList;
+  /** Controller rules shared across turns; the turn prompt carries them as a thread layer. */
+  get staticInstructions(): string { return this.initialListing?.instructions ?? ""; }
+  /** This turn's chat context from the Controller; the turn prompt carries it every turn. */
+  get contextInstructions(): string { return this.initialListing ? contextText(this.initialListing) : ""; }
   private batch?: Batch;
   private readonly requests: { request: ControllerMessageRequest; submitted: boolean }[] = [];
   private readonly invocations = new Map<string, Promise<ControllerToolResult>>();
@@ -92,7 +101,6 @@ export class ControlMcp {
     this.initialListing = await this.controller.listTools(this.request);
     if (this.initialListing.tools.some(tool => tool.name === PROGRESS_TOOL_NAME)) throw new Error("Reserved business tool name");
     this.tools = structuredClone(this.initialListing.tools);
-    this.instructions = this.listInstructions(this.initialListing, this.request);
     await new Promise<void>((resolve, reject) => {
       this.server.once("error", reject);
       this.server.listen(0, "127.0.0.1", () => { this.server.removeListener("error", reject); resolve(); });
@@ -157,10 +165,10 @@ export class ControlMcp {
     await this.drain();
     if (cleanup.some(result => result.status === "rejected")) throw new Error("Control tool shutdown failed");
   }
-  private listInstructions(listed: ControllerToolList, request: ControllerMessageRequest): string {
-    return listed.instructions + (listed.context === undefined ? "" : `\n${controllerContextInstructions(listed.context)}`) +
-      `\n本批业务工具必须填 requestMessageId=${JSON.stringify(request.messageId)}。当前原文只用于界定本批真实用户意图：\n` +
-      redactConsoleCredentials(JSON.stringify({ messageId: request.messageId, text: request.text }));
+  /** The user text reaches the model once, as current_user_message or a result's currentRequest. */
+  private listInstructions(listed: ControllerToolList): string {
+    const context = contextText(listed);
+    return listed.instructions + (context ? `\n${context}` : "");
   }
   private currentRequest(): ControllerMessageRequest {
     const pending = this.requests.filter(item => !item.submitted);
@@ -178,7 +186,7 @@ export class ControlMcp {
       const listed = request.messageId === this.request.messageId && request.text === this.request.text
         ? this.initialListing! : await this.controller.listTools(request);
       batch.toolNames = new Set(listed.tools.map(tool => tool.name));
-      batch.instructions = this.listInstructions(listed, request);
+      batch.instructions = this.listInstructions(listed);
     });
     this.batch = batch;
     return batch;
@@ -191,7 +199,7 @@ export class ControlMcp {
     const session = new Server({ name: "wechat-current-request", version: "1.0.0" }, { capabilities: { tools: {} } });
     session.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...this.tools.map(tool => ({ ...structuredClone(tool),
       inputSchema: { ...structuredClone(tool.inputSchema), properties: { ...structuredClone(tool.inputSchema.properties),
-        requestMessageId: { type: "string", description: "本次工具参数所依据的真实当前 messageId。初轮可省略；追加后必须用返回的最新ID重新核对完整原文并选择参数。" } } } })), structuredClone(this.progressTool)] }));
+        requestMessageId: { type: "string", description: "这次调用依据的用户消息 ID，第一次调用可以不填。用户追加消息后，换成工具返回的最新 ID，并按最新原文重新选参数。" } } } })), structuredClone(this.progressTool)] }));
     session.setRequestHandler(CallToolRequestSchema, input => this.callTool(input.params.name, input.params.arguments));
     return session;
   }
@@ -202,17 +210,16 @@ export class ControlMcp {
     }
     const tool = this.tools.find(tool => tool.name === name);
     if (this.shuttingDown || !tool || !wrapper || typeof wrapper.arguments !== "object" || wrapper.arguments === null ||
-        Array.isArray(wrapper.arguments) || Object.keys(wrapper).some(key => !["arguments", "authorization", "requestMessageId"].includes(key)) ||
+        Array.isArray(wrapper.arguments) || Object.keys(wrapper).some(key => !WRAPPER_KEYS.has(key)) ||
         (wrapper.requestMessageId !== undefined && typeof wrapper.requestMessageId !== "string")) throw new McpError(ErrorCode.InvalidParams, "Invalid current-request business tool");
     while (this.appendHolds.size) await Promise.all(this.appendHolds);
-    if (this.invalidAuthority || this.shuttingDown) return toolError("追加消息是否已被本轮接受尚未核实，当前请求授权待核实，不能继续提交操作。已提交的操作仍需核对实际结果；不要声称已完成或自行重试。");
+    if (this.invalidAuthority || this.shuttingDown) return toolError("本次调用未执行：追加消息是否已被本轮接受还没核实，当前请求授权待核实，不能再提交操作。之前已提交的操作结果待核对，不要说已完成，也不要再调一次。");
     const request = this.currentRequest();
-    if (request.text.length > MAX_CONTROLLER_REQUEST_CHARS) return toolError("本轮待提交的完整用户原文合并后超出 Controller 长度上限，这些消息均未提交执行。不能截断原文或逐条执行旧指令，请用户发送精简后的完整请求。");
+    if (request.text.length > MAX_CONTROLLER_REQUEST_CHARS) return toolError("本次调用未执行：本轮待提交的用户消息合并后超出长度上限，这些消息都没有提交。不要截断原文或逐条执行，请用户发一条精简后的完整请求。");
     if ((wrapper.requestMessageId ?? this.request.messageId) !== request.messageId) return this.authorityChanged();
     const batch = this.selectBatch(request);
     const args = structuredClone(wrapper.arguments as Record<string, unknown>);
-    const authorization = wrapper.authorization === undefined ? undefined : structuredClone(wrapper.authorization) as ToolAuthorization;
-    const key = canonicalJson({ request: batch.request, name, arguments: args, authorization,
+    const key = canonicalJson({ request: batch.request, name, arguments: args,
       ...(tool.annotations.readOnlyHint ? { readGeneration: this.readGeneration } : {}) });
     let invocation = this.invocations.get(key);
     if (!invocation) {
@@ -235,8 +242,7 @@ export class ControlMcp {
         if (!tool.annotations.readOnlyHint && this.failed) throw new Error("Previous business call outcome is uncertain");
         if (ASSET_TOOLS.has(name) && this.assetMessageId && this.assetMessageId !== batch.request.messageId) throw new ReplyAssetSourceError();
         batch.dispatched = true;
-        return traceSpan("codex.mcp.controller", () => this.controller.callTool({ ...batch.request, callId, name, arguments: args,
-          ...(authorization === undefined ? {} : { authorization }) }));
+        return traceSpan("codex.mcp.controller", () => this.controller.callTool({ ...batch.request, callId, name, arguments: args }));
       }).then(result => {
         const snapshot = structuredClone(result);
         const entries = [...this.responses.values(), { value: snapshot, messageId: batch.request.messageId }];
@@ -265,24 +271,23 @@ export class ControlMcp {
     try {
       const result = await invocation;
       if (this.invalidAuthority) throw new Error("Current request authority unavailable");
+      // The turn prompt already holds the first request and its instructions; only a later batch needs them again.
+      const switched = batch.request.messageId !== this.request.messageId;
       return { content: [{ type: "text" as const, text: redactConsoleCredentials(JSON.stringify({ ...result,
-        currentRequest: { messageId: batch.request.messageId, text: batch.request.text }, instructions: batch.instructions })) }] };
+        ...(switched ? { currentRequest: { messageId: batch.request.messageId, text: batch.request.text }, instructions: batch.instructions } : {}) })) }] };
     } catch (error) {
       if (error instanceof StaleAuthorityError) return this.authorityChanged();
-      return toolError(error instanceof ReplyAssetSourceError
-        ? "本调用未提交执行：一次最终回复的图片及控制台凭证必须属于同一原消息来源。此前已成功准备的附件和凭证仍保留；如实说明本次来源冲突，不重试或替换来源。"
-        : error instanceof ControllerToolRejectedError
-        ? `Controller 拒绝了本次工具调用（HTTP ${error.httpStatus}），已确认本调用未执行；此前成功结果仍有效。请如实说明拒绝，不自行重试。`
-        : "Controller 调用未成功，执行结果待核实；请勿声称已完成，也不要自行重试。");
+      if (error instanceof ReplyAssetSourceError) return toolError("本次调用未执行：同一次回复里的图片和控制台链接必须来自同一条用户消息。之前准备好的图片和链接仍保留；告诉用户来源冲突，不要重试或换来源。");
+      return controllerFailure(error);
     }
   }
   private async authorityChanged() {
     this.authorityCorrection = true;
     const request = this.currentRequest();
     const listed = request.text.length <= MAX_CONTROLLER_REQUEST_CHARS ? await this.controller.listTools(request) : undefined;
-    return toolError("本次工具参数依据的用户消息已变化，本调用未提交执行。请完整读取当前真实原文和上下文，按最新限制重新选择工具及参数，并填写当前 requestMessageId。", {
+    return toolError("本次调用未执行：用户追加了消息。读完 currentRequest 里的最新原文，按最新要求重新选择工具和参数，requestMessageId 填 currentRequest.messageId。", {
       currentRequest: { messageId: request.messageId, text: redactConsoleCredentials(request.text) },
-      ...(listed ? { instructions: this.listInstructions(listed, request) } : {}),
+      ...(listed ? { instructions: this.listInstructions(listed) } : {}),
     });
   }
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -309,6 +314,18 @@ export class ControlMcp {
     try { await session.connect(transport); await transport.handleRequest(request, response, body); }
     finally { response.removeListener("close", disconnected); await close(); }
   }
+}
+/** Passes the Controller's own reason and next step to the model; the generic text covers a missing reason. */
+function controllerFailure(error: unknown) {
+  if (error instanceof ControllerToolRejectedError) {
+    return error.detail
+      ? toolError(`本次调用未执行：${error.detail.message}此前成功的结果仍有效。`, { code: error.detail.code })
+      : toolError(`本次调用未执行：Controller 拒绝了这次调用（HTTP ${error.httpStatus}）。此前成功的结果仍有效；告诉用户被拒绝，不要再调一次。`);
+  }
+  if (error instanceof ControllerToolFailedError && error.detail) {
+    return toolError(`这次调用结果不明，可能已经执行：${error.detail.message}`, { code: error.detail.code });
+  }
+  return toolError(CONTROLLER_UNCERTAIN_TEXT);
 }
 function toolError(text: string, data: Record<string, unknown> = {}) {
   return { isError: true, content: [{ type: "text" as const, text: JSON.stringify({ text, ...data }) }] };

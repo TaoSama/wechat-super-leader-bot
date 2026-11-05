@@ -21,7 +21,7 @@ const call = (name: string, args: unknown = {}, extra: Record<string, unknown> =
 });
 const steer = () => call("execute_plan", { actions: [{ nodeId: NODE_ID, sessionId: SESSION_ID,
   prompt: "补充记录失败用例名称", deliveryMode: "steer", expectedTurnId: ACTIVE_TURN }] },
-{ text: `给原会话当前轮 ${ACTIVE_TURN} 补充记录失败用例名称`, authorization: { intent: "task" } });
+{ text: `给原会话当前轮 ${ACTIVE_TURN} 补充记录失败用例名称` });
 
 afterEach(() => vi.useRealTimers());
 
@@ -71,7 +71,7 @@ it.each([
       throw new Error("Injected cancellation cleanup failure");
     });
   }
-  const cancelled = f.create().direct.call(call(name, {}, { text: "取消后续执行", authorization: { intent: "task" } }));
+  const cancelled = f.create().direct.call(call(name, {}, { text: "取消后续执行" }));
   if (cleanupFails) await expect(cancelled).rejects.toThrow("Injected cancellation cleanup failure");
   else expect((await cancelled).reply?.text).toContain("已取消");
   expect((await f.store.getLeaderState(CHAT_ID))?.data.steerGeneration).toBe(1);
@@ -110,7 +110,7 @@ it.each(["final-save", "expired-claim"] as const)("recovers an accepted direct s
     vi.setSystemTime(START_TIME + CLAIM_TTL_MS + 1);
   } else {
     expect((await f.store.getLeaderState(CHAT_ID))?.data.inflight).toBeUndefined();
-    await f.create().direct.call(call("cancel_plan", {}, { text: "取消后续执行", authorization: { intent: "task" } }));
+    await f.create().direct.call(call("cancel_plan", {}, { text: "取消后续执行" }));
   }
   const queried = await f.create().direct.call(call("get_command", { commandId: command.commandId }));
   expect(queried.result).toMatchObject({ commandId: command.commandId, status: "accepted", expectedTurnId: ACTIVE_TURN });
@@ -121,7 +121,7 @@ it.each(["final-save", "expired-claim"] as const)("recovers an accepted direct s
     commandId: command.commandId, text: expect.stringContaining("accepted"),
   });
   expect(await f.create().handle(CHAT_ID, request.messageId, request.text)).toMatchObject({ commandId: command.commandId });
-  await expect(f.create().direct.call(request)).rejects.toThrow(/uncertain/);
+  await expect(f.create().direct.call(request)).rejects.toThrow(/已经开始过/);
   await f.commands.dispatchQueued();
   expect(await f.store.listRecentCommands()).toHaveLength(1);
   expect(await f.store.getLatestExecution(CHAT_ID)).toBeNull();

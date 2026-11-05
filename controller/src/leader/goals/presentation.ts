@@ -3,17 +3,13 @@ import type { Skill } from "../../skills/catalog.js";
 import type { GoalProposal } from "./goal.js";
 import type { GoalScheduler } from "./scheduler.js";
 import { goalReason } from "./reason.js";
-import { sessionLabels, type SessionTitle } from "../plans/presentation.js";
+import { sessionLabels, skillsLine, type SessionTitle } from "../plans/presentation.js";
 
 export function goalPreview(proposal: GoalProposal, catalog: (nodeId: string) => Skill[], title?: SessionTitle): string {
   const labels = sessionLabels(proposal.targets, title);
   const targets = proposal.targets.map((target, index) => {
-    const skills = (target.skills ?? []).map((ref, skillIndex) => {
-      const skill = catalog(target.nodeId).find(item => item.id === ref.id && item.digest === ref.digest);
-      if (!skill) throw new Error("Selected skill unavailable while rendering preview");
-      return `技能 ${skillIndex + 1}：${JSON.stringify(skill.name)}（版本已锁定）`;
-    });
-    return `${index + 1}. ${labels[index]}${skills.length ? `\n${skills.join("\n")}` : ""}`;
+    const skills = skillsLine(target.skills, () => catalog(target.nodeId));
+    return `${index + 1}. ${labels[index]}${skills ? `\n${skills}` : ""}`;
   });
   return `待确认持续目标（尚未派发）\n\n目标：${proposal.objective}\n` +
     `完成条件：\n${proposal.criteria.map((criterion, index) => `${index + 1}. ${criterion}`).join("\n")}\n\n` +

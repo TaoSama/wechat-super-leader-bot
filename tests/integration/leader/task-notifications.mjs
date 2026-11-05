@@ -6,6 +6,7 @@ import { parseArgs } from 'node:util';
 import { createControllerFixture, createPostgresFixture, waitFor } from '../../support/control-plane-fixture.mjs';
 import { withTestCleanup } from '../../support/cleanup.mjs';
 import { verificationEnvironment } from '../../../scripts/verify.mjs';
+import { RESULT_SUMMARY_PROMPT } from '../../../controller/dist/deliveries/service.js';
 
 const CHAT = 'synthetic-task-chat';
 const OTHER_CHAT = 'synthetic-other-chat';
@@ -37,7 +38,7 @@ export async function verifyTaskNotifications({ postgres = false } = {}) {
       const payload = JSON.parse(body);
       assert.equal(payload.model, 'synthetic-summary-model');
       assert.equal(payload.tools?.length ?? 0, 0, 'Summary request unexpectedly allowed tools');
-      assert.match(payload.input[0].content, /真实执行成果/);
+      assert.equal(payload.input[0].content, RESULT_SUMMARY_PROMPT);
       const evidence = JSON.parse(payload.input.at(-1).content);
       assert.equal(evidence.source.type, 'automation');
       assert(evidence.excerpt.length > 11_400, 'Model summarized a short result unnecessarily');

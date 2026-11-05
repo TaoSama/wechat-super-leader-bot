@@ -6,7 +6,7 @@ import { AutomationService } from "../../src/automations/service.js";
 import { MAX_AUTOMATION_TOOL_RESULT_CHARS } from "../../src/automations/tool-results.js";
 import { ACKNOWLEDGEMENT_PROMPT } from "../../src/leader/acknowledgement.js";
 import { CLAIM_TTL_MS } from "../../src/leader/contracts.js";
-import { DirectCallSchema, type DirectAuthorization } from "../../src/leader/direct-contracts.js";
+import { DirectCallSchema } from "../../src/leader/direct-contracts.js";
 import { AUTOMATION_AUTHORIZATION_TOOL_NAME, type AutomationOperation } from "../../src/leader/model/automation-authorization.js";
 import type { ModelMessage, ModelReply } from "../../src/leader/model/contracts.js";
 import { LeaderOrchestrator } from "../../src/leader/orchestrator.js";
@@ -46,10 +46,9 @@ function fixture(operations: AutomationOperation[] = ["edit"]) {
   const seed = (chatId = CHAT) => automations.create(CreateScheduleSchema.parse({ kind: "background", title: "后台日报",
     timing: { type: "cron", expression: "0 10 * * *" }, timezone: "Asia/Shanghai", background: { prompt: ORIGINAL_PROMPT } }),
   { chatId, currentMessageId: "original-creation", explicitCurrentTurnAuthorization: true });
-  const direct = (id: string, authorization: Partial<DirectAuthorization> = { automationOperations: ["edit"] },
-    args: Record<string, unknown> = { prompt: PROMPT, expectedPromptRevision: 0 }) => DirectCallSchema.parse({
+  const direct = (id: string, args: Record<string, unknown> = { prompt: PROMPT, expectedPromptRevision: 0 }) => DirectCallSchema.parse({
     chatId: CHAT, messageId: "current-edit-message", text: EDIT_TEXT, callId: randomUUID(), name: "update_automation",
-    arguments: { id, ...args }, authorization,
+    arguments: { id, ...args },
   });
   return { store, repository, automations, update, runner, submit, complete, leader, seed, direct, replies,
     authorizationMessages, advance: () => { clock += CLAIM_TTL_MS + 1; } };
@@ -70,35 +69,19 @@ describe("direct automation prompt edit authority", () => {
     expect(f.submit).not.toHaveBeenCalled();
   });
 
-  it.each(([[], ["create"], ["pause"], ["resume"], ["cancel"]] satisfies AutomationOperation[][]).map(operations => ({ operations })))(
-    "rejects prompt editing without edit permission: $operations", async ({ operations }) => {
-      const f = fixture(), schedule = await f.seed();
-      await expect(f.leader().direct.call(f.direct(schedule.id, { automationOperations: operations }))).rejects.toThrow(/authorization/);
-      expect(f.update).not.toHaveBeenCalled();
-      expect(await f.repository.get(schedule.id, CHAT)).toMatchObject({ background: { prompt: ORIGINAL_PROMPT } });
-    });
-
-  it.each(["active", "paused", "cancelled"])("does not use edit permission to set status %s", async status => {
-    const f = fixture(), schedule = await f.seed();
-    await expect(f.leader().direct.call(f.direct(schedule.id, { automationOperations: ["edit"] }, { status }))).rejects.toThrow(/authorization/);
-    expect((await f.repository.get(schedule.id, CHAT))?.status).toBe("active");
-  });
-
   it.each([
     { status: "paused", operation: "pause" }, { status: "active", operation: "resume" }, { status: "cancelled", operation: "cancel" },
   ] as const)("preserves the existing $operation operation", async ({ status, operation }) => {
     const f = fixture(), schedule = await f.seed();
     if (operation === "resume") await f.repository.setStatus(schedule.id, CHAT, "paused", NOW);
-    const result = await f.leader().direct.call(f.direct(schedule.id, { automationOperations: [operation] }, { status }));
+    const result = await f.leader().direct.call(f.direct(schedule.id, { status }));
     expect(result.result).toMatchObject({ status, background: { prompt: ORIGINAL_PROMPT } });
     expect(f.update).not.toHaveBeenCalled();
   });
 
   it("rejects mixed status and prompt arguments before either mutation", async () => {
     const f = fixture(), schedule = await f.seed();
-    const request = f.direct(schedule.id, { automationOperations: ["edit", "pause"] }, {
-      status: "paused", prompt: PROMPT, expectedPromptRevision: 0,
-    });
+    const request = f.direct(schedule.id, { status: "paused", prompt: PROMPT, expectedPromptRevision: 0 });
     await expect(f.leader().direct.call(request)).rejects.toThrow(/arguments/);
     expect(f.update).not.toHaveBeenCalled();
     expect(await f.repository.get(schedule.id, CHAT)).toMatchObject({ status: "active", background: { prompt: ORIGINAL_PROMPT } });
@@ -120,7 +103,7 @@ describe("direct automation prompt edit authority", () => {
     const f = fixture(), schedule = await f.seed(), request = f.direct(schedule.id);
     await f.store.recordMessage({ chatId: CHAT, messageId: request.messageId, text: "只查询日报，不修改", replyText: "已查询",
       createdAt: new Date(NOW).toISOString() });
-    await expect(f.leader().direct.call(request)).rejects.toThrow(/different user text/);
+    await expect(f.leader().direct.call(request)).rejects.toMatchObject({ code: "MESSAGE_REBOUND" });
     expect(f.update).not.toHaveBeenCalled();
   });
 
@@ -131,7 +114,7 @@ describe("direct automation prompt edit authority", () => {
       if (state?.data.inflight) f.advance();
       return state;
     });
-    await expect(f.leader().direct.call(f.direct(schedule.id))).rejects.toThrow(/authority.*expired/);
+    await expect(f.leader().direct.call(f.direct(schedule.id))).rejects.toThrow(/授权已变化或过期/);
     expect(f.update).not.toHaveBeenCalled();
     expect(await f.repository.get(schedule.id, CHAT)).toMatchObject({ background: { prompt: ORIGINAL_PROMPT } });
   });

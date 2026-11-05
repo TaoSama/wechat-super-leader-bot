@@ -12,6 +12,7 @@ import { parseArgs } from 'node:util';
 import { verificationEnvironment } from '../../../scripts/verify.mjs';
 import { stopTestProcess, withTestCleanup } from '../../support/cleanup.mjs';
 import { createControllerFixture, waitFor } from '../../support/control-plane-fixture.mjs';
+import { RESULT_SUMMARY_PROMPT } from '../../../controller/dist/deliveries/service.js';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const CHAT = 'synthetic-result-gateway-chat';
@@ -61,7 +62,7 @@ export async function verifyResultGateway() {
       try {
         assert.equal(request.url, '/v1/responses');
         const payload = await jsonBody(request);
-        const summary = payload.input[0]?.content?.includes('真实执行成果');
+        const summary = payload.input[0]?.content === RESULT_SUMMARY_PROMPT;
         if (summary) assert.equal(payload.tools?.length ?? 0, 0, 'Summary model was granted tools');
         modelRequests.push({ summary });
         respond(response, { status: 'completed', output: [{ type: 'message', role: 'assistant', status: 'completed',

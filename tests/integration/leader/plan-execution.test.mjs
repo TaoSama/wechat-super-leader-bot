@@ -45,7 +45,7 @@ test(title, {
         output = [{ type: 'message', role: 'assistant', status: 'completed',
           content: [{ type: 'output_text', text: `Tool evidence: ${last.output}` }] }];
       } else {
-        const call = modelCall(last, payload.tools);
+        const call = modelCall(last, payload.tools, payload.input);
         assert(call, 'Scenario model fixture received an unsupported request');
         output = [{ type: 'function_call', call_id: `fixture-${call.name}`, name: call.name,
           arguments: JSON.stringify(call.args) }];

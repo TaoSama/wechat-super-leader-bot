@@ -1,3 +1,4 @@
+import type { Skill, SkillRef } from "../../skills/catalog.js";
 import type { ExecutionView } from "./scheduler.js";
 
 const labels: Record<string, string> = {
@@ -23,6 +24,18 @@ function literalTitle(title: string): string {
 
 export function sessionLabel(nodeId: string, sessionId: string, title?: string): string {
   return `[${nodeId}] ${title?.trim() ? literalTitle(title) : `会话 ${sessionId.slice(0, 8)}`}`;
+}
+
+/** One ordered line for the frozen skills of a preview target; empty when none were selected. */
+export function skillsLine(refs: SkillRef[] | undefined, catalog: () => Skill[]): string {
+  if (!refs?.length) return "";
+  const available = catalog();
+  const names = refs.map(ref => {
+    const skill = available.find(item => item.id === ref.id && item.digest === ref.digest);
+    if (!skill) throw new Error("Selected skill unavailable while rendering preview");
+    return literalTitle(skill.name);
+  });
+  return `技能：${names.join(" → ")}（版本已锁定）`;
 }
 
 export function sessionLabels(targets: { nodeId: string; sessionId: string }[], title?: SessionTitle): string[] {

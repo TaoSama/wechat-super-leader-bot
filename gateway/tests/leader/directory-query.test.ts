@@ -217,8 +217,8 @@ test("compound and ordinary requests retain native tools with complete memory sn
   const sdkFactory: NonNullable<CodexReplyEngineOptions["sdkFactory"]> = () => ({
     startThread: () => ({ runStreamed: async (input: string) => ({ events: (async function* (): AsyncIterable<ThreadEvent> {
       nativeCalls++;
-      assert.match(input, /完整快照满足读取要求/);
-      assert.match(input, /文件没有变化时不必重写/);
+      assert.match(input, /<memory_snapshot>[^\n]*truncated/);
+      assert.match(input, /只在内容有变化时更新/);
       yield { type: "item.completed", item: { type: "agent_message", id: "a", text: "原生处理" } };
       yield { type: "turn.completed", usage };
     })() }) }),

@@ -5,8 +5,8 @@ export interface Diagnostic { id: string; label: string; value: string; status: 
 export interface SettingsSnapshot { scopes: ModelScope[]; chats: SettingsChat[]; diagnostics: Diagnostic[] }
 export interface CatalogModel { id: string; label: string; reasoningEfforts: string[]; defaultReasoningEffort?: string; contextWindow?: number }
 export interface ModelCatalog { scope: string; models: CatalogModel[]; fetchedAt: string; source: string; version: string; stale: boolean }
-export interface SettingsResource { id: string; kind: "prompt" | "memory" | "skill" | "tool"; title: string; scope: string; path: string; revision: string; version: string; editable: boolean; effect: string; reason?: string }
-export interface ResourceDocument extends SettingsResource { content: string; language: string }
+export interface SettingsResource { id: string; kind: "prompt" | "memory" | "skill" | "tool"; title: string; scope: string; path: string; revision: string; version: string; editable: boolean; effect: string; reason?: string; stale?: boolean }
+export interface ResourceDocument extends SettingsResource { content: string; language: string; defaultContent?: string }
 
 function object(raw: unknown): Record<string, unknown> { if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("设置接口响应格式无效"); return raw as Record<string, unknown>; }
 function string(value: unknown): string { if (typeof value !== "string") throw new Error("设置接口响应字段无效"); return value; }
@@ -28,10 +28,10 @@ export function parseCatalog(raw: unknown): ModelCatalog {
 export function parseResource(raw: unknown): SettingsResource {
   const item = object(raw); const kind = string(item.kind);
   if (!["prompt", "memory", "skill", "tool"].includes(kind)) throw new Error("未知资源类型");
-  return { id: string(item.id), kind: kind as SettingsResource["kind"], title: string(item.title), scope: string(item.scope), path: string(item.path), revision: string(item.revision), version: string(item.version), editable: boolean(item.editable), effect: string(item.effect), reason: typeof item.reason === "string" ? item.reason : undefined };
+  return { id: string(item.id), kind: kind as SettingsResource["kind"], title: string(item.title), scope: string(item.scope), path: string(item.path), revision: string(item.revision), version: string(item.version), editable: boolean(item.editable), effect: string(item.effect), reason: typeof item.reason === "string" ? item.reason : undefined, stale: item.stale === undefined ? false : boolean(item.stale) };
 }
 export function parseResources(raw: unknown): SettingsResource[] { return array(object(raw).resources, parseResource); }
-export function parseDocument(raw: unknown): ResourceDocument { const item = object(raw); return { ...parseResource(item), content: string(item.content), language: string(item.language) }; }
+export function parseDocument(raw: unknown): ResourceDocument { const item = object(raw); return { ...parseResource(item), content: string(item.content), language: string(item.language), defaultContent: item.defaultContent === undefined ? undefined : string(item.defaultContent) }; }
 
 export function parseDiagnostics(raw: unknown): Diagnostic[] {
   return array(raw, value => { const item = object(value); const status = string(item.status); if (!["ok", "warning", "error"].includes(status)) throw new Error("未知诊断状态"); return { id: string(item.id), label: string(item.label), value: string(item.value), status: status as Diagnostic["status"] }; });

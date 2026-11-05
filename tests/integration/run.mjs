@@ -60,7 +60,7 @@ async function main() {
   let confirmationReplies = 0;
   const fixtureSkills = Array.from({ length: 4 }, (_, index) => ({
     id: String(index + 1).repeat(64), digest: String(index + 5).repeat(64),
-    name: '"'.repeat(126) + index, description: 'Test fixture only', path: `/test/${index}/SKILL.md`,
+    name: 'x' + '`'.repeat(125) + index, description: 'Test fixture only', path: `/test/${index}/SKILL.md`,
   }));
   const skillRefs = fixtureSkills.map(({ id, digest }) => ({ id, digest })).reverse();
   const received = [];
@@ -83,7 +83,7 @@ async function main() {
         const resultCall = resultModelCall(last.content);
         const terminalCall = terminalModelCall(last.content);
         const terminalInputCall = terminalInputModelCall(last.content);
-        const goalCall = goalModelCall(last, request.tools);
+        const goalCall = goalModelCall(last, request.tools, request.input);
         const historyReply = leaderHistoryModel.respond(last);
         const desktopReply = desktopModel.respond(last);
         const acknowledgement = acknowledgementModelReply(request);

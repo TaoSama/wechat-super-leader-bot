@@ -17,13 +17,15 @@ const RESULT_PREFIX = 'PRIVATE_GOAL_RESULT:';
 
 // Match the pure decision tool AND this fixture's authorization. A regular model
 // request (including other fixtures) is never intercepted by a JSON-like string.
-export function goalModelCall(last, tools = []) {
+export function goalModelCall(last, tools = [], messages = []) {
   const names = tools.map(tool => tool.name ?? tool.function?.name);
   if (names.length === 1 && names[0] === 'decide_goal') {
     const input = JSON.parse(last.content);
-    if (!input.authorization?.objective?.startsWith(PREFIX)) return null;
-    assert.equal(input.kind, 'untrusted_goal_observations');
-    const scenario = input.authorization.objective.slice(PREFIX.length);
+    const authorization = JSON.parse(messages.at(-2)?.content ?? '{}').confirmedAuthorization;
+    if (!authorization?.objective?.startsWith(PREFIX)) return null;
+    assert.equal(input.kind, 'goal_observations');
+    assert.equal(input.authorization, undefined);
+    const scenario = authorization.objective.slice(PREFIX.length);
     assert(input.actions.every(action => action.status === 'completed' && action.result));
     if (input.actions.length === 0) return { name: 'decide_goal', args: {
       type: 'next', target: 1, prompt: `${PREFIX}${scenario}:baseline`, sourceActions: [], reason: '先取得精确基准' } };

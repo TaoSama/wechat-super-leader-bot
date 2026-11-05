@@ -18,6 +18,7 @@ import { PROGRESS_TASK, RAW_REPLY_TASK, RESUMABLE_REPLY, verifyReliableDelivery 
 import { BUDGET_REPLY, BUDGET_REPLY_TASK, verifyWechatBudget } from './wechat-budget.mjs';
 import { fixtureHistory } from './confirmation-fixture.mjs';
 import { PostgresStore } from '../../../controller/dist/store/postgres.js';
+import { RESULT_SUMMARY_PROMPT } from '../../../controller/dist/deliveries/service.js';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const CHAT = 'synthetic-wechat-interaction-chat';
@@ -299,7 +300,7 @@ async function main({ budgetOnly = values['budget-only'] } = {}) {
           confirmationCalls.push(evidence);
           output = [{ type: 'message', role: 'assistant', status: 'completed',
             content: [{ type: 'output_text', text: observations.join('\n') }] }];
-        } else if (body.input[0]?.content?.startsWith('根据任务的真实执行成果')) {
+        } else if (body.input[0]?.content === RESULT_SUMMARY_PROMPT) {
           assert.equal(body.tools?.length ?? 0, 0, 'Result summary model received mutation tools');
           const source = JSON.parse(last.content);
           assert(source.excerpt.length > 11400, 'Summary was used for a result fitting three messages');

@@ -79,15 +79,9 @@ it("previews every frozen skill in order and confirms the same combination only 
   f.catalog.splice(0, f.catalog.length, ...structuredClone(combination));
   const leader = f.leader();
   const preview = await leader.handle("chat", "multi-preview", "按顺序组合四个技能检查代码");
-  let previous = -1;
-  for (const [index, ref] of combinationRefs.entries()) {
-    const item = combination.find(item => item.id === ref.id)!;
-    const offset = preview.text.indexOf(`技能 ${index + 1}：${JSON.stringify(item.name)}`);
-    expect(offset).toBeGreaterThan(previous);
-    expect(preview.text).toContain(`技能 ${index + 1}：${JSON.stringify(item.name)}（版本已锁定）`);
-    expect(preview.text).not.toContain(ref.digest);
-    previous = offset;
-  }
+  const names = combinationRefs.map(ref => combination.find(item => item.id === ref.id)!.name);
+  expect(preview.text).toContain(`技能：${names.join(" → ")}（版本已锁定）`);
+  for (const ref of combinationRefs) expect(preview.text).not.toContain(ref.digest);
   expect(f.hub.sendCommand).not.toHaveBeenCalled();
   await leader.handle("chat", "multi-confirm", "确认执行");
   await leader.handle("chat", "multi-confirm", "确认执行");
@@ -110,7 +104,7 @@ it("rejects an oversized combination preview instead of confirming hidden steps"
     nodeId: "macair", sessionId: `s${index + 1}`, prompt: "任务".repeat(500), skills: combinationRefs,
   }));
   const f = fixture([tool("propose_plan", { actions })]);
-  f.catalog.splice(0, f.catalog.length, ...combination.map(item => ({ ...item, name: '"'.repeat(128) })));
+  f.catalog.splice(0, f.catalog.length, ...combination.map(item => ({ ...item, name: "`".repeat(128) })));
   const leader = f.leader();
   const reply = await leader.handle("chat", "oversized-preview", "请生成完整计划");
   expect(reply.text).toContain("无法完整展示供确认");
@@ -221,7 +215,7 @@ it("finds a named skill beyond the first catalog page without scanning pages", a
   expect(result.total).toBe(1);
   expect(result.nextOffset).toBeNull();
   expect(result.skills).toEqual([{ ...skill, nodeId: "macair", path: undefined }]);
-  expect(preview.text).toContain(`${JSON.stringify(skill.name)}（版本已锁定）`);
+  expect(preview.text).toContain(`技能：${skill.name}（版本已锁定）`);
   expect(preview.text).not.toContain(skill.digest);
   expect(f.hub.sendCommand).not.toHaveBeenCalled();
   await f.leader().handle("chat", "confirm", "确认执行");

@@ -11,20 +11,10 @@ export interface ControllerTool {
   inputSchema: { type: "object"; properties?: Record<string, unknown>; [key: string]: unknown };
   annotations: { readOnlyHint: boolean };
 }
-export interface ToolAuthorization {
-  intent: "task" | "goal" | "preview" | "query" | "isolated_background" | "unclear";
-  automationOperations?: ("create" | "pause" | "resume" | "cancel" | "edit")[];
-  backgroundOperations?: ("create" | "follow_up" | "extend")[];
-  sendImages?: boolean;
-  interruptSession?: boolean;
-  approvalDecision?: "none" | "accept" | "decline";
-  memoryOperations?: ("remember" | "forget")[];
-}
 export interface ControllerToolCall extends ControllerMessageRequest {
   callId: string;
   name: string;
   arguments: Record<string, unknown>;
-  authorization?: ToolAuthorization;
 }
 export interface ControllerToolResult {
   result: unknown;
@@ -35,12 +25,34 @@ export interface DirectToolClient {
   listTools(request: ControllerMessageRequest): Promise<ControllerToolList>;
   callTool(request: ControllerToolCall): Promise<ControllerToolResult>;
 }
+const REJECTED_CODE = "DIRECT_TOOL_REJECTED";
+const MAX_FAILURE_MESSAGE_CHARS = 600;
+/** The Controller's reason, written for the leader model. */
+export interface ControllerFailureDetail { code: string; message: string }
 /** An explicit server guarantee that this business invocation did not start. */
 export class ControllerToolRejectedError extends Error {
-  constructor(public readonly httpStatus: number) {
+  constructor(public readonly httpStatus: number, public readonly detail?: ControllerFailureDetail) {
     super(`Controller rejected tool without executing it (HTTP ${httpStatus})`);
     this.name = "ControllerToolRejectedError";
   }
+}
+/** The Controller answered with an error whose business effect may already have happened. */
+export class ControllerToolFailedError extends Error {
+  constructor(public readonly httpStatus: number, public readonly detail?: ControllerFailureDetail) {
+    super(`Controller tool returned HTTP ${httpStatus}`);
+    this.name = "ControllerToolFailedError";
+  }
+}
+// A Controller from the previous release still requires the retired attestation and rejects every mutation
+// without it. Its body has no message, so name the cause for the model. Remove with the attestation fallback.
+const LEGACY_AUTHORIZATION_REJECTION = "Current-turn authorization does not permit this operation";
+const LEGACY_CONTROLLER_DETAIL: ControllerFailureDetail = { code: "CONTROLLER_UPGRADING",
+  message: "Controller 正在升级，这次操作没有执行。告诉用户系统正在升级，请稍后再发一次，不要现在重试。" };
+function failureDetail(body: Record<string, unknown>): ControllerFailureDetail | undefined {
+  if (body.code === REJECTED_CODE && body.error === LEGACY_AUTHORIZATION_REJECTION && body.message === undefined) return LEGACY_CONTROLLER_DETAIL;
+  const code = typeof body.reason === "string" ? body.reason : body.code;
+  if (typeof code !== "string" || typeof body.message !== "string" || !body.message.trim()) return undefined;
+  return { code, message: body.message.slice(0, MAX_FAILURE_MESSAGE_CHARS) };
 }
 interface Options { baseUrl: string; token: string; fetchImpl: FetchLike; timeoutMs: number }
 
@@ -58,20 +70,18 @@ export class ControllerDirectTools implements DirectToolClient {
         body: JSON.stringify(request),
       }), abort.signal);
       if (!response.ok) {
+        if (endpoint !== "/v1/tools/call" || response.status === 401) throw new Error(`Controller tool returned HTTP ${response.status}`);
+        let failure: unknown;
+        try { failure = await beforeAbort(response.json(), abort.signal); }
+        catch { abort.signal.throwIfAborted(); throw new ControllerToolFailedError(response.status); }
+        const body = failure && typeof failure === "object" ? failure as Record<string, unknown> : {};
+        const detail = failureDetail(body);
         // A bare 4xx may follow a partially executed action. Only the explicit
         // server guarantee permits retaining prior successful business receipts.
-        if (endpoint === "/v1/tools/call" && response.status >= 400 && response.status < 500 &&
-            response.status !== 401) {
-          let failure: unknown;
-          try { failure = await beforeAbort(response.json(), abort.signal); }
-          catch { abort.signal.throwIfAborted(); throw new Error(`Controller tool returned HTTP ${response.status}`); }
-          if (failure && typeof failure === "object" &&
-              (failure as Record<string, unknown>).code === "DIRECT_TOOL_REJECTED" &&
-              (failure as Record<string, unknown>).execution === "not_started") {
-            throw new ControllerToolRejectedError(response.status);
-          }
+        if (response.status >= 400 && response.status < 500 && body.code === REJECTED_CODE && body.execution === "not_started") {
+          throw new ControllerToolRejectedError(response.status, detail);
         }
-        throw new Error(`Controller tool returned HTTP ${response.status}`);
+        throw new ControllerToolFailedError(response.status, detail);
       }
       const result: unknown = await beforeAbort(response.json(), abort.signal);
       abort.signal.throwIfAborted();

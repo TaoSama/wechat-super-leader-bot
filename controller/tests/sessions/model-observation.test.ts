@@ -131,7 +131,7 @@ describe("Leader model views", () => {
       expect(messages.find(item => item.role === "system")?.content).toBe(SYSTEM_PROMPT);
       expect(SYSTEM_PROMPT).toContain("list_sessions.modelView");
       expect(tools).toEqual(LEADER_TOOLS);
-      expect(tools.find(item => item.function.name === "list_sessions")?.function.description).toContain("回答模型使用 modelView");
+      expect(tools.find(item => item.function.name === "list_sessions")?.function.description).toContain("回答模型看 modelView");
       if (++calls === 1) return { content: null, toolCalls: [{ id: "query", type: "function", function: { name: "list_sessions", arguments: '{"status":"active"}' } }] };
       output = JSON.parse(messages.find(item => item.role === "tool")!.content!);
       return { content: "桌面观测模型为 desktop-model。", toolCalls: [] };

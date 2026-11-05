@@ -34,7 +34,34 @@ test("prompt overlay survives reconstruction, retains source default, and requir
   assert.throws(() => resources.write(initial.id, { content: "no revision", expectedRevision: "" }), status(400));
   assert.equal(resources.read(initial.id).content, saved.content);
   assert.equal(fs.statSync(path.join(root, "prompts", "main.md")).mode & 0o777, 0o600);
-  assert.deepEqual(fs.readdirSync(root), ["prompts"]);
+  assert.deepEqual(fs.readdirSync(root).sort(), ["bases.json", "prompts"]);
+});
+
+test("overrides record their default revision and report stale after the default changes", (t) => {
+  const { root, skillsRoot, options, resources } = fixture(t);
+  const prompt = resources.read("prompt/main");
+  assert.equal(prompt.stale, false);
+  resources.write(prompt.id, { content: "Edited main prompt\n", expectedRevision: prompt.revision });
+  const skill = resources.read("skill/control/SKILL.md");
+  resources.write(skill.id, { content: "# Edited control\n", expectedRevision: skill.revision });
+  assert.equal(resources.read(prompt.id).stale, false);
+  assert.equal(resources.read(skill.id).stale, false);
+  const upgraded = new RuntimeResources({ ...options, defaults: { ...options.defaults, main: "New default prompt\n" } });
+  fs.writeFileSync(path.join(skillsRoot, "control", "SKILL.md"), "# Control v2\n");
+  const stalePrompt = upgraded.read(prompt.id);
+  assert.equal(stalePrompt.stale, true);
+  assert.equal(stalePrompt.content, "Edited main prompt\n");
+  assert.equal(stalePrompt.defaultContent, "New default prompt\n");
+  assert.equal(upgraded.read(skill.id).defaultContent, "# Control v2\n");
+  assert.deepEqual(upgraded.list().filter(item => item.stale).map(item => item.id), [prompt.id, skill.id]);
+  assert.equal("defaultContent" in upgraded.list()[0], false);
+  const saved = upgraded.write(prompt.id, { content: "Reviewed prompt\n", expectedRevision: stalePrompt.revision });
+  assert.equal(saved.stale, false);
+  fs.rmSync(path.join(root, "bases.json"));
+  assert.equal(upgraded.read(prompt.id).stale, true, "overrides saved before revisions were recorded are flagged");
+  fs.writeFileSync(path.join(root, "bases.json"), "not json");
+  assert.equal(upgraded.read(prompt.id).stale, true);
+  assert.equal(upgraded.read("prompt/memory").stale, false);
 });
 
 test("skill child edits overlay deployment and freeze the complete tree including executable scripts and binary files", (t) => {
@@ -122,7 +149,34 @@ test("store instances in the Gateway reject stale revisions without a disk lock"
   assert.throws(() => other.write(initial.id, { content: "lost update", expectedRevision: initial.revision }),
     (error: unknown) => error instanceof RuntimeResourceError && error.code === "revision_conflict");
   assert.equal(other.read(initial.id).content, saved.content);
-  assert.deepEqual(fs.readdirSync(root), ["prompts"]);
+  assert.deepEqual(fs.readdirSync(root).sort(), ["bases.json", "prompts"]);
+});
+
+test("overrides record their default revision and report stale after the default changes", (t) => {
+  const { root, skillsRoot, options, resources } = fixture(t);
+  const prompt = resources.read("prompt/main");
+  assert.equal(prompt.stale, false);
+  resources.write(prompt.id, { content: "Edited main prompt\n", expectedRevision: prompt.revision });
+  const skill = resources.read("skill/control/SKILL.md");
+  resources.write(skill.id, { content: "# Edited control\n", expectedRevision: skill.revision });
+  assert.equal(resources.read(prompt.id).stale, false);
+  assert.equal(resources.read(skill.id).stale, false);
+  const upgraded = new RuntimeResources({ ...options, defaults: { ...options.defaults, main: "New default prompt\n" } });
+  fs.writeFileSync(path.join(skillsRoot, "control", "SKILL.md"), "# Control v2\n");
+  const stalePrompt = upgraded.read(prompt.id);
+  assert.equal(stalePrompt.stale, true);
+  assert.equal(stalePrompt.content, "Edited main prompt\n");
+  assert.equal(stalePrompt.defaultContent, "New default prompt\n");
+  assert.equal(upgraded.read(skill.id).defaultContent, "# Control v2\n");
+  assert.deepEqual(upgraded.list().filter(item => item.stale).map(item => item.id), [prompt.id, skill.id]);
+  assert.equal("defaultContent" in upgraded.list()[0], false);
+  const saved = upgraded.write(prompt.id, { content: "Reviewed prompt\n", expectedRevision: stalePrompt.revision });
+  assert.equal(saved.stale, false);
+  fs.rmSync(path.join(root, "bases.json"));
+  assert.equal(upgraded.read(prompt.id).stale, true, "overrides saved before revisions were recorded are flagged");
+  fs.writeFileSync(path.join(root, "bases.json"), "not json");
+  assert.equal(upgraded.read(prompt.id).stale, true);
+  assert.equal(upgraded.read("prompt/memory").stale, false);
 });
 
 test("workspace skill disabling inspects nested SKILL.md without mutating it and rejects links", t => {
