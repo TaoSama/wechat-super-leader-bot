@@ -1,8 +1,40 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { createEvent, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useLayoutEffect } from "react";
 import { expect, it, vi } from "vitest";
 import { ResourceEditor, type EditableResource } from "../../src/features/settings/ResourceEditor";
 
 const resource: EditableResource = { id: "prompt", title: "微信助手系统提示", kind: "prompt", scope: "微信助手 · 下一轮", content: "original", revision: "v1", editable: true };
+it("首次被动 effect 前输入的草稿不会被初始化覆盖", () => {
+  const dirty = vi.fn();
+  const save = vi.fn();
+  function EditDuringCommit() {
+    useLayoutEffect(() => {
+      const editor = screen.getByLabelText("文件内容");
+      // Dispatch during commit to exercise input before passive effects deterministically.
+      editor.dispatchEvent(createEvent.change(editor, { target: { value: "early draft" } }));
+    }, []);
+    return <ResourceEditor resource={resource} onSave={save} onDirtyChange={dirty} />;
+  }
+  render(<EditDuringCommit />);
+  expect(screen.getByLabelText("文件内容")).toHaveValue("early draft");
+  expect(dirty).toHaveBeenLastCalledWith(true);
+  expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+});
+it("切换资源身份会初始化新草稿并使用新修订保存", async () => {
+  const dirty = vi.fn();
+  const save = vi.fn(async (current: EditableResource, content: string) => ({ ...current, content, revision: "v3" }));
+  const { rerender } = render(<ResourceEditor resource={resource} onSave={save} onDirtyChange={dirty} />);
+  fireEvent.change(screen.getByLabelText("文件内容"), { target: { value: "first draft" } });
+  const next = { ...resource, id: "memory", content: "second resource", revision: "v2" };
+  rerender(<ResourceEditor resource={next} onSave={save} onDirtyChange={dirty} />);
+  expect(screen.getByLabelText("文件内容")).toHaveValue("second resource");
+  expect(screen.getByText("v2")).toBeInTheDocument();
+  expect(dirty).toHaveBeenLastCalledWith(false);
+  fireEvent.change(screen.getByLabelText("文件内容"), { target: { value: "second draft" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  await screen.findByText("已保存");
+  expect(save).toHaveBeenCalledExactlyOnceWith(next, "second draft");
+}, 15000);
 it("并发冲突时保留草稿，不显示假保存成功", async () => {
   const save = vi.fn(async () => { throw new Error("内容已更新，请重新读取后合并"); });
   render(<ResourceEditor resource={resource} onSave={save} />);

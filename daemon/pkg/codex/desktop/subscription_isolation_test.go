@@ -231,7 +231,7 @@ func TestDesktopSubscriptionIsolationBadTargetPreservesHealthyStream(t *testing.
 					defer badClosed.Do(func() { close(badRevoked) })
 					if failure == "oversized" {
 						var header [4]byte
-						binary.LittleEndian.PutUint32(header[:], desktopInboundFrameLimit+1)
+						binary.LittleEndian.PutUint32(header[:], desktopSubscriptionFrameLimit+1)
 						if _, err := c.Write(header[:]); err != nil {
 							return err
 						}

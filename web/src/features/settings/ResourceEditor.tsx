@@ -23,7 +23,11 @@ interface Props {
   onSavingChange?: (saving: boolean) => void;
 }
 
-export function ResourceEditor({ resource, onSave, onReload, onDirtyChange, onSavingChange }: Props) {
+export function ResourceEditor(props: Props) {
+  return <ResourceEditorContent key={props.resource.id} {...props} />;
+}
+
+function ResourceEditorContent({ resource, onSave, onReload, onDirtyChange, onSavingChange }: Props) {
   const editorId = useId();
   const [current, setCurrent] = useState(resource);
   const [draft, setDraft] = useState(resource.content);
@@ -34,7 +38,6 @@ export function ResourceEditor({ resource, onSave, onReload, onDirtyChange, onSa
   const [comparison, setComparison] = useState<EditableResource | null>(null);
   const busy = saving || reading;
   const dirty = draft !== current.content;
-  useEffect(() => { setCurrent(resource); setDraft(resource.content); setError(null); setSaved(false); }, [resource.id]);
   useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
   useEffect(() => { onSavingChange?.(busy); }, [busy, onSavingChange]);
   async function save() {
