@@ -238,10 +238,16 @@ export class ReleaseTransfer {
           }
         }
       })().catch(error => { samplingFailure = error; this.abort.abort(); });
+      const uploads = [];
       let results;
       try {
-        results = await Promise.all(streams.map(paths => this.processes.run('scp', ['-B', ...this.sshArgs(), '-P', String(c.port),
-          ...paths, `${c.user}@${c.host}:${c.stage}/`], { signal: this.signal })));
+        for (const paths of streams) uploads.push(this.processes.run('scp', ['-B', ...this.sshArgs(), '-P', String(c.port),
+          ...paths, `${c.user}@${c.host}:${c.stage}/`], { signal: this.signal }));
+        results = await Promise.all(uploads);
+      } catch (error) {
+        this.abort.abort();
+        await Promise.allSettled(uploads);
+        throw error;
       } finally { sampling.abort(); await sampler; }
       if (samplingFailure) throw samplingFailure;
       const failed = results.find(result => result.code !== 0 || result.reason);
