@@ -98,9 +98,13 @@ elif op=='activate':
   os.close(ready_read)
   os.setsid()
   os.dup2(os.open(os.devnull,os.O_RDONLY),0);os.dup2(output,1);os.dup2(output,2)
-  os.write(ready_write,b'1');os.close(ready_write)
-  try:code=subprocess.call([script]+files)
-  except OSError:code=126
+  try:os.write(ready_write,b'1');ready=True
+  except BrokenPipeError:ready=False
+  finally:os.close(ready_write)
+  if ready:
+   try:code=subprocess.call([script]+files)
+   except OSError:code=126
+  else:code=77
   with open(status+'.tmp','w') as f:f.write(str(code));f.flush();os.fsync(f.fileno())
   os.replace(status+'.tmp',status)
   os._exit(0)
