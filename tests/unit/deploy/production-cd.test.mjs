@@ -77,7 +77,8 @@ test('diagnostic-only is manual trusted-main, mutually exclusive with deploy, an
   assert.doesNotMatch(diagnostic, /docker load|docker compose|remote-release.sh|--release-root/);
   assert.doesNotMatch(diagnostic, /prepare-transfer-manifest|publish-transfer-manifest|--manifest-file|--manifest-artifact-id/);
   assert.match(diagnostic, /does not establish a deployed runtime revision/);
-  assert.match(workflow, /timeout-minutes: 20/);
+  assert.match(workflow, /timeout-minutes: 40/);
+  assert.match(workflow, /gzip -1 --no-name --stdout "\$release_root\/\$component.tar"/);
   assert.match(workflow, /failure\(\) \|\| cancelled\(\)/);
 });
 
