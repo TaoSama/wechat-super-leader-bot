@@ -133,7 +133,7 @@ for (const delivery of ["accepted", "expired"] as const) {
   });
 }
 
-test("closing a 65th reply evicts only the oldest closed entry and preserves started and uncertain work", async t => {
+test("closing a 65th reply evicts only the oldest closed entry and preserves pending started work", async t => {
   const { root, store } = fixture(t);
   const workspace = await store.forChat(ACCOUNT, CHAT);
   const journal: ReplyJournal = Object.fromEntries(Array.from({ length: MAX_CLOSED_REPLY_ENTRIES }, (_, index) => [
@@ -147,9 +147,10 @@ test("closing a 65th reply evicts only the oldest closed entry and preserves sta
   const engine = new CodexReplyEngine(options(root, sdk.sdkFactory));
   await engine.ackReply(ACCOUNT, CHAT, "closing-now", "accepted");
   const persisted = workspace.getReplyJournal();
-  assert.equal(persisted[messageKey("closed-0")], undefined);
+  // Uncertain delivery is terminal: Gateway keeps its own uncertain outbox record, so it counts as closed here.
+  for (const id of ["closed-0", "closed-1"]) assert.equal(persisted[messageKey(id)], undefined);
   for (const id of ["started", "uncertain"]) assert.deepEqual(persisted[messageKey(id)], journal[messageKey(id)]);
-  assert.equal(Object.keys(persisted).length, MAX_CLOSED_REPLY_ENTRIES + 2);
+  assert.equal(Object.keys(persisted).length, MAX_CLOSED_REPLY_ENTRIES + 1);
   assert.equal(persisted[messageKey("closing-now")].delivery, "accepted");
   await engine.ackReply(ACCOUNT, CHAT, "closed-0", "expired");
   assert.deepEqual(workspace.getReplyJournal(), persisted, "repeated receipt for pruned expired work is a no-op");
@@ -158,12 +159,38 @@ test("closing a 65th reply evicts only the oldest closed entry and preserves sta
   assert.equal(sdk.calls(), 0);
 });
 
+test("crashed turns stay pinned until a terminal receipt, then stop blocking the chat", async t => {
+  const { root, store } = fixture(t);
+  const workspace = await store.forChat(ACCOUNT, CHAT);
+  const statuses = ["accepted", "uncertain", "expired"] as const;
+  const journal: ReplyJournal = Object.fromEntries(Array.from({ length: MAX_PINNED_REPLY_ENTRIES }, (_, index) => [
+    messageKey(`crashed-${index}`), seeded("started", "pending", "frozen unknown result"),
+  ]));
+  workspace.setReplyJournal(journal);
+  const sdk = fakeSdk();
+  const engine = new CodexReplyEngine(options(root, sdk.sdkFactory));
+  // Replaying a crashed inbound returns its frozen reply and never reruns the turn.
+  assert.deepEqual(await engine.reply(ACCOUNT, { chatId: CHAT, messageId: "crashed-0", text: "seeded user input" }, noController),
+    { text: "frozen unknown result" });
+  const request = { chatId: CHAT, messageId: "next-work", text: "开始下一项" };
+  await assert.rejects(engine.reply(ACCOUNT, request, noController), ReplyEngineBackpressureError);
+  for (let index = 0; index < MAX_PINNED_REPLY_ENTRIES; index++) {
+    await engine.ackReply(ACCOUNT, CHAT, `crashed-${index}`, statuses[index % statuses.length]);
+  }
+  assert.deepEqual(await engine.reply(ACCOUNT, request, noController), { text: "原文回复 1\n第二行保持不变。" });
+  assert.equal(sdk.calls(), 1);
+  const persisted = workspace.getReplyJournal();
+  assert.equal(Object.keys(persisted).length, MAX_CLOSED_REPLY_ENTRIES + 1);
+  assert.equal(persisted[messageKey(`crashed-${MAX_PINNED_REPLY_ENTRIES - 1}`)].stage, "started");
+  assert.equal(persisted[messageKey("crashed-0")], undefined);
+});
+
 test("worst-case byte reservation near 16 MiB evicts closed replies and keeps every pinned reply", async t => {
   const { root, store } = fixture(t);
   const workspace = await store.forChat(ACCOUNT, CHAT);
   const reply = { text: "\u0000".repeat(16000), commandId: "x" + "\u0000".repeat(4095) };
   const journal: ReplyJournal = Object.fromEntries(Array.from({ length: MAX_PINNED_REPLY_ENTRIES - 1 }, (_, index) => [
-    messageKey(`pinned-${index}`), { ...seeded(index % 2 ? "started" : "completed", index % 2 ? "pending" : "uncertain"), reply },
+    messageKey(`pinned-${index}`), { ...seeded(index % 2 ? "started" : "completed", "pending"), reply },
   ]));
   const closedIds: string[] = [];
   for (let index = 0; index < MAX_CLOSED_REPLY_ENTRIES; index++) {

@@ -104,6 +104,18 @@ function validateText(content: string, limit: number): void {
   }
 }
 
+/**
+ * An entry stays pinned until Gateway records a terminal receipt; until then a
+ * crashed "started" turn replays its frozen reply instead of rerunning. Gateway
+ * sends that receipt only after durably marking the inbound processed, and it
+ * never removes uncertain/expired outbox records, so replay dedupe no longer
+ * depends on this entry. Accepted entries rely on the bounded processed-key
+ * window, as completed accepted entries always have.
+ */
+export function isPinnedReplyEntry(entry: Pick<ReplyJournal[string], "delivery">): boolean {
+  return (entry.delivery ?? "pending") === "pending";
+}
+
 function validateReplyJournal(value: unknown): ReplyJournal {
   const invalid = (): never => { throw new WorkspaceValidationError("Invalid workspace reply journal"); };
   const object = (candidate: unknown): candidate is Record<string, unknown> =>
@@ -111,7 +123,6 @@ function validateReplyJournal(value: unknown): ReplyJournal {
   if (!object(value) || Object.keys(value).length > MAX_REPLY_JOURNAL_ENTRIES) return invalid();
   const entries: [string, ReplyJournal[string]][] = [];
   let pinned = 0;
-  let closed = 0;
   for (const [key, entry] of Object.entries(value)) {
     if (!/^[a-f0-9]{64}$/.test(key) || !object(entry) ||
         Object.keys(entry).some(name => !["inputHash", "stage", "reply", "delivery", "provenance", "steering", "controllerMessageId", "consoleText"].includes(name)) ||
@@ -136,9 +147,9 @@ function validateReplyJournal(value: unknown): ReplyJournal {
         !["submitting", "accepted", "uncertain"].includes(steering.status as string) ||
         (steering.status === "accepted" ? entry.stage !== "completed" || entry.delivery !== "accepted"
           : entry.stage !== "started") || entry.provenance !== undefined)) return invalid();
-    if (entry.stage === "started" || entry.delivery === undefined || entry.delivery === "pending" || entry.delivery === "uncertain") {
-      if (++pinned > MAX_PINNED_REPLY_ENTRIES) return invalid();
-    } else if (++closed > MAX_CLOSED_REPLY_ENTRIES) return invalid();
+    // Closed entries are bounded by the total cap: older journals pinned started
+    // and uncertain entries that now count as closed until the next prune.
+    if (isPinnedReplyEntry(entry as ReplyJournal[string]) && ++pinned > MAX_PINNED_REPLY_ENTRIES) return invalid();
     const reply = entry.reply;
     if (reply === undefined) {
       if (entry.stage === "completed" || entry.stage === "failed") return invalid();

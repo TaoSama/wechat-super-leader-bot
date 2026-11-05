@@ -10,7 +10,7 @@ import type { ControllerMessageRequest, ControllerMessageResponse } from "../typ
 import { ControllerToolRejectedError } from "../controller/direct-tools.js";
 import { WorkspaceStore, MAX_REPLY_CHARS, MAX_REPLY_JOURNAL_ENTRIES, MAX_PINNED_REPLY_ENTRIES,
   MAX_CLOSED_REPLY_ENTRIES, MAX_REPLY_JOURNAL_BYTES, MAX_REPLY_ENTRY_BYTES,
-  type ReplyJournal, type LeaderWorkspace } from "./workspace.js";
+  isPinnedReplyEntry as pinned, type ReplyJournal, type LeaderWorkspace } from "./workspace.js";
 import { ReplyEngineBackpressureError, ReplyEngineConflictError, ReplyEngineUnavailableError,
   type GatewayReplyEngine, type ControllerToolClient, type ReplyEngineTurnOptions } from "./contracts.js";
 import { ControlMcp, CONTROL_TOKEN_ENV, hasConsoleCredential, redactConsoleCredentials } from "./control-mcp.js";
@@ -112,10 +112,6 @@ interface NativeOutcome {
   provenance?: "controller-console";
   consoleText?: string;
   controllerMessageId?: string;
-}
-
-function pinned(entry: ReplyJournal[string]): boolean {
-  return entry.stage === "started" || !["accepted", "expired"].includes(entry.delivery ?? "pending");
 }
 
 function pruneClosed(journal: ReplyJournal): void {
@@ -446,7 +442,7 @@ export class CodexReplyEngine implements GatewayReplyEngine {
     const consoleQuery = isConsoleLinkQuery(request.text);
     // A console-link request has a one-shot issuance side effect. Once the
     // Controller call is dispatched, an ordinary transport/provider failure
-    // cannot prove that no link was issued, so recovery must stay pinned.
+    // cannot prove that no link was issued, so the entry stays pinned until Gateway's terminal receipt.
     let consoleCallDispatched = false;
     try {
       if (directoryQuery || consoleQuery) {
