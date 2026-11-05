@@ -194,12 +194,15 @@ func applyDesktopChange(message desktopEnvelope, clientID string, projections ma
 	if change.Revision == nil || *change.Revision > maxDesktopRevision {
 		return errors.New("desktop state revision missing")
 	}
+	// A late invalid patch must not leave partially updated state behind.
+	// Retained metadata is immutable; patching builds a new encoded value.
+	next := *projection
 	switch change.Type {
 	case "snapshot":
 		if projection.initialized && *change.Revision < projection.revision {
 			return errors.New("desktop snapshot revision regressed")
 		}
-		if err := projection.snapshot(params.ConversationID, change.ConversationState); err != nil {
+		if err := next.snapshot(params.ConversationID, change.ConversationState); err != nil {
 			return err
 		}
 	case "patches":
@@ -207,14 +210,15 @@ func applyDesktopChange(message desktopEnvelope, clientID string, projections ma
 			return errors.New("desktop state revision gap")
 		}
 		for _, patch := range change.Patches {
-			if err := projection.patch(params.ConversationID, patch); err != nil {
+			if err := next.patch(params.ConversationID, patch); err != nil {
 				return err
 			}
 		}
 	default:
 		return errors.New("unsupported desktop state change")
 	}
-	projection.revision, projection.initialized = *change.Revision, true
+	next.revision, next.initialized = *change.Revision, true
+	*projection = next
 	model, provider, effort := projection.modelMetadata()
 	publish(params.ConversationID, protocol.DesktopObservation{Status: projection.status, Availability: "available", Source: "codex-desktop", ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), OwnerID: projection.owner, Revision: projection.revision,
 		Model: model, ModelProvider: provider, ReasoningEffort: effort, ActiveTurnID: projection.activeTurnID})

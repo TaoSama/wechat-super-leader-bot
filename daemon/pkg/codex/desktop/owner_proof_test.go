@@ -20,9 +20,9 @@ func TestDesktopWatchPublishesOwnerBeforeOversizedSnapshot(t *testing.T) {
 		case <-time.After(desktopTestTimeout):
 			return errors.New("discovery did not publish ownership before snapshot")
 		}
-		// No body is needed: the observer must reject at the shared inbound bound.
+		// No body is needed: the observer must reject at the subscription bound.
 		var header [4]byte
-		binary.LittleEndian.PutUint32(header[:], uint32(desktopInboundFrameLimit+1))
+		binary.LittleEndian.PutUint32(header[:], uint32(desktopSubscriptionFrameLimit+1))
 		if _, err := io.Copy(c, bytes.NewReader(header[:])); err != nil {
 			return err
 		}

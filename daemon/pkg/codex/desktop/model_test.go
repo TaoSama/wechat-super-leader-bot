@@ -221,7 +221,7 @@ func TestDesktopModelIdentityAndRevisionFailuresDoNotPublish(t *testing.T) {
 func TestDesktopModelWatchFramedPatchesPreserveValidStatus(t *testing.T) {
 	changes := []map[string]any{
 		modelSnapshot(map[string]any{"latestModel": "first", "modelProvider": "provider", "latestReasoningEffort": "high"}, 1),
-		desktopPatchChange(1, 2, map[string]any{"op": "replace", "path": []any{"latestModel"}, "value": json.RawMessage(`"bad\ud800model"`)}),
+		desktopPatchChange(1, 2, map[string]any{"op": "replace", "path": []any{"latestModel"}, "value": json.RawMessage(`"bad\u0000model"`)}),
 		desktopPatchChange(2, 3, map[string]any{"op": "replace", "path": []any{"latestModel"}, "value": "restored"}),
 	}
 	envelopes := make([]desktopEnvelope, 0, len(changes))

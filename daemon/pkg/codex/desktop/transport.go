@@ -18,15 +18,18 @@ import (
 const (
 	desktopInboundFrameLimit  = 32 * 1024 * 1024
 	desktopOutboundFrameLimit = 16 * 1024 * 1024
-	desktopSkipLimit          = 128
-	desktopRequestTimeout     = 2 * time.Second
-	desktopOwnerTimeout       = 5 * time.Second
-	desktopFrameConcurrency   = 2
-	desktopFrameBodyTimeout   = 5 * time.Second
-	desktopInitialize         = "initialize"
-	desktopDiscoverOwner      = "thread-owner-discovery"
-	desktopFollowingChanged   = "thread-stream-following-changed"
-	desktopStateChanged       = "thread-stream-state-changed"
+	// Subscription snapshots include accumulated conversation bodies, which the
+	// streaming projection validates and discards without retaining the frame.
+	desktopSubscriptionFrameLimit = 128 * 1024 * 1024
+	desktopSkipLimit              = 128
+	desktopRequestTimeout         = 2 * time.Second
+	desktopOwnerTimeout           = 5 * time.Second
+	desktopFrameConcurrency       = 2
+	desktopFrameBodyTimeout       = 5 * time.Second
+	desktopInitialize             = "initialize"
+	desktopDiscoverOwner          = "thread-owner-discovery"
+	desktopFollowingChanged       = "thread-stream-following-changed"
+	desktopStateChanged           = "thread-stream-state-changed"
 )
 
 var errDesktopUnavailable = errors.New("desktop owner unavailable")
@@ -158,7 +161,7 @@ func (c *desktopConn) readBody(size int) (desktopEnvelope, error) {
 // No frame body is allocated or read before the shared budget is acquired.
 // consume must finish strict projection without retaining the raw envelope.
 func (c *desktopConn) readBudgeted(ctx context.Context, budget *desktopFrameBudget, consume func(desktopEnvelope) error) (err error) {
-	size, err := c.readHeader(desktopInboundFrameLimit)
+	size, err := c.readHeader(desktopSubscriptionFrameLimit)
 	if err != nil {
 		return err
 	}
@@ -174,9 +177,15 @@ func (c *desktopConn) readBudgeted(ctx context.Context, budget *desktopFrameBudg
 		return err
 	}
 	defer func() { err = errors.Join(err, c.SetReadDeadline(time.Time{})) }()
-	message, err := c.readBody(size)
+	bodyCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	body := &io.LimitedReader{R: c, N: int64(size)}
+	message, err := readDesktopSubscriptionEnvelope(bodyCtx, body)
 	if err != nil {
 		return err
+	}
+	if body.N != 0 {
+		return io.ErrUnexpectedEOF
 	}
 	return consume(message)
 }
