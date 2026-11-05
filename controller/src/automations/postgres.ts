@@ -23,6 +23,11 @@ export async function initAutomationTables(client: Queryable): Promise<void> {
       id TEXT PRIMARY KEY, schedule_id TEXT NOT NULL REFERENCES automation_schedules(id), state TEXT NOT NULL,
       expires_at BIGINT NOT NULL, created_at BIGINT NOT NULL, data JSONB NOT NULL);
     CREATE INDEX IF NOT EXISTS automation_outbox_pending ON automation_outbox(created_at) WHERE state = 'pending'`);
+  // Older releases kept unknown runs active forever; release those schedules without touching the unknown run.
+  await client.query(`UPDATE automation_schedules s SET active_run_id=NULL,
+      state=CASE WHEN s.next_at IS NULL AND s.state <> 'cancelled' THEN 'completed' ELSE s.state END,
+      data=jsonb_set(s.data - 'activeRunId','{status}',to_jsonb(CASE WHEN s.next_at IS NULL AND s.state <> 'cancelled' THEN 'completed' ELSE s.state END))
+    FROM automation_runs r WHERE r.id=s.active_run_id AND r.state='unknown'`);
 }
 async function saveSchedule(client: Queryable, schedule: Schedule): Promise<void> {
   await client.query(`UPDATE automation_schedules SET state=$2,next_at=$3,active_run_id=$4,data=$5 WHERE id=$1`,
@@ -146,7 +151,7 @@ export class PostgresAutomationRepository implements AutomationRepository {
       await saveSchedule(client, schedule);
       if (item && schedule.status !== "cancelled") {
         if (schedule.retention === "latest") await client.query(`UPDATE automation_outbox SET state='superseded',
-          data=jsonb_set(data,'{status}','"superseded"') WHERE schedule_id=$1 AND state='pending' AND NOT (data ? 'supplement')`, [schedule.id]);
+          data=jsonb_set(data,'{status}','"superseded"') WHERE schedule_id=$1 AND state='pending' AND NOT (data ? 'supplement') AND data->>'kind' <> 'blocked'`, [schedule.id]);
         await client.query(`INSERT INTO automation_outbox(id,schedule_id,state,expires_at,created_at,data) VALUES($1,$2,$3,$4,$5,$6)
           ON CONFLICT(id) DO NOTHING`, [item.id, item.scheduleId, item.status, item.expiresAt, item.createdAt, item]);
       }

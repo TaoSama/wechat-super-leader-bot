@@ -39,6 +39,7 @@ for (const backend of ["memory", "postgres"] as const) {
       now += 60_000; await service.tick();
       const pending = await repository.pendingOutbox(now);
       const protectedPendingId = pending.find(item => item.text === "full report pending")!.id;
+      const unknownNoticeId = pending.find(item => item.kind === "blocked")!.id;
       const publishedIds = pending.filter(item => item.text === "full report published" || item.text === "failure body").map(item => item.id);
       for (const id of publishedIds) await repository.markPublished(id);
       const original = await repository.listRuns(created.find(item => item.title === "published")!.id, authority.chatId);
@@ -55,9 +56,9 @@ for (const backend of ["memory", "postgres"] as const) {
       }
       const [failure] = await repository.listRuns(created.find(item => item.title === "failed")!.id, authority.chatId);
       expect(failure.result?.error).toBeUndefined();
-      expect((await repository.pendingOutbox(now)).map(item => item.id)).toEqual([protectedPendingId]);
+      expect((await repository.pendingOutbox(now)).map(item => item.id).sort()).toEqual([protectedPendingId, unknownNoticeId].sort());
       expect(await repository.cleanupBodies(now + 100, 1_000)).toEqual({ runs: 0, outbox: 0 });
-      expect(await repository.pendingOutbox(now, 100, [protectedPendingId])).toEqual([]);
+      expect(await repository.pendingOutbox(now, 100, [protectedPendingId, unknownNoticeId])).toEqual([]);
       if (pool) {
         const outbox = await pool.query("SELECT data FROM automation_outbox WHERE id = ANY($1::text[])", [publishedIds]);
         expect(outbox.rows.every(row => row.data.text === "" && row.data.bodyClearedAt === now)).toBe(true);

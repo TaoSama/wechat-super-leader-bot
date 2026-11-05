@@ -127,10 +127,12 @@ describe("persistent automation scheduling", () => {
     f.runner.inspect = vi.fn(async () => ({ status: "unknown", error: "No durable command receipt exists" }));
     f.advance(CLAIM_LEASE_MS + 1);
     await new AutomationService(f.options).tick();
-    expect(f.runner.start).not.toHaveBeenCalled();
-    expect((await f.repository.listRuns(created.id, authority.chatId))[0].status).toBe("unknown");
-    f.advance(10 * 60_000); await f.service.tick();
-    expect(f.runner.start).not.toHaveBeenCalled();
+    const [next, unknown] = await f.repository.listRuns(created.id, authority.chatId);
+    expect(unknown.status).toBe("unknown");
+    expect((await f.repository.pendingOutbox(f.now())).map(item => item.kind)).toEqual(["blocked"]);
+    // The unknown occurrence is never started; only the next due occurrence is dispatched.
+    expect(vi.mocked(f.runner.start).mock.calls.map(([run]) => run.id)).toEqual([next.id]);
+    expect((await f.repository.get(created.id, authority.chatId))?.activeRunId).toBe(next.id);
   });
   it("recovers a persisted command by immutable request ID after crashing before saving its receipt", async () => {
     const f = fixture();
@@ -168,13 +170,40 @@ describe("persistent automation scheduling", () => {
   });
   it("treats unclassified dispatch failures as unknown rather than retrying execution", async () => {
     const f = fixture();
-    const created = await f.service.create(f.session(), authority);
-    f.runner.start = vi.fn(async () => { throw new Error("socket closed after submit"); });
-    f.advance(60_000); await f.service.tick();
+    const created = await f.service.create(f.session({ timing: { type: "cron", expression: "*/5 * * * *" } }), authority);
+    vi.mocked(f.runner.start).mockImplementationOnce(async () => { throw new Error("socket closed after submit"); });
     f.advance(5 * 60_000); await f.service.tick();
-    expect(f.runner.start).toHaveBeenCalledTimes(1);
     expect(f.onError).toHaveBeenCalledTimes(1);
-    expect((await f.repository.listRuns(created.id, authority.chatId))[0].status).toBe("unknown");
+    const [unknown] = await f.repository.listRuns(created.id, authority.chatId);
+    expect(unknown.status).toBe("unknown");
+    const [notice] = await f.repository.pendingOutbox(f.now());
+    expect(notice).toMatchObject({ runId: unknown.id, kind: "blocked", status: "pending" });
+    expect(notice.text).toContain("结果不明");
+    await f.repository.setStatus(created.id, authority.chatId, "paused", f.now());
+    await f.repository.setStatus(created.id, authority.chatId, "active", f.now());
+    for (let tick = 0; tick < 5; tick++) { f.advance(5 * 60_000); await f.service.tick(); }
+    const runs = await f.repository.listRuns(created.id, authority.chatId);
+    const started = vi.mocked(f.runner.start).mock.calls.map(([run]) => run.id);
+    expect(started).toHaveLength(6);
+    expect(new Set(started).size).toBe(6);
+    expect(started[0]).toBe(unknown.id);
+    expect(runs.filter(run => run.status === "unknown").map(run => run.id)).toEqual([unknown.id]);
+    // Later results with latest retention must not hide the unknown-outcome warning.
+    expect((await f.repository.pendingOutbox(f.now())).filter(item => item.kind === "blocked").map(item => item.id)).toEqual([notice.id]);
+  });
+  it("completes a one-shot whose only occurrence ended unknown and reports it once", async () => {
+    const f = fixture();
+    const created = await f.service.create(f.session({ timing: { type: "at", at: new Date(START + 60_000).toISOString() } }), authority);
+    f.runner.inspect = vi.fn(async () => ({ status: "unknown", error: "Scheduled command delivery is uncertain" }));
+    f.advance(60_000); await f.service.tick();
+    f.advance(CLAIM_LEASE_MS + 1); await f.service.tick();
+    const schedule = await f.repository.get(created.id, authority.chatId);
+    expect(schedule).toMatchObject({ status: "completed", nextAt: null });
+    expect(schedule?.activeRunId).toBeUndefined();
+    expect((await f.repository.pendingOutbox(f.now())).map(item => item.kind)).toEqual(["blocked"]);
+    f.advance(10 * 60_000); await f.service.tick();
+    expect(f.runner.start).toHaveBeenCalledTimes(1);
+    expect(f.runner.inspect).toHaveBeenCalledTimes(1);
   });
   it("persists inspection outages and retries only observation without redispatch", async () => {
     const f = fixture();
