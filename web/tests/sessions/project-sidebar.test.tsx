@@ -23,6 +23,18 @@ function sidebar(sessions: ScopedSession[], overrides: Partial<ComponentProps<ty
 }
 
 describe("project sidebar navigation", () => {
+  it("labels each session row as Codex or Claude Code", () => {
+    sidebar([
+      session("codex-1", { updatedAt: iso() }),
+      session("claude:11111111-2222-4333-8444-555555555555", { provider: "claude-code", updatedAt: iso(-1000) }),
+      session("terminal:grok", { provider: "terminal/grok", updatedAt: iso(-2000) }),
+    ]);
+    const [codex, claude, grok] = screen.getAllByTestId(/^session-row-/);
+    expect(within(codex).getByText("Codex")).toBeVisible();
+    expect(within(claude).getByText("Claude Code")).toBeVisible();
+    expect(within(grok).queryByText(/Codex|Claude Code/)).toBeNull();
+  });
+
   it("orders projects by their latest task, tasks by update time, and numbers tasks across projects", () => {
     sidebar([
       session("a-old", { cwd: "/a", updatedAt: iso(-3000) }),

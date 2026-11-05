@@ -127,6 +127,40 @@ describe("task notification console", () => {
     expect(screen.getByRole("button", { name: "查看执行详情" })).toBeVisible();
   });
 
+  it("labels background and session schedules with their executor and keeps the session target", async () => {
+    const claudeSession = "claude:11111111-2222-4333-8444-555555555555";
+    const items = parseAutomations({ items: [
+      { ...schedule(), id: "background-1", title: "后台研究", kind: "background", executor: "claude" },
+      { ...schedule(), id: "session-1", title: "会话跟进", target: { nodeId: "mini", sessionId: claudeSession, sendRoute: "claude-resume" } },
+      { ...schedule(), id: "session-2", title: "Codex 跟进", target: { nodeId: "mini", sessionId: "thread-1", sendRoute: "app-server-resume" } },
+      { ...schedule(), id: "reminder-1", title: "喝水提醒", kind: "reminder" },
+    ] });
+    expect(items[1].target).toEqual({ nodeId: "mini", sessionId: claudeSession, sendRoute: "claude-resume" });
+    render(<AutomationsSection items={items} />);
+    const card = (title: string) => screen.getByText(title).closest("article")!;
+    expect(within(card("后台研究")).getByText("Claude Code")).toBeVisible();
+    expect(within(card("会话跟进")).getByText("Claude Code")).toBeVisible();
+    expect(within(card("Codex 跟进")).getByText("Codex")).toBeVisible();
+    expect(within(card("喝水提醒")).queryByText(/Codex|Claude Code/)).toBeNull();
+
+    const runs = [
+      { id: "run-claude", scheduleId: "background-1", scheduledAt: NOW, status: "completed", createdAt: NOW, updatedAt: NOW, executor: "claude" },
+      { id: "run-old", scheduleId: "background-1", scheduledAt: NOW, status: "completed", createdAt: NOW, updatedAt: NOW },
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ items: runs }))));
+    fireEvent.click(within(card("后台研究")).getByRole("button", { name: "查看执行详情" }));
+    expect(await screen.findByTestId("automation-run-run-claude")).toHaveTextContent("Claude Code");
+    expect(screen.getByTestId("automation-run-run-old")).toHaveTextContent("执行器未记录");
+    expect(screen.getByText("执行器").nextElementSibling).toHaveTextContent("Claude Code");
+  });
+
+  it("rejects unknown executors and malformed session targets", () => {
+    expect(() => parseAutomations({ items: [{ ...schedule(), kind: "background", executor: "gemini" }] })).toThrow("定时任务状态格式无效");
+    expect(() => parseAutomations({ items: [{ ...schedule(), target: { sessionId: "thread-1" } }] })).toThrow("定时任务状态格式无效");
+    expect(() => parseAutomationRuns({ items: [{ id: "run", scheduleId: "schedule-1", status: "completed", scheduledAt: NOW,
+      createdAt: NOW, updatedAt: NOW, executor: "gemini" }] }, "schedule-1")).toThrow("执行记录格式无效");
+  });
+
   it("rejects run records belonging to another schedule", () => {
     expect(() => parseAutomationRuns({ items: [{ id: "run", scheduleId: "other", status: "completed", scheduledAt: NOW, createdAt: NOW, updatedAt: NOW }] }, "schedule-1")).toThrow("执行记录格式无效");
   });

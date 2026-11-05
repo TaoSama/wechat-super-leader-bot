@@ -91,7 +91,9 @@ describe("workspace execution indicators", () => {
     expect(within(row).getByText(status === "active" ? "忙" : "闲")).toHaveClass(`state-${status}`);
     expect(row.querySelector(".session-observation")).toBeNull();
     expect(row.querySelector(".session-preview")).toBeNull();
-    expect(row.children).toHaveLength(3);
+    // Number, title, Codex/Claude type badge and compact status.
+    expect(row.children).toHaveLength(4);
+    expect(within(row).getByText("Codex")).toHaveClass("agent-badge", "agent-codex");
     fireEvent.click(row);
     expect(document.querySelector(".detail-title .session-status-dot")).toHaveAccessibleName(label);
     fireEvent.click(screen.getByRole("button", { name: "会话详情" }));

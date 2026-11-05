@@ -7,6 +7,8 @@ import { selectModelObservation } from "../model-observation";
 import { sessionKey } from "../useSessionHistory";
 import { groupSessionProjects } from "../project-groups";
 import { ChoiceSelect } from "../../../components/ui/ChoiceSelect";
+import { AgentBadge } from "./AgentBadge";
+import { sessionAgentKind } from "../agent-kind";
 
 const COMPACT_STATUS: Record<string, string> = {
   active: "忙", busy: "忙", running: "忙", idle: "闲", done: "完",
@@ -88,6 +90,7 @@ export function SessionSidebar({ sessions, nodes, now, selectedKey, listRef, onS
             return <li key={key}><button type="button" className={`session-choice project-session-choice ${key === selectedKey ? "selected" : ""}`} aria-pressed={key === selectedKey} onClick={() => onOpen(key)} data-testid={`session-row-${session.nodeId}-${session.id}`} title={session.title || "未命名会话"}>
               <span className="session-number" aria-hidden="true">{project.start + index}.</span>
               <span className="session-title">{session.title || "未命名会话"}</span>
+              <AgentBadge kind={sessionAgentKind(session)} />
               <span className={`session-compact-status state-${executionStatus}`}>{COMPACT_STATUS[executionStatus] ?? "未知"}</span>
             </button></li>;
           })}
