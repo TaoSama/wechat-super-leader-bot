@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
@@ -87,11 +88,18 @@ func TestCommandExecutionDeadlineIsEarliestForEveryAction(t *testing.T) {
 	}
 }
 
-func waitForDeadline(ctx context.Context) error {
+func waitForDeadline(t *testing.T, ctx context.Context, expiry time.Time) error {
+	t.Helper()
+	if deadline, ok := ctx.Deadline(); !ok || !deadline.Equal(expiry) || ctx.Err() != nil || !time.Now().Before(expiry) {
+		t.Fatalf("operation did not start before command deadline: deadline=%v expiry=%v err=%v", deadline, expiry, ctx.Err())
+	}
 	timer := time.NewTimer(deadlineTestTimeout)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) || !time.Now().Equal(expiry) {
+			t.Fatalf("operation did not expire at command deadline: now=%v expiry=%v err=%v", time.Now(), expiry, ctx.Err())
+		}
 		return ctx.Err()
 	case <-timer.C:
 		return errors.New("command deadline did not cancel operation")
@@ -101,57 +109,66 @@ func waitForDeadline(ctx context.Context) error {
 func TestExpiredExecutionForEveryActionIsDurableAndNotReplayed(t *testing.T) {
 	for _, action := range []protocol.ActionType{protocol.ActionRead, protocol.ActionSend} {
 		t.Run(string(action), func(t *testing.T) {
-			a := &deadlineAdapter{operation: waitForDeadline}
-			cfg := persistenceConfig(t.TempDir())
-			d, err := OpenDaemon(cfg, a)
-			if err != nil {
-				t.Fatal(err)
-			}
-			cmd := persistenceCommand(time.Now().Add(deadlineTestExpiryWindow).UTC().Format(time.RFC3339Nano))
-			cmd.Action = action
-			res := d.ExecuteCommand(context.Background(), cmd)
-			want := protocol.StatusFailed
-			if action == protocol.ActionSend {
-				want = protocol.StatusUncertain
-			}
-			if res.Status != want || a.calls.Load() != 1 {
-				t.Fatalf("deadline result = %+v calls=%d", res, a.calls.Load())
-			}
-			if replay := d.ExecuteCommand(context.Background(), cmd); replay != res || a.calls.Load() != 1 {
-				t.Fatal("expired operation replayed")
-			}
-			closeDaemon(t, d)
-			d, err = OpenDaemon(cfg, a)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer closeDaemon(t, d)
-			if replay := d.ExecuteCommand(context.Background(), cmd); replay != res || a.calls.Load() != 1 {
-				t.Fatal("restart replayed expired operation")
-			}
+			// Journal fsync must not consume this test's in-operation expiry window.
+			synctest.Test(t, func(t *testing.T) {
+				expiry := time.Now().Add(deadlineTestExpiryWindow)
+				a := &deadlineAdapter{operation: func(ctx context.Context) error {
+					return waitForDeadline(t, ctx, expiry)
+				}}
+				cfg := persistenceConfig(t.TempDir())
+				d, err := OpenDaemon(cfg, a)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cmd := persistenceCommand(expiry.UTC().Format(time.RFC3339Nano))
+				cmd.Action = action
+				res := d.ExecuteCommand(context.Background(), cmd)
+				want := protocol.StatusFailed
+				if action == protocol.ActionSend {
+					want = protocol.StatusUncertain
+				}
+				if res.Status != want || a.calls.Load() != 1 {
+					t.Fatalf("deadline result = %+v calls=%d", res, a.calls.Load())
+				}
+				if replay := d.ExecuteCommand(context.Background(), cmd); replay != res || a.calls.Load() != 1 {
+					t.Fatal("expired operation replayed")
+				}
+				closeDaemon(t, d)
+				d, err = OpenDaemon(cfg, a)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer closeDaemon(t, d)
+				if replay := d.ExecuteCommand(context.Background(), cmd); replay != res || a.calls.Load() != 1 {
+					t.Fatal("restart replayed expired operation")
+				}
+			})
 		})
 	}
 }
 
 func TestDeadlineAfterMutationRemainsUncertainWithoutResend(t *testing.T) {
-	a := &deadlineAdapter{}
-	a.operation = func(ctx context.Context) error {
-		a.writes.Add(1)
-		return waitForDeadline(ctx)
-	}
-	d, err := OpenDaemon(persistenceConfig(t.TempDir()), a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer closeDaemon(t, d)
-	cmd := persistenceCommand(time.Now().Add(deadlineTestExpiryWindow).UTC().Format(time.RFC3339Nano))
-	res := d.ExecuteCommand(context.Background(), cmd)
-	if res.Status != protocol.StatusUncertain || a.writes.Load() != 1 {
-		t.Fatalf("write deadline misclassified: %+v writes=%d", res, a.writes.Load())
-	}
-	if replay := d.ExecuteCommand(context.Background(), cmd); replay != res || a.writes.Load() != 1 {
-		t.Fatal("ambiguous written input resent")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		expiry := time.Now().Add(deadlineTestExpiryWindow)
+		a := &deadlineAdapter{}
+		a.operation = func(ctx context.Context) error {
+			a.writes.Add(1)
+			return waitForDeadline(t, ctx, expiry)
+		}
+		d, err := OpenDaemon(persistenceConfig(t.TempDir()), a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer closeDaemon(t, d)
+		cmd := persistenceCommand(expiry.UTC().Format(time.RFC3339Nano))
+		res := d.ExecuteCommand(context.Background(), cmd)
+		if res.Status != protocol.StatusUncertain || a.writes.Load() != 1 {
+			t.Fatalf("write deadline misclassified: %+v writes=%d", res, a.writes.Load())
+		}
+		if replay := d.ExecuteCommand(context.Background(), cmd); replay != res || a.writes.Load() != 1 {
+			t.Fatal("ambiguous written input resent")
+		}
+	})
 }
 
 type deadlineDesktopFrame struct {
