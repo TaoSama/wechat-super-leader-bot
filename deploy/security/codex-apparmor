@@ -2,12 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Derived from https://github.com/moby/profiles/blob/4b8214fc4971e06172938a1f1554ccff6647ee80/apparmor/template.go
 # Preserve Docker default protections; only mount/pivot_root policy is expanded.
-# Companion codex-seccomp.json is the default at the same commit plus five rules:
+# Companion codex-seccomp.json is the default at the same commit plus eight rules:
 # clone exact flags 939655185 or 2013397009 (network-isolated filesystem helper);
-# unshare NEWUSER only; mount/pivot_root; umount2 MNT_DETACH.
+# unshare NEWUSER only; mount/pivot_root; umount2 MNT_DETACH; and for the Claude
+# Code worker sandbox, clone exact flags 805437457 or 1879179281 (bubblewrap
+# without NEWIPC) plus unshare NEWPID|NEWNS (apply-seccomp in its own user namespace).
 # Codex source: https://github.com/openai/codex/tree/rust-v0.163.0/codex-rs/linux-sandbox
-# Targets Codex 0.163.0, unrestricted networking, isolated PID namespace, UID 1000.
-# Revalidate policy if upgrading Codex, Docker, kernel or changing network/PID mode.
+# Claude Code sandbox: https://code.claude.com/docs/en/sandboxing
+# Targets Codex 0.163.0 and Claude Code 2.1.311, isolated PID namespace, UID 1000.
+# The controller also sets systempaths=unconfined so bubblewrap can mount a fresh
+# /proc for its PID namespace; the /proc and /sys denials below still apply.
+# This profile is unchanged by the Claude sandbox: mount and pivot_root already cover it.
+# Revalidate policy if upgrading Codex, Claude Code, Docker, kernel or changing network/PID mode.
 # Install to /etc/apparmor.d/super-leader-codex so the AppArmor service restores it on boot.
 # Load with: apparmor_parser -Kr /etc/apparmor.d/super-leader-codex
 # Verify only in an ephemeral credential-free container before changing production.

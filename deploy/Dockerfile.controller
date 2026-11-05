@@ -27,10 +27,12 @@ FROM node:24-bookworm-slim
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.revision=$VCS_REF
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 curl python3-bs4 python3-html2text \
+    && apt-get install -y --no-install-recommends python3 curl python3-bs4 python3-html2text bubblewrap socat \
     && rm -rf /var/lib/apt/lists/*
-# Install on the target platform so Codex's native sandbox matches the deployed CPU.
-RUN npm install --global @openai/codex@0.163.0 \
+# Install on the target platform so the Codex and Claude Code native binaries match the deployed CPU.
+# Claude Code's Linux sandbox uses the bubblewrap and socat packages above; the
+# controller refuses BACKGROUND_EXECUTOR=claude at startup when that sandbox cannot start.
+RUN npm install --global @openai/codex@0.163.0 @anthropic-ai/claude-code@2.1.311 \
     && npm cache clean --force \
     && mkdir -p /var/lib/super-leader-runtime/settings /var/lib/super-leader-runtime/background/workers /var/lib/super-leader-runtime/background/artifacts \
     && chown -R node:node /var/lib/super-leader-runtime

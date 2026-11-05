@@ -10,6 +10,14 @@ const NEWPID = 0x20000000;
 const NEWUTS = 0x04000000;
 const BWRAP_CLONE = 0x38020011;
 const FS_HELPER_CLONE = BWRAP_CLONE | NEWNET;
+const NEWNS = 0x00020000;
+const NEWIPC = 0x08000000;
+const NEWCGROUP = 0x02000000;
+// Claude Code's bubblewrap never isolates IPC; its shell always gets a network namespace.
+const CLAUDE_BWRAP_CLONE = BWRAP_CLONE & ~NEWIPC;
+const CLAUDE_SHELL_CLONE = CLAUDE_BWRAP_CLONE | NEWNET;
+// apply-seccomp unshares PID and mount namespaces inside the user namespace it created.
+const APPLY_SECCOMP_UNSHARE = NEWPID | NEWNS;
 
 // Evaluate the production target: amd64 with every capability dropped. This
 // checks effective permissions, including upstream capability-conditional rules.
@@ -39,8 +47,21 @@ test('Codex can create only the required namespace shape and detach its own old 
     FS_HELPER_CLONE & ~NEWPID, FS_HELPER_CLONE | NEWUTS, NEWNET, NEWUSER]) {
     assert.equal(allows('clone', [flags]), false, `clone flags ${flags}`);
   }
-  for (const flags of [NEWNET, NEWUSER | NEWNET, 0]) assert.equal(allows('unshare', [flags]), false);
+  for (const flags of [NEWNET, NEWUSER | NEWNET, 0, NEWPID, NEWNS, APPLY_SECCOMP_UNSHARE | NEWNET, APPLY_SECCOMP_UNSHARE | NEWUSER]) {
+    assert.equal(allows('unshare', [flags]), false, `unshare flags ${flags}`);
+  }
   for (const flags of [0, 1, 8]) assert.equal(allows('umount2', [0, flags]), false);
+});
+
+test('Claude Code can create only its bubblewrap and apply-seccomp namespace shapes', () => {
+  assert.equal(CLAUDE_BWRAP_CLONE, 0x30020011);
+  assert.equal(allows('clone', [CLAUDE_BWRAP_CLONE]), true);
+  assert.equal(allows('clone', [CLAUDE_SHELL_CLONE]), true);
+  assert.equal(allows('unshare', [APPLY_SECCOMP_UNSHARE]), true);
+  for (const flags of [CLAUDE_BWRAP_CLONE & ~NEWUSER, CLAUDE_SHELL_CLONE & ~NEWUSER, CLAUDE_SHELL_CLONE | NEWUTS,
+    CLAUDE_SHELL_CLONE | NEWCGROUP, CLAUDE_BWRAP_CLONE & ~NEWPID]) {
+    assert.equal(allows('clone', [flags]), false, `clone flags ${flags}`);
+  }
 });
 
 test('the container retains Docker restrictions outside the namespace setup path', () => {

@@ -18,6 +18,17 @@ services:
       BACKGROUND_MODEL_NAME: ${BACKGROUND_MODEL_NAME:-}
       BACKGROUND_MODEL_BASE_URL: ${BACKGROUND_MODEL_BASE_URL:-}
       BACKGROUND_MODEL_API_KEY: ${BACKGROUND_MODEL_API_KEY:-}
+      # Background and scheduled background tasks run on Claude Code in production;
+      # the WeChat leader keeps its own model. Set BACKGROUND_EXECUTOR=codex to roll back.
+      BACKGROUND_EXECUTOR: ${BACKGROUND_EXECUTOR:-claude}
+      # Empty Claude endpoint and credentials reuse the background model gateway above.
+      # Values live only in .runtime/controller.env; at most one credential may be set.
+      BACKGROUND_CLAUDE_BASE_URL: ${BACKGROUND_CLAUDE_BASE_URL:-}
+      BACKGROUND_CLAUDE_API_KEY: ${BACKGROUND_CLAUDE_API_KEY:-}
+      BACKGROUND_CLAUDE_AUTH_TOKEN: ${BACKGROUND_CLAUDE_AUTH_TOKEN:-}
+      BACKGROUND_CLAUDE_OAUTH_TOKEN: ${BACKGROUND_CLAUDE_OAUTH_TOKEN:-}
+      BACKGROUND_CLAUDE_MODEL: ${BACKGROUND_CLAUDE_MODEL:-}
+      BACKGROUND_CLAUDE_PATH: ${BACKGROUND_CLAUDE_PATH:-}
       BACKGROUND_MAX_CONCURRENT: ${BACKGROUND_MAX_CONCURRENT:-2}
       BACKGROUND_TURN_TIMEOUT_MS: ${BACKGROUND_TURN_TIMEOUT_MS:-600000}
     volumes:
@@ -33,6 +44,9 @@ services:
       - no-new-privileges:true
       - seccomp:${CODEX_SECCOMP_PATH:-./deploy/security/codex-seccomp.json}
       - apparmor:super-leader-codex
+      # Lets bubblewrap mount a fresh /proc for the Claude sandbox's PID namespace
+      # instead of exposing the controller's /proc; AppArmor keeps the /proc and /sys denials.
+      - systempaths=unconfined
     tmpfs: ["/tmp:size=64m,mode=1777"]
     stop_grace_period: 30s
     healthcheck:

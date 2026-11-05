@@ -4,8 +4,10 @@ import test from 'node:test';
 
 const BASE_IMAGE = 'node:24-bookworm-slim';
 const NATIVE_TOOLCHAIN = `FROM --platform=$BUILDPLATFORM ${BASE_IMAGE} AS toolchain`;
-const CONTROLLER_RUNTIME_INSTALL = 'RUN npm install --global @openai/codex@0.163.0 && npm cache clean --force && mkdir -p /var/lib/super-leader-runtime/settings /var/lib/super-leader-runtime/background/workers /var/lib/super-leader-runtime/background/artifacts && chown -R node:node /var/lib/super-leader-runtime';
+const CONTROLLER_RUNTIME_INSTALL = 'RUN npm install --global @openai/codex@0.163.0 @anthropic-ai/claude-code@2.1.311 && npm cache clean --force && mkdir -p /var/lib/super-leader-runtime/settings /var/lib/super-leader-runtime/background/workers /var/lib/super-leader-runtime/background/artifacts && chown -R node:node /var/lib/super-leader-runtime';
 const SKILL_RUNTIME_INSTALL = 'RUN apt-get update && apt-get install -y --no-install-recommends python3 curl python3-bs4 python3-html2text && rm -rf /var/lib/apt/lists/*';
+// Only the controller runs Claude Code workers, whose Linux sandbox needs bubblewrap and socat.
+const CONTROLLER_SKILL_RUNTIME_INSTALL = SKILL_RUNTIME_INSTALL.replace('python3-html2text', 'python3-html2text bubblewrap socat');
 const SKILL_RUNTIME_PERMISSIONS = 'RUN chmod -R go-w /etc/codex/skills';
 const controllerDockerfile = readFileSync(new URL('../../../deploy/Dockerfile.controller', import.meta.url), 'utf8');
 const gatewayDockerfile = readFileSync(new URL('../../../deploy/Dockerfile.gateway', import.meta.url), 'utf8');
@@ -64,7 +66,7 @@ function assertImageContract(source, component) {
   // An unqualified final FROM uses the requested target platform, not BUILDPLATFORM.
   assert.equal(runtime[0], `FROM ${BASE_IMAGE}`);
   assert.deepEqual(runtime.filter(line => /^RUN\s/i.test(line)).map(line => line.replace(/\s+/g, ' ')),
-    component === 'controller' ? [SKILL_RUNTIME_INSTALL, CONTROLLER_RUNTIME_INSTALL, SKILL_RUNTIME_PERMISSIONS]
+    component === 'controller' ? [CONTROLLER_SKILL_RUNTIME_INSTALL, CONTROLLER_RUNTIME_INSTALL, SKILL_RUNTIME_PERMISSIONS]
       : [SKILL_RUNTIME_INSTALL, SKILL_RUNTIME_PERMISSIONS],
     'only reviewed target-platform skill dependencies, pinned CLI, writable directories and skill permissions may be installed');
   assert.ok(runtime.indexOf(SKILL_RUNTIME_PERMISSIONS) > runtime.indexOf('COPY deploy/skills/ /etc/codex/skills/'));
@@ -118,6 +120,8 @@ test('image contracts reject emulated toolchains, unpruned dependencies and leak
   assert.throws(() => assertImageContract(controllerDockerfile.replace('/web/dist ./web', '/web/node_modules ./web'), 'controller'));
   assert.throws(() => assertImageContract(controllerDockerfile.replace('FROM toolchain AS web-build', `FROM ${BASE_IMAGE} AS web-build`), 'controller'));
   assert.throws(() => assertImageContract(controllerDockerfile.replace('@openai/codex@0.163.0', '@openai/codex@latest'), 'controller'));
+  assert.throws(() => assertImageContract(controllerDockerfile.replace('@anthropic-ai/claude-code@2.1.311', '@anthropic-ai/claude-code@latest'), 'controller'));
+  assert.throws(() => assertImageContract(controllerDockerfile.replace(' bubblewrap socat', ''), 'controller'));
   assert.throws(() => assertImageContract(controllerDockerfile.replace('chown -R node:node /var/lib/super-leader-runtime', 'chmod 777 /var/lib/super-leader-runtime'), 'controller'));
   assert.throws(() => assertImageContract(controllerDockerfile.replace('FROM toolchain AS runtime-certificates', `FROM ${BASE_IMAGE} AS runtime-certificates`), 'controller'));
   assert.throws(() => assertImageContract(controllerDockerfile.replace('ca-certificates \\', 'ca-certificates curl \\'), 'controller'));

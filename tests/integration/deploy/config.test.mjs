@@ -140,7 +140,13 @@ test('background workers use isolated paths inside one durable runtime store and
   assert.equal(controller.cpus, 2);
   assert.equal(controller.stop_grace_period, '30s');
   assert.deepEqual(controller.security_opt, ['no-new-privileges:true',
-    'seccomp:./deploy/security/codex-seccomp.json', 'apparmor:super-leader-codex']);
+    'seccomp:./deploy/security/codex-seccomp.json', 'apparmor:super-leader-codex', 'systempaths=unconfined']);
+  // Background tasks run on Claude Code; the credential is only interpolated from the production env file.
+  assert.equal(controller.environment.BACKGROUND_EXECUTOR, 'claude');
+  for (const name of ['BACKGROUND_CLAUDE_BASE_URL', 'BACKGROUND_CLAUDE_API_KEY', 'BACKGROUND_CLAUDE_AUTH_TOKEN',
+    'BACKGROUND_CLAUDE_OAUTH_TOKEN', 'BACKGROUND_CLAUDE_MODEL', 'BACKGROUND_CLAUDE_PATH']) {
+    assert.equal(controller.environment[name], '', name);
+  }
   assert.equal(controller.volumes.length, 1);
   assert.equal(controller.volumes[0].type, 'volume');
   assert.equal(controller.volumes[0].source, 'controller-runtime');
@@ -149,6 +155,8 @@ test('background workers use isolated paths inside one durable runtime store and
   assert.deepEqual(Object.keys(production.volumes).sort(), ['controller-db', 'controller-runtime']);
   const dockerfile = readFileSync(new URL('../../../deploy/Dockerfile.controller', import.meta.url), 'utf8');
   assert.match(dockerfile, /@openai\/codex@0\.163\.0/);
+  assert.match(dockerfile, /@anthropic-ai\/claude-code@2\.1\.311/);
+  assert.match(dockerfile, /bubblewrap socat/);
   assert.match(dockerfile, /ca-certificates/);
   assert.match(dockerfile, /mkdir -p \/var\/lib\/super-leader-runtime\/settings \/var\/lib\/super-leader-runtime\/background\/workers \/var\/lib\/super-leader-runtime\/background\/artifacts/);
   assert.match(dockerfile, /chown -R node:node \/var\/lib\/super-leader-runtime/);
