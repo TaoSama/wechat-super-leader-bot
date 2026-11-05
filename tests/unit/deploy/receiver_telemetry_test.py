@@ -24,7 +24,7 @@ RELEASE = "/srv/private-deploy"
 REVISION = "a" * 40
 NAMES = ["controller.tar", "gateway.tar", "release.sha256", "manifest.env",
          "compose.release.yaml", "compose.yaml", "compose.production.yaml",
-         "compose.gateway.yaml", "codex-seccomp.json", "remote-release.sh"]
+         "compose.gateway.yaml", "codex-seccomp.json", "remote-release.sh", "release-state.py"]
 CONFIG = {"release_path": RELEASE, "revision": REVISION, "run_id": "123",
           "attempt": "2", "port": 22,
           "manifest": [{"name": name, "bytes": 1000} for name in NAMES],
@@ -438,10 +438,10 @@ class ReceiverTelemetryTests(ReceiverAssertions, unittest.TestCase):
 
     def test_payload_progress_is_manifest_bounded_and_separate_from_tcp_bytes(self):
         output = self.sample()
-        self.assertEqual(output["total_bytes"], 10000)
-        self.assertEqual(output["received_bytes"], 1230)
-        self.assertEqual(output["remaining_bytes"], 8770)
-        self.assertEqual(len(output["files"]), 10)
+        self.assertEqual(output["total_bytes"], len(NAMES) * 1000)
+        self.assertEqual(output["received_bytes"], len(NAMES) * 123)
+        self.assertEqual(output["remaining_bytes"], len(NAMES) * (1000 - 123))
+        self.assertEqual(len(output["files"]), len(NAMES))
         self.f.fs.stats[ARCHIVE] = inode(1000, size=1001)
         self.unavailable("stage_invalid")
 
@@ -487,6 +487,34 @@ class ReceiverTelemetryTests(ReceiverAssertions, unittest.TestCase):
                 else:
                     self.mutate_during_metrics(lambda: self.f.fs.text.pop(f"{PROC}/301/stat"))
                 self.assertEqual(self.sample()["status"], "available")
+
+class ManifestLayoutTests(unittest.TestCase):
+    def parse_manifest(self, manifest):
+        args = CONFIG_ARGS[:]
+        args[args.index("--manifest-json") + 1] = json.dumps(manifest)
+        return receiver.parse_config(args)
+
+    def test_current_and_historical_layouts_are_accepted_for_passive_observation(self):
+        for manifest in [CONFIG["manifest"],
+                         [item for item in CONFIG["manifest"] if item["name"] != "release-state.py"]]:
+            with self.subTest(files=len(manifest)):
+                result = self.parse_manifest(list(reversed(manifest)))
+                self.assertEqual(result["manifest"], manifest)
+
+    def test_other_subsets_duplicates_and_unknown_names_are_rejected(self):
+        original = CONFIG["manifest"]
+        invalid = [
+            [item for item in original if item["name"] != "compose.yaml"],
+            original[:-2],
+            original[:-1] + [original[0]],
+            original[:-1] + [{"name": "untrusted.py", "bytes": 1000}],
+        ]
+        for manifest in invalid:
+            with self.subTest(names=[item["name"] for item in manifest]):
+                with self.assertRaises(SystemExit) as error:
+                    self.parse_manifest(manifest)
+                self.assertEqual(error.exception.code, 2)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

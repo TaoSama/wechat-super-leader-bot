@@ -11,6 +11,9 @@ const MANIFEST_KEYS = ['schema', 'revision', 'run_id', 'attempt', 'files', 'tota
 const FILE_KEYS = ['name', 'bytes', 'sha256'];
 const HEX_REVISION = /^[0-9a-f]{40}$/;
 const HEX_SHA256 = /^[0-9a-f]{64}$/;
+const LEGACY_RELEASE_FILES = Object.freeze(['controller.tar', 'gateway.tar', 'release.sha256', 'manifest.env',
+  'compose.release.yaml', 'compose.yaml', 'compose.production.yaml', 'compose.gateway.yaml',
+  'codex-seccomp.json', 'remote-release.sh']);
 
 function exactKeys(value, keys) {
   return value !== null && typeof value === 'object' && !Array.isArray(value) &&
@@ -34,12 +37,15 @@ export function manifestIdentity(identity = {}) {
   return Object.freeze(normalized);
 }
 
-export function validateTransferManifest(value, identity) {
+export function validateTransferManifest(value, identity, { allowLegacy = false } = {}) {
   const expected = manifestIdentity(identity);
+  // Historical artifacts remain readable; activation always requires the current bundle.
+  const releaseFiles = allowLegacy === true && Array.isArray(value?.files) &&
+    value.files.length === LEGACY_RELEASE_FILES.length ? LEGACY_RELEASE_FILES : RELEASE_FILES;
   if (!exactKeys(value, MANIFEST_KEYS) || value.schema !== 1 || typeof value.revision !== 'string' ||
     !HEX_REVISION.test(value.revision) || !Number.isSafeInteger(value.run_id) || value.run_id <= 0 ||
     !Number.isSafeInteger(value.attempt) || value.attempt <= 0 || !Array.isArray(value.files) ||
-    value.files.length !== RELEASE_FILES.length || !Number.isSafeInteger(value.total_bytes) || value.total_bytes < 0) {
+    value.files.length !== releaseFiles.length || !Number.isSafeInteger(value.total_bytes) || value.total_bytes < 0) {
     throw new TransferFailure('manifest_invalid');
   }
   if (['revision', 'run_id', 'attempt'].some(key => value[key] !== expected[key])) {
@@ -48,7 +54,7 @@ export function validateTransferManifest(value, identity) {
   const names = new Set();
   let total = 0;
   for (const file of value.files) {
-    if (!exactKeys(file, FILE_KEYS) || !RELEASE_FILES.includes(file.name) || names.has(file.name) ||
+    if (!exactKeys(file, FILE_KEYS) || !releaseFiles.includes(file.name) || names.has(file.name) ||
       !Number.isSafeInteger(file.bytes) || file.bytes < 0 || typeof file.sha256 !== 'string' || !HEX_SHA256.test(file.sha256)) {
       throw new TransferFailure('manifest_invalid');
     }
@@ -57,7 +63,7 @@ export function validateTransferManifest(value, identity) {
     if (!Number.isSafeInteger(total)) throw new TransferFailure('manifest_invalid');
   }
   if (total !== value.total_bytes) throw new TransferFailure('manifest_invalid');
-  const files = Object.freeze(RELEASE_FILES.map(name => {
+  const files = Object.freeze(releaseFiles.map(name => {
     const file = value.files.find(item => item.name === name);
     return Object.freeze({ name: file.name, bytes: file.bytes, sha256: file.sha256 });
   }));

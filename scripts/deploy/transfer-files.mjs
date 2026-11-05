@@ -6,7 +6,7 @@ import { TransferFailure } from './transfer-process.mjs';
 
 export const RELEASE_FILES = Object.freeze(['controller.tar', 'gateway.tar', 'release.sha256', 'manifest.env',
   'compose.release.yaml', 'compose.yaml', 'compose.production.yaml', 'compose.gateway.yaml',
-  'codex-seccomp.json', 'remote-release.sh']);
+  'codex-seccomp.json', 'remote-release.sh', 'release-state.py']);
 export const DIAGNOSTIC_FILES = Object.freeze(['success.bin', 'cancel.bin']);
 export const DIAGNOSTIC_PAYLOAD_LIMIT = 2 * 1024 * 1024;
 

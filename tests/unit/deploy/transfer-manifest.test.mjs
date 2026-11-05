@@ -24,7 +24,7 @@ const SECRET = 'SYNTHETIC_PRIVATE_MANIFEST_TOKEN';
 
 function wire() {
   return { schema: 1, revision: ENV.REVISION, run_id: 123, attempt: 2,
-    files: RELEASE_FILES.map(name => ({ name, bytes: 3, sha256: SHA_ABC })), total_bytes: 30 };
+    files: RELEASE_FILES.map(name => ({ name, bytes: 3, sha256: SHA_ABC })), total_bytes: RELEASE_FILES.length * 3 };
 }
 
 async function fixture(t, { frozen = true } = {}) {
@@ -119,11 +119,38 @@ for (const [name, mutate] of invalidWires) {
   });
 }
 
-test('creation hashes the exact ten local files and reading preserves the frozen wire', async t => {
+test('creation hashes every required local file and reading preserves the frozen wire', async t => {
   const f = await fixture(t);
   assert.deepEqual(f.manifest, wire());
   assert.deepEqual(await readTransferManifest(f.path, IDENTITY), wire());
   await verifyLocalManifest(f.root, f.manifest);
+});
+
+test('historical layout is readable only with an explicit read-only compatibility option', async t => {
+  const f = await fixture(t);
+  const historical = wire();
+  historical.files = historical.files.filter(file => file.name !== 'release-state.py');
+  historical.total_bytes = historical.files.reduce((sum, file) => sum + file.bytes, 0);
+  const readable = validateTransferManifest(historical, IDENTITY, { allowLegacy: true });
+  assert.deepEqual(readable, historical);
+  assert.ok(Object.isFrozen(readable.files) && readable.files.every(Object.isFrozen));
+  assert.throws(() => validateTransferManifest(historical, IDENTITY), { category: 'manifest_invalid' });
+  await writeFile(f.path, JSON.stringify(historical));
+  await assert.rejects(readTransferManifest(f.path, IDENTITY), { category: 'manifest_invalid' });
+  await assert.rejects(verifyLocalManifest(f.root, readable), { category: 'manifest_invalid' });
+});
+
+test('read-only compatibility never accepts another missing or substituted release file', () => {
+  for (const mutate of [
+    value => { value.files = value.files.filter(file => file.name !== 'remote-release.sh'); },
+    value => { value.files = value.files.filter(file => file.name !== 'compose.yaml'); },
+    value => { value.files = value.files.filter(file => file.name !== 'release-state.py'); value.files[0].name = 'release-state.py'; },
+  ]) {
+    const value = wire();
+    mutate(value);
+    value.total_bytes = value.files.reduce((sum, file) => sum + file.bytes, 0);
+    assert.throws(() => validateTransferManifest(value, IDENTITY, { allowLegacy: true }), { category: 'manifest_invalid' });
+  }
 });
 
 test('manifest reader closes once and preserves read failures when closing also fails', { concurrency: false }, async t => {
@@ -285,7 +312,11 @@ test('sender detects same-length local replacement before creating any transport
   assert.ok(logs.some(value => value.event === 'transfer_failed' && value.category === 'manifest_local_mismatch'));
 });
 
-test('sender consumes the frozen files and carries the immutable artifact identity through completion', async t => {
+for (const [name, output, acceptedEvent] of [
+  ['activated release', 'deployment_result=deployment_verified\n', 'deployment_verified'],
+  ['skipped activation', 'deployment_result=activation_skipped\n', 'activation_skipped'],
+]) {
+test(`sender preserves artifact identity and distinguishes ${name}`, async t => {
   const f = await fixture(t), commands = [], remote = [], logs = [];
   const processes = { children: new Set(), async checked(command, args) {
     commands.push([command, args]);
@@ -305,7 +336,7 @@ test('sender consumes the frozen files and carries the immutable artifact identi
     if (operation === 'status') return { bytes: wire().files.map(file => file.bytes) };
     if (operation === 'verify') return { verified: true };
     if (operation === 'activate') return { started: true };
-    if (operation === 'activation') return { exit_code: 0, output: '' };
+    if (operation === 'activation') return { exit_code: 0, output };
     assert.equal(operation, 'cleanup');
     return { cleanup: 'confirmed' };
   };
@@ -320,7 +351,11 @@ test('sender consumes the frozen files and carries the immutable artifact identi
     assert.equal(record.manifest_artifact_name, manifestArtifactName(IDENTITY));
   }
   assert.deepEqual(logs.find(value => value.event === 'transfer_manifest').files, wire().files);
+  assert.equal(logs.filter(value => value.event === acceptedEvent).length, 1);
+  assert.equal(logs.filter(value => value.event === (acceptedEvent === 'activation_skipped' ?
+    'deployment_verified' : 'activation_skipped')).length, 0);
 });
+}
 
 test('activation waits while an earlier run holds the release lock, then launches once', async t => {
   const f = await fixture(t), remote = [], logs = [];

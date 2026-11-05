@@ -3,6 +3,17 @@ import { spawn } from 'node:child_process';
 const OUTPUT_LIMIT = 64 * 1024;
 const STOP_GRACE_MS = 1_000;
 const CHILD_ENV_KEYS = ['PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL'];
+const DEFAULT_SSH_OPERATION_MS = 30_000;
+const SSH_CONNECT_SECONDS = 5;
+const REMOTE_EXECUTION_RESERVE_MS = 1_000;
+
+export function sshArguments(config, timeoutMs = DEFAULT_SSH_OPERATION_MS) {
+  const connectSeconds = Math.max(1, Math.min(SSH_CONNECT_SECONDS,
+    Math.floor((timeoutMs - REMOTE_EXECUTION_RESERVE_MS) / 1000)));
+  return ['-F', '/dev/null', '-i', config.key, '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
+    '-o', 'IdentityAgent=none', '-o', 'StrictHostKeyChecking=yes', '-o', `UserKnownHostsFile=${config.knownHosts}`,
+    '-o', `ConnectTimeout=${connectSeconds}`, '-o', 'ConnectionAttempts=1', '-o', 'LogLevel=ERROR'];
+}
 
 export class TransferFailure extends Error {
   constructor(category) { super(category); this.category = category; }
