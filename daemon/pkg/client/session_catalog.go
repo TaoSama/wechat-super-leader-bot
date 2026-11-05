@@ -99,6 +99,12 @@ func (d *Daemon) readSession(ctx context.Context, sessionID string) (string, err
 	if isTerminalSession(sessionID) {
 		return d.readTerminal(ctx, sessionID)
 	}
+	if isClaudeSession(sessionID) {
+		if d.claude == nil {
+			return "", errors.New("Claude Code sessions are disabled")
+		}
+		return d.claude.ReadSession(ctx, sessionID)
+	}
 	if d.sessionCatalog == nil {
 		return d.adapter.ReadSession(ctx, sessionID)
 	}

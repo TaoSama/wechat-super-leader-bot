@@ -61,6 +61,7 @@ func OpenDaemon(cfg *config.Config, adapter codex.SessionAdapter) (*Daemon, erro
 }
 
 func (d *Daemon) Close() error {
+	d.closeClaude()
 	d.resetHistory()
 	if d.journal == nil {
 		return nil
@@ -108,6 +109,7 @@ func (d *Daemon) ExecuteCommand(ctx context.Context, cmd protocol.ControllerComm
 		log.Print("Command result persistence unavailable; retaining result for retry and blocking duplicate execution")
 		return journalFailure(cmd.CommandID)
 	}
+	d.watchClaudeTurn(cmd, res)
 	return res
 }
 

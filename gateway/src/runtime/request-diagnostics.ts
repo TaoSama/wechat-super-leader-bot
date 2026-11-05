@@ -2,14 +2,17 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { performance } from "node:perf_hooks";
 import { createHash } from "node:crypto";
 
-export type RequestOperation = "notification_interest" | "result_pending" | "result_get" | "result_claim" |
-  "result_materialize" | "result_receipt" | "result_defer" | "result_resume" | "result_blocked" | "artifact_download" |
-  "notification_pending" | "notification_get" | "notification_claim" | "notification_receipt" | "notification_defer" |
-  "reply_get" | "image_download" | "wechat_sendmessage";
-export type NotificationStage = "interest" | "renewal" | "reply_recovery" | "result_delivery" | "notification_delivery";
+export const REQUEST_OPERATIONS = ["notification_interest", "result_pending", "result_get", "result_claim",
+  "result_materialize", "result_receipt", "result_defer", "result_resume", "result_blocked", "artifact_download",
+  "notification_pending", "notification_get", "notification_claim", "notification_receipt", "notification_defer",
+  "reply_get", "image_download", "wechat_sendmessage"] as const;
+export type RequestOperation = typeof REQUEST_OPERATIONS[number];
+export const NOTIFICATION_STAGES = ["interest", "renewal", "reply_recovery", "result_delivery", "notification_delivery"] as const;
+export type NotificationStage = typeof NOTIFICATION_STAGES[number];
+export const REQUEST_PHASES = ["fetch", "headers", "body", "decode", "validate"] as const;
 export interface RequestFailure {
   operation: RequestOperation;
-  phase: "fetch" | "headers" | "body" | "decode" | "validate";
+  phase: typeof REQUEST_PHASES[number];
   requestAttempts: number;
   requestMaxAttempts: number;
   elapsedMs: number;
@@ -31,6 +34,8 @@ const SAFE_CODES = new Set([
   "ERR_SSL_WRONG_VERSION_NUMBER", "ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR", "ERR_ENCODING_INVALID_ENCODED_DATA",
 ]);
 const SAFE_NAMES = new Set(["Error", "TypeError", "SyntaxError", "RangeError", "AbortError", "TimeoutError", "AggregateError"]);
+const OTHER_CODE = "OtherCode";
+const OTHER_ERROR = "OtherError";
 
 function object(value: unknown): value is object { return typeof value === "object" && value !== null; }
 function ownValue(value: object, key: string): unknown {
@@ -45,12 +50,23 @@ export function safeErrorFacts(error: unknown): { errorName: string; causeCodes:
     if (!object(next) || seen.has(next)) continue;
     seen.add(next);
     const code = ownValue(next, "code");
-    if (code !== undefined) codes.add(typeof code === "string" && SAFE_CODES.has(code) ? code : "OtherCode");
+    if (code !== undefined) codes.add(typeof code === "string" && SAFE_CODES.has(code) ? code : OTHER_CODE);
     queue.push(ownValue(next, "cause"));
     const nested = ownValue(next, "errors");
     if (Array.isArray(nested)) queue.push(...nested.slice(0, MAX_CAUSE_NODES));
   }
-  return { errorName: typeof name === "string" && SAFE_NAMES.has(name) ? name : "OtherError", causeCodes: [...codes] };
+  return { errorName: typeof name === "string" && SAFE_NAMES.has(name) ? name : OTHER_ERROR, causeCodes: [...codes] };
+}
+
+/** Persisted evidence must contain only values this module could have emitted. */
+export function isSafeCauseCode(value: unknown): value is string {
+  return value === OTHER_CODE || typeof value === "string" && SAFE_CODES.has(value);
+}
+export function isSafeErrorName(value: unknown): value is string {
+  return value === OTHER_ERROR || typeof value === "string" && SAFE_NAMES.has(value);
+}
+export function requestKey(operation: RequestOperation, identityHash: string): string {
+  return JSON.stringify([operation, identityHash]);
 }
 
 export function rememberNotificationStage(error: unknown, stage: NotificationStage): void {
@@ -61,7 +77,7 @@ export function rememberNotificationStage(error: unknown, stage: NotificationSta
   }
 }
 export function notificationFailure(error: unknown) {
-  return { stage: object(error) ? stages.get(error) ?? "unknown" : "unknown",
+  return { stage: object(error) ? stages.get(error) ?? "unknown" as const : "unknown" as const,
     ...(object(error) ? failures.get(error) : undefined), ...safeErrorFacts(error) };
 }
 export function observeRequests<T>(observation: RequestObservation, action: () => Promise<T>): Promise<T> {
@@ -76,7 +92,7 @@ export class RequestDiagnostics {
   private readonly key: string;
   constructor(private readonly operation: RequestOperation, identity: string = operation) {
     // The key can contain a request identity but is never included in emitted fields.
-    this.key = JSON.stringify([operation, createHash("sha256").update(identity).digest("hex")]);
+    this.key = requestKey(operation, createHash("sha256").update(identity).digest("hex"));
   }
   success(): void {
     observations.getStore()?.successes.add(this.key);

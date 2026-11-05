@@ -84,7 +84,8 @@ case "$env_file" in
 esac
 [[ -f $controller_env ]] || die "controller env file does not exist: $controller_env"
 [[ -f $controller_archive && -f $gateway_archive && -f $checksums && -f $compose_overlay && \
-  -f $compose_base && -f $compose_production && -f $compose_gateway && -f $seccomp_policy ]] || die 'release bundle is incomplete'
+  -f $compose_base && -f $compose_production && -f $compose_gateway && -f $seccomp_policy && \
+  -f $stage_dir/release-state.py ]] || die 'release bundle is incomplete'
 
 if command -v stat >/dev/null 2>&1; then
   env_mode=$(stat -c '%a' "$controller_env" 2>/dev/null || stat -f '%Lp' "$controller_env")
@@ -130,7 +131,7 @@ chmod 600 "$release_env_next"
 cleanup() {
   rm -f -- "$controller_archive" "$gateway_archive" "$checksums" "$compose_overlay" "$stage_dir/manifest.env" \
     "$compose_base" "$compose_production" "$compose_gateway" "$seccomp_policy" \
-    "$stage_dir/remote-release.sh" "$release_env_next"
+    "$stage_dir/remote-release.sh" "$stage_dir/release-state.py" "$release_env_next"
   rmdir "$stage_dir" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -140,6 +141,16 @@ checksums_dir=${checksums%/*}
 if ! (cd "$checksums_dir" && sha256sum -c "${checksums##*/}"); then
   die 'release bundle checksum verification failed'
 fi
+environment_sha256() {
+  local checksum
+  if ! checksum=$(sha256sum -- "$1"); then
+    die "$2 environment snapshot could not be calculated"
+  fi
+  printf '%s\n' "${checksum%% *}"
+}
+controller_env_sha256=$(environment_sha256 "$controller_env" controller)
+release_env_sha256=$(environment_sha256 "$release_env_next" release)
+readonly controller_env_sha256 release_env_sha256
 log 'read-only Compose preflight'
 if ! compose_with_env "$release_env_next" config --quiet; then
   die 'read-only Compose preflight failed'
@@ -225,8 +236,27 @@ verify_runtime() {
   printf 'gateway_context_window_ms=%s\n' "$gateway_context_window"
 }
 
-if [[ -f $release_env ]] && cmp -s "$release_env" "$release_env_next" && verify_runtime; then
+receipt_matches() {
+  local fingerprint receipt_status
+  if ! fingerprint=$(python3 "$stage_dir/release-state.py" fingerprint --bundle-dir "$stage_dir"); then
+    die 'release configuration fingerprint could not be calculated'
+  fi
+  # The detached activation parent already holds activation.lock.
+  if python3 "$stage_dir/release-state.py" check --release-dir "$release_dir" \
+    --revision "$revision" --fingerprint "$fingerprint" --env-file "$env_file" \
+    --expected-controller-env-sha256 "$controller_env_sha256" \
+    --expected-release-env-sha256 "$release_env_sha256"; then
+    return 0
+  else
+    receipt_status=$?
+  fi
+  [[ $receipt_status == 3 ]] && return 1
+  die 'accepted runtime receipt could not be verified'
+}
+
+if [[ -f $release_env ]] && cmp -s "$release_env" "$release_env_next" && verify_runtime && receipt_matches; then
   log "deployment already healthy for revision $revision; skipping recreation"
+  printf 'deployment_result=activation_skipped\n'
   exit 0
 fi
 
@@ -264,6 +294,14 @@ if ! verify_runtime; then
   die 'runtime verification failed; deployment is not successful'
 fi
 
+if ! python3 "$stage_dir/release-state.py" record --release-dir "$release_dir" \
+  --revision "$revision" --bundle-dir "$stage_dir" --env-file "$env_file" \
+  --expected-controller-env-sha256 "$controller_env_sha256" \
+  --expected-release-env-sha256 "$release_env_sha256"; then
+  rollback || true
+  die 'successful runtime receipt could not be recorded; deployment is not successful'
+fi
+
 prune_old_images() {
   local repository image removed=0
   for repository in super-leader-controller super-leader-gateway; do
@@ -283,3 +321,4 @@ prune_old_images() {
 
 prune_old_images
 log "deployment verified for revision $revision"
+printf 'deployment_result=deployment_verified\n'

@@ -14,7 +14,12 @@ const (
 	RouteDesktopOwner    SendRoute = "desktop-owner"
 	RouteTerminalPane    SendRoute = "terminal-pane"
 	RouteAppServerResume SendRoute = "app-server-resume"
+	// RouteClaudeResume runs one headless turn in an existing Claude Code session.
+	RouteClaudeResume SendRoute = "claude-resume"
 )
+
+// ClaudeSessionPrefix namespaces Claude Code session IDs away from Codex threads.
+const ClaudeSessionPrefix = "claude:"
 
 // DispatchIdentity binds a durable command to its runtime endpoint. Desktop
 // dispatches also bind the owner and connection. Request identifiers are local

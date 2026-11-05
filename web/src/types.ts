@@ -6,8 +6,8 @@
 import type { ConsoleGoals } from "./features/leader/goal-contract";
 import type { ConsoleAutomation } from "./features/notifications/automation-contract";
 import type { ConsoleDelivery } from "./features/notifications/delivery-contract";
-export type ActionType = "read" | "send";
-export type SessionCapability = ActionType | "resume-send";
+export type ActionType = "read" | "send" | "interrupt";
+export type SessionCapability = "read" | "send" | "resume-send";
 
 export type CommandStatus =
   | "admitting"
@@ -38,7 +38,7 @@ export interface DesktopObservation {
   reasoningEffort?: string;
 }
 
-export type SendRoute = "control-socket" | "desktop-owner" | "app-server-resume" | "terminal-pane";
+export type SendRoute = "control-socket" | "desktop-owner" | "app-server-resume" | "terminal-pane" | "claude-resume";
 interface SendAvailabilityFields {
   state: "ready" | "blocked" | "unavailable";
   observedAt: string;
@@ -90,7 +90,7 @@ export interface HistoryItem {
   truncated?: boolean;
 }
 
-export type HistorySource = "control-socket" | "codex-desktop" | "terminal-transcript" | "wechat-codex";
+export type HistorySource = "control-socket" | "codex-desktop" | "terminal-transcript" | "wechat-codex" | "claude-transcript";
 
 export interface SessionHistory {
   session: ScopedSession;
@@ -117,6 +117,7 @@ export interface CommandRecord {
   outputTruncated?: boolean;
   error?: string;
   turnId?: string;
+  expectedTurnId?: string;
   sendRoute?: SendRoute;
   inputReceipt?: InputReceipt;
   expiresAt: string;

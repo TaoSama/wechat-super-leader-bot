@@ -34,3 +34,12 @@ export function historyTurns(items: HistoryItem[], gapBeforeIds: string[]): Hist
   }
   return turns;
 }
+
+/** The newest recorded turn is the only stop candidate; an older in-progress page entry is not proof of a live turn. */
+export function runningTurnId(items: HistoryItem[], statuses?: Record<string, NonNullable<HistoryItem["turnStatus"]>>): string | null {
+  let latest: HistoryItem | undefined;
+  for (let index = items.length - 1; index >= 0 && !latest; index--) if (items[index].turnId) latest = items[index];
+  if (!latest) return null;
+  const status = statuses?.[latest.turnId] ?? latest.turnStatus;
+  return status === "inProgress" ? latest.turnId : null;
+}

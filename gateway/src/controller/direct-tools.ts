@@ -16,6 +16,7 @@ export interface ToolAuthorization {
   automationOperations?: ("create" | "pause" | "resume" | "cancel" | "edit")[];
   backgroundOperations?: ("create" | "follow_up" | "extend")[];
   sendImages?: boolean;
+  interruptSession?: boolean;
   memoryOperations?: ("remember" | "forget")[];
 }
 export interface ControllerToolCall extends ControllerMessageRequest {

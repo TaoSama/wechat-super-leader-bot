@@ -51,6 +51,9 @@ class ConfirmationPool {
     const statement = sql.replace(/\s+/g, " ").trim();
     this.queries.push(statement);
     if (statement.startsWith("SELECT pg_advisory_xact_lock(") || statement.startsWith("SELECT id FROM leader_goals WHERE chat_id=$1")) return { rows: [] };
+    if (statement === "SELECT count(*)::int AS count FROM leader_executions WHERE chat_id=$1 AND status='active'") {
+      return { rows: [{ count: [...this.rows.values()].filter(row => row.chat_id === params[0] && row.status === "active").length }] };
+    }
     if (statement === "SELECT * FROM leader_executions WHERE id=$1") {
       const row = this.rows.get(params[0] as string);
       return { rows: row ? [structuredClone(row)] : [] };
@@ -82,7 +85,7 @@ class ConfirmationPool {
           this.queries.push(statement);
           if (this.failInsert) throw new Error("Simulated insert failure");
           const input = JSON.parse(params[4] as string) as ExecutionRecord;
-          if (this.rows.has(input.id) || [...this.rows.values()].some(row => row.chat_id === input.chatId && row.status === "active")) return { rows: [] };
+          if (this.rows.has(input.id)) return { rows: [] };
           staged = this.row(input);
           await this.afterInsert?.();
           return { rows: [structuredClone(staged)] };
@@ -243,7 +246,7 @@ describe("SQL mock lock and transaction barriers", () => {
     expect(f.pool.released).toBe(1);
   });
 
-  it("rolls back invisible INSERT when index/INSERT waiting crosses claim or plan TTL", async () => {
+  it("rolls back invisible INSERT when lock/INSERT waiting crosses claim or plan TTL", async () => {
     for (const delay of [CLAIM_TTL_MS, PLAN_TTL_MS]) {
       const f = await fixture("SQL mock"), entered = deferred(), release = deferred();
       f.pool.afterInsert = async () => { entered.resolve(); await release.promise; };

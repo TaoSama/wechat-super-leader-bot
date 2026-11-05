@@ -11,6 +11,7 @@ import * as path from "node:path";
 import { GatewaySettings } from "../settings/service.js";
 import { startSettingsServer } from "../settings/server.js";
 import { NotificationCycleDiagnostics } from "../runtime/notification-diagnostics.js";
+import { NotificationRecoveryStore } from "../runtime/notification-recovery-store.js";
 
 export const NOTIFICATION_DIAGNOSTIC_EXIT_CODE = 2;
 const MAX_CODEX_ACCOUNT_ID_BYTES = 4096;
@@ -113,7 +114,8 @@ export async function runCli(args: string[] = process.argv.slice(2), env: NodeJS
     splitMaxChars: opts.maxChars,
     healthTracker,
     replyEngine,
-    notificationDiagnostics: new NotificationCycleDiagnostics(opts.pollIntervalMs),
+    notificationDiagnostics: new NotificationCycleDiagnostics(opts.pollIntervalMs, undefined, undefined,
+      new NotificationRecoveryStore(`${stateManager.statePath}.notification-recovery.json`)),
     resultClient: new ResultClient({ controllerUrl: validatedControllerUrl, controllerToken: opts.controllerToken,
       allowInsecureController: opts.allowInsecureController, artifactPublicOrigin: opts.resultPublicOrigin,
       maxFileBytes: opts.resultFileMaxBytes }),

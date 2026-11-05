@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { ModelTool } from "../leader/model/contracts.js";
 import { SYSTEM_PROMPT, LEADER_TOOLS, ToolArguments } from "../leader/contracts.js";
-import { DIRECT_TOOL_INSTRUCTIONS } from "../leader/direct-contracts.js";
+import { CancelPlanArgumentsSchema, DIRECT_TOOL_INSTRUCTIONS } from "../leader/direct-contracts.js";
 import { BACKGROUND_INSTRUCTIONS, BACKGROUND_TOOLS, BACKGROUND_ARGUMENTS } from "../leader/background-tools.js";
 import { AUTOMATION_TOOLS, AUTOMATION_ARGUMENTS } from "../automations/tools.js";
 import { ACKNOWLEDGEMENT_PROMPT } from "../leader/acknowledgement.js";
@@ -18,9 +18,11 @@ import { WORKER_SYSTEM_PROMPT } from "../background/worker/output.js";
 const EMPTY = { type: "object", properties: {}, additionalProperties: false };
 export const DIRECT_EXTRA_TOOLS: ModelTool[] = [
   { name: "confirm_pending", description: "Consume the real current user's confirmation of the uniquely displayed, unexpired plan or goal; never confirms the agent's own preview." },
-  { name: "cancel_plan", description: "Cancel pending or future fixed-plan steps when explicitly requested; does not stop an already running source task." },
+  { name: "cancel_plan", description: "Cancel pending or future fixed-plan steps when explicitly requested; does not stop an already running source task. " +
+    "Pass the known planId when this chat has several active plans; without it only a single active plan is cancelled, otherwise the reply lists the active plans to choose from.",
+  parameters: z.toJSONSchema(CancelPlanArgumentsSchema) as Record<string, unknown> },
   { name: "cancel_goal", description: "Cancel this chat's pending or active goal when explicitly requested; does not stop source tasks already running." },
-].map(item => ({ type: "function", function: { ...item, parameters: EMPTY } }));
+].map(({ parameters = EMPTY, ...item }) => ({ type: "function", function: { ...item, parameters } }));
 
 export interface RegisteredPrompt { name: string; title: string; content: string; scope: string; path: string }
 export const LOCAL_PROMPTS: RegisteredPrompt[] = [
@@ -42,7 +44,7 @@ export const LOCAL_TOOLS: ModelTool[] = [...LEADER_TOOLS, ...AUTOMATION_TOOLS, .
   ImageAuthorizationTool, REPORT_PROGRESS_TOOL];
 export const LOCAL_TOOL_VALIDATORS: Record<string, z.ZodType> = {
   ...ToolArguments, ...AUTOMATION_ARGUMENTS, ...BACKGROUND_ARGUMENTS,
-  confirm_pending: z.object({}).strict(), cancel_plan: z.object({}).strict(), cancel_goal: z.object({}).strict(),
+  confirm_pending: z.object({}).strict(), cancel_plan: CancelPlanArgumentsSchema, cancel_goal: z.object({}).strict(),
   decide_goal: GoalDecisionSchema, classify_user_authorization: AuthorizationSchema,
   classify_automation_authorization: AutomationClassification, classify_background_authorization: BackgroundClassification,
   classify_image_delivery: ImageAuthorizationSchema, report_progress: ProgressArguments,

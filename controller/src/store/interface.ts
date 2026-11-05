@@ -30,6 +30,14 @@ export class ConflictError extends Error {
   }
 }
 
+/** Creation lost because the chat already holds the maximum number of active plans. */
+export class ActivePlanLimitError extends ConflictError {
+  constructor() {
+    super("Chat reached its active plan limit");
+    this.name = "ActivePlanLimitError";
+  }
+}
+
 export interface CreateCommandResult {
   created: boolean;
   command: CommandRecord;

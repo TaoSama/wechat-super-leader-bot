@@ -1,5 +1,6 @@
 import type { HistorySource, ScopedSession } from "../../types";
 import { isTerminalHistoryTarget, isTerminalSession, MAX_TERMINAL_OBSERVATION_AGE_MS } from "./terminal-session";
+import { isClaudeCodeSession, isClaudeSessionId } from "./claude-session";
 
 const HISTORY_CONTEXT_PATTERN = /^([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/i;
 
@@ -22,6 +23,7 @@ export function hasWechatHistorySource(session: Pick<ScopedSession, "id" | "node
 export function isSessionHistorySource(source: unknown, session: ScopedSession): source is HistorySource {
   if (source === "terminal-transcript") return hasTerminalHistorySource(session);
   if (source === "wechat-codex") return hasWechatHistorySource(session);
+  if (source === "claude-transcript" || isClaudeSessionId(session.id)) return source === "claude-transcript" && isClaudeCodeSession(session);
   return !isTerminalSession(session) && (source === "control-socket" || source === "codex-desktop");
 }
 

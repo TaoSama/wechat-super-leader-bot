@@ -9,9 +9,12 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/claude"
 )
 
 const (
@@ -48,6 +51,10 @@ type Config struct {
 	ServiceAction        string
 	SkillRoots           []string
 	StateDir             string
+	// Claude Code sessions are disabled unless ClaudeProjectsRoot is explicit.
+	ClaudeProjectsRoot   string
+	ClaudePath           string
+	ClaudePermissionMode string
 }
 
 func ParseFlags(args []string) (*Config, error) {
@@ -100,6 +107,9 @@ func ParseFlags(args []string) (*Config, error) {
 	probeSkills := fs.Bool("probe-skills", false, "Read-only scan configured skill roots and exit; no socket or Controller connection")
 	serviceAction := fs.String("service", "", "Manage user service: install|start|stop|restart|status|uninstall")
 	stateDir := fs.String("state-dir", os.Getenv("DAEMON_STATE_DIR"), "Private durable command journal directory; defaults to ~/.super-leader/daemon/<node hash>")
+	claudeProjectsRoot := fs.String("claude-projects-root", "", "Opt in to existing Claude Code sessions: absolute <claude config dir>/projects directory")
+	claudePath := fs.String("claude-path", "", "Absolute Claude Code CLI path (requires claude-projects-root; defaults to claude on PATH)")
+	claudePermissionMode := fs.String("claude-permission-mode", "", "Claude Code --permission-mode for daemon-launched turns (requires claude-projects-root; default "+claude.DefaultPermissionMode+")")
 	var additionalSkillRoots []string
 	fs.Func("skill-root", "Additional permitted skill directory (repeatable); defaults to SKILL_ROOTS JSON array or none", func(value string) error {
 		additionalSkillRoots = append(additionalSkillRoots, value)
@@ -178,6 +188,10 @@ func ParseFlags(args []string) (*Config, error) {
 	if *codexHome != "" && (!filepath.IsAbs(*codexHome) || strings.ContainsAny(*codexHome, "\x00\r\n\t")) {
 		return nil, errors.New("codex-home must be an absolute directory path without control characters")
 	}
+	claudeSettings, err := resolveClaude(*claudeProjectsRoot, *claudePath, *claudePermissionMode)
+	if err != nil {
+		return nil, err
+	}
 	if resolvedSock == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -202,6 +216,9 @@ func ParseFlags(args []string) (*Config, error) {
 		ProbeSkills:          *probeSkills,
 		ServiceAction:        action,
 		SkillRoots:           skillRoots,
+		ClaudeProjectsRoot:   claudeSettings.ProjectsRoot,
+		ClaudePath:           claudeSettings.ClaudePath,
+		ClaudePermissionMode: claudeSettings.PermissionMode,
 	}
 
 	if cfg.NodeID == "" {
@@ -279,4 +296,36 @@ func ValidateControllerURL(rawURL string) error {
 		return fmt.Errorf("remote controller URL requires wss:// scheme (ws:// only permitted for loopback), got host %q", host)
 	}
 	return nil
+}
+
+// ClaudeAdapterConfig returns the adapter settings, or false when disabled.
+func (c *Config) ClaudeAdapterConfig() (claude.Config, bool) {
+	if c.ClaudeProjectsRoot == "" {
+		return claude.Config{}, false
+	}
+	return claude.Config{ProjectsRoot: c.ClaudeProjectsRoot, ClaudePath: c.ClaudePath, PermissionMode: c.ClaudePermissionMode}.WithDefaults(), true
+}
+
+// resolveClaude validates the opt-in flags and resolves the CLI to an absolute path.
+func resolveClaude(root, path, mode string) (claude.Config, error) {
+	if root == "" {
+		if path != "" || mode != "" {
+			return claude.Config{}, errors.New("claude-path and claude-permission-mode require claude-projects-root")
+		}
+		return claude.Config{}, nil
+	}
+	if path == "" {
+		found, err := exec.LookPath("claude")
+		if err != nil {
+			return claude.Config{}, fmt.Errorf("claude-projects-root requires claude-path or claude on PATH: %w", err)
+		}
+		if path, err = filepath.Abs(found); err != nil {
+			return claude.Config{}, fmt.Errorf("resolve claude path: %w", err)
+		}
+	}
+	settings := claude.Config{ProjectsRoot: root, ClaudePath: path, PermissionMode: mode}.WithDefaults()
+	if err := settings.Validate(); err != nil {
+		return claude.Config{}, err
+	}
+	return settings, nil
 }

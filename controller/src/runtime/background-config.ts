@@ -1,6 +1,19 @@
 import path from "node:path";
 
+export const BACKGROUND_EXECUTOR_KINDS = ["codex", "claude"] as const;
+export type BackgroundExecutorKind = typeof BACKGROUND_EXECUTOR_KINDS[number];
+
+export interface ClaudeBackgroundConfig {
+  path: string;
+  model?: string;
+  apiKey?: string;
+  oauthToken?: string;
+}
+
 export interface BackgroundConfig {
+  executorKind: BackgroundExecutorKind;
+  /** Present only when executorKind is claude. */
+  claude?: ClaudeBackgroundConfig;
   root: string;
   artifactRoot: string;
   codexPath: string;
@@ -13,6 +26,29 @@ export interface BackgroundConfig {
 
 const DEFAULT_TURN_TIMEOUT_MS = 10 * 60_000;
 const MAX_TURN_TIMEOUT_MS = 60 * 60_000;
+const CLAUDE_DEFAULT_MODEL_LABEL = "claude-cli-default";
+
+function loadExecutorKind(env: NodeJS.ProcessEnv): BackgroundExecutorKind {
+  const raw = env.BACKGROUND_EXECUTOR?.trim() || "codex";
+  if (!(BACKGROUND_EXECUTOR_KINDS as readonly string[]).includes(raw)) {
+    throw new Error(`Invalid BACKGROUND_EXECUTOR; expected one of: ${BACKGROUND_EXECUTOR_KINDS.join(", ")}`);
+  }
+  return raw as BackgroundExecutorKind;
+}
+
+function loadClaudeConfig(env: NodeJS.ProcessEnv): ClaudeBackgroundConfig {
+  const apiKey = env.BACKGROUND_CLAUDE_API_KEY?.trim();
+  const oauthToken = env.BACKGROUND_CLAUDE_OAUTH_TOKEN?.trim();
+  if (!apiKey && !oauthToken) {
+    throw new Error("BACKGROUND_EXECUTOR=claude requires BACKGROUND_CLAUDE_API_KEY or BACKGROUND_CLAUDE_OAUTH_TOKEN");
+  }
+  if (apiKey && oauthToken) {
+    throw new Error("Set only one of BACKGROUND_CLAUDE_API_KEY or BACKGROUND_CLAUDE_OAUTH_TOKEN");
+  }
+  const model = env.BACKGROUND_CLAUDE_MODEL?.trim();
+  return { path: env.BACKGROUND_CLAUDE_PATH?.trim() || "claude", ...(model ? { model } : {}),
+    ...(apiKey ? { apiKey } : { oauthToken }) };
+}
 
 export function loadBackgroundConfig(env: NodeJS.ProcessEnv,
   leader?: { model: string; baseUrl: string; apiKey: string },
@@ -39,10 +75,12 @@ export function loadBackgroundConfig(env: NodeJS.ProcessEnv,
   if (resolvedRoot === resolvedArtifacts || resolvedRoot.startsWith(resolvedArtifacts + path.sep) || resolvedArtifacts.startsWith(resolvedRoot + path.sep)) {
     throw new Error("Background artifact storage must be separate from worker storage");
   }
+  const executorKind = loadExecutorKind(env);
+  const claude = executorKind === "claude" ? loadClaudeConfig(env) : undefined;
   const model = env.BACKGROUND_MODEL_NAME?.trim() || leader?.model;
   const baseUrl = env.BACKGROUND_MODEL_BASE_URL?.trim() || leader?.baseUrl;
   const apiKey = env.BACKGROUND_MODEL_API_KEY?.trim() || leader?.apiKey;
-  if (!model || !baseUrl || !apiKey) throw new Error("Background execution requires a model provider");
+  if (!claude && (!model || !baseUrl || !apiKey)) throw new Error("Background execution requires a model provider");
   const integer = (name: string, fallback: number, max: number): number => {
     const raw = env[name];
     if (raw === undefined || raw === "") return fallback;
@@ -51,7 +89,9 @@ export function loadBackgroundConfig(env: NodeJS.ProcessEnv,
     }
     return Number(raw);
   };
-  return { root: resolvedRoot, artifactRoot: resolvedArtifacts, model, baseUrl, apiKey,
+  return { executorKind, ...(claude ? { claude } : {}), root: resolvedRoot, artifactRoot: resolvedArtifacts,
+    // The Codex provider is unused by Claude, which falls back to its CLI default model.
+    ...(claude ? { model: claude.model ?? CLAUDE_DEFAULT_MODEL_LABEL, baseUrl: "", apiKey: "" } : { model: model!, baseUrl: baseUrl!, apiKey: apiKey! }),
     codexPath: env.BACKGROUND_CODEX_PATH?.trim() || "codex",
     timeoutMs: integer("BACKGROUND_TURN_TIMEOUT_MS", DEFAULT_TURN_TIMEOUT_MS, MAX_TURN_TIMEOUT_MS),
     maxConcurrent: integer("BACKGROUND_MAX_CONCURRENT", 2, 8) };

@@ -66,7 +66,7 @@ it.each([
   expect(await f.store.getCommand(submitted.reply!.commandId!)).toMatchObject({ status: "queued", deliveryMode: "steer" });
   expect(f.hub.sendCommand).not.toHaveBeenCalled();
   if (cleanupFails) {
-    vi.spyOn(f.store, name === "cancel_plan" ? "getLatestExecution" : "getLatestGoal").mockImplementationOnce(async () => {
+    vi.spyOn(f.store, name === "cancel_plan" ? "listRecentExecutions" : "getLatestGoal").mockImplementationOnce(async () => {
       expect((await f.store.getLeaderState(CHAT_ID))?.data.steerGeneration).toBe(1);
       throw new Error("Injected cancellation cleanup failure");
     });

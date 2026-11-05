@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import pg from "pg";
 import { MemoryStore } from "../../../src/store/memory.js";
 import { PostgresStore } from "../../../src/store/postgres.js";
-import { ConflictError } from "../../../src/store/interface.js";
+import { ActivePlanLimitError, ConflictError } from "../../../src/store/interface.js";
+import { MAX_ACTIVE_PLANS_PER_CHAT } from "../../../src/leader/contracts.js";
 import { createExecution, EXECUTION_CLAIM_MS, type ExecutionRecord } from "../../../src/leader/plans/execution.js";
 
 vi.mock("pg", () => ({ default: { Pool: vi.fn() } }));
@@ -58,12 +59,13 @@ class FakeExecutionPool {
     }
     if (normalized.startsWith("INSERT INTO leader_executions")) {
       const execution = JSON.parse(params[4] as string) as ExecutionRecord;
-      if (this.rows.has(execution.id) || [...this.rows.values()].some(row => row.chat_id === execution.chatId && row.status === "active")) {
-        return this.result([]);
-      }
+      if (this.rows.has(execution.id)) return this.result([]);
       const row = this.row(execution);
       this.rows.set(row.id, row);
       return this.result([row]);
+    }
+    if (normalized === "SELECT count(*)::int AS count FROM leader_executions WHERE chat_id=$1 AND status='active'") {
+      return { rows: [{ count: [...this.rows.values()].filter(row => row.chat_id === params[0] && row.status === "active").length }] };
     }
     if (normalized.startsWith("SELECT * FROM leader_executions WHERE id=$1")) {
       const row = this.rows.get(params[0] as string);
@@ -108,7 +110,7 @@ class FakeExecutionPool {
         if (normalized.startsWith("INSERT INTO leader_executions")) {
           this.queries.push(normalized);
           const input = JSON.parse(params[4] as string) as ExecutionRecord;
-          if (this.rows.has(input.id) || [...this.rows.values()].some(row => row.chat_id === input.chatId && row.status === "active")) return this.result([]);
+          if (this.rows.has(input.id)) return this.result([]);
           staged = this.row(input);
           return this.result([staged]);
         }
@@ -177,12 +179,17 @@ for (const [name, factory] of [
       expect(await store.getExecution(original.id)).toEqual(original);
     });
 
-    it("allows only one active execution per chat even during concurrent creation", async () => {
+    it("caps active executions per chat even during concurrent creation", async () => {
       const store = factory();
-      const results = await Promise.allSettled([1, 2, 3].map(index => store.createExecutionIfAbsent(record(index))));
-      expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
-      for (const result of results) if (result.status === "rejected") expect(result.reason).toBeInstanceOf(ConflictError);
-      expect((await store.createExecutionIfAbsent(record(4, "different"))).created).toBe(true);
+      const attempts = MAX_ACTIVE_PLANS_PER_CHAT + 2;
+      const results = await Promise.allSettled(Array.from({ length: attempts }, (_, index) => store.createExecutionIfAbsent(record(index + 1))));
+      expect(results.filter(result => result.status === "fulfilled")).toHaveLength(MAX_ACTIVE_PLANS_PER_CHAT);
+      for (const result of results) if (result.status === "rejected") expect(result.reason).toBeInstanceOf(ActivePlanLimitError);
+      expect((await store.createExecutionIfAbsent(record(attempts + 1, "different"))).created).toBe(true);
+      const first = (await store.getExecution(uuid(1)))!;
+      await store.compareAndSetExecution(updated(first, { status: "cancelled" }), first.revision);
+      expect((await store.createExecutionIfAbsent(record(attempts + 2))).created).toBe(true);
+      await expect(store.createExecutionIfAbsent(record(attempts + 3))).rejects.toBeInstanceOf(ActivePlanLimitError);
     });
 
     it("has one CAS winner; stale, missing and terminal records cannot advance", async () => {
@@ -320,6 +327,10 @@ describe("postgres execution transaction safety", () => {
     await store.init();
     expect(await store.getExecution(original.id)).toEqual(original);
     expect(pool.queries.some(sql => sql.includes("CREATE UNIQUE INDEX") && sql.includes("leader_executions") && sql.includes("WHERE status='active'"))).toBe(true);
+    // Version 3 replaces the one-active-plan constraint with a lookup index for the locked per-chat cap.
+    const dropped = pool.queries.indexOf("DROP INDEX IF EXISTS leader_executions_active_chat_idx");
+    expect(dropped).toBeGreaterThan(pool.queries.findIndex(sql => sql.includes("leader_executions_active_chat_idx ON leader_executions (chat_id)")));
+    expect(pool.queries.slice(dropped)).toContain("CREATE INDEX IF NOT EXISTS leader_executions_active_chat_created_idx ON leader_executions (chat_id, created_at, id) WHERE status='active'");
     expect(pool.queries.some(sql => sql.includes('id VARCHAR(36) COLLATE "C"'))).toBe(true);
     expect(pool.queries).toContain("ALTER TABLE leader_executions ADD COLUMN IF NOT EXISTS console_hidden_at TIMESTAMPTZ");
     expect(pool.queries.some(sql => sql.startsWith("DELETE FROM node_sessions"))).toBe(true);

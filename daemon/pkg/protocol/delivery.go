@@ -22,6 +22,13 @@ func (c *ControllerCommandMessage) validateDelivery() error {
 	if c.DeliveryMode == "" && c.ExpectedTurnID == "" {
 		return nil
 	}
+	if c.Action == ActionInterrupt {
+		// Interrupt validates its exact target turn separately and has no delivery mode.
+		if c.DeliveryMode != "" {
+			return errors.New("interrupt does not accept delivery mode")
+		}
+		return nil
+	}
 	if c.Action != ActionSend {
 		return errors.New("only send accepts delivery mode")
 	}

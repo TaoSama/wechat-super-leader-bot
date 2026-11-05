@@ -3,6 +3,7 @@ import { DesktopObservationSchema, SendAvailabilitySchema, SendRoute, Session } 
 import { isDesktopObservationFresh, MAX_DESKTOP_OBSERVATION_AGE_MS } from "./observation.js";
 import { isTerminalSession } from "./terminal.js";
 import { TerminalSessionIdSchema } from "./input-receipt.js";
+import { isClaudeCodeSession, isClaudeSessionId } from "./claude.js";
 
 const isoTimestamp = z.string().datetime({ offset: true });
 type SendEligibility = { ready: true; route: SendRoute } | { ready: false; httpStatus: number; reason: string };
@@ -35,8 +36,17 @@ function canResumeSession(session: Session, now: number, allowLoaded: boolean): 
   return true;
 }
 
+/** Claude Code sessions have exactly one route; the daemon rechecks transcript activity before launching. */
+function selectClaudeRoute(session: Session, now: number): SendEligibility {
+  if (!isClaudeCodeSession(session) || !session.capabilities.includes("resume-send")) return blocked("Claude Code session is read-only on this node", 400);
+  if (session.status !== "idle") return blocked("Claude Code session is busy or recently active");
+  if (!freshTimestamp(session.observedAt, now)) return blocked("Target session observation is expired or invalid");
+  return { ready: true, route: "claude-resume" };
+}
+
 /** Present desktop authority never falls back to native control; resume requires its own capability. */
 export function selectSendRoute(session: Session, now = Date.now(), expectedRoute?: SendRoute): SendEligibility {
+  if (isClaudeSessionId(session.id) || session.provider === "claude-code") return selectClaudeRoute(session, now);
   const terminal = isTerminalSession(session);
   if (canResumeSession(session, now, expectedRoute === "app-server-resume")) return { ready: true, route: "app-server-resume" };
   if (terminal && !Object.hasOwn(session, "sendAvailability")) return blocked("Terminal sessions support observation only; sending is unavailable");

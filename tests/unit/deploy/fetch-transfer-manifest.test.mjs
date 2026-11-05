@@ -24,10 +24,10 @@ const JOB_NAME = 'Build and deploy linux/amd64 images';
 const SECRET = 'SYNTHETIC_PRIVATE_GITHUB_TOKEN';
 const sha256 = value => `sha256:${createHash('sha256').update(value).digest('hex')}`;
 
-function wire() {
+function wire(names = RELEASE_FILES) {
+  const files = names.map((name, index) => ({ name, bytes: index + 1, sha256: 'c'.repeat(64) }));
   return { schema: 1, revision: REVISION, run_id: RUN, attempt: ATTEMPT,
-    files: RELEASE_FILES.map((name, index) => ({ name, bytes: index + 1, sha256: 'c'.repeat(64) })),
-    total_bytes: 55 };
+    files, total_bytes: files.reduce((sum, file) => sum + file.bytes, 0) };
 }
 
 function zip(entries = [{ name: MANIFEST_FILENAME, content: JSON.stringify(wire()) }], compression = 'deflated') {
@@ -237,13 +237,30 @@ for (const [name, mutate] of [
   test(`downloaded manifest cannot bypass shared validation: ${name}`, () => rejectsFixture(s => mutate(s.manifest)));
 }
 
-test('the default real Python ZIP reader returns the original ten-file manifest', async () => {
+test('the default real Python ZIP reader preserves the complete current manifest', async () => {
   const f = fixture();
   delete f.options.extract;
   assert.deepEqual((await fetchTransferManifest(INPUT, f.options)).manifest, wire());
   const padded = JSON.stringify(wire()).padEnd(MANIFEST_MAX_BYTES, ' ');
   assert.deepEqual(await extractManifestArchive(zip([{ name: MANIFEST_FILENAME, content: padded }])), wire());
 });
+
+test('the reader preserves a historical artifact without requiring the new receipt helper', async () => {
+  const f = fixture();
+  const historical = wire(['controller.tar', 'gateway.tar', 'release.sha256', 'manifest.env',
+    'compose.release.yaml', 'compose.yaml', 'compose.production.yaml', 'compose.gateway.yaml',
+    'codex-seccomp.json', 'remote-release.sh']);
+  f.state.archive = zip([{ name: MANIFEST_FILENAME, content: JSON.stringify(historical) }]);
+  f.state.artifact.size_in_bytes = f.state.archive.length;
+  f.state.artifact.digest = sha256(f.state.archive);
+  delete f.options.extract;
+  assert.deepEqual((await fetchTransferManifest(INPUT, f.options)).manifest, historical);
+});
+
+test('historical artifact compatibility rejects an incomplete old file set', () => rejectsFixture(state => {
+  state.manifest.files = state.manifest.files.filter(file => file.name !== 'remote-release.sh');
+  state.manifest.total_bytes = state.manifest.files.reduce((sum, file) => sum + file.bytes, 0);
+}));
 
 const badArchives = [
   ['empty ZIP', () => zip([])],

@@ -5,14 +5,16 @@ import { CommandService } from "../commands/service.js";
 import { publicCommand } from "../commands/public.js";
 import { NodeHub } from "../nodes/hub.js";
 import { HistoryError } from "../sessions/history.js";
+import { INTERRUPT_RESULT_WAIT_MS } from "../sessions/turn-interrupt.js";
 import { TERMINAL_SESSION_ID_PATTERN } from "../sessions/terminal.js";
+import { CLAUDE_SESSION_ID_PATTERN } from "../sessions/claude.js";
 import { DeliveryModeSchema, PostCommandRequestSchema, SessionHistorySchema, TurnIdSchema, type CommandAuthority } from "../types.js";
 import { GatewaySettingsClient, SettingsHttpError } from "../settings/gateway-client.js";
 import { makeWechatSession, normalizeHistoryContext, WECHAT_NODE_ID, wechatSessionId } from "../sessions/wechat-history.js";
 
 const TargetSchema = z.object({
   nodeId: PostCommandRequestSchema.shape.nodeId,
-  sessionId: z.string().min(1).max(64).refine(value => /^[A-Za-z0-9_-]+$/.test(value) || TERMINAL_SESSION_ID_PATTERN.test(value)),
+  sessionId: z.string().min(1).max(64).refine(value => /^[A-Za-z0-9_-]+$/.test(value) || TERMINAL_SESSION_ID_PATTERN.test(value) || CLAUDE_SESSION_ID_PATTERN.test(value)),
 });
 const HistoryQuerySchema = z.object({
   source: z.enum(["control-socket", "wechat-codex"]).optional(),
@@ -25,10 +27,11 @@ const MessageSchema = z.object({
   requestId: z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/),
   deliveryMode: DeliveryModeSchema.optional(),expectedTurnId:TurnIdSchema.optional(),
 }).strict();
+const InterruptSchema = z.object({ requestId: z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/), turnId: TurnIdSchema }).strict();
 const CancelSchema = z.object({cancelCommandId:z.string().min(1).max(64)}).strict();
 const RequestIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/);
-function webRequestId(requestId: string): string {
-  return "web_" + createHash("sha256").update(JSON.stringify(["session-message", requestId])).digest("hex");
+function webRequestId(requestId: string, operation: "session-message" | "session-interrupt" = "session-message"): string {
+  return "web_" + createHash("sha256").update(JSON.stringify([operation, requestId])).digest("hex");
 }
 
 interface SessionRouterOptions {
@@ -147,6 +150,22 @@ export function createSessionRouter(hub: NodeHub, commands: CommandService, opti
       ...target.data, action: "send", prompt: body.data.prompt, requestId,deliveryMode:body.data.deliveryMode,expectedTurnId:body.data.expectedTurnId,
     }, 0, assertDispatchAllowed,undefined,res.locals.commandAuthority);
     res.status(["admitting","queued","pending"].includes(command.status) ? 202 : 200).json(publicCommand(command));
+  });
+  router.post("/:nodeId/:sessionId/interrupt", async (req, res) => {
+    const target = TargetSchema.safeParse(req.params);
+    const body = InterruptSchema.safeParse(req.body);
+    if (!req.is("application/json") || !target.success || !body.success) {
+      res.status(400).json({ error: "Invalid session interrupt request" });
+      return;
+    }
+    if (target.data.nodeId === WECHAT_NODE_ID) {
+      res.status(403).json({ code: "session_read_only", error: "WeChat Codex history is read-only" });
+      return;
+    }
+    const assertDispatchAllowed = res.locals.assertConsoleDispatch as (() => Promise<void>) | undefined;
+    const command = await commands.submit({ ...target.data, action: "interrupt", expectedTurnId: body.data.turnId,
+      requestId: webRequestId(body.data.requestId, "session-interrupt") }, INTERRUPT_RESULT_WAIT_MS, assertDispatchAllowed, undefined, res.locals.commandAuthority);
+    res.status(command.status === "pending" ? 202 : 200).json(publicCommand(command));
   });
   return router;
 }

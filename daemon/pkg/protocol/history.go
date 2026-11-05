@@ -25,6 +25,7 @@ const (
 	HistorySourceControl     = "control-socket"
 	HistorySourceDesktop     = "codex-desktop"
 	HistorySourceTerminal    = "terminal-transcript"
+	HistorySourceClaude      = "claude-transcript"
 )
 
 type ReadHistoryMessage struct {

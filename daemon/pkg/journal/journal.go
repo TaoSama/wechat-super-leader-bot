@@ -293,7 +293,7 @@ func (j *Journal) Begin(cmd protocol.ControllerCommandMessage) (Entry, bool, err
 		if records.Stats().KeyN >= MaxRecords || pending.Stats().KeyN >= MaxPending {
 			return ErrCapacity
 		}
-		if cmd.Action == protocol.ActionSend && (cmd.SendRoute == protocol.RouteDesktopOwner || cmd.SendRoute == protocol.RouteAppServerResume) {
+		if cmd.Action == protocol.ActionSend && dispatchRoute(cmd.SendRoute) {
 			messageID, err := protocol.NewDispatchID()
 			if err != nil {
 				return err
