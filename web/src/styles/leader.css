@@ -115,6 +115,7 @@
 .execution-details > summary { list-style: none; cursor: pointer; padding: 18px 20px 14px; }
 .execution-details > summary::-webkit-details-marker { display: none; }
 .execution-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.automation-badges { display: inline-flex; align-items: center; gap: 6px; }
 .execution-summary > strong { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; margin-right: auto; }
 .execution-summary > svg { flex-shrink: 0; color: var(--text-muted); transition: transform 180ms; }
 .execution-details[open] .execution-summary > svg { transform: rotate(180deg); }

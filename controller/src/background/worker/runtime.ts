@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { WorkerInput, WorkerInspectOptions, WorkerRuntime, WorkerRuntimeOptions, WorkerRuntimeStatus } from "./contracts.js";
+import { DEFAULT_WORKER_EXECUTOR, type WorkerExecutor, type WorkerExecutorKind, type WorkerInput, type WorkerInspectOptions,
+  type WorkerRuntime, type WorkerRuntimeOptions, type WorkerRuntimeStatus } from "./contracts.js";
 import { WorkerStorage, alive, hash, readJson, validId, writeJson, type Receipt } from "./storage.js";
 import { CodexCliExecutor } from "./executor.js";
 import { WorkerExecutionFailure } from "./process.js";
@@ -26,7 +27,7 @@ function publicStatus(receipt: Receipt): WorkerRuntimeStatus {
 /** Short lived persistent threads; scheduling, retention and delivery belong to the caller. */
 export class CodexWorkerRuntime implements WorkerRuntime {
   private readonly store: WorkerStorage;
-  private readonly executor;
+  private readonly executor: WorkerExecutor;
   private readonly active: Map<string, ActiveExecution>;
   private readonly processState: ProcessState;
   private readonly maxConcurrent: number;
@@ -64,12 +65,13 @@ export class CodexWorkerRuntime implements WorkerRuntime {
       return this.inspect(input.workerId, input.invocationId);
     }
     this.store.claim(dir, input.invocationId);
+    const threadId = this.resumableThread(dir);
     const receipt: Receipt = { workerId: input.workerId, invocationId: input.invocationId, inputHash,
       ownerPid: process.pid, status: "queued", summary: "后台会话已排队，等待执行容量。", attachments: [],
       queuedAt: Date.now(), pendingInput: input,
       launchDeadlineAt: input.launchDeadlineAt ?? UNBOUNDED_LAUNCH_DEADLINE,
       ...(input.executionDeadlineAt === undefined ? {} : { executionDeadlineAt: input.executionDeadlineAt }),
-      ...(this.store.state(dir)?.threadId ? { threadId: this.store.state(dir)!.threadId } : {}) };
+      ...(threadId ? { threadId } : {}) };
     try {
       writeJson(path.join(dir, "output-schema.json"), outputSchema);
       this.store.save(dir, receipt);
@@ -237,12 +239,15 @@ export class CodexWorkerRuntime implements WorkerRuntime {
         return;
       }
       timer = setTimeout(() => abort.abort(), timeoutMs);
+      // A receipt queued before an executor switch may carry another CLI's session ID.
+      const threadId = this.resumableThread(dir);
+      if (threadId) receipt.threadId = threadId; else delete receipt.threadId;
       const settings = this.options.runtimeSettings?.();
       const text = await this.executor.execute({ workspace: path.join(dir, "workspace"), home: path.join(dir, "home"),
-        schemaPath: path.join(dir, "output-schema.json"), prompt: workerPrompt(input, settings?.systemPrompt), threadId: receipt.threadId,
+        schemaPath: path.join(dir, "output-schema.json"), prompt: workerPrompt(input, settings?.systemPrompt), threadId,
         ...(settings ? { model: settings.model, reasoningEffort: settings.reasoningEffort } : {}),
         signal: abort.signal,
-        onThread: async threadId => { this.store.setThread(dir, threadId); receipt.threadId = threadId; this.store.save(dir, receipt); },
+        onThread: async threadId => { this.store.setThread(dir, threadId, this.executorKind); receipt.threadId = threadId; this.store.save(dir, receipt); },
         onProcess: async pid => {
           receipt.processPid = pid; receipt.summary = "后台会话正在执行。";
           writeJson(slot, { ...readJson<Record<string, unknown>>(slot), processPid: pid });
@@ -279,6 +284,8 @@ export class CodexWorkerRuntime implements WorkerRuntime {
     }
   }
 
+  private get executorKind(): WorkerExecutorKind { return this.executor.kind ?? DEFAULT_WORKER_EXECUTOR; }
+  private resumableThread(dir: string): string | undefined { return this.store.resumableThread(dir, this.executorKind); }
   private validateTimeout(value: number): void {
     if (!Number.isSafeInteger(value) || value <= 0 || value > MAX_TIMEOUT_MS) throw new Error("Invalid worker timeout budget");
   }

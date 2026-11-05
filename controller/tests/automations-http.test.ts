@@ -5,15 +5,15 @@ import { AutomationService, MemoryAutomationRepository, createAutomationRouter }
 
 const servers: Server[] = [];
 afterEach(async () => { await Promise.all(servers.splice(0).map(server => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())))); });
-async function appFixture() {
+async function appFixture(runExecutor?: () => Promise<"codex" | "claude" | undefined>) {
   let now = Date.parse("2026-10-18T00:00:00Z");
   const repository = new MemoryAutomationRepository();
-  const service = new AutomationService({ repository, now: () => now, runner: {
+  const service = new AutomationService({ repository, now: () => now, validateBackground: async () => undefined, runner: {
     start: async () => ({ status: "unknown", error: "not configured" }), inspect: async () => ({ status: "unknown", error: "not configured" }),
   } });
   const app = express(); app.use(express.json());
   app.use("/v1/automations", createAutomationRouter(service, {
-    allowed: () => new Set(["allowed", "second-user"]), now: () => now,
+    allowed: () => new Set(["allowed", "second-user"]), now: () => now, runExecutor,
     authority: async (req, chatId) => req.headers["x-test-user-action"] === "current"
       ? { chatId, currentMessageId: "current-user-message", explicitCurrentTurnAuthorization: true } : null,
   }));
@@ -24,7 +24,11 @@ async function appFixture() {
   const create = (chatId = "allowed", consent = true) => fetch(`${origin}/v1/automations`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": "test-create", ...(consent ? { "x-test-user-action": "current" } : {}) },
     body: JSON.stringify({ chatId, input: { kind: "reminder", title: "test reminder", text: "hello", timing: { type: "at", at: "2026-10-18T01:00:00Z" }, timezone: "Asia/Shanghai" } }),
   });
-  return { origin, create, advanceTo: (value: number) => { now = value; }, tick: () => service.tick() };
+  const createBackground = () => fetch(`${origin}/v1/automations`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": "test-background", "x-test-user-action": "current" },
+    body: JSON.stringify({ chatId: "allowed", input: { kind: "background", title: "background check", background: { prompt: "compare results" },
+      timing: { type: "at", at: "2026-10-18T01:00:00Z" }, timezone: "Asia/Shanghai" } }),
+  });
+  return { origin, create, createBackground, advanceTo: (value: number) => { now = value; }, tick: () => service.tick() };
 }
 
 describe("automation HTTP management", () => {
@@ -70,5 +74,23 @@ describe("automation HTTP management", () => {
     expect(items[0]).not.toHaveProperty("claimOwner");
     expect(items[0]).not.toHaveProperty("claimUntil");
     expect(items[0]).not.toHaveProperty("bodyClearedAt");
+  });
+  it("labels runs with their background executor only for background schedules", async () => {
+    let asked = 0;
+    const f = await appFixture(async () => { asked++; return "claude"; });
+    const { schedule } = await (await f.create()).json();
+    f.advanceTo(Date.parse("2026-10-18T01:00:00Z") + 1);
+    await f.tick();
+    const { items } = await (await fetch(`${f.origin}/v1/automations/${schedule.id}/runs?chatId=allowed`)).json();
+    // A reminder never ran on a background executor.
+    expect(items[0]).not.toHaveProperty("executor");
+    expect(asked).toBe(0);
+    const background = await f.createBackground();
+    expect(background.status).toBe(201);
+    const created = (await background.json()).schedule;
+    await f.tick();
+    const runs = (await (await fetch(`${f.origin}/v1/automations/${created.id}/runs?chatId=allowed`)).json()).items;
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ executor: "claude" });
   });
 });

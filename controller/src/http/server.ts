@@ -286,6 +286,7 @@ export class ControllerServer {
     apiRouter.use("/source-automations", createSourceAutomationRouter(this.hub));
     apiRouter.use("/automations", createAutomationRouter(this.taskNotifications.automations, {
       allowed: () => this.config.allowedChatIds, now: this.now,
+      runExecutor: run => this.taskNotifications.runExecutor(run),
       authority: async (req, chatId) => ({ chatId, currentMessageId: String(req.headers["idempotency-key"] || crypto.randomUUID()), explicitCurrentTurnAuthorization: true, source: "admin_api" }),
     }));
     apiRouter.use("/sessions", createSessionRouter(this.hub, this.commands, {

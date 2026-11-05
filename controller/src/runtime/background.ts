@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import type pg from "pg";
 import { BackgroundService, MemoryBackgroundRepository, PostgresBackgroundRepository, initBackgroundTables } from "../background/index.js";
-import { ClaudeCliExecutor, CodexWorkerRuntime } from "../background/worker/index.js";
+import { ClaudeCliExecutor, CodexWorkerRuntime, verifyClaudeSandbox } from "../background/worker/index.js";
 import type { AutomationRepository, AutomationRunner, Schedule } from "../automations/contracts.js";
 import type { NodeHub } from "../nodes/hub.js";
 import type { Config } from "./config.js";
 import { BackgroundArtifacts, BACKGROUND_ARTIFACT_RETENTION_MS } from "./background-artifacts.js";
-import type { LocalSettingsService } from "../settings/local-service.js";
+import { executorModelChoice, type LocalSettingsService } from "../settings/local-service.js";
 
 const ARTIFACT_MAINTENANCE_INTERVAL_MS = 60_000;
 
@@ -25,10 +25,12 @@ export class BackgroundExecution {
     const claude = config.background.claude;
     this.runtime = new CodexWorkerRuntime({ ...config.background,
       ...(claude ? { executor: new ClaudeCliExecutor({ artifactRoot: config.background.artifactRoot, claudePath: claude.path,
-        model: claude.model, apiKey: claude.apiKey, oauthToken: claude.oauthToken }) } : {}),
+        privateRoots: claude.privateRoots, model: claude.model, baseUrl: claude.baseUrl,
+        apiKey: claude.apiKey, authToken: claude.authToken, oauthToken: claude.oauthToken }) } : {}),
       ...(settings ? { runtimeSettings: () => {
         const view = settings.capture();
-        return { ...view.model("background", config.background!.model), systemPrompt: view.prompt("background-worker") };
+        const fallback = config.background!.model;
+        return { ...executorModelChoice(view.model("background", fallback), !!claude, fallback), systemPrompt: view.prompt("background-worker") };
       } } : {}),
       onError: () => console.warn("Background execution requires reconciliation; durable receipt retained") });
     this.artifacts = new BackgroundArtifacts({ root: config.background.artifactRoot,
@@ -36,6 +38,7 @@ export class BackgroundExecution {
       secret: createHash("sha256").update(`background-artifacts:${config.controllerToken}`).digest("hex"),
       repository, allowed: () => config.allowedChatIds, now });
     this.service = new BackgroundService({ repository, runtime: this.runtime, sources: hub, now,
+      executorKind: config.background.executorKind,
       isAllowed: chatId => config.allowedChatIds.has(chatId), isStopping: () => this.stopping,
       turnTimeoutMs: config.background.timeoutMs,
       getScheduleStatus: async (scheduleId, chatId) => (await schedules.get(scheduleId, chatId))?.status,
@@ -52,7 +55,15 @@ export class BackgroundExecution {
       onError: (_error, context) => console.warn("Background observation deferred", { context }),
     });
   }
-  async initialize(): Promise<void> { if (this.pool) await initBackgroundTables(this.pool); }
+  async initialize(): Promise<void> {
+    const claude = this.config.background!.claude;
+    // Fail closed before accepting work: startup aborts when Bash could not be isolated.
+    if (claude) await verifyClaudeSandbox({ claudePath: claude.path, artifactRoot: this.config.background!.artifactRoot,
+      privateRoots: claude.privateRoots });
+    if (this.pool) await initBackgroundTables(this.pool);
+  }
+  /** The executor that runs newly started background turns. */
+  get executorKind() { return this.config.background!.executorKind; }
   wrap(session: AutomationRunner): AutomationRunner {
     const allowed = (schedule: Schedule) => this.config.allowedChatIds.has(schedule.chatId);
     return {

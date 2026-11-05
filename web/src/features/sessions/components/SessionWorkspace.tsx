@@ -22,6 +22,8 @@ import { useSessionInterrupt } from "../useSessionInterrupt";
 import { SessionApprovals } from "./SessionApprovals";
 import { useSessionApproval } from "../useSessionApproval";
 import { runningTurnId } from "../history-turns";
+import { AgentBadge } from "./AgentBadge";
+import { sessionAgentKind } from "../agent-kind";
 
 interface Props {
   data: ControlPlaneStatusResponse;
@@ -116,7 +118,7 @@ export function SessionWorkspace({ data, nodes, stale, onAuthFailure, active = t
             <button type="button" className="mobile-back" aria-label="返回会话列表" onClick={backToList}><ArrowLeft size={16} aria-hidden="true" /></button>
             <div className="session-header-copy">
               <div className="detail-title"><h2 ref={headingRef} tabIndex={-1} title={selected.title || "未命名会话"}>{selected.title || "未命名会话"}</h2><SessionStatus status={selectedObservation!.executionStatus} showLabel /></div>
-              <div className="detail-subline"><span title={selected.cwd}>{projectName(selected.cwd)}</span><span className="session-machine">{selected.nodeId}</span></div>
+              <div className="detail-subline"><span title={selected.cwd}>{projectName(selected.cwd)}</span><span className="session-machine">{selected.nodeId}</span><AgentBadge kind={sessionAgentKind(selected)} /></div>
             </div>
             <button type="button" className="session-details-button icon-button" aria-label="会话详情" aria-haspopup="dialog" onClick={() => setDetailsOpen(true)}><Ellipsis size={16} aria-hidden="true" /></button>
           </div>

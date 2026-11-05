@@ -1,3 +1,7 @@
+export const WORKER_EXECUTOR_KINDS = ["codex", "claude"] as const;
+export type WorkerExecutorKind = typeof WORKER_EXECUTOR_KINDS[number];
+export const DEFAULT_WORKER_EXECUTOR: WorkerExecutorKind = "codex";
+
 export type WorkerStatus = "queued" | "running" | "completed" | "waiting" | "needs_attention" | "failed" | "unknown";
 
 export interface WorkerInput {
@@ -67,6 +71,8 @@ export interface WorkerExecutionRequest {
 }
 
 export interface WorkerExecutor {
+  /** Session IDs are only resumable by the executor kind that created them; unset means Codex. */
+  readonly kind?: WorkerExecutorKind;
   execute(request: WorkerExecutionRequest): Promise<string>;
 }
 

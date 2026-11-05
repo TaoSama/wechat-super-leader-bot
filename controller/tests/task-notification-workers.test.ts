@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { TaskNotifications } from "../src/runtime/task-notifications.js";
+import { CreateScheduleSchema } from "../src/automations/index.js";
 import { MemoryStore } from "../src/store/memory.js";
 import { NodeHub } from "../src/nodes/hub.js";
 import { CommandService } from "../src/commands/service.js";
@@ -30,6 +34,28 @@ function fixture(model?: LeaderModel, fallback = false) {
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe("independent task notification workers", () => {
+  it("labels background schedules in the console snapshot with the configured executor", async () => {
+    const root = mkdtempSync(join(tmpdir(), "task-notification-executor-"));
+    try {
+      const config: Config = { port: 8790, host: "localhost", controllerToken: "test", nodeTokens: {}, tokenToNode: new Map(),
+        allowedChatIds: new Set([CHAT]), persistenceMode: "memory", commandTtlSeconds: 300,
+        background: { executorKind: "codex", root: join(root, "workers"), artifactRoot: join(root, "artifacts"), model: "fixture",
+          apiKey: "fixture", baseUrl: "http://127.0.0.1", codexPath: "unused", timeoutMs: 300_000, maxConcurrent: 2 } };
+      const store = new MemoryStore();
+      const hub = new NodeHub(store, config.tokenToNode);
+      const runtime = new TaskNotifications(config, store, hub, new CommandService(store, hub, 300), undefined, Date.now, vi.fn());
+      const authority = { chatId: CHAT, explicitCurrentTurnAuthorization: true };
+      const at = new Date(Date.now() + 3_600_000).toISOString();
+      await runtime.automations.create(CreateScheduleSchema.parse({ kind: "background", title: "后台", background: { prompt: "比较结果" },
+        timezone: "Asia/Shanghai", timing: { type: "at", at } }), { ...authority, currentMessageId: "background" });
+      await runtime.automations.create({ kind: "reminder", title: "提醒", text: "hi", timezone: "Asia/Shanghai",
+        timing: { type: "at", at }, businessTtlMs: 600_000, retention: "latest" }, { ...authority, currentMessageId: "reminder" });
+      const items = (await runtime.snapshot()).automations as { kind: string; executor?: string }[];
+      expect(items.find(item => item.kind === "background")).toMatchObject({ executor: "codex" });
+      expect(items.find(item => item.kind === "reminder")).not.toHaveProperty("executor");
+      await runtime.stop();
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
   it("keeps a waiting result interested beyond the bounded recent result list", async () => {
     vi.useFakeTimers(); vi.setSystemTime(START);
     const { runtime } = fixture();

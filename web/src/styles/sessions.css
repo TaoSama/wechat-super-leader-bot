@@ -40,6 +40,10 @@
 .session-compact-status.state-active, .session-compact-status.state-busy, .session-compact-status.state-running { color: color-mix(in srgb, var(--status-running) 60%, var(--text)); }
 .session-compact-status.state-blocked, .session-compact-status.state-awaiting_input { color: color-mix(in srgb, var(--warning) 60%, var(--text)); }
 .session-compact-status.state-error { color: color-mix(in srgb, var(--danger) 60%, var(--text)); }
+/* Codex or Claude Code label; quiet so it never competes with the execution status. */
+.agent-badge { flex-shrink: 0; border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; font-size: 11px; line-height: 18px; color: var(--text-secondary); white-space: nowrap; }
+.agent-badge.agent-claude { border-color: color-mix(in srgb, var(--warning) 45%, transparent); color: color-mix(in srgb, var(--warning) 70%, var(--text)); }
+.agent-badge.agent-codex { border-color: color-mix(in srgb, var(--status-running) 45%, transparent); color: color-mix(in srgb, var(--status-running) 70%, var(--text)); }
 .session-choice { display: flex; align-items: flex-start; text-align: left; gap: 8px; width: 100%; min-height: 44px; padding: 8px 12px 8px 8px; border: 0; border-radius: 8px; margin-bottom: 4px; }
 .session-choice:hover { background: var(--sidebar-hover); }
 .session-choice.selected { background: var(--sidebar-selected); }

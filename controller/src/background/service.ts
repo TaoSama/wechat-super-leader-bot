@@ -40,7 +40,8 @@ export class BackgroundService {
     return this.repository.create({ id: randomUUID(), runId: run.id, scheduleId: run.scheduleId,
       chatId: run.chatId, scheduledAt: run.scheduledAt, spec: parsed, createdAt: now, expiresAt: now + WORKER_LIFETIME_MS,
       deadlineAt: run.scheduledAt + parsed.deadlineMs, phase: "observing", checkCount: 0, nextCheckAt: now,
-      observations: [], prompts: [], invocations: [], leaseUntil: 0, updatedAt: now });
+      observations: [], prompts: [], invocations: [], leaseUntil: 0, updatedAt: now,
+      ...(this.options.executorKind ? { executorKind: this.options.executorKind } : {}) });
   }
   async inspect(run: BackgroundRun, spec?: BackgroundSpec): Promise<RunnerOutcome> {
     const worker = await this.repository.getByRun(run.id);
@@ -287,7 +288,11 @@ export class BackgroundService {
     worker = await save(current => {
       if (cancelled && !this.stopping()) current.cancelRequestedAt ??= this.now();
       canLaunch = !this.stopping() && this.allowed(current.chatId) && !current.cancelRequestedAt && this.now() < current.expiresAt;
-      if (canLaunch) return;
+      if (canLaunch) {
+        // A worker that lives through an executor switch runs this turn on the current executor.
+        if (this.options.executorKind) current.executorKind = this.options.executorKind;
+        return;
+      }
       current.invocations = current.invocations.filter(item => item.id !== invocation.id);
       delete current.activeInvocationId;
       current.phase = !current.initialOutcome ? "observing" : current.initialOutcome.status === "failed" ? "failed" : "completed";

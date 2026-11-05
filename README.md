@@ -32,7 +32,7 @@ flowchart TB
 - 会话忙或离线时排队，恢复后按序投递，未发送内容可取消。
 - 状态不明时保留原记录，不换 ID 重发。
 - 后台定时任务的汇报格式可通过 `update_automation` 更新，仅影响后续轮次，详见 [docs/automation-prompt-updates.md](docs/automation-prompt-updates.md)。
-- 后台任务默认由 Codex 执行；设置 `BACKGROUND_EXECUTOR=claude` 可改用 Claude Code（opt-in，生产启用前见 [docs/production-deployment.md](docs/production-deployment.md#claude-code-后台执行器opt-in)）。
+- 后台任务默认由 Codex 执行；`BACKGROUND_EXECUTOR=claude` 改用 Claude Code，生产编排默认启用，微信主对话仍用 Codex，见 [docs/production-deployment.md](docs/production-deployment.md#claude-code-后台执行器)。
 
 ## 控制台
 
@@ -40,6 +40,7 @@ flowchart TB
 - Cookie 仅可读取工作台数据，或向指定会话发送、取消排队内容；写请求还需同源 `Origin`、intent header 和会话资格。
 - 回执和工具日志隐藏登录凭证；投递重试只复用原链接，不重新签发。
 - 「主微信对话」展示当前 Codex Task 的原生历史，上下文由 Codex 原生 compact 管理，内容按规则脱敏并标记裁剪。
+- 会话列表、会话详情、定时任务卡片和执行记录标注 Codex / Claude Code 类型。
 
 ## 本地开发
 
@@ -66,7 +67,7 @@ node gateway/dist/index.js --run
 
 - `.runtime/` 下的配置、Daemon 状态、微信账号和 Gateway 状态均为私有数据，不入库。
 - Daemon 默认只读；发送需显式配置 desktop socket 或 CLI 终端。owner 不符或失联时降级为只读，不创建替代会话。
-- 已有 Claude Code 会话默认关闭；Daemon 传 `--claude-projects-root <配置目录>/projects` 启用（可选 `--claude-path`、`--claude-permission-mode`，默认 `dontAsk`），仅续写近期无活动的会话。
+- 已有 Claude Code 会话默认关闭；Daemon 传 `--claude-projects-root <配置目录>/projects` 启用（可选 `--claude-path`、`--claude-permission-mode`，默认 `dontAsk`），仅续写近期无活动的会话；服务重装步骤见 [docs/production-deployment.md](docs/production-deployment.md#节点启用-claude-code-会话)。
 
 ## 部署
 

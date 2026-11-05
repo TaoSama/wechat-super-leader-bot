@@ -17,6 +17,8 @@ export interface AutomationRouterOptions {
   /** Must validate trusted current user intent; request/model-supplied booleans are not authority. */
   authority: (req: Request, chatId: string) => Promise<CreationAuthority | null>;
   now?: () => number;
+  /** Which background executor ran a run; session and reminder runs return undefined. */
+  runExecutor?: (run: AutomationRun) => Promise<"codex" | "claude" | undefined>;
 }
 
 /** Keep worker claims and retention bookkeeping private to the controller. */
@@ -78,8 +80,13 @@ export function createAutomationRouter(service: AutomationService, options: Auto
     const query = QuerySchema.safeParse(req.query), id = IdSchema.safeParse(req.params.id);
     if (!query.success || !id.success) { res.status(400).json({ error: "Invalid schedule query" }); return; }
     if (!allowed(query.data.chatId, res)) return;
-    if (!await service.repository.get(id.data, query.data.chatId)) { res.status(404).json({ error: "Schedule not found" }); return; }
-    res.json({ items: (await service.repository.listRuns(id.data, query.data.chatId)).map(publicRun) });
+    const schedule = await service.repository.get(id.data, query.data.chatId);
+    if (!schedule) { res.status(404).json({ error: "Schedule not found" }); return; }
+    const runs = await service.repository.listRuns(id.data, query.data.chatId);
+    res.json({ items: await Promise.all(runs.map(async run => {
+      const executor = schedule.kind === "background" ? await options.runExecutor?.(run) : undefined;
+      return executor ? { ...publicRun(run), executor } : publicRun(run);
+    })) });
   });
   router.post("/:id/status", async (req, res) => {
     const body = UpdateSchema.safeParse(req.body), id = IdSchema.safeParse(req.params.id);

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { ClaudeCliExecutor, CodexWorkerRuntime, type WorkerInput, type WorkerRuntimeStatus } from "../../../src/background/worker/index.js";
+import { CLAUDE_DENIED_DOMAINS, claudeDeniedHosts } from "../../../src/background/worker/claude-network.js";
 
 // Process contract checks include interpreter startup and durable filesystem I/O.
 const CLI_EXECUTION_TIMEOUT_MS = 10_000;
@@ -25,7 +26,8 @@ async function wait(runtime: CodexWorkerRuntime, input: WorkerInput): Promise<Wo
   throw new Error("Child process did not stop within test budget");
 }
 
-function fixture(mode = "complete", timeoutMs = CLI_EXECUTION_TIMEOUT_MS) {
+function fixture(mode = "complete", timeoutMs = CLI_EXECUTION_TIMEOUT_MS, consoleModel = "gpt-ignored",
+  credential: { apiKey?: string; authToken?: string; baseUrl?: string } = { apiKey: API_KEY }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-worker-test-")); roots.push(root);
   const script = path.join(root, "claude");
   fs.writeFileSync(script, `#!${process.execPath}
@@ -37,7 +39,8 @@ process.stdin.on('data', chunk => input += chunk);
 process.stdin.on('end', () => {
  fs.writeFileSync('observed.json', JSON.stringify({args, input, home: process.env.HOME, configDir: process.env.CLAUDE_CONFIG_DIR,
    apiKey: process.env.ANTHROPIC_API_KEY, oauth: process.env.CLAUDE_CODE_OAUTH_TOKEN, scrub: process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB,
-   unexpected: process.env.WORKER_TEST_SECRET}));
+   unexpected: process.env.WORKER_TEST_SECRET, tmp: process.env.CLAUDE_CODE_TMPDIR, tmpdir: process.env.TMPDIR, baseUrl: process.env.ANTHROPIC_BASE_URL,
+   authToken: process.env.ANTHROPIC_AUTH_TOKEN}));
  process.stderr.write('provider said: ' + process.env.ANTHROPIC_API_KEY + '\\n');
  if (mode === 'hang') { setInterval(() => {}, 1000); return; }
  const emit = event => console.log(JSON.stringify({ session_id: '${SESSION_ID}', ...event }));
@@ -54,10 +57,12 @@ process.stdin.on('end', () => {
   const errors: Error[] = [];
   const options = { root: path.join(root, "runtime"), artifactRoot: path.join(root, "artifacts"), model: "claude-cli-default", timeoutMs,
     onError: (error: Error) => { errors.push(error); } };
-  const executor = new ClaudeCliExecutor({ artifactRoot: options.artifactRoot, claudePath: script, model: "sonnet", apiKey: API_KEY });
+  const executor = new ClaudeCliExecutor({ artifactRoot: options.artifactRoot, privateRoots: [options.root], claudePath: script,
+    model: "sonnet", ...credential, // Peer names do not resolve here, as on a host outside the Compose network.
+    deniedHosts: () => claudeDeniedHosts(async () => { throw Object.assign(new Error("not found"), { code: "ENOTFOUND" }); }) });
   const input = { workerId: randomUUID(), invocationId: randomUUID(), task: "Check sources without writing", input: { status: "running" } };
   const runtime = new CodexWorkerRuntime({ ...options, executor,
-    runtimeSettings: () => ({ model: "gpt-ignored", reasoningEffort: "high", systemPrompt: "Claude后台SP" }) });
+    runtimeSettings: () => ({ model: consoleModel, reasoningEffort: "high", systemPrompt: "Claude后台SP" }) });
   const workspace = path.join(options.root, "workers", input.workerId, "workspace");
   const observed = () => JSON.parse(fs.readFileSync(path.join(workspace, "observed.json"), "utf8"));
   const flag = (args: string[], name: string) => args[args.indexOf(name) + 1];
@@ -65,9 +70,17 @@ process.stdin.on('end', () => {
 }
 
 describe("Claude CLI process contract", () => {
-  it("requires a credential", () => {
+  it("requires exactly one credential", () => {
     expect(() => new ClaudeCliExecutor({ artifactRoot: "/data/artifacts" })).toThrow(/credential/);
+    expect(() => new ClaudeCliExecutor({ artifactRoot: "/data/artifacts", apiKey: "a", authToken: "b" })).toThrow(/exactly one/);
   });
+  it("sends a gateway bearer token to the configured Anthropic-compatible endpoint", async () => {
+    const f = fixture("complete", CLI_EXECUTION_TIMEOUT_MS, "gpt-ignored", { authToken: API_KEY, baseUrl: "https://gateway.test" });
+    await f.runtime.start(f.input);
+    expect((await wait(f.runtime, f.input)).status).toBe("completed");
+    expect(f.observed()).toMatchObject({ authToken: API_KEY, baseUrl: "https://gateway.test" });
+    expect(f.observed().apiKey).toBeUndefined();
+  }, CLI_TEST_TIMEOUT_MS);
   it("accepts schema-valid structured output, records the session and resumes it", async () => {
     process.env.WORKER_TEST_SECRET = "must-not-inherit";
     const f = fixture();
@@ -109,15 +122,41 @@ describe("Claude CLI process contract", () => {
     const settings = JSON.parse(f.flag(args, "--settings"));
     const canonicalWorkspace = fs.realpathSync(f.workspace);
     const home = path.join(path.dirname(canonicalWorkspace), "home");
-    expect(settings.sandbox).toEqual({ enabled: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false });
+    const temp = settings.sandbox.filesystem.allowRead[1];
+    const deniedDomains = settings.sandbox.network.deniedDomains;
+    // Peer and container names, loopback and metadata spellings, and this host's own addresses (IP literals bypass name checks).
+    expect(deniedDomains).toEqual(expect.arrayContaining([...CLAUDE_DENIED_DOMAINS, "127.0.0.1", "[::1]", "super-leader-gateway",
+      ...Object.values(os.networkInterfaces()).flatMap(items => items ?? []).map(item => item.family === "IPv6" ? `[${item.address.split("%")[0]}]` : item.address)]));
+    expect(settings.permissions.deny).toEqual(expect.arrayContaining(deniedDomains.map((host: string) => `WebFetch(domain:${host})`)));
+    expect(settings.sandbox).toEqual({ enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true,
+      allowUnsandboxedCommands: false, enableWeakerNestedSandbox: false,
+      network: { allowedDomains: ["*"], deniedDomains },
+      // Every shared temp entry stays closed; only this worker's turn-scoped temp directory is reopened.
+      filesystem: { denyRead: [f.options.artifactRoot, f.options.root, path.join(os.tmpdir(), "*")], allowRead: [canonicalWorkspace, temp],
+        allowWrite: [temp] } });
+    expect(temp).toBe(path.join(os.tmpdir(), `slc-${path.basename(path.dirname(canonicalWorkspace)).slice(0, 12)}`));
+    // Longer paths make the CLI hand sandboxed Bash the shared temp root instead.
+    if (os.tmpdir() === "/tmp") expect(Buffer.byteLength(path.join(temp, "claude-1000"))).toBeLessThanOrEqual(44);
+    expect(f.observed()).toMatchObject({ tmp: temp, tmpdir: temp });
+    // The turn-scoped temp directory is removed after the CLI exits.
+    expect(fs.existsSync(temp)).toBe(false);
     expect(settings.disableAllHooks).toBe(true);
-    expect(settings.permissions.allow).toContain(`Edit(/${canonicalWorkspace}/**)`);
-    expect(settings.permissions.allow).not.toContain("Edit");
+    expect(settings.permissions.allow).toEqual(["Bash", "WebFetch", "WebSearch",
+      `Read(/${canonicalWorkspace}/**)`, `Edit(/${canonicalWorkspace}/**)`]);
+    // Unscoped file tools would read sibling workers and controller state.
+    for (const tool of ["Read", "Glob", "Grep", "Edit", "Write"]) expect(settings.permissions.allow).not.toContain(tool);
     for (const root of [home, f.options.artifactRoot, "/etc/super-leader", "/proc"]) {
       expect(settings.permissions.deny).toEqual(expect.arrayContaining([`Read(/${root}/**)`, `Edit(/${root}/**)`]));
     }
     expect(f.flag(args, "--allowedTools")).toBe(settings.permissions.allow.join(","));
   }, CLI_TEST_TIMEOUT_MS);
+  it.each([["opus", "opus"], ["claude-opus-4-1", "claude-opus-4-1"], ["claude-cli-default", "sonnet"], ["gpt-5.5", "sonnet"]])(
+    "uses the console model %s only when it names a Claude model", async (consoleModel, expected) => {
+      const f = fixture("complete", CLI_EXECUTION_TIMEOUT_MS, consoleModel);
+      await f.runtime.start(f.input);
+      await wait(f.runtime, f.input);
+      expect(f.flag(f.observed().args, "--model")).toBe(expected);
+    }, CLI_TEST_TIMEOUT_MS);
   it.each(["invalid", "missing", "error", "crash"])("does not accept an unverified Claude result (%s)", async mode => {
     const f = fixture(mode);
     await f.runtime.start(f.input);

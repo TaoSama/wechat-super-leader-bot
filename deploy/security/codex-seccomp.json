@@ -1266,6 +1266,48 @@
     },
     {
       "names": [
+        "clone"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        {
+          "index": 0,
+          "value": 805437457,
+          "op": "SCMP_CMP_EQ"
+        }
+      ],
+      "comment": "Claude Code 2.1.311 bubblewrap with unrestricted proxy networking: SIGCHLD | NEWNS | NEWUSER | NEWPID (no NEWIPC)."
+    },
+    {
+      "names": [
+        "clone"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        {
+          "index": 0,
+          "value": 1879179281,
+          "op": "SCMP_CMP_EQ"
+        }
+      ],
+      "comment": "Claude Code 2.1.311 bubblewrap shell namespace: the same shape plus NEWNET; traffic leaves only through the sandbox proxy."
+    },
+    {
+      "names": [
+        "unshare"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        {
+          "index": 0,
+          "value": 537001984,
+          "op": "SCMP_CMP_EQ"
+        }
+      ],
+      "comment": "Claude Code apply-seccomp helper: NEWPID | NEWNS inside the nested user namespace it just created; needs CAP_SYS_ADMIN there."
+    },
+    {
+      "names": [
         "mount",
         "pivot_root"
       ],

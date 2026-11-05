@@ -324,30 +324,172 @@ docker-compose --env-file /dev/null --profile wechat \
 旧版 actionlint（如 1.7.12）尚未识别 GitHub 新增的 `concurrency.queue`；可针对这一项
 使用 `-ignore 'unexpected key "queue"'` 检查其余规则，并以 GitHub 实际工作流解析为准。
 
-## Claude Code 后台执行器（opt-in）
+## Claude Code 后台执行器
 
-后台任务默认使用 Codex（`BACKGROUND_EXECUTOR` 未设置或为 `codex`）；生产镜像和
-`compose.production.yaml` 不传递 Claude 相关变量，因此合并本功能不改变生产行为。
-设置 `BACKGROUND_EXECUTOR=claude` 后，Controller 以 `claude -p` 执行后台任务：
+生产 `compose.production.yaml` 默认 `BACKGROUND_EXECUTOR=claude`：后台任务、`kind=background`
+的定时任务和 leader 的后台追问/延期工具都由 Controller 容器内的 `claude -p` 子进程执行。
+微信主对话 leader 不受影响，仍使用 Codex Task；`kind=session` 定时任务仍发到创建时冻结的节点会话
+（可以是 Codex 会话，也可以是节点上的 Claude Code 会话）。回滚只需在 `.runtime/controller.env`
+设 `BACKGROUND_EXECUTOR=codex` 后重新发布。
+
+### 合并后首次发布前
+
+这个默认值会让下一次发布直接切到 Claude，不需要改 `.runtime/controller.env`。Controller 启动时只在本地检查
+sandbox，不会调用模型网关，所以网关不兼容时健康检查照样通过，失败要等到第一个后台任务才出现。首次发布前：
+
+1. 确认 Claude 实际使用的网关支持 Anthropic Messages API（`POST /v1/messages`）和对应认证头。凭证从
+   `.runtime/controller.env` 读取，经 stdin 交给 curl，不出现在命令行参数和 shell 历史里。`BASE` 是去掉末尾
+   `/v1` 的网关地址，`MODEL` 是网关上的 Claude 模型名；使用 `BACKGROUND_CLAUDE_AUTH_TOKEN` 时把头换成
+   `Authorization: Bearer`：
+
+   ```sh
+   ( set -a; . .runtime/controller.env; set +a
+     KEY="${BACKGROUND_CLAUDE_API_KEY:-${BACKGROUND_MODEL_API_KEY:-$LEADER_MODEL_API_KEY}}"
+     printf 'header = "x-api-key: %s"\n' "$KEY" | curl -sS -K - -o /dev/null -w '%{http_code}\n' \
+       -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' \
+       -d "{\"model\":\"$MODEL\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
+       "$BASE/v1/messages" )
+   ```
+
+   返回 `200` 才算兼容。其他结果先在 `.runtime/controller.env` 固定 `BACKGROUND_EXECUTOR=codex`，配好
+   `BACKGROUND_CLAUDE_*` 再切换。
+2. 在 VPS 上用新的 `deploy/security/codex-apparmor` 覆盖 `/etc/apparmor.d/super-leader-codex` 并执行
+   `sudo apparmor_parser -Kr /etc/apparmor.d/super-leader-codex`（见下文「隔离方式」）。
+
+### `.runtime/controller.env` 需要的变量
+
+后台执行仍需 `BACKGROUND_WORKER_ROOT`（例如 `/var/lib/super-leader-runtime/background/workers`），
+未设置时整个后台执行关闭。凭证只写在 `.runtime/controller.env`（权限 `600`），不进仓库、不进日志。
 
 | 变量 | 说明 |
 |------|------|
-| `BACKGROUND_CLAUDE_API_KEY` / `BACKGROUND_CLAUDE_OAUTH_TOKEN` | 二选一，仅作为 `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` 注入子进程 |
-| `BACKGROUND_CLAUDE_MODEL` | 可选，未设置时使用 CLI 默认模型；控制台的后台模型设置不作用于 Claude |
-| `BACKGROUND_CLAUDE_PATH` | 可选，默认 `claude` |
+| `BACKGROUND_EXECUTOR` | 可选，生产默认 `claude`；设 `codex` 回滚 |
+| `BACKGROUND_MODEL_BASE_URL` / `BACKGROUND_MODEL_API_KEY` | 已有的后台模型网关。未设置 Claude 专用凭证时，Claude 复用这对值：URL 作为 `ANTHROPIC_BASE_URL`，key 作为 `ANTHROPIC_API_KEY`（`x-api-key` 头）。两者都未设置时继续回退到 `LEADER_MODEL_*` |
+| `BACKGROUND_CLAUDE_BASE_URL` | 可选，覆盖 Anthropic 兼容端点。末尾的 `/v1` 会被去掉，因为 Claude Code 会自己拼 `/v1/messages`；必须是 `http(s)`，不能带用户名、密码、query 或 fragment |
+| `BACKGROUND_CLAUDE_API_KEY` | 可选，以 `ANTHROPIC_API_KEY`（`x-api-key`）发送 |
+| `BACKGROUND_CLAUDE_AUTH_TOKEN` | 可选，以 `ANTHROPIC_AUTH_TOKEN`（`Authorization: Bearer`）发送；网关要求 Bearer 认证时用它 |
+| `BACKGROUND_CLAUDE_OAUTH_TOKEN` | 可选，`claude setup-token` 生成的订阅 token，以 `CLAUDE_CODE_OAUTH_TOKEN` 发送；服务端自动化使用受 Anthropic 消费者条款约束，生产优先用 API key |
+| `BACKGROUND_CLAUDE_MODEL` | 可选，网关暴露的 Claude 模型名：别名 `sonnet` / `opus` / `haiku`，或 `claude-*`（允许 `vendor/claude-*` 前缀和 `[1m]` 后缀）；未设置时使用 CLI 默认模型 |
+| `BACKGROUND_CLAUDE_PATH` | 可选，默认镜像内的 `claude` |
 
-每轮使用 `--permission-mode dontAsk`、限定工具集、`--setting-sources user`（配置目录即隔离的
-worker home）和 `--settings`：开启 Bash sandbox 且禁止回退到非 sandbox 执行，Edit 只允许工作区，
-Read/Edit 拒绝 worker home、artifact root、`/etc/super-leader` 和 `/proc`。结构化结果用与 Codex
-相同的 schema 校验，缺失或无效即判为未验证完成；`session_id` 作为续接 ID。
+三个 `BACKGROUND_CLAUDE_*` 凭证最多设一个，同时设置多个时 Controller 拒绝启动。设置了 Claude 专用凭证时，
+不会继承 `BACKGROUND_MODEL_BASE_URL`：没有 `BACKGROUND_CLAUDE_BASE_URL` 就发往 Anthropic 官方 API，
+避免把专用凭证发给别的端点。控制台「后台任务」模型设置在 Claude 下显示 `Claude Code CLI` 和 Claude
+模型别名；选中的 Claude 模型和推理强度作用于后续轮次，之前为 Codex 保存的模型不会传给 Claude。
+反过来也一样：回滚到 `codex` 后，为 Claude 保存的模型和推理强度不会传给 Codex，后台任务使用
+`BACKGROUND_MODEL_NAME`，直到在控制台重新保存 Codex 模型。
 
-生产启用前需完成（均未在本仓库实现或验证）：
+长结果的微信摘要仍由 `BACKGROUND_MODEL_*`（缺省回退 `LEADER_MODEL_*`）这组 HTTP 模型生成，与执行器无关；
+Claude 执行器下也保留这组配置，否则 `LEADER_MODE=rules` 时长结果会停在 `summary_generation_failed`。
 
-1. 在 `deploy/Dockerfile.controller` 安装固定版本的 `@anthropic-ai/claude-code`，并安装其 Linux
-   sandbox 依赖（bubblewrap、socat）；镜像内确认 sandbox 实际生效，sandbox 不可用时不得启用。
-2. 在 `compose.production.yaml` 透传上述变量，凭证只放 `.runtime/controller.env`。
-3. 复核 seccomp 与 `super-leader-codex` AppArmor profile：bubblewrap 需要的 user namespace
-   与 mount 能力可能被当前策略拒绝，放宽前需单独评审。
-4. 用真实 CLI 核对 `--settings` 能通过校验（`-p` 模式下校验失败的设置会被静默忽略）、
-   `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` 确实从 Bash 子进程移除凭证，以及 sandbox 内 Bash 的
-   网络策略是否满足任务需要（Codex worker 允许 shell 联网）。
+### 隔离方式
+
+Claude 作为 Controller 子进程运行在同一个加固容器里（只读根文件系统、UID 1000、`cap_drop: ALL`、
+`no-new-privileges`、seccomp 与 `super-leader-codex` AppArmor）。镜像固定安装
+`@anthropic-ai/claude-code@2.1.311`、`bubblewrap` 和 `socat`。Codex 0.163.0 会优先使用 `PATH` 上的
+`bwrap`，换成 Debian 的 bubblewrap 后 Codex 自己的 sandbox 起不来，后台任务每轮都以
+`worker_execution_unverified` 失败；所以镜像用 `dpkg-divert` 把 `bwrap` 移到
+`/usr/libexec/claude-sandbox/bwrap`，Codex 继续用自带的 bwrap，Claude Code 通过
+`/etc/claude-code/managed-settings.json` 的 `sandbox.bwrapPath` 找到它（这个键只认管理员设置）。
+每轮的 `--settings` 包括：
+
+- `sandbox.enabled`、`failIfUnavailable: true`、`allowUnsandboxedCommands: false`：sandbox 起不来时
+  CLI 直接失败，Bash 永远不会在 sandbox 外执行。`enableWeakerNestedSandbox: false`：bubblewrap 在新
+  PID 命名空间里挂载新的 `/proc`，看不到 Controller 和 CLI 进程的 `/proc/<pid>/environ`。
+- 文件工具 `blockReadsOutsideWorkingDirectories`，Read/Edit 只允许工作区；Read/Edit 拒绝 worker home、
+  artifact root、`/etc/super-leader`、`/proc`。
+- Bash 的 `filesystem.denyRead` 覆盖整个 `CONTROLLER_DATA_ROOT`、artifact root 和 `/tmp/*`，只用
+  `allowRead` 重新打开本 worker 的工作区和本轮临时目录 `/tmp/slc-<id>`（`TMPDIR` 与
+  `CLAUDE_CODE_TMPDIR` 都指向它，轮次结束即删除）。其他 worker、设置目录和 Controller 的临时文件不可读，
+  `/tmp` 下已有文件也不可覆盖。临时目录路径保持在 CLI 的 44 字节上限内，否则 CLI 会让 Bash 回退到共享的
+  `/tmp/claude-<uid>`。
+- 网络经 sandbox 代理，允许公网，和 Codex worker 的 shell 一样。代理按主机名和 IP 字面量匹配，不支持网段，
+  而 `allowedDomains: ["*"]` 也放行 IP 字面量，所以 `deniedDomains` 每轮动态生成：Compose 服务名和容器名
+  （`postgres`、`controller`、`gateway`、`super-leader-postgres-1`、`super-leader-controller-1`、
+  `super-leader-gateway`），这些名字当前解析到的 IP，Controller 容器自己的全部地址（Controller API 和代理在
+  同一网络命名空间），`localhost`、`127.0.0.1`、`0.0.0.0`、`[::1]` 和常见云元数据地址。WebFetch 在 sandbox
+  外运行、不受 `sandbox.network` 约束，所以同一份列表也作为 `WebFetch(domain:…)` 拒绝规则。仍然挡不住的：
+  `127.0.0.2` 这类其他回环地址或十进制等其他 IP 写法、同一 Compose 网络上新增且未列出的容器 IP。这些服务仍各自
+  要求凭证（Postgres 密码和 Controller/Gateway token 都不在 worker 环境里），这里只是纵深防御。
+- `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`：Bash 子进程环境里没有 Anthropic 凭证。
+
+Compose 为 Controller 额外设置 `systempaths=unconfined`，否则 Docker 屏蔽的 `/proc` 路径会让 bubblewrap
+无法挂载新的 `/proc`。这个选项作用于整个 Controller 容器（回滚到 `codex` 后仍然生效），会去掉 Docker 对
+`/proc`、`/sys` 的屏蔽和只读挂载；Codex 的 bwrap 也因此在自己的 PID 命名空间里挂载新的 `/proc`，只能看到
+sandbox 内的进程。`super-leader-codex` AppArmor 补上被去掉的屏蔽：拒绝 `kcore`、`sysrq-trigger`、
+`interrupts`、`keys`、`latency_stats`、`sched_debug`、`timer_list`、`timer_stats`、`acpi`、`asound`、`scsi`
+的访问，拒绝 `/proc`、`/proc/sys` 写入和 `/sys/firmware`。容器以 UID 1000、`cap_drop: ALL` 运行，
+`/proc/sys` 本来也写不进去。seccomp 只新增三条精确匹配：`clone` 标志 `0x30020011` / `0x70020011`
+（bubblewrap 不隔离 IPC）和 `unshare(CLONE_NEWPID|CLONE_NEWNS)`（apply-seccomp 在自己创建的 user
+namespace 内）。AppArmor profile 新增了上述读拒绝，VPS 上的 `/etc/apparmor.d/super-leader-codex` 需要
+更新并用 `apparmor_parser -Kr` 重新加载；未重新加载时这些内核信息文件可读，其余隔离不受影响。
+
+Controller 启动时先运行 `claude sandbox status` 校验设置已生效且是严格模式，Linux 上再用 `bwrap` 试建
+user、PID、network 命名空间并挂载 `/proc`；任一步失败就拒绝启动，不接受后台任务。
+
+### 升级执行器时的已有 worker
+
+每个后台 worker 记录执行器（`executorKind`），每次启动新一轮时更新为当前执行器；会话续接 ID 也带上执行器类型。
+切换执行器后，旧 worker 的 Codex 线程不会被传给 `claude --resume`，下一轮会开启新的 Claude 会话，控制台
+标签随之变成 Claude Code。切换前创建、之后再没跑过新一轮的执行记录显示「执行器未记录」。
+
+### 镜像内验证
+
+升级 Claude Code 版本、Docker、内核或修改 seccomp/AppArmor/compose 安全选项后，在本地构建镜像并运行：
+
+```sh
+docker build -f deploy/Dockerfile.controller -t super-leader-controller:claude-verify .
+node tests/integration/leader/claude-worker-container.mjs --run
+```
+
+它在生产同等加固参数下用真实 CLI 和容器内的模拟 Anthropic API 跑两轮任务，验证 sandbox 启动、凭证不在
+Bash 环境和任何 `/proc/<pid>/environ` 中、其他 worker 与设置目录不可读、`unshare -U` 被拒绝、强制走代理时
+`127.0.0.1`、`localhost`、`0.0.0.0`、容器自身 IP 和 `super-leader-gateway` 都返回 403、WebFetch 访问回环地址
+被拒、被 Docker 屏蔽的内核信息文件不可读、续接同一会话、清理临时目录；并验证去掉 `systempaths=unconfined`
+或去掉三条 seccomp 规则时 Controller 拒绝启动。Codex 执行器（回滚路径）用同一镜像验证：
+
+```sh
+node tests/integration/leader/background-worker-container.mjs --run --native-only --image super-leader-controller:claude-verify
+```
+
+它同样带 `systempaths=unconfined` 运行，确认 Codex sandbox 能启动，且任何可读的 `/proc/<pid>/environ`
+里都没有 Controller 环境和 provider key。
+没有 AppArmor 的引擎（Docker Desktop）可加 `--skip-apparmor`，但不能作为生产证据。
+
+## 节点启用 Claude Code 会话
+
+Daemon 默认不读取 Claude Code 会话。节点上启用时由运维在合并后手工重装服务，注意两点：
+
+- `--service install` 只按本次命令的参数重建 launchd plist，**没有重新传入的参数会被丢弃**。
+- launchd 环境的 `PATH` 不含 `~/.local/bin`，必须显式传 `--claude-path`，否则参数校验失败，
+  KeepAlive 会反复重启 Daemon，连 Codex 会话也会离线。
+
+以 macmini 为例（macair 换成对应用户目录），以登录用户身份执行，不要用 root：
+
+```sh
+# 1. 备份并读出当前参数
+cp ~/Library/LaunchAgents/site.taoai.super-leader-daemon.plist ~/super-leader-daemon.plist.bak
+plutil -extract ProgramArguments json -o - ~/Library/LaunchAgents/site.taoai.super-leader-daemon.plist
+
+# 2. 用包含 daemon/pkg/claude 的提交构建 Daemon，先前台试跑一次（同样参数，不带 --service）
+#    确认没有参数错误后 Ctrl-C
+./super-leader-daemon <第 1 步除 argv[0] 外的全部参数> \
+  --claude-projects-root /Users/macmini/.claude/projects \
+  --claude-path /Users/macmini/.local/bin/claude
+
+# 3. 用同样参数重装服务；--token-file 指向已有的 <state-dir>/service-node-token，token 不进 argv
+./super-leader-daemon <同上全部参数> \
+  --claude-projects-root /Users/macmini/.claude/projects \
+  --claude-path /Users/macmini/.local/bin/claude \
+  --service install
+
+# 4. 核对
+plutil -extract ProgramArguments json -o - ~/Library/LaunchAgents/site.taoai.super-leader-daemon.plist
+./super-leader-daemon --service status
+tail -n 50 <state-dir>/daemon.stderr.log
+```
+
+`--claude-permission-mode` 默认 `dontAsk`，安装时会写入 plist。完成后控制台的节点会话列表应出现带
+「Claude Code」标签的 `claude:` 会话。安装中途失败时服务保持停止，用备份的 plist 或修正后的命令重装。
+Claude Code 会话通过登录钥匙串取凭证，用户未登录或 token 过期时发送会失败；续写的 Bash 命令使用 launchd
+的最小 `PATH`。

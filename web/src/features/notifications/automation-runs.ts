@@ -1,3 +1,5 @@
+import { isAgentKind, type AgentKind } from "../sessions/agent-kind";
+
 export type AutomationRunStatus = "dispatching" | "running" | "completed" | "failed" | "unknown" | "expired" | "skipped";
 
 export interface ConsoleAutomationRun {
@@ -10,6 +12,8 @@ export interface ConsoleAutomationRun {
   commandId?: string;
   result?: { text: string; meaningful?: boolean; fingerprint?: string };
   error?: string;
+  /** Background runs: the executor recorded when the run's worker was created. */
+  executor?: AgentKind;
 }
 
 const STATUSES = new Set<AutomationRunStatus>(["dispatching", "running", "completed", "failed", "unknown", "expired", "skipped"]);
@@ -28,6 +32,7 @@ export function parseAutomationRun(raw: unknown, scheduleId: string): ConsoleAut
       !date(item.createdAt) || !date(item.updatedAt)) return fail();
   if (item.commandId !== undefined && (typeof item.commandId !== "string" || !item.commandId.trim())) return fail();
   if (item.error !== undefined && typeof item.error !== "string") return fail();
+  if (item.executor !== undefined && !isAgentKind(item.executor)) return fail();
   let result: ConsoleAutomationRun["result"];
   if (item.result !== undefined) {
     if (!item.result || typeof item.result !== "object" || Array.isArray(item.result)) return fail();
@@ -38,7 +43,8 @@ export function parseAutomationRun(raw: unknown, scheduleId: string): ConsoleAut
   }
   return { id: item.id, scheduleId, scheduledAt: item.scheduledAt, status: item.status as AutomationRunStatus,
     createdAt: item.createdAt, updatedAt: item.updatedAt, ...(item.commandId ? { commandId: item.commandId as string } : {}),
-    ...(result ? { result } : {}), ...(item.error ? { error: item.error as string } : {}) };
+    ...(result ? { result } : {}), ...(item.error ? { error: item.error as string } : {}),
+    ...(item.executor ? { executor: item.executor as AgentKind } : {}) };
 }
 
 export function parseAutomationRuns(raw: unknown, scheduleId: string): ConsoleAutomationRun[] {

@@ -8,6 +8,7 @@ const DOCS_TOOL_TIMEOUT_SECONDS = 30;
 const HEADLESS_SKILLS_ROOT = "/etc/codex/skills";
 
 export class CodexCliExecutor implements WorkerExecutor {
+  readonly kind = "codex" as const;
   constructor(private readonly options: WorkerRuntimeOptions) {}
 
   async execute(request: WorkerExecutionRequest): Promise<string> {
