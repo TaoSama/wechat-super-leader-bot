@@ -19,6 +19,7 @@ const PREVIOUS_ENV = RELEASE_ENV.replaceAll(REVISION, 'b'.repeat(40));
 const OWNER = 'synthetic-owner';
 const STATUS_WAIT_MS = 10_000;
 const POLL_MS = 50;
+const SESSION_SETUP_DELAY_MS = 300;
 
 function writeReleaseBundle(stage) {
   mkdirSync(stage, { recursive: true });
@@ -368,7 +369,16 @@ test('detached activation finishes its rollback after the launching session is k
   try {
     copyFileSync(SCRIPT, join(fixture.stage, 'remote-release.sh'));
     writeFileSync(join(fixture.stage, '.transfer-owner'), OWNER);
-    const env = fixture.env({ TEST_HEALTH: 'unhealthy', TEST_RECREATE_MS: '1500' });
+    const startup = join(fixture.root, 'python-startup');
+    mkdirSync(startup);
+    writeFileSync(join(startup, 'sitecustomize.py'), `import os,time
+setsid=os.setsid
+def delayed_setsid():
+ time.sleep(${SESSION_SETUP_DELAY_MS / 1000})
+ return setsid()
+os.setsid=delayed_setsid
+`);
+    const env = fixture.env({ TEST_HEALTH: 'unhealthy', TEST_RECREATE_MS: '1500', PYTHONPATH: startup });
     const launcher = spawn('python3', ['-', fixture.stage, OWNER, 'activate',
       Buffer.from(JSON.stringify(fixture.args)).toString('base64')], { detached: true, env, stdio: ['pipe', 'pipe', 'ignore'] });
     launcher.stdin.end(REMOTE_FILES);
