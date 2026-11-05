@@ -332,6 +332,30 @@ docker-compose --env-file /dev/null --profile wechat \
 （可以是 Codex 会话，也可以是节点上的 Claude Code 会话）。回滚只需在 `.runtime/controller.env`
 设 `BACKGROUND_EXECUTOR=codex` 后重新发布。
 
+### 合并后首次发布前
+
+这个默认值会让下一次发布直接切到 Claude，不需要改 `.runtime/controller.env`。Controller 启动时只在本地检查
+sandbox，不会调用模型网关，所以网关不兼容时健康检查照样通过，失败要等到第一个后台任务才出现。首次发布前：
+
+1. 确认 Claude 实际使用的网关支持 Anthropic Messages API（`POST /v1/messages`）和对应认证头。凭证从
+   `.runtime/controller.env` 读取，经 stdin 交给 curl，不出现在命令行参数和 shell 历史里。`BASE` 是去掉末尾
+   `/v1` 的网关地址，`MODEL` 是网关上的 Claude 模型名；使用 `BACKGROUND_CLAUDE_AUTH_TOKEN` 时把头换成
+   `Authorization: Bearer`：
+
+   ```sh
+   ( set -a; . .runtime/controller.env; set +a
+     KEY="${BACKGROUND_CLAUDE_API_KEY:-${BACKGROUND_MODEL_API_KEY:-$LEADER_MODEL_API_KEY}}"
+     printf 'header = "x-api-key: %s"\n' "$KEY" | curl -sS -K - -o /dev/null -w '%{http_code}\n' \
+       -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' \
+       -d "{\"model\":\"$MODEL\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
+       "$BASE/v1/messages" )
+   ```
+
+   返回 `200` 才算兼容。其他结果先在 `.runtime/controller.env` 固定 `BACKGROUND_EXECUTOR=codex`，配好
+   `BACKGROUND_CLAUDE_*` 再切换。
+2. 在 VPS 上用新的 `deploy/security/codex-apparmor` 覆盖 `/etc/apparmor.d/super-leader-codex` 并执行
+   `sudo apparmor_parser -Kr /etc/apparmor.d/super-leader-codex`（见下文「隔离方式」）。
+
 ### `.runtime/controller.env` 需要的变量
 
 后台执行仍需 `BACKGROUND_WORKER_ROOT`（例如 `/var/lib/super-leader-runtime/background/workers`），
@@ -352,12 +376,22 @@ docker-compose --env-file /dev/null --profile wechat \
 不会继承 `BACKGROUND_MODEL_BASE_URL`：没有 `BACKGROUND_CLAUDE_BASE_URL` 就发往 Anthropic 官方 API，
 避免把专用凭证发给别的端点。控制台「后台任务」模型设置在 Claude 下显示 `Claude Code CLI` 和 Claude
 模型别名；选中的 Claude 模型和推理强度作用于后续轮次，之前为 Codex 保存的模型不会传给 Claude。
+反过来也一样：回滚到 `codex` 后，为 Claude 保存的模型和推理强度不会传给 Codex，后台任务使用
+`BACKGROUND_MODEL_NAME`，直到在控制台重新保存 Codex 模型。
+
+长结果的微信摘要仍由 `BACKGROUND_MODEL_*`（缺省回退 `LEADER_MODEL_*`）这组 HTTP 模型生成，与执行器无关；
+Claude 执行器下也保留这组配置，否则 `LEADER_MODE=rules` 时长结果会停在 `summary_generation_failed`。
 
 ### 隔离方式
 
 Claude 作为 Controller 子进程运行在同一个加固容器里（只读根文件系统、UID 1000、`cap_drop: ALL`、
 `no-new-privileges`、seccomp 与 `super-leader-codex` AppArmor）。镜像固定安装
-`@anthropic-ai/claude-code@2.1.311`、`bubblewrap` 和 `socat`。每轮的 `--settings` 包括：
+`@anthropic-ai/claude-code@2.1.311`、`bubblewrap` 和 `socat`。Codex 0.163.0 会优先使用 `PATH` 上的
+`bwrap`，换成 Debian 的 bubblewrap 后 Codex 自己的 sandbox 起不来，后台任务每轮都以
+`worker_execution_unverified` 失败；所以镜像用 `dpkg-divert` 把 `bwrap` 移到
+`/usr/libexec/claude-sandbox/bwrap`，Codex 继续用自带的 bwrap，Claude Code 通过
+`/etc/claude-code/managed-settings.json` 的 `sandbox.bwrapPath` 找到它（这个键只认管理员设置）。
+每轮的 `--settings` 包括：
 
 - `sandbox.enabled`、`failIfUnavailable: true`、`allowUnsandboxedCommands: false`：sandbox 起不来时
   CLI 直接失败，Bash 永远不会在 sandbox 外执行。`enableWeakerNestedSandbox: false`：bubblewrap 在新
@@ -369,23 +403,35 @@ Claude 作为 Controller 子进程运行在同一个加固容器里（只读根�
   `CLAUDE_CODE_TMPDIR` 都指向它，轮次结束即删除）。其他 worker、设置目录和 Controller 的临时文件不可读，
   `/tmp` 下已有文件也不可覆盖。临时目录路径保持在 CLI 的 44 字节上限内，否则 CLI 会让 Bash 回退到共享的
   `/tmp/claude-<uid>`。
-- 网络经 sandbox 代理，允许公网域名，拒绝 `postgres`、`controller`、`gateway` 和云元数据地址。
+- 网络经 sandbox 代理，允许公网，和 Codex worker 的 shell 一样。代理按主机名和 IP 字面量匹配，不支持网段，
+  而 `allowedDomains: ["*"]` 也放行 IP 字面量，所以 `deniedDomains` 每轮动态生成：Compose 服务名和容器名
+  （`postgres`、`controller`、`gateway`、`super-leader-postgres-1`、`super-leader-controller-1`、
+  `super-leader-gateway`），这些名字当前解析到的 IP，Controller 容器自己的全部地址（Controller API 和代理在
+  同一网络命名空间），`localhost`、`127.0.0.1`、`0.0.0.0`、`[::1]` 和常见云元数据地址。WebFetch 在 sandbox
+  外运行、不受 `sandbox.network` 约束，所以同一份列表也作为 `WebFetch(domain:…)` 拒绝规则。仍然挡不住的：
+  `127.0.0.2` 这类其他回环地址或十进制等其他 IP 写法、同一 Compose 网络上新增且未列出的容器 IP。这些服务仍各自
+  要求凭证（Postgres 密码和 Controller/Gateway token 都不在 worker 环境里），这里只是纵深防御。
 - `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`：Bash 子进程环境里没有 Anthropic 凭证。
 
 Compose 为 Controller 额外设置 `systempaths=unconfined`，否则 Docker 屏蔽的 `/proc` 路径会让 bubblewrap
-无法挂载新的 `/proc`。AppArmor 仍拒绝 `kcore`、`sysrq-trigger`、`/proc/sys` 写入和 `/sys/firmware`。
-seccomp 只新增三条精确匹配：`clone` 标志 `0x30020011` / `0x70020011`（bubblewrap 不隔离 IPC）和
-`unshare(CLONE_NEWPID|CLONE_NEWNS)`（apply-seccomp 在自己创建的 user namespace 内）。AppArmor
-profile 规则未变，VPS 上的 `/etc/apparmor.d/super-leader-codex` 不需要重新加载。
+无法挂载新的 `/proc`。这个选项作用于整个 Controller 容器（回滚到 `codex` 后仍然生效），会去掉 Docker 对
+`/proc`、`/sys` 的屏蔽和只读挂载；Codex 的 bwrap 也因此在自己的 PID 命名空间里挂载新的 `/proc`，只能看到
+sandbox 内的进程。`super-leader-codex` AppArmor 补上被去掉的屏蔽：拒绝 `kcore`、`sysrq-trigger`、
+`interrupts`、`keys`、`latency_stats`、`sched_debug`、`timer_list`、`timer_stats`、`acpi`、`asound`、`scsi`
+的访问，拒绝 `/proc`、`/proc/sys` 写入和 `/sys/firmware`。容器以 UID 1000、`cap_drop: ALL` 运行，
+`/proc/sys` 本来也写不进去。seccomp 只新增三条精确匹配：`clone` 标志 `0x30020011` / `0x70020011`
+（bubblewrap 不隔离 IPC）和 `unshare(CLONE_NEWPID|CLONE_NEWNS)`（apply-seccomp 在自己创建的 user
+namespace 内）。AppArmor profile 新增了上述读拒绝，VPS 上的 `/etc/apparmor.d/super-leader-codex` 需要
+更新并用 `apparmor_parser -Kr` 重新加载；未重新加载时这些内核信息文件可读，其余隔离不受影响。
 
 Controller 启动时先运行 `claude sandbox status` 校验设置已生效且是严格模式，Linux 上再用 `bwrap` 试建
 user、PID、network 命名空间并挂载 `/proc`；任一步失败就拒绝启动，不接受后台任务。
 
 ### 升级执行器时的已有 worker
 
-每个后台 worker 记录创建时的执行器（`executorKind`），会话续接 ID 也带上执行器类型。切换执行器后，
-旧 worker 的 Codex 线程不会被传给 `claude --resume`，下一轮会开启新的 Claude 会话；控制台按记录显示
-Codex / Claude Code 标签，切换前创建的执行记录显示「执行器未记录」。
+每个后台 worker 记录执行器（`executorKind`），每次启动新一轮时更新为当前执行器；会话续接 ID 也带上执行器类型。
+切换执行器后，旧 worker 的 Codex 线程不会被传给 `claude --resume`，下一轮会开启新的 Claude 会话，控制台
+标签随之变成 Claude Code。切换前创建、之后再没跑过新一轮的执行记录显示「执行器未记录」。
 
 ### 镜像内验证
 
@@ -397,8 +443,17 @@ node tests/integration/leader/claude-worker-container.mjs --run
 ```
 
 它在生产同等加固参数下用真实 CLI 和容器内的模拟 Anthropic API 跑两轮任务，验证 sandbox 启动、凭证不在
-Bash 环境和任何 `/proc/<pid>/environ` 中、其他 worker 与设置目录不可读、`unshare -U` 被拒绝、续接同一会话、
-清理临时目录；并验证去掉 `systempaths=unconfined` 或去掉三条 seccomp 规则时 Controller 拒绝启动。
+Bash 环境和任何 `/proc/<pid>/environ` 中、其他 worker 与设置目录不可读、`unshare -U` 被拒绝、强制走代理时
+`127.0.0.1`、`localhost`、`0.0.0.0`、容器自身 IP 和 `super-leader-gateway` 都返回 403、WebFetch 访问回环地址
+被拒、被 Docker 屏蔽的内核信息文件不可读、续接同一会话、清理临时目录；并验证去掉 `systempaths=unconfined`
+或去掉三条 seccomp 规则时 Controller 拒绝启动。Codex 执行器（回滚路径）用同一镜像验证：
+
+```sh
+node tests/integration/leader/background-worker-container.mjs --run --native-only --image super-leader-controller:claude-verify
+```
+
+它同样带 `systempaths=unconfined` 运行，确认 Codex sandbox 能启动，且任何可读的 `/proc/<pid>/environ`
+里都没有 Controller 环境和 provider key。
 没有 AppArmor 的引擎（Docker Desktop）可加 `--skip-apparmor`，但不能作为生产证据。
 
 ## 节点启用 Claude Code 会话
