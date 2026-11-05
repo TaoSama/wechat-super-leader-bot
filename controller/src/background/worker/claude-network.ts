@@ -18,6 +18,10 @@ export const CLAUDE_DENIED_DOMAINS = [...CLAUDE_PEER_HOSTS, ...LOCAL_AND_METADAT
 // Names that do not exist on this network (no gateway profile, local runs) have nothing to deny.
 const UNRESOLVED_CODES = new Set(["ENOTFOUND", "ENODATA"]);
 
+async function resolveAll(host: string): Promise<string[]> {
+  return (await lookup(host, { all: true })).map(item => item.address);
+}
+
 /** Formats an address the way deniedDomains matches IP literals: IPv6 in brackets, without a zone ID. */
 function hostEntry(address: string): string {
   const bare = address.split("%")[0];
@@ -29,10 +33,10 @@ function hostEntry(address: string): string {
  * above, the addresses those peer names resolve to now, and every address of this
  * container, whose listeners share the proxy's network namespace.
  */
-export async function claudeDeniedHosts(): Promise<string[]> {
+export async function claudeDeniedHosts(resolve: (host: string) => Promise<string[]> = resolveAll): Promise<string[]> {
   const own = Object.values(networkInterfaces()).flatMap(items => items ?? []).map(item => item.address);
   const peers = await Promise.all(CLAUDE_PEER_HOSTS.map(async host => {
-    try { return (await lookup(host, { all: true })).map(item => item.address); }
+    try { return await resolve(host); }
     catch (error) {
       if (UNRESOLVED_CODES.has((error as NodeJS.ErrnoException).code ?? "")) return [];
       throw error;

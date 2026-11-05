@@ -36,6 +36,8 @@ export interface ClaudeExecutorOptions {
   /** Sent as Authorization: Bearer (ANTHROPIC_AUTH_TOKEN). */
   authToken?: string;
   oauthToken?: string;
+  /** Hosts the sandbox proxy denies; resolves the Compose peers on this network by default. */
+  deniedHosts?: () => Promise<string[]>;
 }
 
 /**
@@ -115,7 +117,7 @@ export class ClaudeCliExecutor implements WorkerExecutor {
     if (request.signal.aborted) throw new Error("Worker execution cancelled before launch");
     const command = executable(this.options.claudePath ?? "claude", "Claude");
     const schema = JSON.stringify(JSON.parse(readFileSync(request.schemaPath, "utf8")));
-    const settings = claudeWorkerSettings(request, this.options.artifactRoot, this.options.privateRoots, await claudeDeniedHosts());
+    const settings = claudeWorkerSettings(request, this.options.artifactRoot, this.options.privateRoots, await (this.options.deniedHosts ?? claudeDeniedHosts)());
     // A console choice applies only when it names a Claude model; a stored Codex model never reaches the CLI.
     const model = isClaudeModel(request.model) ? request.model : this.options.model;
     const effort = isClaudeEffort(request.reasoningEffort) ? request.reasoningEffort : undefined;

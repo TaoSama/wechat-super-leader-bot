@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { ClaudeCliExecutor, CodexWorkerRuntime, type WorkerInput, type WorkerRuntimeStatus } from "../../../src/background/worker/index.js";
-import { CLAUDE_DENIED_DOMAINS } from "../../../src/background/worker/claude-network.js";
+import { CLAUDE_DENIED_DOMAINS, claudeDeniedHosts } from "../../../src/background/worker/claude-network.js";
 
 // Process contract checks include interpreter startup and durable filesystem I/O.
 const CLI_EXECUTION_TIMEOUT_MS = 10_000;
@@ -58,7 +58,8 @@ process.stdin.on('end', () => {
   const options = { root: path.join(root, "runtime"), artifactRoot: path.join(root, "artifacts"), model: "claude-cli-default", timeoutMs,
     onError: (error: Error) => { errors.push(error); } };
   const executor = new ClaudeCliExecutor({ artifactRoot: options.artifactRoot, privateRoots: [options.root], claudePath: script,
-    model: "sonnet", ...credential });
+    model: "sonnet", ...credential, // Peer names do not resolve here, as on a host outside the Compose network.
+    deniedHosts: () => claudeDeniedHosts(async () => { throw Object.assign(new Error("not found"), { code: "ENOTFOUND" }); }) });
   const input = { workerId: randomUUID(), invocationId: randomUUID(), task: "Check sources without writing", input: { status: "running" } };
   const runtime = new CodexWorkerRuntime({ ...options, executor,
     runtimeSettings: () => ({ model: consoleModel, reasoningEffort: "high", systemPrompt: "Claude后台SP" }) });
