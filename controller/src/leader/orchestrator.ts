@@ -31,6 +31,8 @@ import { SessionTitles } from "./queries/session-titles.js";
 import { authorizeImageDelivery, sendSessionImages } from "./queries/session-images.js";
 import { authorizeSessionInterrupt } from "./model/interrupt-authorization.js";
 import { interruptSessionTurn } from "./session-interrupt.js";
+import { classifyApprovalDecision } from "./model/approval-authorization.js";
+import { answerSessionApproval, approvalAuthorizationFailure } from "./session-approval.js";
 import type { MediaHub } from "../sessions/message-images.js";
 import { GoalConversation, goalConfirmation, goalCancellation } from "./goals/conversation.js";
 import { GoalScheduler } from "./goals/scheduler.js";
@@ -646,6 +648,16 @@ export class LeaderOrchestrator {
         if (call.function.name === "interrupt_session" && !await authorizeSessionInterrupt(this.model, sanitizedUserPrompt, signal)) {
           return { text: "本条消息未明确要求停止会话当前正在运行的轮次，未发送停止请求。" };
         }
+        if (call.function.name === "answer_approval") {
+          let args: unknown;
+          try { args = call.function.arguments.length <= 8000 ? JSON.parse(call.function.arguments) : undefined; }
+          catch { return { text: "审批参数无效，未提交审批决定。" }; }
+          const target = ToolArguments.answer_approval.safeParse(args);
+          if (!target.success) return { text: "审批参数无效，未提交审批决定。" };
+          const failure = approvalAuthorizationFailure(sanitizedUserPrompt, await classifyApprovalDecision(this.model, sanitizedUserPrompt, signal),
+            this.hub.getNodeSession(target.data.nodeId, target.data.sessionId), target.data);
+          if (failure) return { text: failure };
+        }
         if (call.function.name === "execute_plan" || call.function.name === "execute_goal") {
           const intent = await currentUserIntent();
           const requiredIntent = call.function.name === "execute_plan" ? "task" : "goal";
@@ -712,6 +724,10 @@ export class LeaderOrchestrator {
         const target = ToolArguments.interrupt_session.parse(raw);
         return interruptSessionTurn({ store: this.store, hub: this.hub, commands: this.commands, now: this.now }, chatId, data, target, signal);
       }
+      case "answer_approval": {
+        const target = ToolArguments.answer_approval.parse(raw);
+        return answerSessionApproval({ store: this.store, hub: this.hub, commands: this.commands, now: this.now }, chatId, data, target, signal);
+      }
       case "list_nodes": return this.hub.getNodeStatusList();
       case "focus_session_candidates": {
         const { targets } = ToolArguments.focus_session_candidates.parse(raw);
@@ -769,10 +785,10 @@ export class LeaderOrchestrator {
         // Keep the full directory on the server; omit previews while preserving raw and selected observations.
         const compact = listing.sessions.map(({ nodeId, id, provider, title, cwd, status, capabilities, loaded,
           executionStatus, statusSource, observedAt, updatedAt, model, modelProvider, reasoningEffort,
-          desktopObservation, modelView, sendAvailability, historySource }) => ({
+          desktopObservation, modelView, sendAvailability, historySource, pendingApprovals }) => ({
           nodeId, id, provider, title, cwd, status, capabilities, loaded, executionStatus, statusSource,
           observedAt, updatedAt, model, modelProvider, reasoningEffort, desktopObservation,
-          modelView, sendAvailability, historySource,
+          modelView, sendAvailability, historySource, pendingApprovals,
           displayLabel: sessionTitles.add({ nodeId, id, title }),
         }));
         const result = { ...listing, sessions: [] as typeof compact, nextOffset: null as number | null,
@@ -804,7 +820,8 @@ export class LeaderOrchestrator {
         const args = ToolArguments.read_session.parse(raw);
         const history = await readSessionHistory(this.hub, args, signal);
         const session = this.hub.getNodeSession(args.nodeId, args.sessionId);
-        return session ? { ...history, displayLabel: sessionTitles.add({ ...session, nodeId: args.nodeId }, true) } : history;
+        return session ? { ...history, ...(session.pendingApprovals?.length ? { pendingApprovals: session.pendingApprovals } : {}),
+          displayLabel: sessionTitles.add({ ...session, nodeId: args.nodeId }, true) } : history;
       }
       case "get_command": {
         const { commandId, planId, goalId } = ToolArguments.get_command.parse(raw);

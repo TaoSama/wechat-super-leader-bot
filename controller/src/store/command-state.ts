@@ -1,3 +1,4 @@
+import { ApprovalDecisionSchema, ApprovalRequestIdSchema } from "../sessions/approval-contracts.js";
 import { CommandRecord, isValidTurnId, validateCommandSendRoute, DeliveryModeSchema, CommandAuthoritySchema } from "../types.js";
 import { InputReceiptSchema, sameInputReceipt, type InputReceipt } from "../sessions/input-receipt.js";
 import { ConflictError } from "./interface.js";
@@ -26,8 +27,8 @@ export function validateCommandTurnBinding(cmd: CommandRecord, status: CommandRe
   if (status === "input-written" || inputReceipt !== undefined || cmd.inputReceipt !== undefined) {
     throw new ConflictError("Read and native commands cannot carry terminal input receipts");
   }
-  if (cmd.action === "interrupt") {
-    // An interrupt never starts a turn: only its exact target may confirm completion.
+  if (cmd.action === "interrupt" || cmd.action === "approve") {
+    // Interrupt and approve never start a turn: only its exact target may confirm completion.
     if (status === "accepted" || (status === "completed") !== (turnId !== undefined) ||
         turnId !== undefined && turnId !== cmd.expectedTurnId) {
       throw new ConflictError("Interrupt result does not match its exact target turn");
@@ -73,9 +74,13 @@ export function nextCommandState(cmd: CommandRecord, status: CommandRecord["stat
 /** Reject malformed persisted proof before it can be displayed, ACKed or inspected. */
 export function validateStoredCommandInput(cmd: CommandRecord): void {
   if (cmd.deliveryMode !== undefined) DeliveryModeSchema.parse(cmd.deliveryMode);
-  const exactTurn = cmd.deliveryMode === "steer" || cmd.action === "interrupt";
+  const exactTurn = cmd.deliveryMode === "steer" || cmd.action === "interrupt" || cmd.action === "approve";
   if (exactTurn ? !isValidTurnId(cmd.expectedTurnId) : cmd.expectedTurnId !== undefined) throw new ConflictError("Invalid command delivery identity");
-  if (cmd.action === "interrupt" && (cmd.deliveryMode !== undefined || cmd.prompt !== undefined || cmd.skills?.length)) throw new ConflictError("Invalid interrupt command");
+  if ((cmd.action === "interrupt" || cmd.action === "approve") && (cmd.deliveryMode !== undefined || cmd.prompt !== undefined || cmd.skills?.length)) throw new ConflictError("Invalid interrupt command");
+  if ((cmd.action === "approve") !== (cmd.approvalRequestId !== undefined && cmd.approvalDecision !== undefined) ||
+      cmd.action !== "approve" && (cmd.approvalRequestId !== undefined || cmd.approvalDecision !== undefined)) throw new ConflictError("Invalid approval command identity");
+  if (cmd.approvalRequestId !== undefined) ApprovalRequestIdSchema.parse(cmd.approvalRequestId);
+  if (cmd.approvalDecision !== undefined) ApprovalDecisionSchema.parse(cmd.approvalDecision);
   if (cmd.authority !== undefined) CommandAuthoritySchema.parse(cmd.authority);
   if (cmd.status === "admitting" && (cmd.action !== "send" || !cmd.authority || !cmd.sendRoute || cmd.sendRoute === "terminal-pane" ||
       cmd.turnId !== undefined || cmd.inputReceipt !== undefined)) throw new ConflictError("Invalid admitting command");

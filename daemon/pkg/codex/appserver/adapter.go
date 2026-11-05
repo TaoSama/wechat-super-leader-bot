@@ -54,6 +54,9 @@ type rpcConn struct {
 	pending   map[uint64]chan rpcResponse
 	done      chan struct{}
 	closeOnce sync.Once
+	// serverEvents, when set before the read loop starts, receives server
+	// requests and serverRequest/resolved notifications. Nothing here answers them.
+	serverEvents chan serverEvent
 }
 
 type rpcResponse struct {
@@ -68,6 +71,10 @@ func (a *AppServerAdapter) connect(ctx context.Context) (*rpcConn, error) {
 }
 
 func (a *AppServerAdapter) connectWithReadLimit(ctx context.Context, readLimit int64) (*rpcConn, error) {
+	return a.connectWith(ctx, readLimit, nil)
+}
+
+func (a *AppServerAdapter) connectWith(ctx context.Context, readLimit int64, events chan serverEvent) (*rpcConn, error) {
 	if a.socketPath == "" {
 		return nil, errors.New("codex app-server socket path is empty")
 	}
@@ -98,9 +105,10 @@ func (a *AppServerAdapter) connectWithReadLimit(ctx context.Context, readLimit i
 	wsConn.SetReadLimit(readLimit)
 
 	rc := &rpcConn{
-		conn:    wsConn,
-		pending: make(map[uint64]chan rpcResponse),
-		done:    make(chan struct{}),
+		conn:         wsConn,
+		pending:      make(map[uint64]chan rpcResponse),
+		done:         make(chan struct{}),
+		serverEvents: events,
 	}
 	go rc.readLoop()
 
@@ -160,6 +168,7 @@ func (rc *rpcConn) readLoop() {
 		// Check "method" first so server requests with an "id" never collide with client RPC response IDs,
 		// and never auto-decline or mutate user approval state on existing sessions.
 		if methodVal, hasMethod := raw["method"]; hasMethod && methodVal != nil {
+			rc.forwardServerEvent(data)
 			continue
 		}
 

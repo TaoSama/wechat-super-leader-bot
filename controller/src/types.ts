@@ -4,8 +4,9 @@ import { sanitizeModelMetadata } from "./sessions/model-metadata.js";
 import { InputReceiptSchema, TerminalSessionIdSchema, type InputReceipt } from "./sessions/input-receipt.js";
 import { isTerminalHistoryTarget, isTerminalSession } from "./sessions/terminal.js";
 import { CLAUDE_SESSION_ID_PATTERN, isClaudeCodeSession, isClaudeSessionId } from "./sessions/claude.js";
+import { ApprovalDecisionSchema, ApprovalRequestIdSchema, PendingApprovalsSchema, type ApprovalDecision } from "./sessions/approval-contracts.js";
 
-export const ActionTypeSchema = z.enum(["read", "send", "interrupt"]);
+export const ActionTypeSchema = z.enum(["read", "send", "interrupt", "approve"]);
 export type ActionType = z.infer<typeof ActionTypeSchema>;
 export const MAX_DAEMON_CONTROL_MESSAGE_BYTES = 1024 * 1024;
 export const MAX_TURN_OUTPUT_BYTES = 8 * 1024 * 1024;
@@ -109,6 +110,7 @@ export const SessionSchema = z.object({
   desktopObservation: DesktopObservationSchema.optional(),
   sendAvailability: SendAvailabilitySchema.optional(),
   historySource: z.enum(["terminal-transcript", "wechat-codex"]).optional(),
+  pendingApprovals: PendingApprovalsSchema,
 }).refine(session => session.historySource !== "terminal-transcript" || isTerminalHistoryTarget(session), "Invalid terminal history target")
   .refine(session => session.historySource !== "wechat-codex" ||
     session.provider === "wechat-codex" && session.capabilities.length === 1 && session.capabilities[0] === "read",
@@ -247,10 +249,18 @@ export const ControllerCancelHistoryMessageSchema = z.object({
   sessionId: z.string().min(1).max(64),
 }).strict();
 
-/** Interrupt targets exactly one native turn and carries no input, skills or delivery mode. */
-function isInterruptShape(value: { prompt?: string; skills?: unknown[]; deliveryMode?: DeliveryMode; expectedTurnId?: string; sessionId: string }): boolean {
+type ExactTurnShape = { action: ActionType; prompt?: string; skills?: unknown[]; deliveryMode?: DeliveryMode; expectedTurnId?: string; sessionId: string;
+  approvalRequestId?: string; approvalDecision?: ApprovalDecision };
+/** Interrupt and approve target exactly one native turn and carry no input, skills or delivery mode. */
+function isExactTurnShape(value: ExactTurnShape): boolean {
   return value.prompt === undefined && !value.skills?.length && value.deliveryMode === undefined &&
-    isValidTurnId(value.expectedTurnId) && !value.sessionId.startsWith("terminal:");
+    isValidTurnId(value.expectedTurnId) && !value.sessionId.startsWith("terminal:") && !isClaudeSessionId(value.sessionId) &&
+    (value.action === "approve") === (value.approvalRequestId !== undefined && value.approvalDecision !== undefined);
+}
+function hasValidTurnTarget(value: ExactTurnShape): boolean {
+  if (value.action !== "approve" && (value.approvalRequestId !== undefined || value.approvalDecision !== undefined)) return false;
+  if (value.action === "interrupt" || value.action === "approve") return isExactTurnShape(value);
+  return value.deliveryMode === "steer" ? value.action === "send" && value.expectedTurnId !== undefined : value.expectedTurnId === undefined;
 }
 
 export const ControllerCommandMessageSchema = z.object({
@@ -265,10 +275,11 @@ export const ControllerCommandMessageSchema = z.object({
   sendRoute: SendRouteSchema.optional(),
   deliveryMode: DeliveryModeSchema.optional(),
   expectedTurnId: TurnIdSchema.optional(),
+  approvalRequestId: ApprovalRequestIdSchema.optional(),
+  approvalDecision: ApprovalDecisionSchema.optional(),
 }).refine(value => value.action !== "read" || value.sendRoute === undefined, "Read commands cannot carry a send route")
   .refine(value => value.action !== "read" || value.deliveryMode === undefined,"Read commands cannot carry delivery mode")
-  .refine(value => value.action === "interrupt" ? isInterruptShape(value) : value.deliveryMode === "steer" ? value.action === "send" && value.expectedTurnId !== undefined : value.expectedTurnId === undefined,
-    "Only steer and interrupt require an exact expected turn ID")
+  .refine(hasValidTurnTarget, "Only steer, interrupt and approve require an exact expected turn ID")
   .refine(value => value.action !== "send" ||
     (value.sendRoute === "terminal-pane" ? TerminalSessionIdSchema.safeParse(value.sessionId).success : !value.sessionId.startsWith("terminal:")),
   "Terminal targets require the exclusive terminal-pane send route")
@@ -306,10 +317,11 @@ export const PostCommandRequestSchema = z
     skills: SkillRefsSchema.optional(),
     deliveryMode: DeliveryModeSchema.optional(),
     expectedTurnId: TurnIdSchema.optional(),
+    approvalRequestId: ApprovalRequestIdSchema.optional(),
+    approvalDecision: ApprovalDecisionSchema.optional(),
   }).strict()
   .refine(value => value.action !== "read" || value.deliveryMode === undefined,"Read commands cannot carry delivery mode")
-  .refine(value => value.action === "interrupt" ? isInterruptShape(value) : value.deliveryMode === "steer" ? value.action === "send" && value.expectedTurnId !== undefined : value.expectedTurnId === undefined,
-    "Only steer and interrupt require an exact expected turn ID")
+  .refine(hasValidTurnTarget, "Only steer, interrupt and approve require an exact expected turn ID")
   .refine(
     (data) => {
       if (data.action === "send") {
@@ -347,6 +359,8 @@ export interface CommandRecord {
   inputReceipt?: InputReceipt;
   deliveryMode?: DeliveryMode;
   expectedTurnId?: string;
+  approvalRequestId?: string;
+  approvalDecision?: ApprovalDecision;
   authority?: CommandAuthority;
   queueOrder?: number;
   expiresAt: string;
@@ -362,7 +376,7 @@ export function validateCommandSendRoute(command: Pick<CommandRecord, "action" |
   if (command.sendRoute === "claude-resume" && !CLAUDE_SESSION_ID_PATTERN.test(command.sessionId)) throw new Error("Claude route requires a precise Claude Code session");
   if (command.sendRoute === undefined) return; // Historical records remain readable, but are never replayed.
   SendRouteSchema.parse(command.sendRoute);
-  if (command.action === "interrupt" && command.sendRoute !== "terminal-pane") return;
+  if ((command.action === "interrupt" || command.action === "approve") && command.sendRoute !== "terminal-pane") return;
   if (command.action !== "send") throw new Error("Read commands cannot carry a send route");
 }
 

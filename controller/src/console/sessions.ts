@@ -6,6 +6,8 @@ import { publicCommand } from "../commands/public.js";
 import { NodeHub } from "../nodes/hub.js";
 import { HistoryError } from "../sessions/history.js";
 import { INTERRUPT_RESULT_WAIT_MS } from "../sessions/turn-interrupt.js";
+import { APPROVAL_RESULT_WAIT_MS } from "../sessions/approval.js";
+import { ApprovalDecisionSchema, ApprovalRequestIdSchema } from "../sessions/approval-contracts.js";
 import { TERMINAL_SESSION_ID_PATTERN } from "../sessions/terminal.js";
 import { CLAUDE_SESSION_ID_PATTERN } from "../sessions/claude.js";
 import { DeliveryModeSchema, PostCommandRequestSchema, SessionHistorySchema, TurnIdSchema, type CommandAuthority } from "../types.js";
@@ -27,10 +29,12 @@ const MessageSchema = z.object({
   requestId: z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/),
   deliveryMode: DeliveryModeSchema.optional(),expectedTurnId:TurnIdSchema.optional(),
 }).strict();
+const ApprovalSchema = z.object({ requestId: z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/), turnId: TurnIdSchema,
+  approvalRequestId: ApprovalRequestIdSchema, decision: ApprovalDecisionSchema }).strict();
 const InterruptSchema = z.object({ requestId: z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/), turnId: TurnIdSchema }).strict();
 const CancelSchema = z.object({cancelCommandId:z.string().min(1).max(64)}).strict();
 const RequestIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/);
-function webRequestId(requestId: string, operation: "session-message" | "session-interrupt" = "session-message"): string {
+function webRequestId(requestId: string, operation: "session-message" | "session-interrupt" | "session-approval" = "session-message"): string {
   return "web_" + createHash("sha256").update(JSON.stringify([operation, requestId])).digest("hex");
 }
 
@@ -165,6 +169,24 @@ export function createSessionRouter(hub: NodeHub, commands: CommandService, opti
     const assertDispatchAllowed = res.locals.assertConsoleDispatch as (() => Promise<void>) | undefined;
     const command = await commands.submit({ ...target.data, action: "interrupt", expectedTurnId: body.data.turnId,
       requestId: webRequestId(body.data.requestId, "session-interrupt") }, INTERRUPT_RESULT_WAIT_MS, assertDispatchAllowed, undefined, res.locals.commandAuthority);
+    res.status(command.status === "pending" ? 202 : 200).json(publicCommand(command));
+  });
+  // One explicit button press answers one exact observed request; the browser cannot choose session-wide approval.
+  router.post("/:nodeId/:sessionId/approval", async (req, res) => {
+    const target = TargetSchema.safeParse(req.params);
+    const body = ApprovalSchema.safeParse(req.body);
+    if (!req.is("application/json") || !target.success || !body.success) {
+      res.status(400).json({ error: "Invalid session approval request" });
+      return;
+    }
+    if (target.data.nodeId === WECHAT_NODE_ID) {
+      res.status(403).json({ code: "session_read_only", error: "WeChat Codex history is read-only" });
+      return;
+    }
+    const assertDispatchAllowed = res.locals.assertConsoleDispatch as (() => Promise<void>) | undefined;
+    const command = await commands.submit({ ...target.data, action: "approve", expectedTurnId: body.data.turnId,
+      approvalRequestId: body.data.approvalRequestId, approvalDecision: body.data.decision,
+      requestId: webRequestId(body.data.requestId, "session-approval") }, APPROVAL_RESULT_WAIT_MS, assertDispatchAllowed, undefined, res.locals.commandAuthority);
     res.status(command.status === "pending" ? 202 : 200).json(publicCommand(command));
   });
   return router;

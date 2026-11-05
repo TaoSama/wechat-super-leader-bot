@@ -74,6 +74,7 @@ type Daemon struct {
 	claude             *claude.Adapter
 	claudeSnapshot     []protocol.Session
 	claudeWatchers     sync.WaitGroup
+	approvals          approvalCache
 }
 
 func NewDaemon(cfg *config.Config, adapter codex.SessionAdapter) *Daemon {

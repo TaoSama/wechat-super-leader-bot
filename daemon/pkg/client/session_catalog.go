@@ -44,6 +44,7 @@ func mergeSessionSources(control, catalog []protocol.Session) []protocol.Session
 		stored.Capabilities = []protocol.ActionType{protocol.ActionRead}
 		stored.DesktopObservation = nil
 		stored.SendAvailability = nil
+		stored.PendingApprovals = nil
 		positions[stored.ID] = len(result)
 		result = append(result, stored)
 	}

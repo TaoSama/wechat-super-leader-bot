@@ -91,6 +91,8 @@ async function migrateInitialSchema(client: pg.PoolClient): Promise<void> {
   await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS delivery_mode VARCHAR(16)");
   await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS expected_turn_id VARCHAR(128)");
   await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS authority JSONB");
+  await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS approval_request_id VARCHAR(128)");
+  await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS approval_decision VARCHAR(16)");
   await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS console_hidden_at TIMESTAMPTZ");
   await client.query("ALTER TABLE commands ADD COLUMN IF NOT EXISTS queue_order BIGSERIAL");
   await client.query("DROP INDEX IF EXISTS commands_queue_idx");

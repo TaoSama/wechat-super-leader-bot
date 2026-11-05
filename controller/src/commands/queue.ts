@@ -10,7 +10,8 @@ export const ACTIVE_COMMAND_STATUSES = ["pending", "accepted", "uncertain"];
 export function sameCommandPayload(a: CommandRecord, b: PostCommandRequest): boolean {
   return a.nodeId === b.nodeId && a.sessionId === b.sessionId && a.action === b.action &&
     (a.prompt ?? "") === (b.prompt ?? "") && sameSkillRefs(a.skills, b.skills) &&
-    (a.deliveryMode ?? "next-turn") === (b.deliveryMode ?? "next-turn") && a.expectedTurnId === b.expectedTurnId;
+    (a.deliveryMode ?? "next-turn") === (b.deliveryMode ?? "next-turn") && a.expectedTurnId === b.expectedTurnId &&
+    a.approvalRequestId === b.approvalRequestId && a.approvalDecision === b.approvalDecision;
 }
 
 /** Historical capability is target identity evidence only. Dispatch always rechecks live authority. */

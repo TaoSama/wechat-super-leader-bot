@@ -1,4 +1,4 @@
-import { SessionHistory, HistoryItem, CommandRecord } from "../types";
+import { SessionHistory, HistoryItem, CommandRecord, ApprovalDecision } from "../types";
 import { isHistoryContext, isSessionHistorySource, MAX_HISTORY_DURATION_MS } from "../features/sessions/history-contract";
 import { normalizeSession, normalizeCommand } from "./normalizers";
 import { sessionRequest } from "./request";
@@ -64,6 +64,17 @@ export async function interruptSession(nodeId: string, sessionId: string, turnId
   const raw = await sessionRequest(`${sessionPath(nodeId, sessionId)}/interrupt`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json", "X-Super-Leader-Intent": SESSION_INTERRUPT_INTENT }, body: JSON.stringify({ requestId, turnId }), signal });
   const command = normalizeCommand(raw);
   if (!command || command.action !== "interrupt" || command.nodeId !== nodeId || command.sessionId !== sessionId || command.expectedTurnId !== turnId) throw new Error("停止回执与当前会话不匹配，需核查");
+  return command;
+}
+
+export const SESSION_APPROVAL_INTENT = "session-approval";
+
+/** Answers one exact observed approval request; re-posting the same requestId only recovers the original receipt. */
+export async function answerSessionApproval(nodeId: string, sessionId: string, turnId: string, approvalRequestId: string, decision: ApprovalDecision, requestId: string, signal?: AbortSignal): Promise<CommandRecord> {
+  const raw = await sessionRequest(`${sessionPath(nodeId, sessionId)}/approval`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json", "X-Super-Leader-Intent": SESSION_APPROVAL_INTENT }, body: JSON.stringify({ requestId, turnId, approvalRequestId, decision }), signal });
+  const command = normalizeCommand(raw);
+  if (!command || command.action !== "approve" || command.nodeId !== nodeId || command.sessionId !== sessionId || command.expectedTurnId !== turnId ||
+      command.approvalRequestId !== approvalRequestId || command.approvalDecision !== decision) throw new Error("审批回执与当前请求不匹配，需核查");
   return command;
 }
 

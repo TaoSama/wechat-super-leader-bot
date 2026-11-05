@@ -30,6 +30,18 @@ func ExtractString(m map[string]any, keys ...string) string {
 	return ""
 }
 
+// Session status strings derived from an active thread's native activeFlags.
+const (
+	StatusWaitingApproval  = "waitingApproval"
+	StatusWaitingUserInput = "waitingUserInput"
+	nativeStatusActive     = "active"
+	flagWaitingOnApproval  = "waitingOnApproval"
+	flagWaitingOnUserInput = "waitingOnUserInput"
+)
+
+// ExtractStatus returns a status string. A native thread status object
+// {type:"active", activeFlags:[...]} maps a pending approval or user-input
+// flag to waitingApproval / waitingUserInput; approval wins when both are set.
 func ExtractStatus(raw any) string {
 	switch v := raw.(type) {
 	case string:
@@ -37,9 +49,34 @@ func ExtractStatus(raw any) string {
 			return strings.TrimSpace(v)
 		}
 	case map[string]any:
-		if t, ok := v["type"].(string); ok && strings.TrimSpace(t) != "" {
-			return strings.TrimSpace(t)
+		t, ok := v["type"].(string)
+		if !ok || strings.TrimSpace(t) == "" {
+			break
 		}
+		t = strings.TrimSpace(t)
+		if t == nativeStatusActive {
+			if flagged := activeFlagStatus(v["activeFlags"]); flagged != "" {
+				return flagged
+			}
+		}
+		return t
 	}
 	return "unknown"
+}
+
+func activeFlagStatus(raw any) string {
+	flags, _ := raw.([]any)
+	waitingInput := false
+	for _, flag := range flags {
+		switch flag {
+		case flagWaitingOnApproval:
+			return StatusWaitingApproval
+		case flagWaitingOnUserInput:
+			waitingInput = true
+		}
+	}
+	if waitingInput {
+		return StatusWaitingUserInput
+	}
+	return ""
 }

@@ -56,3 +56,42 @@ func TestSendAndReadFingerprintsUnchanged(t *testing.T) {
 		t.Fatalf("send fingerprint = %s", got)
 	}
 }
+
+func TestApproveValidationAndIdentity(t *testing.T) {
+	now := time.Now().UTC()
+	base := ControllerCommandMessage{Type: "command", CommandID: "command", NodeID: "node", SessionID: "session",
+		Action: ActionApprove, ExpectedTurnID: "turn", ApprovalRequestID: "7", ApprovalDecision: ApprovalAccept,
+		ExpiresAt: now.Add(time.Minute).Format(time.RFC3339Nano)}
+	for _, tc := range []struct {
+		name   string
+		change func(*ControllerCommandMessage)
+		ok     bool
+	}{
+		{"accept", func(*ControllerCommandMessage) {}, true},
+		{"decline-desktop", func(c *ControllerCommandMessage) {
+			c.ApprovalDecision, c.SendRoute = ApprovalDecline, RouteDesktopOwner
+		}, true},
+		{"session-wide", func(c *ControllerCommandMessage) { c.ApprovalDecision = "acceptForSession" }, false},
+		{"cancel", func(c *ControllerCommandMessage) { c.ApprovalDecision = "cancel" }, false},
+		{"missing-request", func(c *ControllerCommandMessage) { c.ApprovalRequestID = "" }, false},
+		{"bad-request", func(c *ControllerCommandMessage) { c.ApprovalRequestID = "a b" }, false},
+		{"missing-turn", func(c *ControllerCommandMessage) { c.ExpectedTurnID = "" }, false},
+		{"terminal", func(c *ControllerCommandMessage) { c.SessionID = "terminal:pane" }, false},
+		{"claude", func(c *ControllerCommandMessage) { c.SessionID = ClaudeSessionPrefix + "x" }, false},
+		{"prompt", func(c *ControllerCommandMessage) { c.Prompt = "yes" }, false},
+		{"fields-on-send", func(c *ControllerCommandMessage) { c.Action, c.Prompt, c.ExpectedTurnID = ActionSend, "p", "" }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := base
+			tc.change(&cmd)
+			if err := cmd.Validate("node", now); (err == nil) != tc.ok {
+				t.Fatalf("validation = %v, want ok=%v", err, tc.ok)
+			}
+		})
+	}
+	other := base
+	other.ApprovalDecision = ApprovalDecline
+	if other.PayloadFingerprint() == base.PayloadFingerprint() {
+		t.Fatal("approval decision omitted from fingerprint")
+	}
+}
