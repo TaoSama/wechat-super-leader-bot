@@ -182,6 +182,9 @@ func (c *desktopConn) readBudgeted(ctx context.Context, budget *desktopFrameBudg
 	body := &io.LimitedReader{R: c, N: int64(size)}
 	message, err := readDesktopSubscriptionEnvelope(bodyCtx, body)
 	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return io.ErrUnexpectedEOF
+		}
 		return err
 	}
 	if body.N != 0 {

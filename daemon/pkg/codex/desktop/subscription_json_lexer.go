@@ -62,18 +62,51 @@ func (l *desktopJSONLexer) peekRaw() (byte, error) {
 	return b[0], nil
 }
 
+// A span never crosses the next cancellation checkpoint. Peek first ensures
+// buffered data is available without asking the reader to fill a whole span.
+func (l *desktopJSONLexer) span() ([]byte, error) {
+	if err := l.ctx.Err(); err != nil {
+		return nil, err
+	}
+	if _, err := l.r.Peek(1); err != nil {
+		return nil, err
+	}
+	return l.r.Peek(min(l.r.Buffered(), desktopJSONReadBuffer-l.read))
+}
+
+func (l *desktopJSONLexer) consume(size int) error {
+	if err := l.ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := l.r.Discard(size); err != nil {
+		return err
+	}
+	l.read += size
+	if l.read == desktopJSONReadBuffer {
+		l.read = 0
+	}
+	return nil
+}
+
 func desktopJSONWhitespace(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\r' || b == '\n'
 }
 
 func (l *desktopJSONLexer) peek() (byte, error) {
 	for {
-		b, err := l.peekRaw()
-		if err != nil || !desktopJSONWhitespace(b) {
-			return b, err
-		}
-		if _, err := l.readByte(); err != nil {
+		span, err := l.span()
+		if err != nil {
 			return 0, err
+		}
+		size := 0
+		for size < len(span) && desktopJSONWhitespace(span[size]) {
+			size++
+		}
+		if err := l.consume(size); err != nil {
+			return 0, err
+		}
+		if size != len(span) {
+			return span[size], nil
 		}
 	}
 }
@@ -108,23 +141,27 @@ type desktopJSONScalar struct {
 }
 
 func (s *desktopJSONScalar) put(b byte) {
+	s.putSpan([]byte{b})
+}
+
+func (s *desktopJSONScalar) putSpan(raw []byte) {
 	if s.overflow {
 		return
 	}
-	if len(s.raw) == s.limit {
+	if len(raw) > s.limit-len(s.raw) {
 		s.raw, s.overflow = nil, true
 		return
 	}
 	// Bound capacity as well as length; append's geometric growth may otherwise
 	// exceed the caller's retained-value budget.
-	if len(s.raw) == cap(s.raw) {
-		capacity := max(32, 2*cap(s.raw))
+	if len(s.raw)+len(raw) > cap(s.raw) {
+		capacity := max(len(s.raw)+len(raw), max(32, 2*cap(s.raw)))
 		capacity = min(capacity, s.limit)
 		grown := make([]byte, len(s.raw), capacity)
 		copy(grown, s.raw)
 		s.raw = grown
 	}
-	s.raw = append(s.raw, b)
+	s.raw = append(s.raw, raw...)
 }
 
 func (l *desktopJSONLexer) scalarByte(s *desktopJSONScalar) (byte, error) {
@@ -226,20 +263,25 @@ func desktopJSONDigit(b byte) bool { return b >= '0' && b <= '9' }
 func (l *desktopJSONLexer) digits(s *desktopJSONScalar, required bool) error {
 	count := 0
 	for {
-		b, err := l.peekRaw()
+		span, err := l.span()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
 			return err
 		}
-		if !desktopJSONDigit(b) {
-			break
+		size := 0
+		for size < len(span) && desktopJSONDigit(span[size]) {
+			size++
 		}
-		if _, err := l.scalarByte(s); err != nil {
+		s.putSpan(span[:size])
+		if err := l.consume(size); err != nil {
 			return err
 		}
-		count++
+		count += size
+		if size != len(span) {
+			break
+		}
 	}
 	if required && count == 0 {
 		return errDesktopSubscriptionJSON
@@ -377,6 +419,28 @@ func (l *desktopJSONLexer) stringScalar(s *desktopJSONScalar) error {
 		return err
 	}
 	for {
+		span, err := l.span()
+		if errors.Is(err, io.EOF) {
+			return io.ErrUnexpectedEOF
+		}
+		if err != nil {
+			return err
+		}
+		size := 0
+		for size < len(span) {
+			b := span[size]
+			if b < 0x20 || b >= utf8.RuneSelf || b == '"' || b == '\\' {
+				break
+			}
+			size++
+		}
+		s.putSpan(span[:size])
+		if err := l.consume(size); err != nil {
+			return err
+		}
+		if size == len(span) {
+			continue
+		}
 		b, err := l.scalarByte(s)
 		if err != nil {
 			return err
