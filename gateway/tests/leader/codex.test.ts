@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { CodexOptions, ThreadEvent, ThreadOptions } from "@openai/codex-sdk";
+import type { CodexOptions, Input, ThreadEvent, ThreadOptions } from "@openai/codex-sdk";
 import { CodexReplyEngine, type CodexReplyEngineOptions } from "../../src/leader/codex.js";
 import { ReplyEngineConflictError, ReplyEngineUnavailableError } from "../../src/leader/contracts.js";
 import { WorkspaceStore } from "../../src/leader/workspace.js";
@@ -25,11 +25,22 @@ function fixture(t: TestContext) {
   return root;
 }
 
+/** Splits SDK input into its text and the local image paths that follow it. */
+function splitInput(input: Input): { text: string; images: string[] } {
+  if (typeof input === "string") return { text: input, images: [] };
+  return { text: input.map(part => part.type === "text" ? part.text : "").join(""),
+    images: input.flatMap(part => part.type === "local_image" ? [part.path] : []) };
+}
+
 function fakeFactory(run: (input: string, settings: ThreadOptions, sdk: CodexOptions,
-  resume: string | undefined, signal: AbortSignal) => AsyncIterable<ThreadEvent>): NonNullable<CodexReplyEngineOptions["sdkFactory"]> {
+  resume: string | undefined, signal: AbortSignal, images: string[]) => AsyncIterable<ThreadEvent>): NonNullable<CodexReplyEngineOptions["sdkFactory"]> {
+  const call = (input: Input, settings: ThreadOptions, sdk: CodexOptions, resume: string | undefined, signal: AbortSignal) => {
+    const { text, images } = splitInput(input);
+    return run(text, settings, sdk, resume, signal, images);
+  };
   return sdk => ({
-    startThread: settings => ({ runStreamed: async (input, turn) => ({ events: run(input, settings, sdk, undefined, turn.signal) }) }),
-    resumeThread: (id, settings) => ({ runStreamed: async (input, turn) => ({ events: run(input, settings, sdk, id, turn.signal) }) }),
+    startThread: settings => ({ runStreamed: async (input, turn) => ({ events: call(input, settings, sdk, undefined, turn.signal) }) }),
+    resumeThread: (id, settings) => ({ runStreamed: async (input, turn) => ({ events: call(input, settings, sdk, id, turn.signal) }) }),
   });
 }
 

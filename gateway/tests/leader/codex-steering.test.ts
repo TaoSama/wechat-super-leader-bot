@@ -30,7 +30,7 @@ function fixture(t: TestContext) {
   const started = deferred<CodexOptions>();
   const finish = deferred<void>();
   const ready = deferred<void>();
-  const calls: Array<{ text: string; expected: string }> = [];
+  const calls: Array<{ text: string; expected: string; images?: readonly string[] }> = [];
   let rejection: Error | undefined;
   let beforeSteerReceipt: (() => Promise<void>) | undefined;
   let runs = 0;
@@ -39,8 +39,8 @@ function fixture(t: TestContext) {
     started.resolve(options);
     await ready.promise;
     return { threadId: "thread-active", turnId: "turn-active", close: async () => undefined,
-      steer: async (text, expected) => {
-        calls.push({ text, expected });
+      steer: async (text, expected, images) => {
+        calls.push({ text, expected, ...(images?.length ? { images } : {}) });
         await beforeSteerReceipt?.();
         if (rejection) throw rejection;
       },
@@ -97,6 +97,52 @@ test("new message waits for starting native turn and steers once with exact pers
   const restarted = new CodexReplyEngine({ root: f.root, model: "test", codexPath: process.execPath });
   assert.equal(await restarted.steer("account", additional, controller), true, "restart must not resubmit accepted supplementation");
   assert.equal(await restarted.steer("account", { ...additional, messageId: "after-completion" }, controller), false);
+});
+
+test("an image sent during a running turn is steered into it as pixels without adding business authority", async t => {
+  const f = fixture(t);
+  const forwarded: string[] = [];
+  const boundController = directToolController(async request => {
+    forwarded.push(request.text); return { result: { text: `Controller:${request.text}` } };
+  });
+  const bytes = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.from("screenshot")]);
+  const image = { mime: "image/png", bytes, sha256: createHash("sha256").update(bytes).digest("hex") };
+  const reply = f.engine.reply("account", initial, boundController);
+  const options = await f.started.promise;
+  f.ready.resolve();
+  assert.equal(f.engine.hasActiveTurn("account", initial.chatId), true);
+  const picture = { chatId: initial.chatId, messageId: "picture", text: "" };
+  assert.equal(await f.engine.steer("account", picture, boundController), false, "nothing staged means nothing to steer");
+  await f.engine.stageImages("account", initial.chatId, picture.messageId, [image]);
+  assert.equal(await f.engine.steer("account", picture, boundController), true);
+  assert.equal(await f.engine.steer("account", picture, boundController), true, "a redelivered image is not steered twice");
+  assert.equal(f.calls.length, 1);
+  assert.match(f.calls[0].text, /<current_user_images count="1">/);
+  assert.equal(f.calls[0].images?.length, 1);
+  assert.deepEqual(fs.readFileSync(f.calls[0].images![0]), bytes);
+  await callTool(options, TEST_TOOL_NAME, { requestMessageId: initial.messageId });
+  assert.deepEqual(forwarded, [initial.text], "an image alone must not change the request authority");
+  f.finish.resolve();
+  await reply;
+  await f.engine.drain();
+  assert.equal(f.engine.hasActiveTurn("account", initial.chatId), false);
+});
+
+test("a rejected image steer returns the image to the next turn", async t => {
+  const f = fixture(t);
+  const bytes = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.from("late")]);
+  const reply = f.engine.reply("account", initial, controller);
+  await f.started.promise;
+  f.ready.resolve();
+  await f.engine.stageImages("account", initial.chatId, "picture", [{ mime: "image/png", bytes,
+    sha256: createHash("sha256").update(bytes).digest("hex") }]);
+  f.reject(new AppServerRejectedError(-32602));
+  assert.equal(await f.engine.steer("account", { chatId: initial.chatId, messageId: "picture", text: "" }, controller), false);
+  f.finish.resolve();
+  await reply;
+  const workspace = await new WorkspaceStore(f.root).forChat("account", initial.chatId);
+  const manifest = JSON.parse(fs.readFileSync(path.join(workspace.workspacePath, ".inbound-images", "manifest.json"), "utf8"));
+  assert.deepEqual(manifest.map((entry: { claimedBy?: string }) => entry.claimedBy), [undefined]);
 });
 
 test("accepting a supplement prunes closed history before crossing the durable journal limit", async t => {

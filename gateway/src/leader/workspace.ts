@@ -77,11 +77,11 @@ function digest(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
-function hasCode(error: unknown, code: string): boolean {
+export function hasCode(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
 }
 
-function storageOperation<T>(action: () => T): T {
+export function storageOperation<T>(action: () => T): T {
   try {
     return action();
   } catch (error: unknown) {
@@ -91,7 +91,7 @@ function storageOperation<T>(action: () => T): T {
   }
 }
 
-class WorkspaceValidationError extends Error {
+export class WorkspaceValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "WorkspaceValidationError";
@@ -187,7 +187,7 @@ function validateReplyJournal(value: unknown): ReplyJournal {
 }
 
 /** Check every ancestor as well as the leaf; recursive mkdir would follow links. */
-function ensureDirectory(directory: string, create: boolean, privateMode = false): void {
+export function ensureDirectory(directory: string, create: boolean, privateMode = false): void {
   const parsed = path.parse(directory);
   let current = parsed.root;
   for (const component of directory.slice(parsed.root.length).split(path.sep).filter(Boolean)) {
@@ -211,7 +211,7 @@ function ensureDirectory(directory: string, create: boolean, privateMode = false
   if (privateMode) fs.chmodSync(directory, DIRECTORY_MODE);
 }
 
-function assertRegularFile(file: string): boolean {
+export function assertRegularFile(file: string): boolean {
   let stat: fs.Stats;
   try {
     stat = fs.lstatSync(file);
@@ -225,7 +225,7 @@ function assertRegularFile(file: string): boolean {
   return true;
 }
 
-function readText(file: string, limit: number, strictUtf8 = false): string | undefined {
+export function readText(file: string, limit: number, strictUtf8 = false): string | undefined {
   if (!assertRegularFile(file)) return undefined;
   const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
@@ -279,7 +279,7 @@ function readMemoryPrefix(file: string): { content: string; truncated: boolean }
   }
 }
 
-function atomicWrite(file: string, content: string): void {
+export function atomicWrite(file: string, content: string | Buffer): void {
   assertRegularFile(file);
   const directory = path.dirname(file);
   const temporary = path.join(directory, `.write-${randomUUID()}.tmp`);

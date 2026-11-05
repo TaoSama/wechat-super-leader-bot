@@ -58,8 +58,8 @@ test("each native turn actually consumes saved model, effort, SP and immutable s
     sdkFactory: sdk => ({ startThread: options => ({ runStreamed: async input => ({ events: (async function* (): AsyncIterable<ThreadEvent> {
       assert.equal(options.model, "new-model");
       assert.equal(options.modelReasoningEffort, "high");
-      assert.match(input, /^Custom system instructions/);
-      assert.match(input, /<current_user_message>/);
+      assert.match(String(input), /^Custom system instructions/);
+      assert.match(String(input), /<current_user_message>/);
       observedHome = sdk.env!.HOME;
       const file = path.join(observedHome, ".agents", "skills", "test-skill", "SKILL.md");
       assert.match(fs.readFileSync(file, "utf8"), /Changed skill/);
