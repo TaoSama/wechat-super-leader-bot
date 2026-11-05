@@ -37,6 +37,16 @@ describe("24-hour isolated background workers", () => {
     expect((await f.repository.get(worker.id))?.executorKind).toBe("claude");
     expect(publicBackgroundWorker(worker)).toMatchObject({ executor: "claude" });
   });
+  it("relabels a worker that lives through an executor switch when its next turn launches", async () => {
+    const f = setup();
+    const codex = new BackgroundService({ ...f.options, executorKind: "codex" });
+    await codex.register(f.run, f.spec);
+    expect((await f.worker())?.executorKind).toBe("codex");
+    const claude = new BackgroundService({ ...f.options, executorKind: "claude" });
+    await claude.inspect(f.run);
+    expect(f.runtime.start).toHaveBeenCalledTimes(1);
+    expect((await f.worker())?.executorKind).toBe("claude");
+  });
   it.each([undefined, 2 * 3_600_000])("starts partial analysis at the default one-hour or explicit deadline (%s)", async deadlineMs => {
     const f = setup();
     const spec = BackgroundSpecSchema.parse({ prompt: "汇总跨机器任务结果", sources: watched(f).sources, deadlineMs });

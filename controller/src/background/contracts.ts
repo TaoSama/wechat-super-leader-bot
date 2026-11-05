@@ -68,7 +68,7 @@ export interface BackgroundWorker {
   prompts: BackgroundPrompt[]; invocations: BackgroundInvocation[]; activeInvocationId?: string;
   initialOutcome?: RunnerOutcome; initialAcceptedAt?: number; initialDiscardedAt?: number;
   leaseOwner?: string; leaseUntil: number; updatedAt: number; cleanedAt?: number; suspendedAt?: number; cancelRequestedAt?: number;
-  /** Executor configured when the worker was created; absent on workers created before it was recorded. */
+  /** Executor of the worker's latest launched turn (or its creation); absent on workers created before it was recorded. */
   executorKind?: WorkerExecutorKind;
 }
 export interface BackgroundRepository {
