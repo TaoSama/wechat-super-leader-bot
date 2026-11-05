@@ -29,6 +29,7 @@ JOB_BUDGET_SECONDS = 20 * 60
 MAX_LOG_BYTES = 512 * 1024
 COMMAND_SECONDS = 20 * 60
 CLEANUP_COMMAND_SECONDS = 5
+BUILDER_CLEANUP_SECONDS = 30
 STOP_GRACE_SECONDS = 2
 
 
@@ -50,11 +51,13 @@ class Probe:
         self.temp = Path(tempfile.mkdtemp(prefix="release-archive-probe-"))
         self.token = uuid.uuid4().hex
         self.builder = "archive-probe-" + self.token
+        self.container = "archive-probe-cli-" + self.token
         self.tags = {name: f"release-archive-probe-{name}:{self.token}" for name in COMPONENTS}
         self.processes = set()
         self.lock = threading.Lock()
         self.env = os.environ.copy()
         self.builder_created = False
+        self.container_attempted = False
         self.engine_pinned = False
         self.cancelled = False
         self.loaded = set()
@@ -225,6 +228,8 @@ class Probe:
         result = {"raw_bytes": raw.stat().st_size, "raw_sha256": sha256(raw),
                   "archive": self.archive_structure(raw)}
         self.report["images"][name] = result
+        if result["archive"]["npm_cache"]["archived_file_bytes"]:
+            raise RuntimeError(f"{name} release archive retains npm install cache")
         compression, _ = self.command(name + "-gzip-1", ["gzip", "-n", "-1", "-c", str(raw)], stdout_path=compressed)
         self.command(name + "-gunzip", ["gzip", "-d", "-c", str(compressed)], stdout_path=restored)
         result.update({"gzip_bytes": compressed.stat().st_size, "gzip_sha256": sha256(compressed),
@@ -239,6 +244,13 @@ class Probe:
         gzip_load, _ = self.command(name + "-load-gzip", ["docker", "load", "--input", str(compressed)])
         if self.inspect(name, name + "-inspect-gzip") != identity:
             raise RuntimeError(f"{name} compressed archive changed image identity")
+        if name == "controller":
+            self.container_attempted = True
+            _, log = self.command("controller-cli-version", ["docker", "run", "--rm", "--name", self.container,
+                                  "--network", "none", "--entrypoint", "codex", self.tags[name], "--version"])
+            result["cli_version"] = log.read_text().strip()
+            if result["cli_version"] != "codex-cli 0.163.0":
+                raise RuntimeError(f"Unexpected controller CLI version: {result['cli_version']}")
         truncated = self.temp / (name + "-truncated.tar")
         with compressed.open("rb") as source, truncated.open("wb") as target:
             remaining = compressed.stat().st_size // 2
@@ -298,6 +310,14 @@ class Probe:
         for process in running:
             self.stop_process(process)
         self.cancelled = False
+        if self.container_attempted and self.engine_pinned:
+            try:
+                check, log = self.command("cleanup-cli-container", ["docker", "container", "rm", "--force", self.container],
+                                          expected_success=False, timeout_seconds=CLEANUP_COMMAND_SECONDS)
+                if check["exit_code"] and "No such container" not in log.read_text():
+                    raise RuntimeError("Cannot remove owned CLI probe container")
+            except Exception as error:
+                self.report["errors"].append(f"Container cleanup: {error}")
         for name in self.loaded if self.engine_pinned else ():
             try:
                 check, _ = self.command(name + "-cleanup-inspect", ["docker", "image", "inspect", self.tags[name]],
@@ -312,7 +332,7 @@ class Probe:
         if self.builder_created:
             try:
                 self.command("cleanup-builder", ["docker", "buildx", "rm", self.builder],
-                             timeout_seconds=CLEANUP_COMMAND_SECONDS)
+                             timeout_seconds=BUILDER_CLEANUP_SECONDS)
             except Exception as error:
                 self.report["errors"].append(f"Builder cleanup: {error}")
         try:

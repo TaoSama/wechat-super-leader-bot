@@ -4,7 +4,7 @@ import test from 'node:test';
 
 const BASE_IMAGE = 'node:24-bookworm-slim';
 const NATIVE_TOOLCHAIN = `FROM --platform=$BUILDPLATFORM ${BASE_IMAGE} AS toolchain`;
-const CONTROLLER_RUNTIME_INSTALL = 'RUN npm install --global @openai/codex@0.163.0 && mkdir -p /var/lib/super-leader-runtime/settings /var/lib/super-leader-runtime/background/workers /var/lib/super-leader-runtime/background/artifacts && chown -R node:node /var/lib/super-leader-runtime';
+const CONTROLLER_RUNTIME_INSTALL = 'RUN npm install --global @openai/codex@0.163.0 && npm cache clean --force && mkdir -p /var/lib/super-leader-runtime/settings /var/lib/super-leader-runtime/background/workers /var/lib/super-leader-runtime/background/artifacts && chown -R node:node /var/lib/super-leader-runtime';
 const SKILL_RUNTIME_INSTALL = 'RUN apt-get update && apt-get install -y --no-install-recommends python3 curl python3-bs4 python3-html2text && rm -rf /var/lib/apt/lists/*';
 const SKILL_RUNTIME_PERMISSIONS = 'RUN chmod -R go-w /etc/codex/skills';
 const controllerDockerfile = readFileSync(new URL('../../../deploy/Dockerfile.controller', import.meta.url), 'utf8');
