@@ -23,6 +23,7 @@ export async function manifestFor(root, names, signal) {
   return files;
 }
 
+export const MAX_TRANSFER_PARTS = 64;
 export const ACTIVATION_LOG = 'activation.log';
 export const ACTIVATION_STATUS = 'activation.status';
 const ACTIVATION_OUTPUT_BYTES = 8192;
@@ -66,6 +67,21 @@ elif op=='verify':
    for chunk in iter(lambda:stream.read(1048576),b''):h.update(chunk)
   if h.hexdigest()!=f['sha256']:sys.exit(74)
  print(json.dumps({'verified':True}))
+elif op=='join':
+ # Parallel uploads arrive as numbered parts; reassemble each before integrity verification.
+ for f in files:
+  count=f['parts']
+  if not isinstance(count,int) or count<1 or count>${MAX_TRANSFER_PARTS}:sys.exit(74)
+  target=os.path.join(stage,f['name'])
+  parts=[target+'.part%02d'%i for i in range(count)]
+  for part in parts:
+   if os.path.islink(part) or not os.path.isfile(part):sys.exit(74)
+  with open(target,'wb') as out:
+   for part in parts:
+    with open(part,'rb') as src:
+     for chunk in iter(lambda:src.read(1048576),b''):out.write(chunk)
+  for part in parts:os.unlink(part)
+ print(json.dumps({'joined':True}))
 elif op=='activate':
  script=os.path.join(stage,'remote-release.sh')
  os.chmod(script,0o700)
@@ -96,7 +112,9 @@ elif op=='activation':
  print(json.dumps(result))
 elif op=='cleanup':
  if os.path.exists(log) and not os.path.exists(status):sys.exit(77)
- for name in [f['name'] for f in files]+['release.env.next','${ACTIVATION_LOG}','${ACTIVATION_STATUS}']:
+ names=[f['name'] for f in files]
+ names+=[entry for entry in os.listdir(stage) if any(entry.startswith(name+'.part') for name in names)]
+ for name in names+['release.env.next','${ACTIVATION_LOG}','${ACTIVATION_STATUS}']:
   try:os.unlink(os.path.join(stage,name))
   except FileNotFoundError:pass
  if set(os.listdir(stage))!={'.transfer-owner'}:sys.exit(75)

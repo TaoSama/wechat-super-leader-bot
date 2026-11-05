@@ -1,4 +1,6 @@
 import { appendFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
 import { randomBytes } from 'node:crypto';
 import { join, posix } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -24,6 +26,9 @@ const DIAGNOSTIC_CANCEL_BYTES = 256 * 1024;
 const DIAGNOSTIC_PARTIAL_WAIT_MS = 10_000;
 const DIAGNOSTIC_POLL_MS = 500;
 const ACTIVATION_POLL_MS = 5_000;
+// One TCP stream to the VPS is loss-limited on the long path; parallel streams multiply throughput.
+export const PARALLEL_STREAMS = 8;
+export const PARALLEL_MIN_BYTES = 32 * 1024 * 1024;
 // Normally the 20-minute job timeout ends the wrapper first; either way completion is reported as unknown.
 const ACTIVATION_WAIT_MS = 20 * 60_000;
 
@@ -196,8 +201,67 @@ export class ReleaseTransfer {
     throw new TransferFailure('activation_completion_unknown');
   }
 
+  partNames(file) {
+    return Array.from({ length: PARALLEL_STREAMS }, (_, index) => `${file.name}.part${String(index).padStart(2, '0')}`);
+  }
+
+  // Splits large archives into equal parts and uploads part N of every file on SCP stream N.
+  async copyParallel(files) {
+    const c = this.config;
+    const partRoot = await mkdtemp(join(tmpdir(), 'release-transfer-parts-'));
+    try {
+      const streams = Array.from({ length: PARALLEL_STREAMS }, () => []);
+      const parts = [];
+      for (const file of files) {
+        const size = Math.ceil(file.bytes / PARALLEL_STREAMS);
+        for (const [index, name] of this.partNames(file).entries()) {
+          const start = index * size, end = Math.min(file.bytes, start + size);
+          const path = join(partRoot, name);
+          if (end > start) await pipeline(createReadStream(join(c.root, file.name), { start, end: end - 1, signal: this.signal }), createWriteStream(path, { mode: 0o600 }));
+          else await writeFile(path, '', { mode: 0o600 });
+          streams[index].push(path);
+          parts.push({ name, bytes: Math.max(0, end - start) });
+        }
+      }
+      this.copyStarted = Date.now();
+      this.log('parallel_transfer_start', { streams: PARALLEL_STREAMS, files: files.map(file => file.name) });
+      const sampling = new AbortController();
+      let samplingFailure;
+      const sampler = (async () => {
+        while (!sampling.signal.aborted) {
+          try { await delay(PROGRESS_MS, undefined, { signal: sampling.signal }); }
+          catch (error) { if (sampling.signal.aborted && error.name === 'AbortError') break; throw error; }
+          try { await this.progress(parts); }
+          catch (error) {
+            if (this.signal.aborted || !(error instanceof TransferFailure) || !PROGRESS_UNAVAILABLE_CATEGORIES.has(error.category)) throw error;
+            this.log('transfer_progress_unavailable', { category: error.category });
+          }
+        }
+      })().catch(error => { samplingFailure = error; this.abort.abort(); });
+      let results;
+      try {
+        results = await Promise.all(streams.map(paths => this.processes.run('scp', ['-B', ...this.sshArgs(), '-P', String(c.port),
+          ...paths, `${c.user}@${c.host}:${c.stage}/`], { signal: this.signal })));
+      } finally { sampling.abort(); await sampler; }
+      if (samplingFailure) throw samplingFailure;
+      const failed = results.find(result => result.code !== 0 || result.reason);
+      const bytes = parts.reduce((sum, part) => sum + part.bytes, 0), elapsed = Date.now() - this.copyStarted;
+      this.log('parallel_transfer_finished', { transfer_elapsed_ms: elapsed, bytes,
+        average_bytes_per_second: Math.floor(bytes * 1000 / Math.max(1, elapsed)),
+        category: failed ? errorCategory(failed) : 'ok' });
+      if (failed) throw new TransferFailure(errorCategory(failed));
+      if (this.processes.children?.size > 0) throw new TransferFailure('process_stop');
+      if ((await this.remote('join', files.map(file => ({ name: file.name, parts: PARALLEL_STREAMS })))).joined !== true) {
+        throw new TransferFailure('remote_response');
+      }
+    } finally { await rm(partRoot, { recursive: true, force: true }); }
+  }
+
   async deploy() {
-    const result = await this.copy(this.files);
+    const large = (this.files ?? []).filter(file => file.bytes >= PARALLEL_MIN_BYTES);
+    if (large.length) await this.copyParallel(large);
+    const rest = large.length ? this.files.filter(file => !large.includes(file)) : this.files;
+    const result = await this.copy(rest);
     if (result.code !== 0 || result.reason) throw new TransferFailure(errorCategory(result));
     await this.progress(this.files);
     const verificationStarted = Date.now();
