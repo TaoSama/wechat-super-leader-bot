@@ -2,7 +2,21 @@ name: Verify release archives
 
 on:
   pull_request:
+    paths:
+      - .dockerignore
+      - deploy/**
+      - controller/**
+      - gateway/**
+      - web/**
+      - packages/**
+      - scripts/clean-build.mjs
+      - tests/live/release-archive-compression.py
+      - .github/workflows/verify-release-archives.yml
   workflow_dispatch:
+
+concurrency:
+  group: verify-release-archives-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
