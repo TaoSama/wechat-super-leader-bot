@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { copyFileSync, mkdirSync, rmSync } from 'node:fs';
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, relative } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { runSenderTelemetry, verifySenderTelemetry } from '../../integration/deploy/transfer-telemetry.mjs';
 import { verificationEnvironment } from '../../../scripts/verify.mjs';
@@ -47,6 +48,33 @@ function safeFailure(error, phase, category, cleanupCategory) {
   assert.ok(!JSON.stringify(error).includes('credential.invalid'));
   return true;
 }
+
+test('copied sender entry includes its complete static import closure', async t => {
+  const value = await fixture(t);
+  await writeFile(value.values['key-file'], 'synthetic client fixture');
+  const container = join(value.root, 'container');
+  const localPath = path => join(container, relative('/fixture/sender-telemetry', path));
+  value.copyToContainer = (source, destination) => copyFileSync(source, localPath(destination));
+  let imported;
+  value.runInContainer = args => {
+    if (args[0] === 'mkdir') {
+      for (const path of args.slice(2)) mkdirSync(localPath(path), { recursive: true });
+    } else if (args[0] === 'node') {
+      imported = spawnSync(process.execPath, ['--input-type=module', '--eval',
+        `await import(${JSON.stringify(pathToFileURL(localPath(args[1])).href)})`],
+      { encoding: 'utf8', timeout: 5_000 });
+      if (imported.error) throw imported.error;
+      assert.equal(imported.status, 0, imported.stderr);
+      return JSON.stringify(EVIDENCE);
+    } else if (args[0] === 'rm') rmSync(localPath(args.at(-1)), { recursive: true, force: true });
+    else assert.fail(`Unexpected fixture operation: ${args[0]}`);
+    return '';
+  };
+  assert.deepEqual(await verifySenderTelemetry(value), EVIDENCE);
+  assert.equal(imported.status, 0);
+  assert.equal(imported.stderr, '');
+  assert.deepEqual((await readdir(value.root)).sort(), ['client', 'known_hosts']);
+});
 
 test('prepare and cleanup failures preserve primary and still remove the host temporary directory', async t => {
   const value = await fixture(t, { prepareError: unsafeError({}), cleanupError: unsafeError({ code: 'EACCES' }) });

@@ -16,7 +16,7 @@ const CANCEL_MS = 15_000;
 const SAMPLE_MS = 250;
 const SAMPLE_WAIT_MS = 8_000;
 const DEPLOY_MODULES = ['transfer-release.mjs', 'transfer-process.mjs', 'transfer-telemetry.mjs',
-  'transfer-files.mjs', 'transfer-manifest.mjs', 'resolve-revision.mjs'];
+  'transfer-files.mjs', 'transfer-manifest.mjs', 'resolve-revision.mjs', 'probe-release.mjs'];
 const PHASES = new Set(['arguments', 'fixture_create', 'sender_prepare', 'sender_runtime', 'sender_validation', 'host_validation', 'cleanup']);
 const CATEGORIES = new Set(`probe_failed assertion_failed invalid_json invalid_options file_missing permission_denied io_error
   command_timeout command_failed unsafe_logs linux_node24_required unexpected_activation scheduled_sample_unavailable
