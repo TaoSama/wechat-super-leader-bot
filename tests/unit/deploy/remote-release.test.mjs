@@ -20,16 +20,8 @@ const OWNER = 'synthetic-owner';
 const STATUS_WAIT_MS = 10_000;
 const POLL_MS = 50;
 
-function releaseFixture() {
-  const root = mkdtempSync(join(tmpdir(), 'release-idempotency-'));
-  const stage = join(root, 'stage');
-  const bin = join(root, 'bin');
-  mkdirSync(stage);
-  mkdirSync(bin);
-  mkdirSync(join(root, '.runtime'));
-  writeFileSync(join(root, '.runtime/controller.env'), '', { mode: 0o600 });
-  writeFileSync(join(root, '.runtime/release.env'), RELEASE_ENV, { mode: 0o600 });
-  writeFileSync(join(root, '.runtime/release.env.previous'), PREVIOUS_ENV);
+function writeReleaseBundle(stage) {
+  mkdirSync(stage, { recursive: true });
   const bundle = ['controller.tar', 'gateway.tar', 'compose.release.yaml', 'compose.yaml',
     'compose.production.yaml', 'compose.gateway.yaml', 'codex-seccomp.json'];
   for (const file of bundle) writeFileSync(join(stage, file), 'fixture\n');
@@ -38,6 +30,18 @@ function releaseFixture() {
   bundle.push('remote-release.sh', 'release-state.py');
   writeFileSync(join(stage, 'release.sha256'), bundle.map(file =>
     `${createHash('sha256').update(readFileSync(join(stage, file))).digest('hex')}  ${file}\n`).join(''));
+}
+
+function releaseFixture() {
+  const root = mkdtempSync(join(tmpdir(), 'release-idempotency-'));
+  const stage = join(root, 'stage');
+  const bin = join(root, 'bin');
+  mkdirSync(bin);
+  mkdirSync(join(root, '.runtime'));
+  writeFileSync(join(root, '.runtime/controller.env'), '', { mode: 0o600 });
+  writeFileSync(join(root, '.runtime/release.env'), RELEASE_ENV, { mode: 0o600 });
+  writeFileSync(join(root, '.runtime/release.env.previous'), PREVIOUS_ENV);
+  writeReleaseBundle(stage);
   writeFileSync(join(bin, 'docker'), `#!/usr/bin/env node
 import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -49,10 +53,17 @@ const expectedId = 'sha256:' + 'a'.repeat(64);
 const rebuiltId = 'sha256:' + 'c'.repeat(64);
 const tagId = existsSync(join(root, 'retagged')) ? rebuiltId : expectedId;
 const containerId = process.env.TEST_IMAGE_ID || (existsSync(join(root, 'recreated')) ? tagId : expectedId);
+function mutateReleaseEnvironment() {
+  writeFileSync(join(root, '.runtime/release.env'),
+    'CONTROLLER_IMAGE=super-leader-controller:' + revision + '\\n' +
+    'GATEWAY_IMAGE=super-leader-gateway:' + revision + '\\n' +
+    'GATEWAY_CONTEXT_WINDOW_MS=86400000\\n');
+}
 if (args[0] === 'compose') {
   const ps = args.indexOf('ps');
   if (ps !== -1) console.log(args.at(-1));
   if (args.includes('--force-recreate')) writeFileSync(join(root, 'recreated'), 'yes');
+  if (args.includes('--force-recreate') && process.env.TEST_MUTATE_RELEASE_ON_UP) mutateReleaseEnvironment();
   if ((args.includes('--force-recreate') && process.env.TEST_MUTATE_ENV_ON_UP) ||
       (args.includes('config') && process.env.TEST_MUTATE_ENV_ON_PREFLIGHT)) {
     writeFileSync(join(root, '.runtime/controller.env'), 'SECRET=changed\\n');
@@ -70,6 +81,7 @@ if (args[0] === 'compose') {
   if (!args.includes('--format')) {
     if (process.env.TEST_RECORD_FAILURE) process.exit(1);
     if (process.env.TEST_MUTATE_ENV_ON_INSPECT) writeFileSync(join(root, '.runtime/controller.env'), 'SECRET=changed\\n');
+    if (process.env.TEST_MUTATE_RELEASE_ON_INSPECT) mutateReleaseEnvironment();
     const service = args.at(-1);
     const labels = { 'org.opencontainers.image.revision': revision,
       'com.docker.compose.project': 'super-leader', 'com.docker.compose.service': service,
@@ -86,6 +98,11 @@ if (args[0] === 'compose') {
   }
   const format = args[args.indexOf('--format') + 1];
   const service = args.at(-1);
+  if (format.includes('.State.Health') && process.env.TEST_MUTATE_RELEASE_DURING_HEALTH &&
+      existsSync(join(root, 'recreated')) && !existsSync(join(root, 'release-mutated'))) {
+    mutateReleaseEnvironment();
+    writeFileSync(join(root, 'release-mutated'), 'yes');
+  }
   if (format.includes('.Os')) console.log('linux/amd64');
   else if (format === '{{.Image}}') console.log(containerId);
   else if (format === '{{.Id}}') console.log(tagId);
@@ -112,13 +129,14 @@ if (args[0] === 'compose') {
         RELEASE_COMMAND_LOG: join(root, 'commands.jsonl'), ...overrides } });
     if (result.error) throw result.error;
     return { ...result, commands: readFileSync(join(root, 'commands.jsonl'), 'utf8') };
-  }, cleanup() { rmSync(root, { recursive: true, force: true }); } };
+  }, restage() { writeReleaseBundle(stage); }, cleanup() { rmSync(root, { recursive: true, force: true }); } };
 }
 
 function seedReceipt(fixture) {
   const result = spawnSync('python3', [STATE_SCRIPT, 'record', '--release-dir', fixture.root,
     '--revision', REVISION, '--bundle-dir', fixture.stage, '--expected-controller-env-sha256',
-    createHash('sha256').update(readFileSync(join(fixture.root, '.runtime/controller.env'))).digest('hex')],
+    createHash('sha256').update(readFileSync(join(fixture.root, '.runtime/controller.env'))).digest('hex'),
+    '--expected-release-env-sha256', createHash('sha256').update(RELEASE_ENV).digest('hex')],
   { env: fixture.env({}), encoding: 'utf8' });
   if (result.error) throw result.error;
   assert.equal(result.status, 0, result.stderr);
@@ -203,6 +221,12 @@ test('first release health failure remains retryable and cannot create a success
     assert.match(result.stdout, /rollback is unavailable/);
     assert.equal(existsSync(join(fixture.root, '.runtime/deployment-receipt.json')), false);
     assert.doesNotMatch(result.stdout, /deployment_result=deployment_verified/);
+    fixture.restage();
+    const retry = fixture.run();
+    assert.equal(retry.status, 0, retry.stderr);
+    assert.match(retry.commands, /force-recreate/);
+    assert.match(retry.stdout, /deployment_result=deployment_verified/);
+    assert.equal(existsSync(join(fixture.root, '.runtime/deployment-receipt.json')), true);
   } finally { fixture.cleanup(); }
 });
 
@@ -252,6 +276,58 @@ for (const mutation of ['TEST_MUTATE_ENV_ON_PREFLIGHT', 'TEST_MUTATE_ENV_ON_INSP
     } finally { fixture.cleanup(); }
   });
 }
+
+for (const mutation of ['TEST_MUTATE_RELEASE_ON_UP', 'TEST_MUTATE_RELEASE_DURING_HEALTH']) {
+  test(`late release environment ${mutation} rolls back and cannot establish a duplicate receipt`, t => {
+    const fixture = releaseFixture();
+    try {
+      seedReceipt(fixture);
+      const receipt = join(fixture.root, '.runtime/deployment-receipt.json');
+      const accepted = readFileSync(receipt, 'utf8');
+      const fingerprint = JSON.parse(accepted).fingerprint;
+      writeFileSync(join(fixture.root, '.runtime/release.env'), PREVIOUS_ENV);
+      const result = fixture.run({ [mutation]: '1' });
+      const check = spawnSync('python3', [STATE_SCRIPT, 'check', '--release-dir', fixture.root,
+        '--revision', REVISION, '--fingerprint', fingerprint], { env: fixture.env({}), encoding: 'utf8' });
+      if (check.error) throw check.error;
+      writeFileSync(join(fixture.root, '.runtime/activation.lock'), '', { mode: 0o600 });
+      const probe = spawnSync('python3', [STATE_SCRIPT, 'probe', '--release-dir', fixture.root,
+        '--revision', REVISION, '--fingerprint', fingerprint, '--lock-timeout', '0.1'],
+      { env: fixture.env({}), encoding: 'utf8' });
+      if (probe.error) throw probe.error;
+      t.diagnostic(JSON.stringify({ mutation, activation_status: result.status,
+        receipt_preserved: readFileSync(receipt, 'utf8') === accepted,
+        verified_claimed: /deployment_result=deployment_verified/.test(result.stdout),
+        subsequent_check_status: check.status, subsequent_check: check.stdout.trim(),
+        subsequent_probe_status: probe.status, subsequent_probe: probe.stdout.trim() }));
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, /release_environment_changed/);
+      assert.match(result.stdout, /restoring the previous image selection/);
+      assert.doesNotMatch(result.stdout, /deployment_result=/);
+      assert.equal(readFileSync(receipt, 'utf8'), accepted);
+      assert.equal(readFileSync(join(fixture.root, '.runtime/release.env'), 'utf8'), PREVIOUS_ENV);
+      assert.equal(check.status, 3, check.stderr);
+      assert.equal(JSON.parse(check.stdout).decision, 'deploy_required');
+      assert.equal(probe.status, 0, probe.stderr);
+      assert.equal(JSON.parse(probe.stdout).decision, 'deploy_required');
+      assert.equal(JSON.parse(probe.stdout).reason, 'environment_changed');
+    } finally { fixture.cleanup(); }
+  });
+}
+
+test('late release environment mutation during the activation check cannot skip', () => {
+  const fixture = releaseFixture();
+  try {
+    seedReceipt(fixture);
+    const receipt = join(fixture.root, '.runtime/deployment-receipt.json');
+    const accepted = readFileSync(receipt, 'utf8');
+    const result = fixture.run({ TEST_MUTATE_RELEASE_ON_INSPECT: '1' });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /release_environment_changed/);
+    assert.doesNotMatch(result.stdout, /deployment_result=/);
+    assert.equal(readFileSync(receipt, 'utf8'), accepted);
+  } finally { fixture.cleanup(); }
+});
 
 for (const [name, overrides] of [
   ['unhealthy container', { TEST_HEALTH: 'unhealthy' }],

@@ -68,8 +68,9 @@ Docker 归档。两个归档都带有完整 commit SHA 的 `org.opencontainers.i
 实际激活完成最终健康和镜像验证后，才以 0600 原子写入
 `.runtime/deployment-receipt.json`。凭据包含 revision、两服务实际 image ID、配置文件指纹、
 release/controller env 摘要及容器 Config、HostConfig、挂载和网络配置摘要；不保存明文环境。
-激活前固定 controller env 摘要，记录凭据前后再次核对；健康等待期间修改 env 会失败并回滚，
-不能把尚未应用的新 env 与旧容器配置一起接受。服务发现排除 Compose 一次性维护容器。
+首次 Compose 前固定 controller env 与本次生成的 release env 摘要，激活内 check 及
+记录凭据前后再次核对；健康等待期间修改任一 env 会失败并回滚，不能把尚未应用的新 env
+与旧容器配置一起接受。服务发现排除 Compose 一次性维护容器。
 只有以下条件全部满足，自动事件才输出 `duplicate_skipped` 和 `deploy_required=false`：
 
 - 凭据 revision 与本次已核实的 merge SHA 相同，配置、脚本及 seccomp 文件指纹相同。

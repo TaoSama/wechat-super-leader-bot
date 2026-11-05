@@ -141,11 +141,16 @@ checksums_dir=${checksums%/*}
 if ! (cd "$checksums_dir" && sha256sum -c "${checksums##*/}"); then
   die 'release bundle checksum verification failed'
 fi
-if ! controller_env_sha256=$(sha256sum -- "$controller_env"); then
-  die 'controller environment snapshot could not be calculated'
-fi
-controller_env_sha256=${controller_env_sha256%% *}
-readonly controller_env_sha256
+environment_sha256() {
+  local checksum
+  if ! checksum=$(sha256sum -- "$1"); then
+    die "$2 environment snapshot could not be calculated"
+  fi
+  printf '%s\n' "${checksum%% *}"
+}
+controller_env_sha256=$(environment_sha256 "$controller_env" controller)
+release_env_sha256=$(environment_sha256 "$release_env_next" release)
+readonly controller_env_sha256 release_env_sha256
 log 'read-only Compose preflight'
 if ! compose_with_env "$release_env_next" config --quiet; then
   die 'read-only Compose preflight failed'
@@ -239,7 +244,8 @@ receipt_matches() {
   # The detached activation parent already holds activation.lock.
   if python3 "$stage_dir/release-state.py" check --release-dir "$release_dir" \
     --revision "$revision" --fingerprint "$fingerprint" --env-file "$env_file" \
-    --expected-controller-env-sha256 "$controller_env_sha256"; then
+    --expected-controller-env-sha256 "$controller_env_sha256" \
+    --expected-release-env-sha256 "$release_env_sha256"; then
     return 0
   else
     receipt_status=$?
@@ -290,7 +296,8 @@ fi
 
 if ! python3 "$stage_dir/release-state.py" record --release-dir "$release_dir" \
   --revision "$revision" --bundle-dir "$stage_dir" --env-file "$env_file" \
-  --expected-controller-env-sha256 "$controller_env_sha256"; then
+  --expected-controller-env-sha256 "$controller_env_sha256" \
+  --expected-release-env-sha256 "$release_env_sha256"; then
   rollback || true
   die 'successful runtime receipt could not be recorded; deployment is not successful'
 fi

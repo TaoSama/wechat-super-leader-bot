@@ -25,6 +25,7 @@ function fixture(t) {
   writeFileSync(join(runtime, 'controller.env'), 'SECRET=must-not-appear\n', { mode: 0o600 });
   writeFileSync(join(runtime, 'release.env'), `CONTROLLER_IMAGE=super-leader-controller:${REVISION}\n` +
     `GATEWAY_IMAGE=super-leader-gateway:${REVISION}\nGATEWAY_CONTEXT_WINDOW_MS=82800000\n`, { mode: 0o600 });
+  const expectedReleaseEnvSha256 = createHash('sha256').update(readFileSync(join(runtime, 'release.env'))).digest('hex');
   const state = { containers: {}, images: {} };
   for (const service of ['controller', 'gateway']) {
     const image = `super-leader-${service}:${REVISION}`;
@@ -57,6 +58,7 @@ if (args[0] === 'ps') {
 } else if (args[0] === 'image') console.log(JSON.stringify([state.images[args.at(-1)]]));
 else {
   if (state.mutateEnvDuringInspect) writeFileSync(join(dirname(process.env.TEST_STATE), '.runtime/controller.env'), 'SECRET=changed\\n');
+  if (state.mutateReleaseDuringInspect) writeFileSync(join(dirname(process.env.TEST_STATE), '.runtime/release.env'), 'GATEWAY_CONTEXT_WINDOW_MS=86400000\\n');
   console.log(JSON.stringify([state.containers[args.at(-1)]]));
 }
 `);
@@ -65,7 +67,8 @@ else {
   const run = (command, extra = []) => {
     const args = command === 'fingerprint' ? ['--bundle-dir', bundle] :
       ['--release-dir', root, '--revision', REVISION, ...(command === 'record' ? ['--bundle-dir', bundle,
-        '--expected-controller-env-sha256', createHash('sha256').update(readFileSync(join(runtime, 'controller.env'))).digest('hex')] :
+        '--expected-controller-env-sha256', createHash('sha256').update(readFileSync(join(runtime, 'controller.env'))).digest('hex'),
+        '--expected-release-env-sha256', expectedReleaseEnvSha256] :
         ['--fingerprint', fp(), ...(command === 'probe' ? ['--lock-timeout', '0.1'] : [])])];
     const result = spawnSync('python3', ['-', command, ...args, ...extra], { input: SOURCE, env,
       encoding: 'utf8', timeout: 10_000 });
@@ -84,7 +87,7 @@ else {
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout);
   };
-  return { root, runtime, bundle, state, save, env, run, fp, record, probe,
+  return { root, runtime, bundle, state, save, env, run, fp, record, probe, expectedReleaseEnvSha256,
     receipt: join(runtime, RECEIPT) };
 }
 
@@ -209,6 +212,43 @@ test('record binds the controller environment consumed by activation and rejects
   assert.match(result.stderr, /controller_environment_changed/);
   assert.equal(readFileSync(f.receipt, 'utf8'), accepted);
 });
+
+for (const accepted of [false, true]) {
+  test(`late release environment snapshot mismatch cannot ${accepted ? 'replace an accepted' : 'create a'} receipt`, t => {
+    const f = fixture(t);
+    if (accepted) f.record();
+    const before = accepted ? readFileSync(f.receipt, 'utf8') : null;
+    writeFileSync(join(f.runtime, 'release.env'), 'GATEWAY_CONTEXT_WINDOW_MS=86400000\n');
+    const result = f.run('record');
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /release_environment_changed/);
+    assert.equal(existsSync(f.receipt), accepted);
+    if (accepted) assert.equal(readFileSync(f.receipt, 'utf8'), before);
+    assert.equal(f.probe().decision, 'deploy_required');
+  });
+}
+
+test('late release environment mutation during record inspection cannot establish a receipt', t => {
+  const f = fixture(t);
+  f.state.mutateReleaseDuringInspect = true; f.save();
+  const result = f.run('record');
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /release_environment_changed/);
+  assert.equal(existsSync(f.receipt), false);
+});
+
+for (const command of ['check', 'probe']) {
+  test(`late release environment mutation during ${command} cannot produce duplicate_skipped`, t => {
+    const f = fixture(t); f.record();
+    const before = readFileSync(f.receipt, 'utf8');
+    f.state.mutateReleaseDuringInspect = true; f.save();
+    const result = f.run(command, ['--expected-release-env-sha256', f.expectedReleaseEnvSha256]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /release_environment_changed/);
+    assert.doesNotMatch(result.stdout, /duplicate_skipped/);
+    assert.equal(readFileSync(f.receipt, 'utf8'), before);
+  });
+}
 
 test('environment changes during Docker inspection cannot create a receipt or yield a duplicate decision', t => {
   const f = fixture(t);

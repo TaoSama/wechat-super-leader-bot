@@ -128,9 +128,10 @@ def env_hashes(args):
         controller = args.release_dir / controller
     hashes = {'release_env_sha256': digest(protected_bytes(args.release_dir / '.runtime/release.env')),
               'controller_env_sha256': digest(protected_bytes(controller))}
-    if (args.expected_controller_env_sha256 is not None and
-            hashes['controller_env_sha256'] != args.expected_controller_env_sha256):
-        raise StateError('controller_environment_changed')
+    for name, expected in (('controller', args.expected_controller_env_sha256),
+                           ('release', args.expected_release_env_sha256)):
+        if expected is not None and hashes[name + '_env_sha256'] != expected:
+            raise StateError(name + '_environment_changed')
     return hashes
 
 
@@ -238,7 +239,8 @@ def main():
         sub.add_argument('--release-dir', type=Path, required=True)
         sub.add_argument('--revision', required=True)
         sub.add_argument('--env-file', default='.runtime/controller.env')
-        sub.add_argument('--expected-controller-env-sha256', required=command == 'record')
+        for name in ('controller', 'release'):
+            sub.add_argument('--expected-' + name + '-env-sha256', required=command == 'record')
         if command != 'record':
             sub.add_argument('--fingerprint', required=True)
         if command == 'probe':
@@ -251,8 +253,9 @@ def main():
         return
     if not SHA.fullmatch(args.revision) or not args.release_dir.is_absolute():
         parser.error('expected absolute release directory and full lowercase revision')
-    if args.expected_controller_env_sha256 is not None and not HEX.fullmatch(args.expected_controller_env_sha256):
-        parser.error('expected controller environment SHA256')
+    for expected in (args.expected_controller_env_sha256, args.expected_release_env_sha256):
+        if expected is not None and not HEX.fullmatch(expected):
+            parser.error('expected environment SHA256')
     if args.command != 'record' and not HEX.fullmatch(args.fingerprint):
         parser.error('expected fingerprint')
     if args.command == 'probe' and not 0 <= args.lock_timeout <= 300:
