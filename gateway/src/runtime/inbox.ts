@@ -16,6 +16,8 @@ const LOCK_STALE_AFTER_MS = 60_000;
 const MESSAGE_FIELDS = new Set(["chatId", "text", "messageId", "deliveryKey", "contextToken", "createdAtMs", "unsupportedKinds"]);
 const UNSUPPORTED_KINDS = new Set<UnsupportedInboundKind>(["image", "file", "video", "voice", "unknown"]);
 const STATE_FIELDS = new Set(["version", "fingerprint", "items"]);
+// Lock files this process currently holds; any other record with our PID is stale.
+const HELD_LOCKS = new Set<string>();
 
 export class InboxConflictError extends Error {
   constructor() { super("Durable inbound message identity or content changed"); this.name = "InboxConflictError"; }
@@ -74,15 +76,20 @@ function reclaimableLock(lockPath: string): boolean {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
   }
-  if (Date.now() - stat.mtimeMs < LOCK_STALE_AFTER_MS) return false;
-  try {
-    const raw = JSON.parse(fs.readFileSync(lockPath, "utf8")) as { pid?: unknown };
-    return typeof raw.pid !== "number" || !Number.isSafeInteger(raw.pid) || raw.pid <= 0 || !processIsAlive(raw.pid);
-  } catch (error) {
-    if (error instanceof SyntaxError) return true;
+  const expired = Date.now() - stat.mtimeMs >= LOCK_STALE_AFTER_MS;
+  let pid: unknown;
+  try { pid = (JSON.parse(fs.readFileSync(lockPath, "utf8")) as { pid?: unknown } | null)?.pid; }
+  catch (error) {
+    // A live owner may not have finished writing its record yet.
+    if (error instanceof SyntaxError) return expired;
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
   }
+  // No other live process can share our PID, so a record carrying it was left
+  // by a previous process whose PID was reused (deterministic container PIDs).
+  if (pid === process.pid) return !HELD_LOCKS.has(lockPath);
+  if (!expired) return false;
+  return typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0 || !processIsAlive(pid);
 }
 
 function withFileLock<T>(targetPath: string, action: () => T): T {
@@ -98,8 +105,10 @@ function withFileLock<T>(targetPath: string, action: () => T): T {
       fs.fsyncSync(fd);
       fs.closeSync(fd);
       fd = undefined;
+      HELD_LOCKS.add(lockPath);
       try { return action(); }
       finally {
+        HELD_LOCKS.delete(lockPath);
         try { fs.unlinkSync(lockPath); }
         catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;

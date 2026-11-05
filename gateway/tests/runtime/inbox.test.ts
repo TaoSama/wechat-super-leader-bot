@@ -211,3 +211,29 @@ test("unsupported content is durable with empty text only when its kinds are pre
     items: [{ ...inbound("tampered"), text: "", unsupportedKinds: "image" }] }));
   assert.throws(() => reload(), /unsupported kinds/);
 });
+
+test("a lock left with this process PID by a previous instance is reclaimed without waiting", t => {
+  const { path, inbox, reload } = fixture(t);
+  const lockPath = `${path}.lock`;
+  const hourAgo = new Date(Date.now() - 60 * 60_000);
+  // A SIGKILL inside the critical section leaves the lock; the restarted container reuses the PID.
+  for (const mtime of [hourAgo, new Date()]) {
+    fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, createdAt: mtime.getTime() }));
+    fs.utimesSync(lockPath, mtime, mtime);
+    const startedAt = Date.now();
+    inbox.put(inbound(`after-${mtime.getTime()}`));
+    assert.ok(Date.now() - startedAt < 1_000, "reclaim must not wait for the lock timeout");
+    assert.equal(fs.existsSync(lockPath), false);
+  }
+  assert.equal(reload().list().length, 2);
+});
+
+test("an expired, partially written lock is still reclaimed", t => {
+  const { path, inbox } = fixture(t);
+  const lockPath = `${path}.lock`;
+  fs.writeFileSync(lockPath, "");
+  const old = new Date(Date.now() - 60 * 60_000);
+  fs.utimesSync(lockPath, old, old);
+  inbox.put(inbound("after-expired-partial"));
+  assert.equal(fs.existsSync(lockPath), false);
+});

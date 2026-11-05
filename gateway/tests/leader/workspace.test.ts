@@ -5,8 +5,7 @@ import * as path from "node:path";
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { WorkspaceStore, type MemoryFile, type ReplyJournal, MEMORY_SNAPSHOT_BYTES,
-  MAX_REPLY_JOURNAL_BYTES, MAX_REPLY_JOURNAL_ENTRIES, MAX_PINNED_REPLY_ENTRIES,
-  MAX_CLOSED_REPLY_ENTRIES } from "../../src/leader/workspace.js";
+  MAX_REPLY_JOURNAL_BYTES, MAX_REPLY_JOURNAL_ENTRIES, MAX_PINNED_REPLY_ENTRIES } from "../../src/leader/workspace.js";
 
 function fixture(t: TestContext): { temporary: string; root: string; store: WorkspaceStore } {
   const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "leader-workspace-test-"));
@@ -456,26 +455,26 @@ test("sanitized console segments preserve mixed text command and image metadata 
   assert.deepEqual((await new WorkspaceStore(root).findChat("account", "chat"))?.getReplyJournal(), journal);
 });
 
-test("reply journal independently bounds pinned and closed entries without evicting either", async (t) => {
+test("reply journal bounds pending entries and still loads legacy journals with retained terminal entries", async (t) => {
   const { store } = fixture(t);
   const workspace = await store.forChat("account", "chat");
   const inputHash = "b".repeat(64);
   workspace.setReplyJournal(replyJournal(65, { inputHash, stage: "started" }));
   assert.equal(Object.keys(workspace.getReplyJournal()).length, 65);
-  const maximum = replyJournal(MAX_REPLY_JOURNAL_ENTRIES, { inputHash, stage: "completed", delivery: "accepted", reply: { text: "done" } });
-  for (const entry of Object.values(maximum).slice(0, MAX_PINNED_REPLY_ENTRIES)) {
+  // Older Gateways kept started and uncertain entries forever; they now count as
+  // closed and must keep loading until the next receipt prunes them.
+  const legacy = replyJournal(MAX_REPLY_JOURNAL_ENTRIES, { inputHash, stage: "completed", delivery: "accepted", reply: { text: "done" } });
+  for (const [index, entry] of Object.values(legacy).slice(0, MAX_PINNED_REPLY_ENTRIES).entries()) {
     entry.stage = "started";
-    entry.delivery = "accepted"; // Started remains pinned even if delivery metadata says accepted.
+    entry.delivery = index % 2 ? "accepted" : "uncertain";
   }
-  workspace.setReplyJournal(maximum);
-  assert.deepEqual(workspace.getReplyJournal(), maximum);
-  assert.throws(() => workspace.setReplyJournal(replyJournal(MAX_CLOSED_REPLY_ENTRIES + 1,
-    { inputHash, stage: "completed", delivery: "expired", reply: { text: "expired" } })), /Invalid workspace reply journal/);
-  for (const delivery of [undefined, "pending", "uncertain"] as const) {
+  workspace.setReplyJournal(legacy);
+  assert.deepEqual(workspace.getReplyJournal(), legacy);
+  for (const delivery of [undefined, "pending"] as const) {
     assert.throws(() => workspace.setReplyJournal(replyJournal(MAX_PINNED_REPLY_ENTRIES + 1,
       { inputHash, stage: "completed", reply: { text: "pending" }, ...(delivery ? { delivery } : {}) })), /Invalid workspace reply journal/);
   }
-  assert.deepEqual(workspace.getReplyJournal(), maximum);
+  assert.deepEqual(workspace.getReplyJournal(), legacy);
 });
 
 test("reply journal accepts worst-case escaped responses beyond the old file limit and enforces the byte budget", async (t) => {
