@@ -157,7 +157,7 @@ export async function fetchTransferManifest({ repository, revision, runId, attem
     'artifact_archive_limit');
   if (artifact.digest != null) requireValue(`sha256:${createHash('sha256').update(archive).digest('hex')}` === artifact.digest,
     'artifact_digest');
-  const manifest = validateTransferManifest(await extract(archive), identity);
+  const manifest = validateTransferManifest(await extract(archive), identity, { allowLegacy: true });
   requireValue(expires > now(), 'artifact_identity');
   return { manifest, job_started_at: job.started_at, job_id: jobId, artifact_id: artifact.id, artifact_name: name };
 }

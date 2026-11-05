@@ -77,9 +77,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/deploy/resolve-revision.mjs --assert-current "$REVISION"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
-
       - name: Validate production deployment inputs
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -100,7 +97,24 @@ jobs:
           deploy_port="${DEPLOY_PORT:-22}"
           [[ "$deploy_port" =~ ^[0-9]+$ && deploy_port -ge 1 && deploy_port -le 65535 ]] || { echo 'DEPLOY_PORT must be a TCP port' >&2; exit 1; }
 
+      - name: Check whether this release is already healthy
+        id: production-state
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          DEPLOY_ENV_FILE: ${{ vars.DEPLOY_ENV_FILE }}
+        run: node scripts/deploy/transfer-release.mjs --probe --credentials-root "$RUNNER_TEMP"
+
+      - name: Set up Docker Buildx
+        if: steps.production-state.outputs.deploy_required == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
       - name: Build controller and Gateway archives in parallel
+        if: steps.production-state.outputs.deploy_required == 'true'
         env:
           BUILDKIT_PROGRESS: auto
         run: |
@@ -113,6 +127,7 @@ jobs:
           cp deploy/compose.gateway.yaml "$release_root/compose.gateway.yaml"
           cp deploy/security/codex-seccomp.json "$release_root/codex-seccomp.json"
           cp scripts/deploy/remote-release.sh "$release_root/remote-release.sh"
+          cp scripts/deploy/release-state.py "$release_root/release-state.py"
 
           build_image() {
             local component="$1" dockerfile="$2" image="$3" archive="$4" log_file="$5"
@@ -162,23 +177,26 @@ jobs:
           done
           (
             cd "$release_root"
-            sha256sum controller.tar gateway.tar compose.yaml compose.release.yaml compose.production.yaml compose.gateway.yaml codex-seccomp.json > release.sha256
+            sha256sum controller.tar gateway.tar compose.yaml compose.release.yaml compose.production.yaml compose.gateway.yaml codex-seccomp.json remote-release.sh release-state.py > release.sha256
           )
           printf 'REVISION=%s\nCONTROLLER_IMAGE=%s\nGATEWAY_IMAGE=%s\n' "$REVISION" "$CONTROLLER_IMAGE" "$GATEWAY_IMAGE" \
             > "$release_root/manifest.env"
 
       - name: Reject a superseded built release
+        if: steps.production-state.outputs.deploy_required == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/deploy/resolve-revision.mjs --assert-current "$REVISION"
 
       - name: Prepare release transfer manifest
+        if: steps.production-state.outputs.deploy_required == 'true'
         run: |
           node scripts/deploy/prepare-transfer-manifest.mjs \
             --release-root "$RUNNER_TEMP/super-leader-release-$REVISION" \
             --output "$RUNNER_TEMP/super-leader-transfer-manifest-$REVISION-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/transfer-manifest.json"
 
       - name: Publish release transfer manifest
+        if: steps.production-state.outputs.deploy_required == 'true'
         id: publish-transfer-manifest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -188,6 +206,7 @@ jobs:
           retention-days: 7
 
       - name: Transfer and activate the release on the VPS
+        if: steps.production-state.outputs.deploy_required == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}

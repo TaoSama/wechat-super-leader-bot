@@ -7,6 +7,7 @@ const releaseScript = readFileSync(new URL('../../../scripts/deploy/remote-relea
 const overlay = readFileSync(new URL('../../../deploy/compose.release.yaml', import.meta.url), 'utf8');
 const transfer = readFileSync(new URL('../../../scripts/deploy/transfer-release.mjs', import.meta.url), 'utf8');
 const files = readFileSync(new URL('../../../scripts/deploy/transfer-files.mjs', import.meta.url), 'utf8');
+const processSource = readFileSync(new URL('../../../scripts/deploy/transfer-process.mjs', import.meta.url), 'utf8');
 const productionSteps = workflow.split('\n  diagnostic-only:')[0].split('\n      - ').slice(1);
 
 function productionStep(name) {
@@ -60,8 +61,8 @@ test('production CD gates Verify completions before deploying immutable merged r
   assert.match(files, /'compose.release.yaml', 'compose.yaml', 'compose.production.yaml', 'compose.gateway.yaml'/);
   assert.match(transfer, /--compose-base/);
   assert.match(transfer, /--seccomp-policy/);
-  assert.match(transfer, /StrictHostKeyChecking=yes/);
-  assert.match(transfer, /UserKnownHostsFile=/);
+  assert.match(processSource, /StrictHostKeyChecking=yes/);
+  assert.match(processSource, /UserKnownHostsFile=/);
   assert.doesNotMatch(transfer, /\['-q'/);
 });
 
@@ -106,10 +107,30 @@ test('production publishes one run-specific manifest before transfer and consume
 
 test('manifest preparation and publication failures block the default production transfer path', () => {
   for (const name of ['Prepare release transfer manifest', 'Publish release transfer manifest', 'Transfer and activate the release on the VPS']) {
-    assert.doesNotMatch(productionStep(name), /continue-on-error:|^\s*if:|always\(|\|\|\s*(?:true|:)|\bset\s+\+e\b/m);
+    const step = productionStep(name);
+    assert.match(step, /^\s*if: steps\.production-state\.outputs\.deploy_required == 'true'$/m);
+    assert.doesNotMatch(step, /continue-on-error:|always\(|\|\|\s*(?:true|:)|\bset\s+\+e\b/m);
   }
   assert.doesNotMatch(workflow.split('\n  diagnostic-only:')[0], /continue-on-error:/);
   assert.doesNotMatch(workflow, /actions:\s*write/);
+});
+
+test('one locked preflight gates every build, artifact and activation step', () => {
+  const probe = productionStep('Check whether this release is already healthy');
+  assert.match(probe, /id: production-state/);
+  assert.match(probe, /transfer-release\.mjs --probe --credentials-root/);
+  const probeIndex = productionSteps.indexOf(probe);
+  assert.ok(probeIndex > productionSteps.indexOf(productionStep('Reject a superseded queued release')));
+  assert.ok(probeIndex > productionSteps.indexOf(productionStep('Validate production deployment inputs')));
+  for (const name of ['Set up Docker Buildx', 'Build controller and Gateway archives in parallel',
+    'Reject a superseded built release', 'Prepare release transfer manifest',
+    'Publish release transfer manifest', 'Transfer and activate the release on the VPS']) {
+    const step = productionStep(name);
+    assert.ok(productionSteps.indexOf(step) > probeIndex);
+    assert.match(step, /^\s*if: steps\.production-state\.outputs\.deploy_required == 'true'$/m);
+  }
+  assert.match(files, /'release-state.py'/);
+  assert.match(workflow, /cp scripts\/deploy\/release-state.py "\$release_root\/release-state.py"/);
 });
 
 test('remote release verifies before switching and keeps a bounded rollback path', () => {

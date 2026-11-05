@@ -12,6 +12,7 @@ import { ACTIVATION_LOG, ACTIVATION_STATUS, REMOTE_FILES } from '../../../script
 
 const REVISION = 'a'.repeat(40);
 const SCRIPT = fileURLToPath(new URL('../../../scripts/deploy/remote-release.sh', import.meta.url));
+const STATE_SCRIPT = fileURLToPath(new URL('../../../scripts/deploy/release-state.py', import.meta.url));
 const RELEASE_ENV = `CONTROLLER_IMAGE=super-leader-controller:${REVISION}\n` +
   `GATEWAY_IMAGE=super-leader-gateway:${REVISION}\nGATEWAY_CONTEXT_WINDOW_MS=82800000\n`;
 const PREVIOUS_ENV = RELEASE_ENV.replaceAll(REVISION, 'b'.repeat(40));
@@ -27,32 +28,67 @@ function releaseFixture() {
   mkdirSync(bin);
   mkdirSync(join(root, '.runtime'));
   writeFileSync(join(root, '.runtime/controller.env'), '', { mode: 0o600 });
-  writeFileSync(join(root, '.runtime/release.env'), RELEASE_ENV);
+  writeFileSync(join(root, '.runtime/release.env'), RELEASE_ENV, { mode: 0o600 });
   writeFileSync(join(root, '.runtime/release.env.previous'), PREVIOUS_ENV);
   const bundle = ['controller.tar', 'gateway.tar', 'compose.release.yaml', 'compose.yaml',
     'compose.production.yaml', 'compose.gateway.yaml', 'codex-seccomp.json'];
   for (const file of bundle) writeFileSync(join(stage, file), 'fixture\n');
-  const digest = createHash('sha256').update('fixture\n').digest('hex');
-  writeFileSync(join(stage, 'release.sha256'), bundle.map(file => `${digest}  ${file}\n`).join(''));
+  copyFileSync(SCRIPT, join(stage, 'remote-release.sh'));
+  copyFileSync(STATE_SCRIPT, join(stage, 'release-state.py'));
+  bundle.push('remote-release.sh', 'release-state.py');
+  writeFileSync(join(stage, 'release.sha256'), bundle.map(file =>
+    `${createHash('sha256').update(readFileSync(join(stage, file))).digest('hex')}  ${file}\n`).join(''));
   writeFileSync(join(bin, 'docker'), `#!/usr/bin/env node
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 const args = process.argv.slice(2);
 appendFileSync(process.env.RELEASE_COMMAND_LOG, JSON.stringify(args) + '\\n');
 const revision = process.env.TEST_RELEASE_REVISION;
+const root = dirname(process.env.RELEASE_COMMAND_LOG);
+const expectedId = 'sha256:' + 'a'.repeat(64);
+const rebuiltId = 'sha256:' + 'c'.repeat(64);
+const tagId = existsSync(join(root, 'retagged')) ? rebuiltId : expectedId;
+const containerId = process.env.TEST_IMAGE_ID || (existsSync(join(root, 'recreated')) ? tagId : expectedId);
 if (args[0] === 'compose') {
   const ps = args.indexOf('ps');
   if (ps !== -1) console.log(args.at(-1));
+  if (args.includes('--force-recreate')) writeFileSync(join(root, 'recreated'), 'yes');
+  if ((args.includes('--force-recreate') && process.env.TEST_MUTATE_ENV_ON_UP) ||
+      (args.includes('config') && process.env.TEST_MUTATE_ENV_ON_PREFLIGHT)) {
+    writeFileSync(join(root, '.runtime/controller.env'), 'SECRET=changed\\n');
+  }
   if (args.includes('--force-recreate') && process.env.TEST_RECREATE_MS) {
     // Block like a long stop_grace_period, then write to stderr as Compose does.
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.TEST_RECREATE_MS));
     console.error('Container super-leader-gateway Recreated');
   }
+} else if (args[0] === 'load') {
+  if (process.env.TEST_LOAD_RETAG) writeFileSync(join(root, 'retagged'), 'yes');
+} else if (args[0] === 'ps') {
+  console.log(args.at(-1).split('=').at(-1));
 } else if (args[0] === 'inspect' || (args[0] === 'image' && args[1] === 'inspect')) {
+  if (!args.includes('--format')) {
+    if (process.env.TEST_RECORD_FAILURE) process.exit(1);
+    if (process.env.TEST_MUTATE_ENV_ON_INSPECT) writeFileSync(join(root, '.runtime/controller.env'), 'SECRET=changed\\n');
+    const service = args.at(-1);
+    const labels = { 'org.opencontainers.image.revision': revision,
+      'com.docker.compose.project': 'super-leader', 'com.docker.compose.service': service,
+      'com.docker.compose.project.working_dir': root };
+    if (args[0] === 'image') console.log(JSON.stringify([{ Id: tagId, Os: 'linux', Architecture: 'amd64',
+      Config: { Labels: labels } }]));
+    else console.log(JSON.stringify([{ Image: containerId,
+      State: { Status: 'running', Health: { Status: process.env.TEST_HEALTH || 'healthy' } },
+      Config: { Image: 'super-leader-' + service + ':' + revision, Labels: labels,
+        Env: ['GATEWAY_CONTEXT_WINDOW_MS=' + (process.env.TEST_WINDOW || '82800000')] },
+      HostConfig: { Memory: Number(process.env.TEST_RUNTIME_MEMORY || 1024) },
+      Mounts: [], NetworkSettings: { Networks: {} } }]));
+    process.exit(0);
+  }
   const format = args[args.indexOf('--format') + 1];
   const service = args.at(-1);
   if (format.includes('.Os')) console.log('linux/amd64');
-  else if (format === '{{.Image}}') console.log(process.env.TEST_IMAGE_ID || 'sha256:expected');
-  else if (format === '{{.Id}}') console.log('sha256:expected');
+  else if (format === '{{.Image}}') console.log(containerId);
+  else if (format === '{{.Id}}') console.log(tagId);
   else if (format.includes('revision')) console.log(revision);
   else if (format.includes('.State.Status')) console.log('running');
   else if (format.includes('.State.Health')) console.log(process.env.TEST_HEALTH || 'healthy');
@@ -79,15 +115,52 @@ if (args[0] === 'compose') {
   }, cleanup() { rmSync(root, { recursive: true, force: true }); } };
 }
 
+function seedReceipt(fixture) {
+  const result = spawnSync('python3', [STATE_SCRIPT, 'record', '--release-dir', fixture.root,
+    '--revision', REVISION, '--bundle-dir', fixture.stage, '--expected-controller-env-sha256',
+    createHash('sha256').update(readFileSync(join(fixture.root, '.runtime/controller.env'))).digest('hex')],
+  { env: fixture.env({}), encoding: 'utf8' });
+  if (result.error) throw result.error;
+  assert.equal(result.status, 0, result.stderr);
+}
+
 test('duplicate healthy release skips recreation and preserves previous rollback selection', () => {
   const fixture = releaseFixture();
   try {
+    seedReceipt(fixture);
+    const receiptBefore = readFileSync(join(fixture.root, '.runtime/deployment-receipt.json'), 'utf8');
     const result = fixture.run();
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /deployment already healthy.*skipping recreation/);
     assert.doesNotMatch(result.commands, /force-recreate/);
+    assert.match(result.stdout, /deployment_result=activation_skipped/);
+    assert.equal(readFileSync(join(fixture.root, '.runtime/deployment-receipt.json'), 'utf8'), receiptBefore);
     assert.equal(readFileSync(join(fixture.root, '.runtime/release.env.previous'), 'utf8'), PREVIOUS_ENV);
     assert.equal(readFileSync(join(fixture.root, '.runtime/release.env'), 'utf8'), RELEASE_ENV);
+  } finally { fixture.cleanup(); }
+});
+
+test('same healthy image IDs without an accepted receipt recreate once and establish a receipt', () => {
+  const fixture = releaseFixture();
+  try {
+    const result = fixture.run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.commands, /force-recreate/);
+    assert.match(result.stdout, /deployment_result=deployment_verified/);
+    assert.equal(existsSync(join(fixture.root, '.runtime/deployment-receipt.json')), true);
+  } finally { fixture.cleanup(); }
+});
+
+test('same image IDs with container configuration drift cannot use the activation skip', () => {
+  const fixture = releaseFixture();
+  try {
+    seedReceipt(fixture);
+    const result = fixture.run({ TEST_RUNTIME_MEMORY: '2048' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.commands, /force-recreate/);
+    assert.match(result.stdout, /runtime_changed/);
+    assert.doesNotMatch(result.stdout, /deployment_result=activation_skipped/);
+    assert.match(result.stdout, /deployment_result=deployment_verified/);
   } finally { fixture.cleanup(); }
 });
 
@@ -99,10 +172,86 @@ test('different release environment activates the new revision and retains the o
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.commands, /force-recreate/);
     assert.match(result.stdout, /deployment verified for revision/);
+    assert.match(result.stdout, /deployment_result=deployment_verified/);
+    assert.equal(existsSync(join(fixture.root, '.runtime/deployment-receipt.json')), true);
     assert.equal(readFileSync(join(fixture.root, '.runtime/release.env.previous'), 'utf8'), PREVIOUS_ENV);
     assert.equal(readFileSync(join(fixture.root, '.runtime/release.env'), 'utf8'), RELEASE_ENV);
   } finally { fixture.cleanup(); }
 });
+
+test('docker load retagging the same revision still recreates and verifies the actual new image ID', () => {
+  const fixture = releaseFixture();
+  try {
+    const result = fixture.run({ TEST_LOAD_RETAG: '1' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.commands, /force-recreate/);
+    assert.doesNotMatch(result.stdout, /deployment_result=activation_skipped/);
+    const receipt = JSON.parse(readFileSync(join(fixture.root, '.runtime/deployment-receipt.json'), 'utf8'));
+    assert.equal(receipt.services.controller.image_id, 'sha256:' + 'c'.repeat(64));
+    assert.equal(receipt.services.gateway.image_id, 'sha256:' + 'c'.repeat(64));
+    assert.equal(readFileSync(join(fixture.root, '.runtime/release.env.previous'), 'utf8'), PREVIOUS_ENV);
+  } finally { fixture.cleanup(); }
+});
+
+test('first release health failure remains retryable and cannot create a successful receipt', () => {
+  const fixture = releaseFixture();
+  try {
+    rmSync(join(fixture.root, '.runtime/release.env'));
+    rmSync(join(fixture.root, '.runtime/release.env.previous'));
+    const result = fixture.run({ TEST_HEALTH: 'unhealthy' });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stdout, /rollback is unavailable/);
+    assert.equal(existsSync(join(fixture.root, '.runtime/deployment-receipt.json')), false);
+    assert.doesNotMatch(result.stdout, /deployment_result=deployment_verified/);
+  } finally { fixture.cleanup(); }
+});
+
+test('receipt verification failure rolls back without replacing the last accepted receipt', () => {
+  const fixture = releaseFixture();
+  try {
+    writeFileSync(join(fixture.root, '.runtime/release.env'), PREVIOUS_ENV);
+    const receipt = join(fixture.root, '.runtime/deployment-receipt.json');
+    writeFileSync(receipt, 'last accepted receipt', { mode: 0o600 });
+    const result = fixture.run({ TEST_RECORD_FAILURE: '1' });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /receipt could not be recorded/);
+    assert.doesNotMatch(result.stdout, /deployment_result=deployment_verified/);
+    assert.equal(readFileSync(receipt, 'utf8'), 'last accepted receipt');
+    assert.equal(readFileSync(join(fixture.root, '.runtime/release.env'), 'utf8'), PREVIOUS_ENV);
+  } finally { fixture.cleanup(); }
+});
+
+test('environment changed after Compose consumes it cannot replace a receipt or claim success', () => {
+  const fixture = releaseFixture();
+  try {
+    seedReceipt(fixture);
+    const receipt = join(fixture.root, '.runtime/deployment-receipt.json');
+    const accepted = readFileSync(receipt, 'utf8');
+    writeFileSync(join(fixture.root, '.runtime/release.env'), PREVIOUS_ENV);
+    const result = fixture.run({ TEST_MUTATE_ENV_ON_UP: '1' });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /controller_environment_changed/);
+    assert.match(result.stdout, /restoring the previous image selection/);
+    assert.doesNotMatch(result.stdout, /deployment_result=deployment_verified/);
+    assert.equal(readFileSync(receipt, 'utf8'), accepted);
+  } finally { fixture.cleanup(); }
+});
+
+for (const mutation of ['TEST_MUTATE_ENV_ON_PREFLIGHT', 'TEST_MUTATE_ENV_ON_INSPECT']) {
+  test(`${mutation} cannot race into an activation skip`, () => {
+    const fixture = releaseFixture();
+    try {
+      seedReceipt(fixture);
+      const receipt = join(fixture.root, '.runtime/deployment-receipt.json');
+      const accepted = readFileSync(receipt, 'utf8');
+      const result = fixture.run({ [mutation]: '1' });
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, /controller_environment_changed/);
+      assert.doesNotMatch(result.stdout, /deployment_result=/);
+      assert.equal(readFileSync(receipt, 'utf8'), accepted);
+    } finally { fixture.cleanup(); }
+  });
+}
 
 for (const [name, overrides] of [
   ['unhealthy container', { TEST_HEALTH: 'unhealthy' }],
@@ -118,6 +267,7 @@ for (const [name, overrides] of [
       assert.doesNotMatch(result.stdout, /deployment already healthy/);
       assert.match(result.commands, /force-recreate/);
       assert.match(result.stderr, /deployment is not successful/);
+      assert.equal(existsSync(join(fixture.root, '.runtime/deployment-receipt.json')), false);
       assert.equal(readFileSync(join(fixture.root, '.runtime/release.env'), 'utf8'), PREVIOUS_ENV);
     } finally { fixture.cleanup(); }
   });

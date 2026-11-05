@@ -3,7 +3,8 @@
 `.github/workflows/deploy-production.yml` 监听 `Verify` 的 `workflow_run.completed`。
 Verify 保留 PR 的 `opened`、`synchronize`、`reopened` 事件，并监听 `ready_for_review`，
 确保草稿阶段的验证已经结束后，转为 ready 仍会启动一次新验证。
-`GITHUB_TOKEN` 自动合并产生的 `push` 和 `pull_request.closed` 都不会启动后续工作流，
+`GITHUB_TOKEN` 直接引起的 `push` 和 `pull_request.closed` 不会启动后续工作流；
+启用 auto merge 的 token 本身不能证明最终合并事件的来源。
 因此部署以 Verify 完成为入口，再通过 GitHub API 核对成功的同仓库 PR 验证、仓库所有者
 身份、非草稿、当前 PR head、合并状态和实际 merge SHA。符合条件且仍开放的 PR 沿用
 现有 60 次检查、5 秒间隔的轮询窗口（休眠最多 295 秒，API 耗时另计）；即使
@@ -14,7 +15,13 @@ Verify 保留 PR 的 `opened`、`synchronize`、`reopened` 事件，并监听 `r
 
 保留 `pull_request_target.closed` 作为人工合并入口：即使 CI 通过数小时后才合并，
 也会重新查询该 PR head 对应的成功 Verify，再执行相同的合并和当前主干门禁。
-机器人合并依赖 `workflow_run`，两个入口偶尔重叠时由串行队列和远端幂等检查去重。
+机器人合并依赖 `workflow_run`；两个入口重叠时，在串行部署 job 内、构建前读取生产凭据和
+实际运行状态，满足完整条件才跳过构建、传输和激活。串行队列本身不提供去重。
+两个入口各自覆盖不同合并时序，不能删除其中之一：人工晚合并需要 closed，
+由 `GITHUB_TOKEN` 直接执行的合并不能依赖 closed。token 合并若发生在 Verify 轮询
+预算结束后，现有两个入口仍存在覆盖缺口，本次去重不改变这项限制。
+事件语义依据 [GitHub 官方触发规则](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow)
+和 [事件说明](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)。
 
 实际合并 SHA 必须仍是当前 main。发布 job 使用 `deploy-production` 并发组和
 `queue: max`，串行处理、最多保留 100 个待发布 job，不取消正在执行的发布。
@@ -43,17 +50,51 @@ Docker 归档。两个归档都带有完整 commit SHA 的 `org.opencontainers.i
    成功，再检查运行状态、镜像和 revision。数据库、Controller runtime、微信账号和
    Gateway 状态路径由现有 Compose 配置继续管理。
 
-重复触发同一版本时，只有 release env 完全一致、Controller/Gateway 的实际镜像 ID 和
-revision 一致、容器健康、Gateway 窗口正确才跳过重建；上一版回滚选择保持不变。
+重复触发同一版本时，只有成功发布凭据、环境和实际运行配置完整匹配才跳过；
+上一版回滚选择保持不变。远端激活内仍会重新核对，避免构建后配置漂移被旧的快速路径漏过。
 健康检查失败时，脚本会恢复上一次 `.runtime/release.env` 并尝试重新启动旧镜像，随后
 以失败状态结束。首次发布没有可回滚版本；Compose、Docker、SSH、归档校验或旧版本
 重启失败都会在对应停止点失败，工作流不会报告部署成功。成功发布后只清理同名仓库中
 已被替代的镜像 tag，并保留当前和上一版本供一次回滚使用；临时归档和脚本会清理。
 生产容器日志仍由现有的 `json-file` 10 MiB × 3 轮转策略限制。
 
+### 构建前的重复发布判定
+
+`transfer-release.mjs --probe` 在 `deploy-production` job 的并发锁内运行，早于 Buildx、
+两镜像构建、manifest 上传和 SCP。远端 `release-state.py` 与脱离 SSH 的激活进程共用
+`.runtime/activation.lock`：最多等 60 秒，取得锁后重新读取状态；锁等待、SSH 或 Docker
+查询失败都明确失败，不猜测已经部署。检查不调用业务接口，也不加载或修改镜像。
+
+实际激活完成最终健康和镜像验证后，才以 0600 原子写入
+`.runtime/deployment-receipt.json`。凭据包含 revision、两服务实际 image ID、配置文件指纹、
+release/controller env 摘要及容器 Config、HostConfig、挂载和网络配置摘要；不保存明文环境。
+激活前固定 controller env 摘要，记录凭据前后再次核对；健康等待期间修改 env 会失败并回滚，
+不能把尚未应用的新 env 与旧容器配置一起接受。服务发现排除 Compose 一次性维护容器。
+只有以下条件全部满足，自动事件才输出 `duplicate_skipped` 和 `deploy_required=false`：
+
+- 凭据 revision 与本次已核实的 merge SHA 相同，配置、脚本及 seccomp 文件指纹相同。
+- 两份 env 摘要相同，两服务各有唯一、正确项目和部署目录归属的运行容器且健康。
+- 实际容器 image ID、当前 tag 的 image ID 与成功凭据相同，平台和 OCI revision 正确。
+- 实际容器配置摘要相同，Gateway 仍使用 23 小时窗口。
+
+新版本、首次启用而没有凭据、无效凭据、服务缺失或健康/镜像/配置漂移均进入正常发布，
+不能宣称已部署。最终验证或凭据写入失败时不提交新凭据，沿用原回滚流程；旧凭据也必须
+重新通过实际状态检查。手动 `workflow_dispatch` 保留构建恢复入口，绕过构建前自动去重；
+激活阶段仍只在全部条件匹配时跳过无必要的容器重建。diagnostic-only 入口不受影响。
+
+日志区分 `duplicate_skipped`（构建前跳过）、`activation_skipped`（已传输但激活内跳过）
+和 `deployment_verified`（本轮实际激活成功），跳过不会伪报本轮完成了生产激活。
+独立验收应观察两个自然事件解析同一 merge SHA，只有首轮出现 build/transfer/activation；
+后轮应在 preflight 明确跳过，且容器 ID、StartedAt、实际 image ID 均未变化。
+漂移和失败恢复须在隔离环境验收，不能为验证去重而在生产主动重建或发送微信。
+
+代码回退通过新 PR 撤回去重门和凭据写入即可；旧 release 脚本忽略凭据文件。
+镜像回滚仍使用 `release.env.previous`；凭据不会替代镜像、数据库或业务状态回滚。
+本次不改持久 volume、Controller 运行根、daemon 或微信额度规则。
+
 ### 传输观测、取消与 stage 归属
 
-`scripts/deploy/transfer-release.mjs` 使用固定的十份发布文件清单。SSH 前将每份文件的
+`scripts/deploy/transfer-release.mjs` 使用固定的十一份发布文件清单（包含运行态凭据 helper）。SSH 前将每份文件的
 basename、准确 bytes、SHA-256、总字节数及 revision/run/attempt 直接写入 Actions 日志；
 传输期间约每 15 秒记录远端已收字节、耗时和平均速率。远端文件长度/hash 再次核验通过后，
 重新检查当前 main，随后才调用原来的 release 脚本。20 分钟发布 job 总预算保持不变。
@@ -123,17 +164,18 @@ children文件缺失时重新核对同一进程身份：活进程为`children_un
 
 ### 上传前的冻结清单
 
-构建后的current-main检查通过后，`prepare-transfer-manifest.mjs`复用固定十文件与流式
+构建后的current-main检查通过后，`prepare-transfer-manifest.mjs`复用固定发布文件与流式
 SHA256规则，生成至runner本次独立临时目录的`transfer-manifest.json`（最多16KiB）。
 内容为schema、resolver实际选出的revision M、run R、attempt A、每份文件name/bytes/sha256
-及total_bytes；不含端点、凭证或stage owner token，也不加入十文件payload。
+及total_bytes；不含端点、凭证或stage owner token，也不加入发布payload。
 工作流用固定commit的upload-artifact v4提前发布
 `release-transfer-manifest-M-R-A`；上传失败或文件缺失会阻止后续传输步骤。
 
 生产sender要求`--manifest-file`与上传成功返回的`--manifest-artifact-id`。在任何SSH
-操作前检查身份、schema、十个唯一固定名称、安全整数、hash和总量，再重算本地文件核对；
+操作前检查身份、schema、十一个唯一固定名称、安全整数、hash和总量，再重算本地文件核对；
 实际包变化立即失败，不重新生成另一份清单继续。这个第二遍hash用于确认冻结后的包未变。
-Diagnostic-only仍使用原有有界合成样本。
+Diagnostic-only仍使用原有有界合成样本。只读 fetch 和 receiver 兼容历史十文件清单，
+新 sender 始终要求包含 helper 的十一文件清单，不能用旧包绕过当前发布完整性检查。
 
 取证端在已有只读`GH_TOKEN`的环境中，先定位指定attempt的唯一部署job，再用小入口读取：
 
@@ -165,7 +207,7 @@ v4 artifact上传完成即可通过API读取，独立于job是否结束；这不
 
 `scripts/deploy/receiver-telemetry.py`是独立的Python 3.10+只读采样器，供一次已批准发布
 通过严格host-key SSH的标准输入执行。正式CD不会自动启动它。运行前须固定实际merge
-revision、run、attempt、部署目录、端口、job.started_at以及该run的十份文件manifest；
+revision、run、attempt、部署目录、端口、job.started_at以及该run的文件manifest；
 使用 `--help` 查看标准参数。manifest必须来自本次构建的真实清单，不能复用旧包大小。
 同run清单按上一节的独立artifact入口取得；不依赖未结束job日志下载，也不新增远端清单文件。
 

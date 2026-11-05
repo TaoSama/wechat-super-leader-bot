@@ -17,7 +17,10 @@ import time
 
 FILES = ('controller.tar', 'gateway.tar', 'release.sha256', 'manifest.env',
          'compose.release.yaml', 'compose.yaml', 'compose.production.yaml',
-         'compose.gateway.yaml', 'codex-seccomp.json', 'remote-release.sh')
+         'compose.gateway.yaml', 'codex-seccomp.json', 'remote-release.sh', 'release-state.py')
+LEGACY_FILES = ('controller.tar', 'gateway.tar', 'release.sha256', 'manifest.env',
+                'compose.release.yaml', 'compose.yaml', 'compose.production.yaml',
+                'compose.gateway.yaml', 'codex-seccomp.json', 'remote-release.sh')
 ARCHIVES = FILES[:2]
 TCP_FIELDS = ('bytes_received', 'recv_queue_bytes', 'rcv_space_bytes', 'rcv_ssthresh_bytes',
               'receive_memory_bytes', 'receive_buffer_bytes', 'backlog_bytes', 'drops')
@@ -534,7 +537,9 @@ def parse_config(argv=None):
             if not math.isfinite(config[name]) or not 0 < config[name] <= maximum:
                 raise ValueError()
         manifest = json.loads(config.pop('manifest_json'))
-        if not isinstance(manifest, list) or len(manifest) != len(FILES) or {item['name'] for item in manifest} != set(FILES):
+        if not isinstance(manifest, list) or not any(
+                len(manifest) == len(layout) and {item['name'] for item in manifest} == set(layout)
+                for layout in (FILES, LEGACY_FILES)):
             raise ValueError()
         for item in manifest:
             if set(item) - {'name', 'bytes', 'sha256'} or type(item['bytes']) is not int or not 0 <= item['bytes'] <= MAX_INTEGER:
