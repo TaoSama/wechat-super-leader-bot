@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import { CommandService } from "../../src/commands/service.js";
@@ -102,17 +103,18 @@ it("does not let a duplicate bypass the original admission", async () => {
 it("keeps admission out of real hub inspection while preserving recovery of a dispatched pending command", async () => {
   const f = fixture(), entered = barrier(), resume = barrier();
   const frames: Array<{ type: string; commandId?: string }> = [];
-  const socket = { readyState: WebSocket.OPEN,
+  const socket = Object.assign(new EventEmitter(), { readyState: WebSocket.OPEN as number,
     send(data: string, callback?: () => void) { frames.push(JSON.parse(data)); callback?.(); },
-    close() {},
-  };
+    close() { socket.readyState = WebSocket.CLOSED; socket.emit("close", 1001, Buffer.alloc(0)); },
+  });
   const hub = new NodeHub(f.store, new Map());
-  const node: ConnectedNode = { nodeId: input.nodeId, ws: socket as unknown as WebSocket,
-    connectedAt: new Date(), lastHeartbeat: new Date(), sessions: [f.session], skills: [], isHelloCompleted: true };
   const inspection = hub as unknown as { nodes: Map<string, ConnectedNode>;
     reconcileTurn(node: ConnectedNode): Promise<void>;
     handleDaemonMessage(node: ConnectedNode, message: DaemonMessage): Promise<void> };
-  inspection.nodes.set(input.nodeId, node);
+  hub.handleConnection(socket as unknown as WebSocket, input.nodeId);
+  socket.emit("message", JSON.stringify({ type: "hello", version: 1, nodeId: input.nodeId, sessions: [f.session], skills: [] }));
+  const node = inspection.nodes.get(input.nodeId)!;
+  await vi.waitFor(() => expect(node.reconciling).toBe(false));
   const commands = new CommandService(f.store, hub, TTL_SECONDS);
   const submission = commands.submit(input, 0, async () => { entered.release(); await resume.promise; },
     "control-socket", authority);

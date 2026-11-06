@@ -25,6 +25,7 @@ import { sameInputReceipt } from "../sessions/input-receipt.js";
 import { InvalidSessionInventoryError, validateNodeSessionInventory } from "../store/node-sessions.js";
 import { duplicateNodeCloseReason } from "./close-reason.js";
 import { CommandTransport, type CommandDelivery } from "./command-transport.js";
+import { ConnectionLifecycle, type WatchdogResetKind } from "./connection-lifecycle.js";
 
 export interface ConnectedNode {
   nodeId: string;
@@ -51,6 +52,7 @@ export class NodeHub {
   private automationRequests = new AutomationRequests();
   private stopping = false;
   private commandTransport = new CommandTransport();
+  private lifecycle = new ConnectionLifecycle();
 
   async listAutomations(nodeId: string, signal?: AbortSignal): Promise<SourceAutomation[]> {
     const node = this.nodes.get(nodeId);
@@ -165,16 +167,20 @@ export class NodeHub {
   }
 
   handleConnection(ws: WebSocket, nodeId: string): void {
+    this.lifecycle.begin(ws, nodeId, () => ({ isCurrentSlot: this.nodes.get(nodeId)?.ws === ws, hubStopping: this.stopping }));
     // Rejected sockets can still emit parser errors during the closing handshake.
     ws.on("error", (err) => {
       this.commandTransport.disconnect(ws);
       this.historyRequests.disconnect(ws);
       this.mediaRequests.disconnect(ws);
       this.automationRequests.disconnect(ws);
+      this.lifecycle.socketError(ws);
       console.error(`[${nodeId}] ws error:`, err);
     });
 
     if (this.stopping) {
+      this.lifecycle.rejected(ws, "server_stopping");
+      this.lifecycle.closeRequested(ws, NodeHub.SHUTDOWN_CLOSE_CODE, "server_stopping");
       ws.close(NodeHub.SHUTDOWN_CLOSE_CODE, NodeHub.SHUTDOWN_CLOSE_REASON);
       return;
     }
@@ -182,6 +188,8 @@ export class NodeHub {
     // Contract: Reject duplicate live node identities
     const existing = this.nodes.get(nodeId);
     if (existing && existing.ws.readyState === WebSocket.OPEN) {
+      this.lifecycle.rejected(ws, "duplicate_identity", existing.ws);
+      this.lifecycle.closeRequested(ws, 4009, "duplicate_identity");
       ws.close(4009, duplicateNodeCloseReason(nodeId));
       return;
     }
@@ -201,21 +209,25 @@ export class NodeHub {
       isHelloCompleted: false,
     };
     this.nodes.set(nodeId, nodeRecord);
+    if (existing) this.lifecycle.released(existing.ws, "replacement", ws);
+    this.lifecycle.accepted(ws, currentGen);
 
-    const resetHeartbeatWatchdog = () => {
+    const resetHeartbeatWatchdog = (kind: WatchdogResetKind) => {
       if (nodeRecord.heartbeatTimer) clearTimeout(nodeRecord.heartbeatTimer);
+      this.lifecycle.watchdogReset(ws, kind);
       nodeRecord.heartbeatTimer = setTimeout(() => {
         console.warn(`[${nodeId}] Heartbeat timeout exceeded (${NodeHub.HEARTBEAT_TIMEOUT_MS}ms). Closing socket.`);
+        this.lifecycle.closeRequested(ws, 4008, "heartbeat_timeout", NodeHub.HEARTBEAT_TIMEOUT_MS);
         ws.close(4008, "Heartbeat timeout");
       }, NodeHub.HEARTBEAT_TIMEOUT_MS);
     };
 
-    resetHeartbeatWatchdog();
+    resetHeartbeatWatchdog("initial");
 
     ws.on("ping", () => {
       // Only the current socket's completed, authenticated hello grants liveness.
       if (this.nodes.get(nodeId) !== nodeRecord || !nodeRecord.isHelloCompleted || ws.readyState !== WebSocket.OPEN) return;
-      resetHeartbeatWatchdog();
+      resetHeartbeatWatchdog("ping");
     });
 
     ws.on("message", async (data: Buffer | string) => {
@@ -228,18 +240,19 @@ export class NodeHub {
         const text = typeof data === "string" ? data : data.toString("utf8");
         const json = JSON.parse(text);
         if (json?.type !== "result" && Buffer.byteLength(text,"utf8") > MAX_DAEMON_CONTROL_MESSAGE_BYTES) {
+          this.lifecycle.closeRequested(ws, 4000, "control_message_too_large");
           ws.close(4000,"Daemon control message exceeds limit"); return;
         }
         if (json?.type === "history" && nodeRecord.isHelloCompleted) {
-          if (this.historyRequests.receive(nodeId, ws, json)) resetHeartbeatWatchdog();
+          if (this.historyRequests.receive(nodeId, ws, json)) resetHeartbeatWatchdog("history_response");
           return;
         }
         if ((json?.type === "media_list" || json?.type === "media_chunk") && nodeRecord.isHelloCompleted) {
-          if (this.mediaRequests.receive(nodeId, ws, json)) resetHeartbeatWatchdog();
+          if (this.mediaRequests.receive(nodeId, ws, json)) resetHeartbeatWatchdog("media_response");
           return;
         }
         if (json?.type === "automation_response" && nodeRecord.isHelloCompleted) {
-          if (this.automationRequests.receive(nodeId,ws,json)) resetHeartbeatWatchdog();
+          if (this.automationRequests.receive(nodeId,ws,json)) resetHeartbeatWatchdog("automation_response");
           return;
         }
         const parseResult = DaemonMessageSchema.safeParse(json);
@@ -249,6 +262,7 @@ export class NodeHub {
             // An invalid inventory must revoke cached send authority immediately.
             nodeRecord.sessions = [];
             this.sessionsChanged(nodeId);
+            this.lifecycle.closeRequested(ws, 4000, "invalid_session_inventory");
             ws.close(4000, "Invalid session inventory");
           }
           return;
@@ -263,11 +277,12 @@ export class NodeHub {
             console.warn(`[${nodeId}] Rejected duplicate session identities in inventory`);
             nodeRecord.sessions = [];
             this.sessionsChanged(nodeId);
+            this.lifecycle.closeRequested(ws, 4000, "invalid_session_inventory");
             ws.close(4000, "Invalid session inventory");
             return;
           }
         }
-        resetHeartbeatWatchdog();
+        resetHeartbeatWatchdog("schema_message");
         await this.handleDaemonMessage(nodeRecord, msg);
         this.onStatusChanged?.();
       } catch (err) {
@@ -283,6 +298,7 @@ export class NodeHub {
       this.automationRequests.disconnect(ws);
       if (this.nodes.get(nodeId)?.ws === ws) {
         this.nodes.delete(nodeId);
+        this.lifecycle.released(ws, "socket_close");
         this.sessionsChanged(nodeId);
 
         await this.queueNodeSessionWrite(nodeId, async () => {
@@ -312,12 +328,14 @@ export class NodeHub {
       // Reject repeated hello
       if (node.isHelloCompleted) {
         console.error(`[${nodeId}] Repeated hello received. Closing socket.`);
+        this.lifecycle.closeRequested(node.ws, 4000, "repeated_hello");
         node.ws.close(4000, "Repeated hello message rejected");
         return;
       }
 
       if (msg.nodeId !== nodeId) {
         console.error(`[${nodeId}] Node reported mismatched nodeId in hello: ${msg.nodeId}`);
+        this.lifecycle.closeRequested(node.ws, 4003, "node_identity_mismatch");
         node.ws.close(4003, "Node ID mismatch with authenticated identity");
         return;
       }
@@ -328,6 +346,7 @@ export class NodeHub {
       node.inputAttachments = msg.inputAttachments === true;
       node.lastHeartbeat = new Date();
       node.isHelloCompleted = true;
+      this.lifecycle.helloAccepted(node.ws);
       this.sessionsChanged(nodeId);
       try {
         await this.persistNodeSessions(node, msg.sessions);
@@ -341,6 +360,7 @@ export class NodeHub {
     // Reject any heartbeat or result before hello is completed
     if (!node.isHelloCompleted) {
       console.error(`[${nodeId}] Received ${msg.type} before hello handshake completed. Closing socket.`);
+      this.lifecycle.closeRequested(node.ws, 4002, "message_before_hello");
       node.ws.close(4002, "Message before hello handshake");
       return;
     }
@@ -574,10 +594,12 @@ export class NodeHub {
     this.automationRequests.closeAll();
     const closingNodes = [...this.nodes.entries()];
     this.nodes.clear();
+    for (const [, node] of closingNodes) this.lifecycle.released(node.ws, "shutdown");
     for (const [nodeId] of closingNodes) this.sessionsChanged(nodeId);
     for (const [nodeId, node] of closingNodes) {
       if (node.heartbeatTimer) clearTimeout(node.heartbeatTimer);
       try {
+        this.lifecycle.closeRequested(node.ws, NodeHub.SHUTDOWN_CLOSE_CODE, "server_shutdown");
         node.ws.close(NodeHub.SHUTDOWN_CLOSE_CODE, NodeHub.SHUTDOWN_CLOSE_REASON);
       } catch (err) {
         console.error(`[${nodeId}] Error closing websocket during closeAll:`, err);
