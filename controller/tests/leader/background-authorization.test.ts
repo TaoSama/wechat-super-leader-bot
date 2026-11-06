@@ -11,6 +11,9 @@ describe("background human authorization", () => {
     expect(await classifyBackgroundAuthorization({ complete }, "让它继续核对第二项，并再留一天", signal)).toEqual(new Set(["follow_up", "extend"]));
     const [messages, tools, passedSignal] = complete.mock.calls[0];
     expect(messages).toEqual([{ role: "system", content: expect.any(String) }, { role: "user", content: "让它继续核对第二项，并再留一天" }]);
+    const followUpRule = messages[0].content?.split("\n").find(line => line.startsWith("follow_up："));
+    expect(followUpRule).toContain("让它继续核对第二项");
+    expect(followUpRule).not.toContain("再看看刚才那个");
     expect(tools.map(item => item.function.name)).toEqual([BACKGROUND_AUTHORIZATION_TOOL_NAME]);
     expect(passedSignal).toBe(signal);
   });

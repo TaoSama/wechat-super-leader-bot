@@ -48,6 +48,11 @@ export function verificationEnvironment(source = process.env) {
     GOARCH: process.arch === 'arm64' ? 'arm64' : 'amd64', CGO_ENABLED: '1' };
 }
 
+/**
+ * Returns ordered command steps without executing them. Integration-only plans prepend builds;
+ * combined plans reuse the unit suite's builds. Native progress can be delegated to a separate job.
+ * @throws {Error} When the requested suite is unknown.
+ */
 export function verificationPlan(suite = 'all', { skipNativeProgress = false } = {}) {
   if (!SUITES.includes(suite)) throw new Error('Unknown suite; use all, unit or integration');
   const step = (id, command, args, cwd = '.', env = {}) => ({ id, command, args, cwd, env });
