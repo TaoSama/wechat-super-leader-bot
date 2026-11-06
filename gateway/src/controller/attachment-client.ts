@@ -1,9 +1,12 @@
+import { createHash } from "node:crypto";
 import { beforeAbort } from "../runtime/abort.js";
 import { transferTimeoutMs } from "../runtime/transfer-budget.js";
 import type { DownloadedMedia } from "../wechat/cdn-download.js";
 
 export const ATTACHMENT_UPLOAD_SETUP_MS = 15_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+const MAX_ATTACHMENT_MESSAGE_ID_CHARS = 128;
+const HASHED_MESSAGE_ID_PREFIX = "sha256:";
 
 export interface StoredAttachmentReference { id: string; kind: DownloadedMedia["kind"]; name: string; size: number }
 
@@ -17,7 +20,11 @@ export async function uploadInboundAttachment(options: { baseUrl: string; token:
     transferTimeoutMs(media.bytes.length, ATTACHMENT_UPLOAD_SETUP_MS));
   try {
     const url = new URL(`${options.baseUrl}/v1/inbound-attachments`);
-    for (const [key, value] of Object.entries({ chatId: request.chatId, messageId: request.messageId,
+    // WeChat client IDs can exceed the Controller's slot key limit. Reserve the hash prefix
+    // so a literal short ID cannot alias a hashed long ID; other existing keys stay unchanged.
+    const messageId = request.messageId.length > MAX_ATTACHMENT_MESSAGE_ID_CHARS || request.messageId.startsWith(HASHED_MESSAGE_ID_PREFIX)
+      ? HASHED_MESSAGE_ID_PREFIX + createHash("sha256").update(JSON.stringify(request.messageId)).digest("hex") : request.messageId;
+    for (const [key, value] of Object.entries({ chatId: request.chatId, messageId,
       ordinal: String(request.ordinal), kind: media.kind, name: media.name, mime: media.mime, sha256: media.sha256 })) {
       url.searchParams.set(key, value);
     }
