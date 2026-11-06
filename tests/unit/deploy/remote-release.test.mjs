@@ -398,8 +398,9 @@ os.setsid=delayed_setsid
     }
     assert.deepEqual(JSON.parse(stdout), { started: true });
     // Emulate a cancelled runner: kill the SSH-side process group and drop its output pipe.
+    // macOS reports EPERM instead of ESRCH once the launcher group holds only exited members.
     try { process.kill(-launcher.pid, 'SIGKILL'); }
-    catch (error) { if (error.code !== 'ESRCH') throw error; }
+    catch (error) { if (error.code !== 'ESRCH' && error.code !== 'EPERM') throw error; }
     launcher.stdout.destroy();
 
     assert.equal(existsSync(join(fixture.stage, ACTIVATION_STATUS)), false, 'activation is still running');
