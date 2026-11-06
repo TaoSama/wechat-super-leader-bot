@@ -92,6 +92,22 @@ function verifiedImage(workspace: LeaderWorkspace, entry: StagedImage): boolean 
 }
 
 /**
+ * Creates the staging directory before the sandbox starts. The sandbox mounts a read-only path that
+ * does not exist yet over an empty placeholder file, which would block every later turn; an empty
+ * regular file at this path can only be that placeholder and is replaced.
+ */
+export function prepareInboundImageDirectory(workspace: LeaderWorkspace): void {
+  storageOperation(() => {
+    const target = directory(workspace);
+    let stat: fs.Stats | undefined;
+    try { stat = fs.lstatSync(target); }
+    catch (error: unknown) { if (!hasCode(error, "ENOENT")) throw error; }
+    if (stat?.isFile() && stat.size === 0) fs.unlinkSync(target);
+    ensureDirectory(target, true, true);
+  });
+}
+
+/**
  * Keeps each image of one inbound message for the chat's leader. Retrying the same message is
  * idempotent per ordinal, so redelivery cannot duplicate pixels in a turn. Callers hold the journal lock.
  */

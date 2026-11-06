@@ -22,7 +22,7 @@ import { buildLeaderPrompt as prompt, buildStaticLayers, staticLayersRevision } 
 import { isConsoleLinkQuery, parseSessionDirectoryQuery } from "@super-leader/wechat-text";
 import { combineReplyText, restoreConsoleReply } from "./reply-content.js";
 import { startAppServerTurn, AppServerRejectedError, type AppServerTurn } from "./app-server.js";
-import { claimInboundImages, inboundImageNote, releaseInboundImages, stageInboundImages, INBOUND_IMAGE_DIRECTORY,
+import { claimInboundImages, inboundImageNote, prepareInboundImageDirectory, releaseInboundImages, stageInboundImages, INBOUND_IMAGE_DIRECTORY,
   type InboundImage } from "./inbound-images.js";
 
 const DEFAULT_TIMEOUT_MS = 300000;
@@ -558,6 +558,8 @@ export class CodexReplyEngine implements GatewayReplyEngine {
     try {
       await traceSpan("codex.mcp.start", () => control.start());
       started = true;
+      // Must exist before the sandbox starts, or the sandbox mounts its read-only rule over a placeholder file.
+      prepareInboundImageDirectory(workspace);
       const env: Record<string, string> = { HOME: frozen?.home ?? workspace.workspacePath, CODEX_HOME: workspace.codexHome,
         [CONTROL_TOKEN_ENV]: control.token };
       for (const name of ENV_ALLOWLIST) if (process.env[name] !== undefined) env[name] = process.env[name]!;

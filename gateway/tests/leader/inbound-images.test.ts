@@ -7,7 +7,7 @@ import * as path from "node:path";
 import type { Input, ThreadEvent } from "@openai/codex-sdk";
 import { CodexReplyEngine } from "../../src/leader/codex.js";
 import { WorkspaceStore } from "../../src/leader/workspace.js";
-import { claimInboundImages, releaseInboundImages, stageInboundImages, INBOUND_IMAGE_DIRECTORY, INBOUND_IMAGE_WINDOW_MS,
+import { claimInboundImages, prepareInboundImageDirectory, releaseInboundImages, stageInboundImages, INBOUND_IMAGE_DIRECTORY, INBOUND_IMAGE_WINDOW_MS,
   MAX_TURN_IMAGES, type InboundImage } from "../../src/leader/inbound-images.js";
 import { directToolController } from "./direct-tool-fixture.js";
 
@@ -87,4 +87,17 @@ test("the main chat turn receives staged images as local image input, and only o
   assert.deepEqual(fs.readFileSync(image.type === "local_image" ? image.path : ""), png("cat").bytes);
   assert.equal(typeof second, "string", "the next turn must not resend the same image");
   assert.doesNotMatch(String(second), /current_user_images/);
+});
+
+test("an empty sandbox placeholder at the staging path is replaced by the directory; other files are refused", async t => {
+  const workspace = await new WorkspaceStore(root(t)).forChat("account", "chat");
+  const target = path.join(workspace.workspacePath, INBOUND_IMAGE_DIRECTORY);
+  fs.writeFileSync(target, "", { mode: 0o444 });
+  prepareInboundImageDirectory(workspace);
+  assert.ok(fs.lstatSync(target).isDirectory());
+  assert.equal(stageInboundImages(workspace, "m1", [png("after-repair")], Date.now()), 1);
+  fs.rmSync(target, { recursive: true });
+  fs.writeFileSync(target, "not a placeholder");
+  assert.throws(() => prepareInboundImageDirectory(workspace));
+  assert.equal(fs.readFileSync(target, "utf8"), "not a placeholder");
 });
