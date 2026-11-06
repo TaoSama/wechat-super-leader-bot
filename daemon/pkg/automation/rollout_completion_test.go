@@ -122,3 +122,94 @@ func TestTaskCompleteErrorDoesNotResolveAmbiguousScheduledTurns(t *testing.T) {
 		t.Fatalf("terminal error bypassed scheduled identity ambiguity: %+v", evidence)
 	}
 }
+
+func fixtureContinuationTurn(turn, prompt string) string {
+	return fixtureRecord("event_msg", map[string]any{"type": "task_started", "turn_id": turn,
+		"turn_attribution": map[string]any{"turn_trigger": nil}}) +
+		fixtureRecord("response_item", map[string]any{
+			"type": "message", "role": "user",
+			"content": []any{map[string]any{"type": "input_text", "text": prompt}},
+			"internal_chat_message_metadata_passthrough": map[string]any{"turn_id": turn, "content_item_kinds": []string{"user.text"}},
+		})
+}
+
+func TestIsContinuationPrompt(t *testing.T) {
+	for _, prompt := range []string{
+		"继续", "继续。", "继续！", " 继续 ", "继续执行", "继续完成", "继续下文", "接着", "接着写",
+		"continue", "Continue", "CONTINUE", "continue.", "continue!", "go on", "proceed",
+		"continue execution", "continue task",
+	} {
+		if !isContinuationPrompt(prompt) {
+			t.Errorf("expected %q to be continuation prompt", prompt)
+		}
+	}
+	for _, prompt := range []string{
+		"", "   ", "帮我查天气", "今天天气怎么样", "what is the weather", "restart",
+		"<heartbeat>some xml</heartbeat>", "停止", "cancel",
+	} {
+		if isContinuationPrompt(prompt) {
+			t.Errorf("expected %q NOT to be continuation prompt", prompt)
+		}
+	}
+}
+
+func TestHeartbeatContinuationSuccess(t *testing.T) {
+	text := fixtureHeartbeat("scheduled", "target", fixtureTime) +
+		fixtureCompletionError("scheduled", `{"message":"unexpected status 530"}`) +
+		fixtureContinuationTurn("cont", "继续") +
+		fixtureFinal("cont", "日报已完成") +
+		fixtureComplete("cont")
+	evidence := inspectFixture(t, text, true)
+	if evidence.Status != "completed" || evidence.TurnID != "cont" || evidence.Text != "日报已完成" {
+		t.Fatalf("continuation turn completion not returned: %+v", evidence)
+	}
+}
+
+func TestHeartbeatMultipleContinuationsSuccess(t *testing.T) {
+	text := fixtureHeartbeat("t0", "target", fixtureTime) +
+		fixtureCompletionError("t0", `{"message":"status 530"}`) +
+		fixtureContinuationTurn("t1", "继续") +
+		fixtureCompletionError("t1", `{"message":"status 530"}`) +
+		fixtureContinuationTurn("t2", "继续") +
+		fixtureCompletionError("t2", `{"message":"status 530"}`) +
+		fixtureContinuationTurn("t3", "继续") +
+		fixtureFinal("t3", "最终日报成果") +
+		fixtureComplete("t3")
+	evidence := inspectFixture(t, text, true)
+	if evidence.Status != "completed" || evidence.TurnID != "t3" || evidence.Text != "最终日报成果" {
+		t.Fatalf("multi-turn continuation completion not returned: %+v", evidence)
+	}
+}
+
+func TestHeartbeatContinuationStillRunning(t *testing.T) {
+	text := fixtureHeartbeat("t0", "target", fixtureTime) +
+		fixtureCompletionError("t0", `{"message":"status 530"}`) +
+		fixtureContinuationTurn("t1", "继续")
+	evidence := inspectFixture(t, text, true)
+	if evidence.Status != "running" || evidence.TurnID != "t1" {
+		t.Fatalf("running continuation not recognized: %+v", evidence)
+	}
+}
+
+func TestHeartbeatContinuationFailedWithoutFurtherTurns(t *testing.T) {
+	text := fixtureHeartbeat("t0", "target", fixtureTime) +
+		fixtureCompletionError("t0", `{"message":"status 530"}`) +
+		fixtureContinuationTurn("t1", "继续") +
+		fixtureCompletionError("t1", `{"message":"status 530"}`)
+	evidence := inspectFixture(t, text, true)
+	if evidence.Status != "failed" || evidence.TurnID != "t1" {
+		t.Fatalf("failed continuation not recognized: %+v", evidence)
+	}
+}
+
+func TestHeartbeatUnrelatedManualTurnDoesNotContinue(t *testing.T) {
+	text := fixtureHeartbeat("t0", "target", fixtureTime) +
+		fixtureCompletionError("t0", `{"message":"status 530"}`) +
+		fixtureContinuationTurn("t1", "帮我查一下天气") +
+		fixtureFinal("t1", "今天晴天") +
+		fixtureComplete("t1")
+	evidence := inspectFixture(t, text, true)
+	if evidence.Status != "failed" || evidence.TurnID != "t0" || evidence.Text != "" {
+		t.Fatalf("unrelated manual turn replaced scheduled failure: %+v", evidence)
+	}
+}
