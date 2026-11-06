@@ -19,6 +19,12 @@ const CONTROLLER_UNCERTAIN_TEXT = "这次调用结果不明，可能已经执行
 const ASSET_TOOLS = new Set(["get_console_link", "send_session_images"]);
 // Older leader threads may still send the retired attestation; it is dropped, never forwarded.
 const WRAPPER_KEYS = new Set(["arguments", "requestMessageId", "authorization"]);
+
+/** True when the tool's business arguments declare a required field, so an omitted object cannot be assumed empty. */
+function requiresArguments(tool: { inputSchema: { properties?: Record<string, unknown> } }): boolean {
+  const schema = tool.inputSchema.properties?.arguments as { required?: unknown } | undefined;
+  return !schema || (Array.isArray(schema.required) && schema.required.length > 0);
+}
 export const CONTROL_TOKEN_ENV = "LEADER_TURN_MCP_TOKEN";
 export function hasConsoleCredential(text: string): boolean { return /#login=[A-Za-z0-9_.~%-]+/.test(text); }
 export function redactConsoleCredentials(text: string): string {
@@ -209,6 +215,8 @@ export class ControlMcp {
       return { content: [{ type: "text" as const, text: JSON.stringify(await this.progress.report(wrapper.text)) }] };
     }
     const tool = this.tools.find(tool => tool.name === name);
+    // Models often omit an empty arguments object for tools that take no business arguments.
+    if (tool && wrapper && wrapper.arguments === undefined && !requiresArguments(tool)) wrapper = { ...wrapper, arguments: {} };
     if (this.shuttingDown || !tool || !wrapper || typeof wrapper.arguments !== "object" || wrapper.arguments === null ||
         Array.isArray(wrapper.arguments) || Object.keys(wrapper).some(key => !WRAPPER_KEYS.has(key)) ||
         (wrapper.requestMessageId !== undefined && typeof wrapper.requestMessageId !== "string")) throw new McpError(ErrorCode.InvalidParams, "Invalid current-request business tool");
