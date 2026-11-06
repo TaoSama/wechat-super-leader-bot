@@ -18,6 +18,7 @@ if (!values.run || values.help) {
   await verify().catch(error => { console.error(error); process.exitCode = 1; });
 }
 
+/** Drives four isolated CLI scenarios and captures injected rules; tool order is scripted, with no model inference. */
 async function verify() {
   const require = createRequire(new URL('../../../controller/package.json', import.meta.url));
   const { WebSocket } = require('ws');
@@ -85,6 +86,9 @@ async function verify() {
       const user = { chatId, messageId: randomUUID(), text: '但是他最终成功了，你不信再读一下' };
       catalog = await request('/v1/tools/list', user);
       const tools = new Map(catalog.tools.map(tool => [tool.name, tool]));
+      assert(catalog.instructions.includes('继续用 read_session 只读查询工具已定位的原机器和会话'));
+      assert(catalog.instructions.includes('后续独立轮次的结果不能改写原 occurrence'));
+      assert(tools.get('inspect_source_automation')?.description.includes('不包含同一会话后续独立轮次的结果'));
       for (const name of ['list_nodes', 'list_source_automations', 'inspect_source_automation', 'read_session']) {
         assert.equal(tools.get(name)?.annotations.readOnlyHint, true);
       }

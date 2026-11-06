@@ -104,6 +104,20 @@ describe("direct business tools background authority", () => {
     expect(f.complete).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
   });
 
+  it("exposes read-only later-result guidance and occurrence boundaries in the actual catalog", async () => {
+    const f = await fixture();
+    const catalog = await f.leader().direct.list({ chatId: "chat", messageId: "message",
+      text: "但是他最终成功了，你不信再读一下" });
+    expect(catalog.instructions).toContain("继续用 read_session 只读查询工具已定位的原机器和会话");
+    expect(catalog.instructions).toContain("后续独立轮次的结果不能改写原 occurrence");
+    expect(catalog.instructions).toContain("只有用户明确要求后台继续工作或执行新的检查时");
+    const tools = new Map(catalog.tools.map(tool => [tool.name, tool]));
+    expect(tools.get("inspect_source_automation")?.description).toContain("不包含同一会话后续独立轮次的结果");
+    expect(tools.get("read_session")?.annotations.readOnlyHint).toBe(true);
+    expect(tools.get("follow_up_background_task")?.annotations.readOnlyHint).toBe(false);
+    expect(f.complete).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
+  });
+
   it.each(["later-result", "empty", "truncated", "read-failed"])(
     "keeps the failed occurrence separate from a read-only session lookup: %s", async scenario => {
       const f = await fixture(), owner = f.leader();
