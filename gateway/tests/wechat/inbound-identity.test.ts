@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ILinkClient } from "../../src/wechat/client.js";
+import { ILinkClient, MAX_CONTROLLER_MESSAGE_ID_CHARS, controllerMessageId } from "../../src/wechat/client.js";
 import { StateManager } from "../../src/runtime/state.js";
 
 const ACCOUNT_ID = "identity-fixture";
@@ -117,4 +117,22 @@ test("messages without stable IDs preserve distinct commands and deduplicate onl
   const anotherPage = await poll(f.loadState());
   assert.equal(anotherPage.messages.length, 2, "equal text alone cannot prove that another page is a redelivery");
   assert.ok(anotherPage.messages.every(message => !original.messages.some(previous => previous.messageId === message.messageId)));
+});
+
+test("an image message ID longer than the Controller limit maps to a stable short ID and keeps raw dedupe", async t => {
+  const f = fixture(t);
+  // Real WeChat image IDs carry an extra upload segment and reach 145 characters.
+  const imageId = `mmassistant_bypmsg_inbox_${"a".repeat(32)}mm${"b".repeat(28)}@weclawaupimgjpg_${"c".repeat(16)}_1793943680205_1793943680`;
+  assert.ok(imageId.length > MAX_CONTROLLER_MESSAGE_ID_CHARS);
+  const poll = (state: StateManager) => client(state, async () =>
+    new Response(JSON.stringify({ ret: 0, get_updates_buf: NEXT_CURSOR, msgs: [textMessage({ client_id: imageId })] }))).pollBatch();
+  const first = await poll(f.state);
+  const [message] = first.messages;
+  assert.ok(message.messageId.length <= MAX_CONTROLLER_MESSAGE_ID_CHARS);
+  assert.equal(message.messageId, controllerMessageId(imageId));
+  assert.equal(message.deliveryKey, JSON.stringify([ACCOUNT_ID, "chat-a", imageId]));
+  assert.equal((await poll(f.loadState())).messages[0].messageId, message.messageId, "the mapping is stable across restarts");
+  f.state.recordProcessedMessageKey(message.deliveryKey!);
+  assert.equal((await poll(f.state)).messages.length, 0);
+  assert.equal(controllerMessageId("short-id"), "short-id");
 });
