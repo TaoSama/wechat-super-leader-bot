@@ -73,15 +73,6 @@ export function splitWeChatReply(renderedText: string, maxChars: number = DEFAUL
   return chunks;
 }
 
-/** Controller message IDs are capped; WeChat image message IDs carry an extra upload segment and exceed it. */
-export const MAX_CONTROLLER_MESSAGE_ID_CHARS = 128;
-
-/** Keeps short platform IDs verbatim and maps longer ones to a stable digest that fits the Controller limit. */
-export function controllerMessageId(stableId: string): string {
-  if (stableId.length <= MAX_CONTROLLER_MESSAGE_ID_CHARS) return stableId;
-  return `long:${crypto.createHash("sha256").update(stableId, "utf8").digest("hex")}`;
-}
-
 export class ILinkClient {
   public readonly baseUrl: string;
   private readonly stateManager: StateManager;
@@ -280,8 +271,7 @@ export class ILinkClient {
       let messageId: string;
       let deliveryKey: string;
       if (stableId) {
-        messageId = controllerMessageId(stableId);
-        // Keyed by the raw platform ID so dedupe evidence recorded before shortening still matches.
+        messageId = stableId;
         deliveryKey = this.stateManager.computeDeliveryKey(sender, stableId);
       } else {
         // Without a stable ID, only retries of the same page position are identifiable.
