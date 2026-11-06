@@ -369,3 +369,22 @@ test("a later plain receipt cannot change the message identity used to download 
   assert.equal(tool.result?.commandId, "cmd-next");
   assert.match(tool.result!.text, /图片已准备[\s\S]*新任务已接收/);
 });
+
+test("an omitted empty arguments object is accepted only for tools without required business arguments", async t => {
+  const required: ControllerTool = { ...schema, name: "needs_id", inputSchema: { type: "object", properties: { arguments: { type: "object",
+    properties: { id: { type: "string" } }, required: ["id"], additionalProperties: false } }, required: ["arguments"], additionalProperties: false } };
+  const forwarded: string[] = [];
+  const tool = new ControlMcp({ chatId: "chat", messageId: "message", text: "查一下定时任务" }, {
+    listTools: async () => ({ tools: [schema, required], instructions: "rules" }),
+    callTool: async input => { forwarded.push(input.name); return { result: { listed: true } }; } });
+  await tool.start();
+  t.after(() => tool.close());
+  // The shape a model produced in production: requestMessageId and authorization, no arguments.
+  const omitted = await (await call(tool, "tools/call", { name: "inspect_current",
+    arguments: { requestMessageId: "message", authorization: { intent: "query" } } })).json() as any;
+  assert.equal(omitted.error, undefined);
+  assert.deepEqual(forwarded, ["inspect_current"]);
+  const missing = await (await call(tool, "tools/call", { name: "needs_id", arguments: { requestMessageId: "message" } })).json() as any;
+  assert.equal(missing.error.code, -32602);
+  assert.deepEqual(forwarded, ["inspect_current"]);
+});
