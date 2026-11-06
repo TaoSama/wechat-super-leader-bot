@@ -67,6 +67,8 @@ type rolloutTurn struct {
 	aborted     bool
 	final       string
 	trigger     string
+	userPrompt  string
+	startedAt   int64
 	firstRecord int
 	lastRecord  int
 	invalid     bool
@@ -126,6 +128,7 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 		return unknown("rollout tail contains no complete records"), nil
 	}
 	turns := map[string]*rolloutTurn{}
+	var turnOrder []string
 	candidates := map[string]bool{}
 	supported, missingIdentity, invalidHeartbeat := false, false, false
 	invalidRecords := []int{}
@@ -162,9 +165,33 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 				return Evidence{}, ErrTooLarge
 			}
 			turns[id] = &rolloutTurn{firstRecord: recordIndex, lastRecord: recordIndex}
+			turnOrder = append(turnOrder, id)
 		}
 		if id != "" {
 			turns[id].lastRecord = recordIndex
+		}
+		if at, err := time.Parse(time.RFC3339Nano, rec.Timestamp); err == nil {
+			if id != "" && turns[id] != nil {
+				ms := at.UnixMilli()
+				if turns[id].startedAt == 0 || ms < turns[id].startedAt {
+					turns[id].startedAt = ms
+				}
+			}
+		}
+		if rec.Type == "response_item" && p.Type == "message" && p.Role == "user" {
+			targetTurnID := p.Metadata.TurnID
+			if targetTurnID == "" {
+				targetTurnID = id
+			}
+			if targetTurnID != "" && turns[targetTurnID] != nil && turns[targetTurnID].userPrompt == "" {
+				for _, content := range p.Content {
+					text := strings.TrimSpace(content.Text)
+					if text != "" {
+						turns[targetTurnID].userPrompt = text
+						break
+					}
+				}
+			}
 		}
 		if heartbeat && rec.Type == "response_item" && p.Type == "message" && p.Role == "user" {
 			for _, content := range p.Content {
@@ -233,6 +260,11 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 			case "turn_aborted", "task_failed", "turn_failed":
 				turn.aborted = true
 			case "item_completed":
+				if p.Item.Type == "UserMessage" && turn.userPrompt == "" {
+					if text, err := rolloutItemText(p.Item.Content); err == nil && text != "" {
+						turn.userPrompt = strings.TrimSpace(text)
+					}
+				}
 				if p.Item.Type == "AgentMessage" && isFinalPhase(p.Item.Phase) {
 					text, err := rolloutItemText(p.Item.Content)
 					if err != nil {
@@ -277,7 +309,6 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 	}
 	for id := range candidates {
 		turn := turns[id]
-		result := Evidence{Status: "running", TurnID: id, Sources: []string{"rollout:" + sessionID + "#turn=" + id}}
 		if turn == nil {
 			return unknown("matching turn state is unavailable"), nil
 		}
@@ -285,30 +316,92 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 			return unknown("rollout contains malformed records for the scheduled turn"), nil
 		}
 		if heartbeat && turn.trigger != "automation_heartbeat_scheduled" {
-			result.Status = "unknown"
-			result.Reason = "heartbeat XML has no trusted native scheduled trigger"
+			result := Evidence{Status: "unknown", Reason: "heartbeat XML has no trusted native scheduled trigger", Sources: []string{"rollout:" + sessionID + "#turn=" + id}}
 			return result, nil
 		}
-		if turn.aborted {
+
+		currentID := id
+		currentTurn := turn
+
+		if heartbeat {
+			candidateIdx := -1
+			for idx, tid := range turnOrder {
+				if tid == id {
+					candidateIdx = idx
+					break
+				}
+			}
+			if candidateIdx >= 0 {
+				for i := candidateIdx + 1; i < len(turnOrder); i++ {
+					if currentTurn.complete && !currentTurn.aborted && strings.TrimSpace(currentTurn.final) != "" {
+						break
+					}
+					nextID := turnOrder[i]
+					nextTurn := turns[nextID]
+					if nextTurn == nil || nextTurn.invalid || invalidRecordWithin(nextTurn, invalidRecords) {
+						break
+					}
+					if nextTurn.startedAt != 0 && (nextTurn.startedAt < heartbeatLower || nextTurn.startedAt > notAfter) {
+						break
+					}
+					if !isContinuationPrompt(nextTurn.userPrompt) {
+						break
+					}
+					currentID = nextID
+					currentTurn = nextTurn
+				}
+			}
+		}
+
+		sources := []string{"rollout:" + sessionID + "#turn=" + currentID}
+		if currentID != id {
+			sources = []string{"rollout:" + sessionID + "#turn=" + id, "rollout:" + sessionID + "#turn=" + currentID}
+		}
+		result := Evidence{Status: "running", TurnID: currentID, Sources: sources}
+		if currentTurn.aborted {
 			result.Status = "failed"
 			result.Reason = "scheduled turn was aborted or failed"
 			return result, nil
 		}
-		if len(turn.final) > rolloutTextLimit {
+		if len(currentTurn.final) > rolloutTextLimit {
 			return Evidence{}, ErrTooLarge
 		}
-		if turn.complete {
-			if strings.TrimSpace(turn.final) == "" {
+		if currentTurn.complete {
+			if strings.TrimSpace(currentTurn.final) == "" {
 				result.Status = "unknown"
 				result.Reason = "completed turn has no exact final answer"
 			} else {
 				result.Status = "completed"
-				result.Text = turn.final
+				result.Text = currentTurn.final
 			}
 		}
 		return result, nil
 	}
 	return unknown("scheduled turn was not identified"), nil
+}
+
+// isContinuationPrompt returns true when prompt is an explicit directive to resume
+// or continue an interrupted turn (e.g. "继续", "continue").
+func isContinuationPrompt(prompt string) bool {
+	s := strings.TrimSpace(prompt)
+	s = strings.Trim(s, " 	\r\n.,!?;:。，！？；：…~～")
+	if s == "" {
+		return false
+	}
+	lower := strings.ToLower(s)
+	if lower == "continue" || lower == "go on" || lower == "proceed" {
+		return true
+	}
+	if strings.HasPrefix(lower, "continue ") || strings.HasPrefix(lower, "continue:") || strings.HasPrefix(lower, "continue,") {
+		return true
+	}
+	if s == "继续" || s == "接着" {
+		return true
+	}
+	if strings.HasPrefix(s, "继续") || strings.HasPrefix(s, "接着") {
+		return true
+	}
+	return false
 }
 
 func isFinalPhase(phase string) bool { return phase == "final" || phase == "final_answer" }
