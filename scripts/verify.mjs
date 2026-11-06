@@ -86,6 +86,7 @@ export function verificationPlan(suite = 'all', { skipNativeProgress = false } =
     step('notification-diagnostics-cli', process.execPath, ['tests/integration/leader/notification-diagnostics.mjs', '--run']),
     step('sdk-result-gateway-cli', process.execPath, ['tests/integration/leader/sdk-result-gateway.mjs', '--run']),
     step('background-monitoring', process.execPath, ['tests/integration/leader/background-monitoring.mjs', '--run']),
+    step('source-followup', process.execPath, ['tests/integration/leader/source-followup.mjs', '--run']),
     step('native-source-failure', process.execPath, ['tests/integration/leader/native-source-failure.mjs', '--run']),
   ];
   return suite === 'unit' ? unit : suite === 'integration' ? [...builds, ...integration] : [...unit, ...integration];

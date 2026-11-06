@@ -8,9 +8,9 @@ describe("background human authorization", () => {
   it("isolates current human text from history, task outputs and tools", async () => {
     const complete = vi.fn<LeaderModel["complete"]>(async () => reply(["follow_up", "extend"]));
     const signal = AbortSignal.timeout(1000);
-    expect(await classifyBackgroundAuthorization({ complete }, "再看看刚才那个，并再留一天", signal)).toEqual(new Set(["follow_up", "extend"]));
+    expect(await classifyBackgroundAuthorization({ complete }, "让它继续核对第二项，并再留一天", signal)).toEqual(new Set(["follow_up", "extend"]));
     const [messages, tools, passedSignal] = complete.mock.calls[0];
-    expect(messages).toEqual([{ role: "system", content: expect.any(String) }, { role: "user", content: "再看看刚才那个，并再留一天" }]);
+    expect(messages).toEqual([{ role: "system", content: expect.any(String) }, { role: "user", content: "让它继续核对第二项，并再留一天" }]);
     expect(tools.map(item => item.function.name)).toEqual([BACKGROUND_AUTHORIZATION_TOOL_NAME]);
     expect(passedSignal).toBe(signal);
   });
