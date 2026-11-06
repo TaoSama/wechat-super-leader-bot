@@ -1,6 +1,6 @@
 # 后续结果只读查询的规则澄清与验证
 
-本次变更补充用户追问后续结果时的工具选择规则。已验证实际 Controller 下发的新指令和只读工具链；尚未验证生产 Codex 模型会主动选择该路径，不能据此宣称生产回答质量问题已经修复。
+本次变更补充用户追问后续结果时的工具选择规则。实际 Controller 工具链、生产请求配置下的模型自主工具选择、历史边界回答和真实授权分类均取得证据。该验证采用平铺 function tools 的 Responses API，不能宣称完整原生 Codex 等价或证明生产历史错误的唯一原因；旧规则在本次成功报告样本中同样答对，不能宣称已证明因果改善。
 
 ## 事实与责任边界
 
@@ -33,7 +33,7 @@
 
 同时断言没有源会话提交、后台追问、延期、新建定时任务、状态修改或后台启动。既有测试继续覆盖用户明确要求后台工作时追问只入队一次、不隐式延期；后台授权测试校验分类结果格式和当前用户消息隔离，不证明模型的意图识别能力。
 
-Controller 全量单元测试：193个文件通过、11个跳过；2536项通过、159项跳过。类型检查、构建和 `git diff --check` 通过。跳过项不是本次新增，不能算作通过。
+Controller 全量单元测试：193个文件通过、11个跳过；2537项通过、159项跳过。类型检查、构建和 `git diff --check` 通过。跳过项不是本次新增，不能算作通过。
 
 CodeRabbit 复核后，增加实际 `direct.list` 目录回归：确认下发的指令引导 `read_session`、保留原 occurrence 失败、限制后台继续执行，并核对 occurrence 工具的覆盖范围。相关两个文件29项通过。这些断言防止指引丢失，不验证模型会遵循指引。
 
@@ -60,39 +60,91 @@ node tests/integration/leader/source-followup.mjs --run
 
 上述运行验证的结论仅为“指令已注入、工具链保持只读和证据边界”。调用顺序由验证脚本选择，没有使用模型生成预设答案；证据明确标记 `modelInference=false`、`modelToolSelectionVerified=false`。目录回归和入口契约注释补充后，重建 Controller 并再次运行四个场景均通过，证据为 `source-followup-review-after.json`。
 
-## 生产配置与模型验收阻塞
+## 生产请求配置
 
-11月7日03:15（北京时间），通过严格校验主机密钥的 SSH 只读核对实际容器的固定设置文件和白名单元数据，没有调用生产工具目录或业务接口：
+通过严格主机密钥校验的 SSH 读取固定配置及白名单元数据，没有向生产工具目录提交合成消息，也没有调用生产业务：
 
-- Controller 与 Gateway 的实际镜像 revision 均为 `5dad01e7a196f2b8d610dbcc09698924f74713c2`，健康状态均为 healthy；本候选变更尚未部署。
-- Controller 的 `/var/lib/super-leader-runtime/settings/runtime-settings.json` 不存在，因此没有 `controller.prompt.direct`、`controller.prompt.background-tools`、`controller.prompt.background-authorization` 或三项相关工具的持久覆盖。
-- Gateway 的 `/var/lib/super-leader-gateway/settings/resources/prompts/main.md` 不存在，没有主提示词覆盖。
-- Gateway 的 `settings/model.json` 不存在，实际配置选择为 `model=gpt-6.1-sol, reasoningEffort=null`。Controller 也没有模型覆盖，其环境默认模型为 `gpt-6.1-sol`。
-- 两者使用 `https://cpa.taoai.site/v1`；Gateway 注册的 provider 是 `leader_openai`，`wire_api=responses`。`gateway/src/leader/codex.ts` 将非空 effort 交给 SDK；SDK 原样写入 `model_reasoning_effort`。生产没有显式 effort，不能把它说成 Ultra。缓存模型目录的默认值为 low，但记录时间为10月26日，不能用旧缓存证明当前请求的实际默认强度。
+- Controller 与 Gateway 均为 `5dad01e7a196f2b8d610dbcc09698924f74713c2`，healthy。Controller 为 model 模式，Gateway 为 codex 模式，二者环境模型均为 `gpt-6.1-sol`，无命令行模型覆盖。
+- Controller `runtime-settings.json`、Gateway 主提示词覆盖及 `settings/model.json` 均不存在。没有相关提示词或工具覆盖。
+- 11月7日05:04（北京时间）补查当前唯一聊天工作区：没有 `.codex/config.toml`，没有聊天级 effort、profile 或 provider 覆盖。Gateway 选择为 `reasoningEffort=null`。
+- Gateway 的 SDK 路径仅在 effort 非空时设置 `modelReasoningEffort`；app-server 路径仅将非空值加入 `model_reasoning_effort`，`turn/start` 不另传 effort。固定 headless 配置和权限覆盖也没有 effort。
+- 同一生产凭据与本地推理凭据在进程内比较相同；凭据没有写入证据。provider 为 `leader_openai` → `https://cpa.taoai.site/v1` → Responses。
 
-设置 GET 返回的生产 direct 内容与基线默认全文相同，SHA-256 为 `69ad0938b63fe53250b98cc2cb44dbb718b2b3eb37490dfe7b4148008661e512`。候选版本实际本地 CLI 下发的 direct 为 `87a1dc17459e1d477ada3f2c426d61fad4f29cb074cd3ea194537b5d7519d46c`。持久文件核对补足了仅凭 `stale=false` 无法排除相同全文覆盖的缺口。证据为 `source-followup-production-persisted.json` 和 `source-followup-effective-config-comparison.json`。
+因此，被测请求使用 `gpt-6.1-sol` 并省略 `reasoning` 字段；本 Task 的执行模型仍保持 Sol + Ultra。两者属于不同配置层次。CLI 内部默认强度没有核实；不根据旧模型缓存推断，也没有主动选择 low/max 替代。
 
-本 Task 保持 GPT-6.1-Sol + Ultra。无会话 API 的请求均使用 `store=false`，不带 conversation 或 previous_response_id，凭证仅在进程内使用。现有 Responses 入口对 `model=gpt-6.1-sol, reasoning.effort=ultra` 返回 HTTP 400：
+证据：`source-followup-production-persisted.json`、`source-followup-production-startup.json`、`source-followup-production-request-config-verified.json`。第一次补查因环境变量名不正确而未取得 provider 信息的 `source-followup-production-request-config.json` 也保留，不能把它作为完整配置证据。
 
-```text
-Invalid value: 'ultra'. Supported values are: 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'.
+生产旧 direct 的 SHA-256 为 `69ad0938b63fe53250b98cc2cb44dbb718b2b3eb37490dfe7b4148008661e512`；候选实际 CLI 下发的 direct 为 `87a1dc17459e1d477ada3f2c426d61fad4f29cb074cd3ea194537b5d7519d46c`。本候选尚未部署。
+
+此前 Ultra HTTP400、真实分类器 Ultra400、远端生产凭据 Ultra400，以及仅返回固定文本的 max 连通探针全部保留。它们分别是 `source-followup-model-api-probe.json`、`source-followup-ultra-classifier-attempt.json`、`source-followup-production-ultra-api-probe.json` 和 `source-followup-model-api-max-probe.json`。这些不能阻塞或替代按生产省略 effort 的行为试验；本轮没有新增 max 请求。
+
+## 模型自主工具选择
+
+新增入口为 `tests/live/source-followup-model.mjs`；默认仅显示用法，必须显式 `--run`，不接入自动 CI 的外部推理。基线指令、三个相关工具说明、主提示词及授权提示词固化在 `tests/fixtures/source-followup-baseline.json`，无需本机历史文件才能运行。
+
+```sh
+pnpm --dir controller build
+pnpm --dir gateway build
+# 向进程提供 FOLLOWUP_API_KEY、FOLLOWUP_BASE_URL、FOLLOWUP_MODEL；生产不传 effort 时不设 FOLLOWUP_EFFORT。
+node tests/live/source-followup-model.mjs --run --cases pair --output /tmp/source-followup-pair.json
+node tests/live/source-followup-model.mjs --run --cases boundaries --output /tmp/source-followup-boundaries.json
+node tests/live/source-followup-model.mjs --run --cases authorization --output /tmp/source-followup-authorization.json
 ```
 
-原始记录 `source-followup-model-api-probe.json` 保留不改。另保留此前一次 max 连通探针，仅证明较低强度能返回固定探针文本，没有运行模型行为对照，不能替代 Ultra 验收；主控要求后未新增 max 调用。
+旧／新版本均从隔离 Controller 的 `/v1/tools/list` 实时取得完整 **30 个 Controller 工具**。旧版只替换实际变更的指令和相关说明，不把旧证据中筛选过的三个工具当作完整目录。函数参数保留真实 MCP 的 `arguments` 外层，再由适配器解包转发到实际 HTTP 工具。
 
-再次以构建后的真实 `classifyBackgroundAuthorization` 和 `HttpLeaderModel` 分别提交“再看看刚才那个”与“让它继续核对第二项”，两者均在 Ultra 参数校验阶段被同一接口拒绝，没有分类结果或工具执行，记录为 `source-followup-ultra-classifier-attempt.json`。不能把这两项算作分类通过。没有找到有证据支持的 Ultra 等价无会话入口；缓存目录列出 Ultra 不等于 Responses API 接受它，也不能据此认定 max 等价。
+模型看到的前置上下文来自合成节点的真实发现和 failed occurrence 查询，只包含已定位机器、会话和原失败事实；后续成功正文只有模型选择 `read_session` 后才进入其上下文。工具预检单独记录，不进入模型输入。模型自主选择所有调用，脚本不预设工具序列或答案。
 
-因此，旧/新规则下模型自主选择 `read_session`、四种历史边界的自然语言回答、含糊追问与明确继续工作的真实分类，仍未通过模型层验收。后续需要一个支持指定强度的无会话入口，或主控明确修改验证强度契约；不创建新 Codex 聊天，不对生产主聊天试验。
+真实 `HttpLeaderModel` 发送 `store=false`，不带 conversation 或 previous_response_id；原生 responseOutput 仅在当前内存循环续接。落盘保存请求、实际模型、effort 字段是否存在、工具参数和返回、公开回答及 usage；推理摘要不落盘，encrypted content 仅保留哈希和长度。每场景运行一次，工具数、轮数和总时间有界。Controller 使用内存库、临时目录、随机本地凭据和不可用的执行器地址；工具转发使用显式只读白名单，变更工具即使出现在目录也会在转发前拦截。没有生产 daemon、微信或源业务写操作。
 
-## 审查状态
+该入口使用生产 SP 的静态／动态分层构建函数，但把原生开发者指令适配为 API system 消息，把 wechat_control 适配为同名 function tools。没有加载原生 shell、code-mode、AGENTS、skills 和 CLI 默认参数，因此结论限定为 **API 配置行为对照**。
 
-CodeRabbit 于11月7日03:05（北京时间）实际完成对 `8d27c4f` 的 review，不能再记作因 draft 跳过。两项意见为：实际目录应包含后续只读指引；授权分类应有真实模型覆盖。前者已补目录回归及真实 CLI 断言；后者受上述 Ultra 接口限制，仍未解决。新入口函数已补充说明其隔离场景、脚本工具顺序和无模型推理边界的 JSDoc。修订后的 head 还需精确 CI 和复审；检查 success 不代表模型缺口消失。
+### 失败与夹具修复
 
-03:24对 `3db23fb` 的复审新增一条提示词回归建议，已在分类器真实收到的 `follow_up` 规则中断言保留明确示例、排除含糊示例；同样不替代模型分类。文档覆盖率仍报0%，检查未列出函数名；补充了本 diff 修改的验证计划生成器的契约，说明只返回计划、构建顺序和错误条件。最终 head 的机器人复审仍需跟踪额度限制，不能把旧 head 的审查转记为新 head 通过。
+失败证据没有覆盖或删除：
+
+1. `source-followup-model-production-pair.json`：两次真实请求均 HTTP200，实际模型为 `gpt-6.1-sol`、未传 effort；旧版选 `list_sessions`，新版选 `read_session`。夹具漏解 `arguments` 外层，HTTP 转发400，不能算完整行为通过。
+2. `source-followup-model-production-pair-routing-fixed.json`：从已产生的工具选择接续，没有重新抽取首步。源历史的 historyContext 不是 UUID，Controller 返回 `history_invalid_response`；两版均诚实说明读不到记录。这也不能算“有后续报告”场景通过。
+3. `source-followup-model-production-pair-history-fixed.json`：修正 UUID 后，从先前最后一次工具选择接续，真实返回后续报告，两版均答对。该版本误把历史消息时间作为 fetchedAt，只能用于受此限制的合成样本。
+4. `source-followup-model-production-pair-final.json`：按夹具复核修正读取时间、保留历史 item.timestamp，并使用生产的静态／动态提示词分层后，明确进行一次独立修复验证。不是对历史失败的覆盖，也不冒充同一次接续。
+
+`source-followup-model-production-boundaries.json` 是夹具时间与分层修复前的三次边界试验；`source-followup-model-production-boundaries-final.json` 为修复后的单次边界验证。两套均保留，不选择性隐藏回答。
+
+### 有效样本与结论
+
+| 场景 | 模型自主调用 | 公开回答核查 |
+| --- | --- | --- |
+| 旧规则，有后续报告 | `list_sessions` → `read_session` | 引用08:34完成报告，保留08:00原轮次失败，说明并非完整历史 |
+| 新规则，有后续报告 | `read_session` | 引用后续独立报告；保留原失败；没有微信回执，不能确认送达 |
+| 新规则，空历史 | `read_session` | 返回为空，最终结果待核实；不能据此否定后来成功 |
+| 新规则，裁剪历史 | `read_session` | 指出历史和正文裁剪，没有最终成功证据 |
+| 新规则，读取失败 | `read_session` | 明确读取失败、最终结果未核实，不把原轮次失败扩展为最终失败 |
+
+每次原 occurrence 重读完全相同，后台任务和新定时任务均为空；合成节点只收到 list_automations、inspect_automation 和 read_history，没有源命令。原始请求均省略 reasoning，响应 actual model 均为 `gpt-6.1-sol`。
+
+这证明候选指令在这些合成样本中能够按预期只读查询并陈述证据边界；**旧版也答对，不能证明新规则提升了成功率或找到了历史错误的唯一根因**。样本未覆盖原生长上下文、图片插话、裁剪策略、工具传输及真实投递。
+
+## 真实授权分类
+
+`--cases authorization` 调用构建后的 `classifyBackgroundAuthorization`、实际 `HttpLeaderModel` 和 `LocalSettingsService.wrapModel`。旧版通过隔离 settings 覆盖旧授权提示词，新版使用当前默认；没有复制分类逻辑，也没有把 mock 返回当推理。三个输入各在旧／新规则中提交一次：
+
+| 当前用户消息 | 旧规则实际结果 | 新规则实际结果 |
+| --- | --- | --- |
+| 但是他最终成功了，你不信再读一下 | `[]` | `[]` |
+| 再看看刚才那个 | `[follow_up]` | `[]` |
+| 让它继续核对第二项 | `[follow_up]` | `[follow_up]` |
+
+原始记录为 `source-followup-model-production-authorization.json`，六次请求均 HTTP200、实际 `gpt-6.1-sol`、未传 effort。含糊追问的旧结果保留为不符合当前授权要求的样本；新版三个样本通过。分类结果没有交给执行器，未启动或追问任何后台会话；实际队列语义由既有明确授权测试覆盖。
+
+## CI 与审查
+
+此前精确 head `3497706` 的 Verify run `42279760482` 当前六项通过，Controller 为2537通过、159跳过；发布归档 run `42279760351` 通过。首次 Ubuntu daemon 两项失败日志保留：主干、前一全绿 head 和此 head 的 Go 树相同，本地定向 race 20轮通过，只重跑失败 job 一次后通过；精确时序根因未解决，本 PR 没有修改 daemon。
+
+CodeRabbit 已实际审查 `8d27c4f` 和 `3db23fb`。目录指引、分类提示词断言和验证计划 JSDoc 已补；此前“缺真实模型分类”意见现有上述生产请求配置证据。03:34请求 `3497706` 的复审被每小时限流拒绝，draft 自动检查跳过不算实际通过。后续提交以精确 head 的 CI 和实际复审为门禁；不能转记旧 head 的结果，实时状态以 PR 与交接证据为准。
 
 ## 发布与回滚
 
-提交保持 draft，待主控独立复核、精确 head CI及模型层验收，不提前 ready 或自动合并。
+提交保持 draft，待主控独立复核及精确 head 的 CI、实际审查门禁，不提前 ready 或自动合并。
 
 获准部署后，还应通过 settings GET、持久文件白名单和离线组合核对生效规则。`/v1/tools/list` 是 POST，会冻结消息并更新 directContext，不能给生产主聊天提交合成 messageId 作只读探针。持久化的 `controller.prompt.direct`、`controller.prompt.background-tools`、`controller.prompt.background-authorization` 或工具自定义覆盖可能继续生效；新默认值不会擅自覆盖用户编辑。本次读取时没有这些覆盖，部署时仍需复核。实际生效规则包含新内容后，才能确认默认规则生效，不能只凭镜像版本或容器健康下结论。
 
