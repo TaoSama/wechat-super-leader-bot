@@ -54,7 +54,8 @@ type rolloutPayload struct {
 	Attribution struct {
 		Trigger string `json:"turn_trigger"`
 	} `json:"turn_attribution"`
-	Item struct {
+	Error json.RawMessage `json:"error"`
+	Item  struct {
 		Type    string          `json:"type"`
 		Phase   string          `json:"phase"`
 		Content json.RawMessage `json:"content"`
@@ -226,6 +227,9 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 				}
 			case "task_complete":
 				turn.complete = true
+				failed, invalid := completionError(p.Error)
+				turn.aborted = turn.aborted || failed
+				turn.invalid = turn.invalid || invalid
 			case "turn_aborted", "task_failed", "turn_failed":
 				turn.aborted = true
 			case "item_completed":
@@ -308,6 +312,21 @@ func inspectRollout(ctx context.Context, home, path, sessionID, automationID str
 }
 
 func isFinalPhase(phase string) bool { return phase == "final" || phase == "final_answer" }
+
+// Decode only terminal error evidence; malformed values must not make a turn
+// successful, and provider error details must never enter the public result.
+func completionError(raw json.RawMessage) (failed, invalid bool) {
+	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
+		return false, false
+	}
+	var event struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &event); err != nil || strings.TrimSpace(event.Message) == "" {
+		return false, true
+	}
+	return true, false
+}
 
 func inRolloutWindow(at, expected, until int64) bool { return at >= expected && at <= until }
 
