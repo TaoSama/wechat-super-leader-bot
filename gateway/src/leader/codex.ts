@@ -224,6 +224,7 @@ export class CodexReplyEngine implements GatewayReplyEngine {
     if (!images.length) return;
     await this.withJournalLock(accountId, chatId, async () => {
       const workspace = await this.store.forChat(accountId, chatId);
+      prepareInboundImageDirectory(workspace);
       const staged = stageInboundImages(workspace, messageId, images, Date.now());
       traceEvent("codex.images.staged", { itemCount: staged });
     });

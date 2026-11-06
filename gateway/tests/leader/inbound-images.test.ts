@@ -6,7 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Input, ThreadEvent } from "@openai/codex-sdk";
 import { CodexReplyEngine } from "../../src/leader/codex.js";
-import { WorkspaceStore } from "../../src/leader/workspace.js";
+import { WorkspaceStore, WorkspaceValidationError } from "../../src/leader/workspace.js";
 import { claimInboundImages, prepareInboundImageDirectory, releaseInboundImages, stageInboundImages, INBOUND_IMAGE_DIRECTORY, INBOUND_IMAGE_WINDOW_MS,
   MAX_TURN_IMAGES, type InboundImage } from "../../src/leader/inbound-images.js";
 import { directToolController } from "./direct-tool-fixture.js";
@@ -58,8 +58,11 @@ test("a turn attaches at most the newest images and skips files that no longer m
   assert.throws(() => stageInboundImages(workspace, "bad", [{ ...png("x"), mime: "image/jpeg" }], now), /Inbound image content is invalid/);
 });
 
-test("the main chat turn receives staged images as local image input, and only once", async t => {
+test("an image before the first native turn repairs a legacy placeholder and reaches the turn only once", async t => {
   const directory = root(t);
+  const workspace = await new WorkspaceStore(directory).forChat("account", "chat");
+  const target = path.join(workspace.workspacePath, INBOUND_IMAGE_DIRECTORY);
+  fs.writeFileSync(target, "", { mode: 0o444 });
   const inputs: Input[] = [];
   const engine = new CodexReplyEngine({ root: directory, model: "test", codexPath: process.execPath,
     sdkFactory: () => {
@@ -75,6 +78,12 @@ test("the main chat turn receives staged images as local image input, and only o
   t.after(() => engine.stop());
   const controller = directToolController();
   await engine.stageImages("account", "chat", "img", [png("cat")]);
+  assert.equal(inputs.length, 0, "staging must succeed before any native turn starts");
+  assert.ok(fs.lstatSync(target).isDirectory());
+  assert.equal(fs.statSync(target).mode & 0o777, 0o700);
+  const manifest = fs.readFileSync(path.join(target, "manifest.json"));
+  await engine.stageImages("account", "chat", "img", [png("cat")]);
+  assert.deepEqual(fs.readFileSync(path.join(target, "manifest.json")), manifest, "preparing an existing directory must preserve staged images");
   assert.deepEqual(await engine.reply("account", { chatId: "chat", messageId: "ask", text: "图里是什么？" }, controller), { text: "图里是一只猫" });
   await engine.reply("account", { chatId: "chat", messageId: "next", text: "谢谢" }, controller);
 
@@ -87,6 +96,30 @@ test("the main chat turn receives staged images as local image input, and only o
   assert.deepEqual(fs.readFileSync(image.type === "local_image" ? image.path : ""), png("cat").bytes);
   assert.equal(typeof second, "string", "the next turn must not resend the same image");
   assert.doesNotMatch(String(second), /current_user_images/);
+});
+
+test("the staging entry refuses nonempty files and symlinks without changing their targets", async t => {
+  const directory = root(t);
+  const workspace = await new WorkspaceStore(directory).forChat("account", "chat");
+  const target = path.join(workspace.workspacePath, INBOUND_IMAGE_DIRECTORY);
+  const engine = new CodexReplyEngine({ root: directory, model: "test", codexPath: process.execPath });
+  t.after(() => engine.stop());
+  fs.writeFileSync(target, "keep this file");
+  await assert.rejects(engine.stageImages("account", "chat", "img", [png("cat")]), WorkspaceValidationError);
+  assert.equal(fs.readFileSync(target, "utf8"), "keep this file");
+  fs.unlinkSync(target);
+  const external = path.join(directory, "external");
+  fs.mkdirSync(external);
+  const empty = path.join(external, "empty");
+  fs.writeFileSync(empty, "");
+  for (const destination of [empty, external]) {
+    fs.symlinkSync(destination, target);
+    await assert.rejects(engine.stageImages("account", "chat", "img", [png("cat")]), WorkspaceValidationError);
+    assert.ok(fs.lstatSync(target).isSymbolicLink());
+    assert.deepEqual(fs.readdirSync(external), ["empty"]);
+    assert.equal(fs.statSync(empty).size, 0);
+    fs.unlinkSync(target);
+  }
 });
 
 test("an empty sandbox placeholder at the staging path is replaced by the directory; other files are refused", async t => {
