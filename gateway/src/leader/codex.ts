@@ -14,7 +14,7 @@ import { WorkspaceStore, MAX_REPLY_CHARS, MAX_REPLY_JOURNAL_ENTRIES, MAX_PINNED_
 import { ReplyEngineBackpressureError, ReplyEngineConflictError, ReplyEngineUnavailableError,
   type GatewayReplyEngine, type ControllerToolClient, type ReplyEngineTurnOptions } from "./contracts.js";
 import { ControlMcp, CONTROL_TOKEN_ENV, hasConsoleCredential, redactConsoleCredentials } from "./control-mcp.js";
-import { DEFAULT_CONTROLLER_TIMEOUT_MS, DEFAULT_CONTROLLER_MAX_RETRIES } from "../runtime/budgets.js";
+import { DEFAULT_CONTROLLER_TIMEOUT_MS, DEFAULT_CONTROLLER_MAX_RETRIES, MAX_CODEX_TURN_TIMEOUT_MS } from "../runtime/budgets.js";
 import { HEADLESS_CODEX_CONFIG, HEADLESS_SKILLS_ROOT } from "./headless-config.js";
 import { traceEvent, traceSpan } from "../runtime/telemetry.js";
 import { NativeEventTrace, nativeId } from "./native-events.js";
@@ -25,8 +25,7 @@ import { startAppServerTurn, AppServerRejectedError, type AppServerTurn } from "
 import { claimInboundImages, inboundImageNote, prepareInboundImageDirectory, releaseInboundImages, stageInboundImages, INBOUND_IMAGE_DIRECTORY,
   type InboundImage } from "./inbound-images.js";
 
-const DEFAULT_TIMEOUT_MS = 300000;
-const MAX_TIMEOUT_MS = 315000;
+const MAX_CLEANUP_TIMEOUT_MS = 315000;
 // Upstream exec shutdown allows a 35s acknowledgement budget, including analytics flush.
 const DEFAULT_CLEANUP_TIMEOUT_MS = 40_000;
 const STOP_ABORT_GRACE_MS = 2_000;
@@ -150,12 +149,12 @@ export class CodexReplyEngine implements GatewayReplyEngine {
 
   constructor(private readonly options: CodexReplyEngineOptions) {
     if (!options.model?.trim()) throw new Error("A Codex reply model is required");
-    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs <= 0 || this.timeoutMs > MAX_TIMEOUT_MS) {
+    this.timeoutMs = options.timeoutMs ?? MAX_CODEX_TURN_TIMEOUT_MS;
+    if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs <= 0 || this.timeoutMs > MAX_CODEX_TURN_TIMEOUT_MS) {
       throw new Error("Invalid Codex reply timeout budget");
     }
     this.cleanupTimeoutMs = options.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS;
-    if (!Number.isSafeInteger(this.cleanupTimeoutMs) || this.cleanupTimeoutMs <= 0 || this.cleanupTimeoutMs > MAX_TIMEOUT_MS) {
+    if (!Number.isSafeInteger(this.cleanupTimeoutMs) || this.cleanupTimeoutMs <= 0 || this.cleanupTimeoutMs > MAX_CLEANUP_TIMEOUT_MS) {
       throw new Error("Invalid Codex cleanup timeout budget");
     }
     this.store = new WorkspaceStore(options.root);
@@ -526,7 +525,10 @@ export class CodexReplyEngine implements GatewayReplyEngine {
     const abort = new AbortController();
     this.nativeAborts.add(abort);
     let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
-    const timer = setTimeout(() => abort.abort(), this.timeoutMs);
+    const timer = setTimeout(() => {
+      traceEvent("codex.work.budget_exceeded", { budgetMs: this.timeoutMs });
+      abort.abort();
+    }, this.timeoutMs);
     let started = false;
     let nativeEvents: NativeEventTrace | undefined;
     let native: AppServerTurn | undefined;

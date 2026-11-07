@@ -416,5 +416,6 @@ test("timeout aborts the native turn and keeps uncertain journal; budget is boun
   const reply = await engine.reply("account", request, noController);
   assert.equal(terminated, true);
   assert.match(reply.text, /未正常完成|没有正常完成/);
-  assert.throws(() => new CodexReplyEngine({ root, model: "x", timeoutMs: 315001 }), /budget/);
+  assert.throws(() => new CodexReplyEngine({ root, model: "x", timeoutMs: 1_800_001 }), /budget/);
+  assert.throws(() => new CodexReplyEngine({ root, model: "x", cleanupTimeoutMs: 315001 }), /budget/);
 });

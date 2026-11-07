@@ -14,7 +14,7 @@ const context = new AsyncLocalStorage<MessageTrace>();
 const instanceId = randomUUID();
 const STDERR_FD = 2;
 const FIELD_NAMES = new Set([
-  "durationMs", "outcome", "spanId", "threadId", "turnId", "itemId", "itemType", "tool",
+  "durationMs", "budgetMs", "outcome", "spanId", "threadId", "turnId", "itemId", "itemType", "tool",
   "status", "exitCode", "timingCoverage", "inputTokens", "cachedInputTokens", "outputTokens",
   "batchId", "batchIndex", "batchCount", "batchWaitMs", "platformCreatedAtMs", "platformToReceivedMs",
   "clockSkew", "chars", "chunkIndex", "chunkCount", "acknowledgedChunks", "attempt", "httpStatus",
