@@ -1,7 +1,7 @@
 import type { BackgroundInvocation, BackgroundWorker, WorkerReceipt } from "./contracts.js";
 
 const SAFE_FAILURE_CATEGORIES = {
-  worker_cancelled_before_launch: "not_started", worker_expired: "expired",
+  worker_cancelled_before_launch: "not_started", worker_cancelled: "cancelled", worker_expired: "expired",
   worker_interrupted: "interrupted", worker_artifact_invalid: "artifact_invalid",
   worker_process_cleanup_unverified: "cleanup_unverified",
 } as const;

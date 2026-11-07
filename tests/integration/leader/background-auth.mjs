@@ -17,7 +17,7 @@ const SECRET = 'synthetic-auth-secret-canary';
 const { values } = parseArgs({ options: { run: { type: 'boolean' },
   'fixture-server': { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } });
 if (values['fixture-server']) await serve();
-else if (!values.run || values.help) console.log('Usage: node tests/integration/leader/background-auth.mjs --run\nRuns the built Controller HTTP/scheduler/result flow with a controlled Claude executable and native authentication-error fixture. No real providers, daemon sessions or WeChat. Sandbox posture is simulated by the controlled executable; this is not a sandbox security test.');
+else if (!values.run || values.help) console.log('Usage: node tests/integration/leader/background-auth.mjs --run\nRuns the built Controller HTTP/scheduler/result flow with a controlled Claude executable and native authentication-error fixture. No real providers, daemon sessions or WeChat. Compose peer DNS and sandbox posture are simulated; this is not a sandbox security test.');
 else await verify().catch(error => { console.error(error); process.exitCode = 1; });
 
 async function serve() {
@@ -25,6 +25,16 @@ async function serve() {
   const { loadConfig } = await import('../../../controller/dist/runtime/config.js');
   const { ControllerServer } = await import('../../../controller/dist/http/server.js');
   const { MemoryStore } = await import('../../../controller/dist/store/memory.js');
+  const { CLAUDE_PEER_HOSTS } = await import('../../../controller/dist/background/worker/claude-network.js');
+  const { default: dns } = await import('node:dns/promises');
+  const { syncBuiltinESMExports } = await import('node:module');
+  // This fixture has no Compose peers; external DNS must not determine whether the CLI starts.
+  dns.lookup = async host => {
+    if (!CLAUDE_PEER_HOSTS.includes(host)) throw new Error('Unexpected fixture DNS lookup');
+    process.send({ type: 'peer-dns' });
+    throw Object.assign(new Error('Synthetic absent Compose peer'), { code: 'ENOTFOUND' });
+  };
+  syncBuiltinESMExports();
   const app = new ControllerServer({ ...loadConfig(), port: 0 }, new MemoryStore());
   await app.start();
   let stopping = false;
@@ -80,7 +90,7 @@ async function verify() {
   const token = randomUUID(), nodeToken = randomUUID();
   const native = JSON.parse(await readFile(new URL('../../../controller/tests/background/worker/fixtures/claude-authentication-failed.json', import.meta.url), 'utf8'));
   const executable = path.join(directory, 'controlled-claude.mjs');
-  let child, socket, base, heartbeat;
+  let child, socket, base, heartbeat, peerDnsLookups = 0;
   const logs = [], frames = [], errors = [], observations = [], outcomes = [];
   const send = frame => socket.send(JSON.stringify(frame), error => { if (error) errors.push(error); });
   await withTestCleanup(async () => {
@@ -96,7 +106,10 @@ async function verify() {
     }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
     child.on('error', error => errors.push(error));
     for (const stream of [child.stdout, child.stderr]) stream.on('data', data => logs.push(data.toString()));
-    child.on('message', message => { if (message?.type === 'ready') base = message.base; });
+    child.on('message', message => {
+      if (message?.type === 'ready') base = message.base;
+      if (message?.type === 'peer-dns') peerDnsLookups++;
+    });
     await waitFor(() => {
       if (errors.length) throw errors[0];
       if (child.exitCode !== null) throw new Error('Controller exited before readiness');
@@ -175,8 +188,9 @@ async function verify() {
         sourceStatus: task.observations[0].status, deliveryKind: delivery.kind, queueOnly: true });
     }
     assert.equal(observations.length, 5); assert(!frames.includes('command')); assert.equal(errors.length, 0);
+    assert.equal(peerDnsLookups, 30, 'Every CLI run must resolve the six absent peers locally');
     console.log(JSON.stringify({ pass: true, surface: 'actual Controller HTTP/scheduler/CLI/results', outcomes,
-      sourceCommands: 0, realProviders: 0, realWeChat: 0, securityBoundaryVerified: false }));
+      sourceCommands: 0, realProviders: 0, realWeChat: 0, peerDnsLookups, securityBoundaryVerified: false }));
   }, [
     { label: 'heartbeat', cleanup: () => clearInterval(heartbeat) },
     { label: 'synthetic WebSocket', cleanup: () => closeTestWebSocket(socket) },

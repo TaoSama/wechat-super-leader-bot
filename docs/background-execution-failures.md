@@ -25,7 +25,7 @@ Claude Code 原生 assistant 事件同时包含 `error=authentication_failed` �
 }
 ```
 
-`category` 使用固定白名单，未知错误归为 `execution_unverified`。日志不包含服务商原文、凭证、工具输入或原始异常；更早发生的 runtime 错误只输出通用提示，不声称终态已经保存。
+`category` 使用固定白名单，未知错误归为 `execution_unverified`。日志不包含服务商原文、凭证、工具输入或原始异常；更早发生的 runtime 错误只输出通用提示，不声称终态已经保存。错误回调抛错时仅输出固定安全提示，不影响已保存的回执、取消处理或后续观测；原业务错误仍按原路径处理。
 
 | executionEvidence | 含义 |
 | --- | --- |
@@ -33,7 +33,7 @@ Claude Code 原生 assistant 事件同时包含 `error=authentication_failed` �
 | `unverified` | 工具执行及外部影响尚未核实，不能推断为未执行 |
 | `not_started` | 仅用于已确认启动前取消的回执 |
 
-`worker_expired` 可能来自停止正在运行的 invocation，因此仍为 `unverified`。认证失败无论是否观察到工具活动，都不自动重放。
+`worker_expired` 可能来自停止正在运行的 invocation，因此仍为 `unverified`。用户取消产生的 `worker_cancelled` 单独归为 `cancelled`，外部影响仍为 `unverified`；只有 `worker_cancelled_before_launch` 可以标记为 `not_started`。认证失败无论是否观察到工具活动，都不自动重放。
 
 ## 隔离验证
 
@@ -44,4 +44,4 @@ node tests/integration/leader/background-auth.mjs --run
 
 入口启动实际 Controller，通过认证 HTTP API 创建计划，让 scheduler 只读观察合成源任务，再启动受控 Claude 可执行文件，最后检查 run、公开任务详情、结构化日志和结果队列。覆盖认证失败、工具活动后认证失败、普通失败、认证错误后成功和正常成功；核对源观测仍为 `completed`、失败结果不误作日报、重复查询不重跑，以及凭证和服务商原文不外泄。
 
-原生认证事件形状另以 Claude Code 2.1.316 连接本机合成 HTTP 403 服务核对。上述验证不调用真实模型、微信或用户会话；集成入口模拟 Claude sandbox posture，不作为沙箱安全边界的验证。它已接入 `scripts/verify.mjs` 的 integration 分组。
+原生认证事件形状另以 Claude Code 2.1.316 连接本机合成 HTTP 403 服务核对。上述验证不调用真实模型、微信或用户会话；集成入口固定模拟不存在的 Compose peer DNS 与 Claude sandbox posture，不作为 DNS 隔离或沙箱安全边界的验证。Linux 启动仍检查实际 bubblewrap 能否启动。入口已接入 `scripts/verify.mjs` 的 integration 分组。

@@ -110,10 +110,15 @@ export class BackgroundService {
     const results = await Promise.allSettled(workers.map(worker => this.advance(worker.id, worker)));
     const failures = results.flatMap((result, index) => {
       if (result.status === "fulfilled") return [];
-      this.options.onError?.(result.reason, `background maintenance ${workers[index].id}`);
+      this.report(result.reason, `background maintenance ${workers[index].id}`);
       return [result.reason];
     });
     if (failures.length) throw new AggregateError(failures, "Background maintenance failed; durable state retained for retry");
+  }
+  private report(error: unknown, context: string): void {
+    if (!this.options.onError) { console.error("Background service operation failed"); return; }
+    try { this.options.onError(error, context); }
+    catch { console.error("Background service error reporting failed"); }
   }
   private allowed(chatId: string): boolean { return this.options.isAllowed?.(chatId) ?? true; }
   private stopping(): boolean { return this.options.isStopping?.() ?? false; }
@@ -305,7 +310,7 @@ export class BackgroundService {
       launchDeadlineAt: worker.expiresAt, executionDeadlineAt: worker.expiresAt + WORKER_SHUTDOWN_GRACE_MS,
       timeoutMs: this.turnTimeoutMs }); }
     catch (error) {
-      this.options.onError?.(error, `background submit ${invocation.id}`);
+      this.report(error, `background submit ${invocation.id}`);
       // Ambiguous submission remains active; inspect the same operation after recovery.
       return save(current => { const active = current.invocations.find(item => item.id === invocation.id)!;
         active.status = "running"; active.receipt = { status: "unknown", error: "Submission receipt unavailable; observing without redispatch" }; });
@@ -354,7 +359,7 @@ export class BackgroundService {
       if (quarantined || current.phase === "quarantined") current.phase = "quarantined";
       else if (current.phase !== "expired") current.phase = !current.initialOutcome ? "observing" : current.initialOutcome.status === "failed" ? "failed" : "completed";
     });
-    if (failed) this.options.onError?.(new BackgroundWorkerFailure(recorded, invocation, receipt), "background worker failed");
+    if (failed) this.report(new BackgroundWorkerFailure(recorded, invocation, receipt), "background worker failed");
     return recorded;
   }
   private async deliverFollowups(worker: BackgroundWorker,
