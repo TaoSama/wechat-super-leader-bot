@@ -111,3 +111,27 @@ describe("durable global execution capacity", () => {
   expect(JSON.parse(fs.readFileSync(f.slot, "utf8")).ownerPid).toBe(2147483647);
  });
 });
+
+describe("worker failure metadata", () => {
+ it.each(["unverified", "tool_activity_observed"] as const)("retains only the fixed authentication diagnostic (%s)", executionEvidence => {
+  const { store } = fixture(), workerId = randomUUID(), invocationId = randomUUID();
+  const dir = store.worker(workerId, true)!;
+  const failureDiagnostic = { category: "authentication_failed" as const, executionEvidence };
+  store.save(dir, { workerId, invocationId, inputHash: "input", ownerPid: process.pid,
+   status: "needs_attention", summary: "safe", attachments: [], failureDiagnostic });
+  expect(new WorkerStorage(store.root, store.artifacts).receipt(dir, invocationId)?.failureDiagnostic).toEqual(failureDiagnostic);
+ });
+ it.each([
+  { category: "authentication_failed", executionEvidence: "not_started" },
+  { category: "private-provider-text", executionEvidence: "unverified" },
+  { category: "authentication_failed", executionEvidence: "unverified", raw: "private-provider-text" },
+ ])("rejects and retains malformed diagnostics for inspection (%j)", failureDiagnostic => {
+  const { store } = fixture(), workerId = randomUUID(), invocationId = randomUUID();
+  const dir = store.worker(workerId, true)!, file = store.receiptPath(dir, invocationId);
+  const body = JSON.stringify({ workerId, invocationId, inputHash: "input", ownerPid: process.pid,
+   status: "needs_attention", summary: "safe", attachments: [], failureDiagnostic });
+  fs.writeFileSync(file, body);
+  expect(() => store.receipt(dir, invocationId)).toThrow("Invalid worker receipt metadata");
+  expect(fs.readFileSync(file, "utf8")).toBe(body);
+ });
+});

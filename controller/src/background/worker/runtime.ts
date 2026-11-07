@@ -263,6 +263,14 @@ export class CodexWorkerRuntime implements WorkerRuntime {
       receipt.status = "needs_attention";
       receipt.summary = exporting ? "执行已结束，但结果附件未通过接收校验，需要核对。" : UNCERTAIN;
       receipt.error = abort.signal.aborted ? "worker_interrupted" : exporting ? "worker_artifact_invalid" : "worker_execution_unverified";
+      if (!abort.signal.aborted && !exporting && error instanceof WorkerExecutionFailure && error.failureDiagnostic &&
+          !error.processCleanupUnverified) {
+        receipt.failureDiagnostic = error.failureDiagnostic;
+        receipt.error = "worker_authentication_failed";
+        receipt.summary = "后台执行器认证失败，本轮未取得完整执行结果。请检查执行账户状态或凭证；任务未自动重跑。" +
+          (error.failureDiagnostic.executionEvidence === "tool_activity_observed"
+            ? "本轮已观察到工具活动，外部影响仍需核对。" : "本轮工具执行及外部影响尚未核实。");
+      }
       if (error instanceof WorkerExecutionFailure && error.processCleanupUnverified) {
         receipt.processCleanupUnverified = true; receipt.error = "worker_process_cleanup_unverified";
         receipt.summary = "有后台子进程未能确认退出；工作区已保留隔离，需要人工核对。";

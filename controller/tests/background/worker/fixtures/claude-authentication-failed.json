@@ -1,0 +1,26 @@
+{
+  "cliVersion": "2.1.316",
+  "assistant": {
+    "type": "assistant",
+    "message": {
+      "id": "synthetic-api-error-message",
+      "model": "<synthetic>",
+      "role": "assistant",
+      "type": "message",
+      "stop_reason": "stop_sequence",
+      "content": [{ "type": "text", "text": "Failed to authenticate. API Error: 403 account suspended: synthetic-auth-error-canary" }]
+    },
+    "parent_tool_use_id": null,
+    "error": "authentication_failed",
+    "is_api_error_message": true,
+    "api_error_status": 403
+  },
+  "result": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": true,
+    "terminal_reason": "api_error",
+    "api_error_status": 403,
+    "result": "Failed to authenticate. API Error: 403 account suspended: synthetic-auth-error-canary"
+  }
+}

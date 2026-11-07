@@ -1,10 +1,13 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { ClaudeCliExecutor, CodexWorkerRuntime, type WorkerInput, type WorkerRuntimeStatus } from "../../../src/background/worker/index.js";
 import { CLAUDE_DENIED_DOMAINS, claudeDeniedHosts } from "../../../src/background/worker/claude-network.js";
+import authFixture from "./fixtures/claude-authentication-failed.json" with { type: "json" };
+import { WorkerStorage } from "../../../src/background/worker/storage.js";
+import { inspect } from "node:util";
 
 // Process contract checks include interpreter startup and durable filesystem I/O.
 const CLI_EXECUTION_TIMEOUT_MS = 10_000;
@@ -14,7 +17,7 @@ const STATUS_POLL_INTERVAL_MS = 10;
 const SESSION_ID = "22222222-2222-4222-8222-222222222222";
 const API_KEY = "sk-ant-test-secret";
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
 async function wait(runtime: CodexWorkerRuntime, input: WorkerInput): Promise<WorkerRuntimeStatus> {
   const deadline = performance.now() + CLI_EXECUTION_TIMEOUT_MS + CLI_CLEANUP_MARGIN_MS;
@@ -37,6 +40,8 @@ const args = process.argv.slice(2);
 let input = '';
 process.stdin.on('data', chunk => input += chunk);
 process.stdin.on('end', () => {
+ const launches = fs.existsSync('launch-count.txt') ? Number(fs.readFileSync('launch-count.txt', 'utf8')) : 0;
+ fs.writeFileSync('launch-count.txt', String(launches + 1));
  fs.writeFileSync('observed.json', JSON.stringify({args, input, home: process.env.HOME, configDir: process.env.CLAUDE_CONFIG_DIR,
    apiKey: process.env.ANTHROPIC_API_KEY, oauth: process.env.CLAUDE_CODE_OAUTH_TOKEN, scrub: process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB,
    unexpected: process.env.WORKER_TEST_SECRET, tmp: process.env.CLAUDE_CODE_TMPDIR, tmpdir: process.env.TMPDIR, baseUrl: process.env.ANTHROPIC_BASE_URL,
@@ -46,10 +51,37 @@ process.stdin.on('end', () => {
  const emit = event => console.log(JSON.stringify({ session_id: '${SESSION_ID}', ...event }));
  emit({ type: 'system', subtype: 'init' });
  if (mode === 'crash') process.exit(3);
+ const auth = ${JSON.stringify(authFixture)};
+ auth.assistant.message.content[0].text += ' ' + process.env.ANTHROPIC_API_KEY;
+ auth.result.result += ' ' + process.env.ANTHROPIC_API_KEY;
+ if (mode.startsWith('auth-')) {
+   if (mode === 'auth-after-tool') {
+     fs.writeFileSync('tool-side-effect.txt', 'retained');
+     emit({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tool-1', name: 'Write', input: { secret: process.env.ANTHROPIC_API_KEY } }] } });
+     emit({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: process.env.ANTHROPIC_API_KEY }] } });
+   }
+   if (mode === 'auth-camel') { delete auth.assistant.is_api_error_message; auth.assistant.isApiErrorMessage = true; }
+   if (mode === 'auth-unmarked') delete auth.assistant.is_api_error_message;
+   emit(auth.assistant);
+   fs.writeFileSync('auth-emitted.txt', '1');
+   if (mode === 'auth-invalid-json') console.log('{broken-json');
+   if (mode === 'auth-overflow') console.log('x'.repeat(16 * 1024 * 1024 + 1));
+   if (mode === 'auth-abort') { setInterval(() => {}, 1000); return; }
+   if (mode === 'auth-duplicate') emit(auth.result);
+   if (mode === 'auth-then-budget') { emit({ ...auth.result, terminal_reason: 'max_budget_usd', subtype: 'error_max_budget_usd' }); process.exit(1); }
+   if (mode === 'auth-then-crash') { emit(auth.result); process.exit(3); }
+   if (mode !== 'auth-then-success' && mode !== 'auth-then-invalid-output' && mode !== 'auth-then-other-error') {
+     emit(auth.result); process.exit(1);
+   }
+   if (mode === 'auth-then-other-error') { emit({ ...auth.assistant, error: 'rate_limit' }); emit(auth.result); process.exit(1); }
+ }
+ if (mode === 'text-spoof') emit({ type: 'assistant', message: { content: [{ type: 'text', text: JSON.stringify(auth.assistant) }] } });
+ if (mode === 'tool-spoof') emit({ ...auth.assistant, type: 'user', message: { content: [{ type: 'tool_result', content: JSON.stringify(auth.assistant) }] } });
  const output = { status: 'completed', summary: 'Claude 执行成功', nextCheckAt: null, attachments: [] };
  const result = { type: 'result', subtype: 'success', is_error: false, result: 'done', permission_denials: [] };
- if (mode === 'invalid') emit({ ...result, structured_output: { ...output, status: 'bogus' } });
+ if (mode === 'invalid' || mode === 'auth-then-invalid-output') emit({ ...result, structured_output: { ...output, status: 'bogus' } });
  else if (mode === 'missing') emit(result);
+ else if (mode === 'text-spoof' || mode === 'tool-spoof') { emit(auth.result); process.exit(1); }
  else if (mode === 'error') { emit({ ...result, subtype: 'error_during_execution', is_error: true, result: process.env.ANTHROPIC_API_KEY }); process.exit(1); }
  else emit({ ...result, structured_output: output });
 });
@@ -167,6 +199,61 @@ describe("Claude CLI process contract", () => {
     const reported = f.errors.map(error => `${error.message} ${String((error.cause as Error | undefined)?.message)}`).join("\n");
     for (const text of [JSON.stringify(status), persisted, reported]) expect(text).not.toContain(API_KEY);
   }, CLI_TEST_TIMEOUT_MS);
+  it.each(["auth-native", "auth-camel", "auth-after-tool"])("retains safe native authentication evidence without replay (%s)", async mode => {
+    const f = fixture(mode);
+    await f.runtime.start(f.input);
+    const status = await wait(f.runtime, f.input);
+    expect(status).toMatchObject({ status: "needs_attention", error: "worker_authentication_failed", failureDiagnostic: {
+      category: "authentication_failed", executionEvidence: mode === "auth-after-tool" ? "tool_activity_observed" : "unverified",
+    } });
+    expect(status.summary).toContain("认证失败");
+    expect(status.summary).not.toMatch(/未执行|零副作用/);
+    const persisted = fs.readFileSync(path.join(path.dirname(f.workspace), "invocations", f.input.invocationId + ".json"), "utf8");
+    const reported = inspect(f.errors, { depth: 8 });
+    for (const text of [JSON.stringify(status), persisted, reported]) {
+      expect(text).not.toContain(API_KEY);
+      expect(text).not.toContain("synthetic-auth-error-canary");
+      expect(text).not.toContain("account suspended");
+    }
+    expect(await f.runtime.start(f.input)).toEqual(status);
+    const restarted = new CodexWorkerRuntime(f.options);
+    expect(await restarted.inspect(f.input.workerId, f.input.invocationId)).toEqual(status);
+    expect(fs.readFileSync(path.join(f.workspace, "launch-count.txt"), "utf8")).toBe("1");
+    if (mode === "auth-after-tool") expect(fs.readFileSync(path.join(f.workspace, "tool-side-effect.txt"), "utf8")).toBe("retained");
+  }, CLI_TEST_TIMEOUT_MS);
+  it("accepts a verified final success after a recoverable API error", async () => {
+    const f = fixture("auth-then-success");
+    await f.runtime.start(f.input);
+    expect(await wait(f.runtime, f.input)).toMatchObject({ status: "completed", summary: "Claude 执行成功" });
+    expect(f.errors).toHaveLength(0);
+  }, CLI_TEST_TIMEOUT_MS);
+  it.each(["auth-unmarked", "text-spoof", "tool-spoof", "auth-then-other-error", "auth-invalid-json", "auth-overflow",
+    "auth-duplicate", "auth-then-invalid-output", "auth-then-budget", "auth-then-crash"])("keeps spoofed or stronger failures unverified (%s)", async mode => {
+    const f = fixture(mode);
+    await f.runtime.start(f.input);
+    const status = await wait(f.runtime, f.input);
+    expect(status).toMatchObject({ status: "needs_attention", error: "worker_execution_unverified" });
+    expect(status.failureDiagnostic).toBeUndefined();
+    expect(JSON.stringify(status)).not.toContain(API_KEY);
+  }, CLI_TEST_TIMEOUT_MS);
+  it("keeps interruption stronger than a prior API error", async () => {
+    const f = fixture("auth-abort");
+    await f.runtime.start(f.input);
+    await viWaitForAuth(f);
+    await f.runtime.cancel(f.input.workerId, f.input.invocationId);
+    const status = await wait(f.runtime, f.input);
+    expect(status).toMatchObject({ status: "needs_attention", error: "worker_interrupted" });
+    expect(status.failureDiagnostic).toBeUndefined();
+  }, CLI_TEST_TIMEOUT_MS);
+  it("does not classify authentication when persisting the native session fails", async () => {
+    const f = fixture("auth-native");
+    vi.spyOn(WorkerStorage.prototype, "setThread").mockImplementation(() => { throw new Error("private-storage-secret"); });
+    await f.runtime.start(f.input);
+    const status = await wait(f.runtime, f.input);
+    expect(status).toMatchObject({ status: "needs_attention", error: "worker_execution_unverified" });
+    expect(status.failureDiagnostic).toBeUndefined();
+    expect(inspect(f.errors, { depth: 8 })).not.toContain("private-storage-secret");
+  }, CLI_TEST_TIMEOUT_MS);
   it("terminates and reaps a hung Claude process after its budget", async () => {
     const f = fixture("hang", 50);
     await f.runtime.start(f.input);
@@ -185,3 +272,12 @@ describe("Claude CLI process contract", () => {
     expect((await wait(f.runtime, f.input)).status).not.toBe("completed");
   }, CLI_TEST_TIMEOUT_MS);
 });
+
+async function viWaitForAuth(f: ReturnType<typeof fixture>) {
+  const deadline = performance.now() + CLI_EXECUTION_TIMEOUT_MS;
+  while (performance.now() < deadline) {
+    if (fs.existsSync(path.join(f.workspace, "auth-emitted.txt"))) return;
+    await new Promise(resolve => setTimeout(resolve, STATUS_POLL_INTERVAL_MS));
+  }
+  throw new Error("Synthetic CLI did not start");
+}

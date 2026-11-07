@@ -6,6 +6,7 @@ import { isClaudeEffort, isClaudeModel } from "./claude-models.js";
 import { CLAUDE_DENIED_DOMAINS, claudeDeniedHosts } from "./claude-network.js";
 import { parseOutput } from "./output.js";
 import { executable, runWorkerProcess, workerEnvironment } from "./process.js";
+import { ClaudeFailureEvidence } from "./claude-failure.js";
 
 /** Built-in tools roughly matching the Codex worker: shell, file edits, reads and web. */
 export const CLAUDE_WORKER_TOOLS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebFetch", "WebSearch"] as const;
@@ -138,11 +139,13 @@ export class ClaudeCliExecutor implements WorkerExecutor {
     else if (this.options.oauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = this.options.oauthToken;
     let session: string | undefined;
     let result: Record<string, any> | undefined;
+    const failureEvidence = new ClaudeFailureEvidence();
     // Turn-scoped: the process group (and every Bash descendant) is gone before removal.
     rmSync(temp, { recursive: true, force: true });
     mkdirSync(temp, { mode: 0o700 });
     return runWorkerProcess(request, { label: "Claude", command, args, env,
       onEvent: (event, context) => {
+        failureEvidence.observe(event);
         if (typeof event.session_id === "string" && event.session_id && event.session_id !== session) {
           session = event.session_id;
           context.thread(event.session_id);
@@ -150,10 +153,14 @@ export class ClaudeCliExecutor implements WorkerExecutor {
         if (event.type !== "result") return;
         if (result) { context.fail("Claude reported more than one worker result"); return; }
         result = event;
-        if (event.subtype !== "success" || event.is_error !== false) context.fail("Claude reported a failed worker turn");
       },
       finish: code => {
-        if (code !== 0 || !session || result?.structured_output === undefined) {
+        if (result?.is_error === true) {
+          const authentication = (code === 0 || code === 1) && result.terminal_reason === "api_error"
+            ? failureEvidence.failure() : undefined;
+          throw authentication ?? new Error("Claude reported a failed worker turn");
+        }
+        if (code !== 0 || !session || result?.subtype !== "success" || result.is_error !== false || result.structured_output === undefined) {
           throw new Error("Worker ended without a verified complete turn");
         }
         const text = JSON.stringify(result.structured_output);

@@ -28,6 +28,8 @@ const receiptSchema = z.object({
   processPid: z.number().int().positive().optional(),
   status: z.enum(["queued", "running", "completed", "waiting", "needs_attention", "failed", "unknown"]),
   summary: z.string(), attachments: z.array(z.string()),
+  failureDiagnostic: z.object({ category: z.literal("authentication_failed"),
+    executionEvidence: z.enum(["tool_activity_observed", "unverified"]) }).strict().optional(),
   queuedAt: z.number().int().nonnegative().optional(),
   launchDeadlineAt: z.number().int().positive().optional(), executionDeadlineAt: z.number().int().positive().optional(),
   pendingInput: z.object({ workerId: z.string().regex(UUID), invocationId: z.string().regex(UUID),

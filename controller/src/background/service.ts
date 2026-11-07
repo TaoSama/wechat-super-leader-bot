@@ -5,6 +5,7 @@ import { BACKGROUND_LEASE_MS, BACKGROUND_LEASE_RENEWAL_MS, BackgroundSpecSchema,
   type BackgroundWorker, type WorkerReceipt } from "./contracts.js";
 import { clearBackgroundBody } from "./retention.js";
 import { fallbackSummary, observationInput, observeSources } from "./observations.js";
+import { BackgroundWorkerFailure } from "./failure.js";
 
 const terminal = (receipt: WorkerReceipt) => !["running", "queued", "unknown"].includes(receipt.status);
 const running = (): RunnerOutcome => ({ status: "running" });
@@ -109,10 +110,15 @@ export class BackgroundService {
     const results = await Promise.allSettled(workers.map(worker => this.advance(worker.id, worker)));
     const failures = results.flatMap((result, index) => {
       if (result.status === "fulfilled") return [];
-      this.options.onError?.(result.reason, `background maintenance ${workers[index].id}`);
+      this.report(result.reason, `background maintenance ${workers[index].id}`);
       return [result.reason];
     });
     if (failures.length) throw new AggregateError(failures, "Background maintenance failed; durable state retained for retry");
+  }
+  private report(error: unknown, context: string): void {
+    if (!this.options.onError) { console.error("Background service operation failed"); return; }
+    try { this.options.onError(error, context); }
+    catch { console.error("Background service error reporting failed"); }
   }
   private allowed(chatId: string): boolean { return this.options.isAllowed?.(chatId) ?? true; }
   private stopping(): boolean { return this.options.isStopping?.() ?? false; }
@@ -304,7 +310,7 @@ export class BackgroundService {
       launchDeadlineAt: worker.expiresAt, executionDeadlineAt: worker.expiresAt + WORKER_SHUTDOWN_GRACE_MS,
       timeoutMs: this.turnTimeoutMs }); }
     catch (error) {
-      this.options.onError?.(error, `background submit ${invocation.id}`);
+      this.report(error, `background submit ${invocation.id}`);
       // Ambiguous submission remains active; inspect the same operation after recovery.
       return save(current => { const active = current.invocations.find(item => item.id === invocation.id)!;
         active.status = "running"; active.receipt = { status: "unknown", error: "Submission receipt unavailable; observing without redispatch" }; });
@@ -324,7 +330,7 @@ export class BackgroundService {
     const failed = ["failed", "needs_attention", "unknown"].includes(receipt.status);
     // Artifacts belong in the durable receipt even when result delivery has not succeeded yet.
     const durableReceipt = { ...receipt, artifacts };
-    return save(current => {
+    const recorded = await save(current => {
       const now = this.now();
       const deadlineAt = Math.min(current.expiresAt, invocation.kind === "initial" ? current.deadlineAt : current.expiresAt);
       const continuing = receipt.status === "waiting" && !quarantined && current.phase !== "expired" &&
@@ -353,6 +359,8 @@ export class BackgroundService {
       if (quarantined || current.phase === "quarantined") current.phase = "quarantined";
       else if (current.phase !== "expired") current.phase = !current.initialOutcome ? "observing" : current.initialOutcome.status === "failed" ? "failed" : "completed";
     });
+    if (failed) this.report(new BackgroundWorkerFailure(recorded, invocation, receipt), "background worker failed");
+    return recorded;
   }
   private async deliverFollowups(worker: BackgroundWorker,
     save: (mutate: (current: BackgroundWorker) => void) => Promise<BackgroundWorker>): Promise<BackgroundWorker> {
