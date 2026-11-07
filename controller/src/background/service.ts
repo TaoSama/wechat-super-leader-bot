@@ -5,6 +5,7 @@ import { BACKGROUND_LEASE_MS, BACKGROUND_LEASE_RENEWAL_MS, BackgroundSpecSchema,
   type BackgroundWorker, type WorkerReceipt } from "./contracts.js";
 import { clearBackgroundBody } from "./retention.js";
 import { fallbackSummary, observationInput, observeSources } from "./observations.js";
+import { BackgroundWorkerFailure } from "./failure.js";
 
 const terminal = (receipt: WorkerReceipt) => !["running", "queued", "unknown"].includes(receipt.status);
 const running = (): RunnerOutcome => ({ status: "running" });
@@ -324,7 +325,7 @@ export class BackgroundService {
     const failed = ["failed", "needs_attention", "unknown"].includes(receipt.status);
     // Artifacts belong in the durable receipt even when result delivery has not succeeded yet.
     const durableReceipt = { ...receipt, artifacts };
-    return save(current => {
+    const recorded = await save(current => {
       const now = this.now();
       const deadlineAt = Math.min(current.expiresAt, invocation.kind === "initial" ? current.deadlineAt : current.expiresAt);
       const continuing = receipt.status === "waiting" && !quarantined && current.phase !== "expired" &&
@@ -353,6 +354,8 @@ export class BackgroundService {
       if (quarantined || current.phase === "quarantined") current.phase = "quarantined";
       else if (current.phase !== "expired") current.phase = !current.initialOutcome ? "observing" : current.initialOutcome.status === "failed" ? "failed" : "completed";
     });
+    if (failed) this.options.onError?.(new BackgroundWorkerFailure(recorded, invocation, receipt), "background worker failed");
+    return recorded;
   }
   private async deliverFollowups(worker: BackgroundWorker,
     save: (mutate: (current: BackgroundWorker) => void) => Promise<BackgroundWorker>): Promise<BackgroundWorker> {

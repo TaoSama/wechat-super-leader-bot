@@ -32,6 +32,12 @@ export interface WorkerArtifact {
   sha256: string;
 }
 
+/** Fixed diagnostics only; provider messages and tool payloads are never retained here. */
+export interface WorkerFailureDiagnostic {
+  category: "authentication_failed";
+  executionEvidence: "tool_activity_observed" | "unverified";
+}
+
 export interface WorkerRuntimeStatus {
   workerId: string;
   invocationId: string;
@@ -43,6 +49,7 @@ export interface WorkerRuntimeStatus {
   attachments: string[];
   artifacts?: WorkerArtifact[];
   error?: string;
+  failureDiagnostic?: WorkerFailureDiagnostic;
   /** Local durable metadata confirms this invocation was never recorded. */
   receiptMissing?: boolean;
 }

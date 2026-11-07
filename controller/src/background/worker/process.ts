@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { accessSync, constants, realpathSync } from "node:fs";
 import * as path from "node:path";
-import type { WorkerExecutionRequest } from "./contracts.js";
+import type { WorkerExecutionRequest, WorkerFailureDiagnostic } from "./contracts.js";
 
 const MAX_STREAM_BYTES = 16 * 1024 * 1024;
 const KILL_GRACE_MS = 3000;
@@ -9,7 +9,8 @@ const HARD_STOP_MS = KILL_GRACE_MS + 1000;
 const ENV_ALLOWLIST = ["PATH", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"] as const;
 
 export class WorkerExecutionFailure extends Error {
-  constructor(message: string, readonly processCleanupUnverified = false) { super(message); }
+  constructor(message: string, readonly processCleanupUnverified = false,
+    readonly failureDiagnostic?: WorkerFailureDiagnostic) { super(message); }
 }
 
 /** Resolves a CLI to its canonical path; `label` names the CLI in the error message. */

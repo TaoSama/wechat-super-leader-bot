@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { CodexWorkerRuntime, type WorkerExecutor, type WorkerInput, type WorkerRuntimeStatus } from "../../../src/background/worker/index.js";
 import { hash } from "../../../src/background/worker/storage.js";
+import { WorkerExecutionFailure } from "../../../src/background/worker/process.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
@@ -31,6 +32,16 @@ function completing(): WorkerExecutor {
 }
 
 describe("isolated resumable worker runtime", () => {
+  it("keeps unverified process cleanup stronger than provider authentication", async () => {
+    const f = fixture({ execute: async () => { throw new WorkerExecutionFailure("safe failure", true, {
+      category: "authentication_failed", executionEvidence: "tool_activity_observed",
+    }); } });
+    await f.runtime.start(f.input);
+    const status = await terminal(f.runtime, f.input);
+    expect(status.error).toBe("worker_process_cleanup_unverified");
+    expect(status.failureDiagnostic).toBeUndefined();
+    expect(status.summary).toContain("后台子进程未能确认退出");
+  });
   it("resumes only sessions created by the same executor kind", async () => {
     const claudeThread = "33333333-3333-4333-8333-333333333333";
     const codex = completing();

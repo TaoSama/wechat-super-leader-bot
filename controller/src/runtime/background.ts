@@ -7,6 +7,7 @@ import type { NodeHub } from "../nodes/hub.js";
 import type { Config } from "./config.js";
 import { BackgroundArtifacts, BACKGROUND_ARTIFACT_RETENTION_MS } from "./background-artifacts.js";
 import { executorModelChoice, type LocalSettingsService } from "../settings/local-service.js";
+import { BackgroundWorkerFailure } from "../background/failure.js";
 
 const ARTIFACT_MAINTENANCE_INTERVAL_MS = 60_000;
 
@@ -32,7 +33,7 @@ export class BackgroundExecution {
         const fallback = config.background!.model;
         return { ...executorModelChoice(view.model("background", fallback), !!claude, fallback), systemPrompt: view.prompt("background-worker") };
       } } : {}),
-      onError: () => console.warn("Background execution requires reconciliation; durable receipt retained") });
+      onError: () => console.warn("Background worker runtime failure; inspect persisted execution state") });
     this.artifacts = new BackgroundArtifacts({ root: config.background.artifactRoot,
       publicUrl: config.consolePublicUrl ?? `http://localhost:${config.port}`,
       secret: createHash("sha256").update(`background-artifacts:${config.controllerToken}`).digest("hex"),
@@ -52,7 +53,10 @@ export class BackgroundExecution {
           expiresAt: invocation.createdAt + BACKGROUND_ARTIFACT_RETENTION_MS });
         changed();
       },
-      onError: (_error, context) => console.warn("Background observation deferred", { context }),
+      onError: (error, context) => {
+        if (error instanceof BackgroundWorkerFailure) console.warn(JSON.stringify(error.diagnostic));
+        else console.warn("Background observation deferred", { context });
+      },
     });
   }
   async initialize(): Promise<void> {

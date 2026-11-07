@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { WorkerArtifact, WorkerExecutorKind, WorkerInspectOptions } from "./worker/contracts.js";
+import type { WorkerArtifact, WorkerExecutorKind, WorkerFailureDiagnostic, WorkerInspectOptions } from "./worker/contracts.js";
 import type { AutomationRun, RunnerOutcome, RunResult } from "../automations/contracts.js";
 
 export const WORKER_LIFETIME_MS = 24 * 60 * 60 * 1_000;
@@ -43,6 +43,7 @@ export interface WorkerReceipt {
   attachments?: string[];
   artifacts?: WorkerArtifact[];
   receiptMissing?: boolean;
+  failureDiagnostic?: WorkerFailureDiagnostic;
 }
 /** start is idempotent by invocationId and returns before model completion. inspect never redispatches. */
 export interface BackgroundWorkerRuntime {
