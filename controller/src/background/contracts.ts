@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { WorkerArtifact, WorkerExecutorKind, WorkerFailureDiagnostic, WorkerInspectOptions } from "./worker/contracts.js";
+import { WORKER_EXECUTOR_KINDS, type WorkerArtifact, type WorkerExecutorKind, type WorkerFailureDiagnostic, type WorkerInspectOptions } from "./worker/contracts.js";
 import type { AutomationRun, RunnerOutcome, RunResult } from "../automations/contracts.js";
 
 export const WORKER_LIFETIME_MS = 24 * 60 * 60 * 1_000;
@@ -17,6 +17,7 @@ export const BackgroundSourceSchema = z.object({
 }).strict();
 export const BackgroundSpecSchema = z.object({
   prompt: z.string().trim().min(1).max(128_000),
+  executor: z.enum(WORKER_EXECUTOR_KINDS).optional().describe("默认 Codex；只有用户明确要求此任务使用 Claude 时才设 claude。"),
   sources: z.array(BackgroundSourceSchema).max(50).default([]),
   preferences: z.array(z.string().max(8_000)).max(50).default([]),
   deadlineMs: z.number().int().positive().max(WORKER_LIFETIME_MS).default(DEFAULT_OBSERVATION_DEADLINE_MS),
@@ -35,6 +36,7 @@ export interface BackgroundSourceReader {
 }
 export interface WorkerInvocation {
   workerId: string; invocationId: string; task: string; preferences?: string[]; input: unknown; timeoutMs?: number;
+  executorKind?: WorkerExecutorKind;
   launchDeadlineAt?: number; executionDeadlineAt?: number;
 }
 export interface WorkerReceipt {
@@ -44,6 +46,7 @@ export interface WorkerReceipt {
   artifacts?: WorkerArtifact[];
   receiptMissing?: boolean;
   failureDiagnostic?: WorkerFailureDiagnostic;
+  executorKind?: WorkerExecutorKind;
 }
 /** start is idempotent by invocationId and returns before model completion. inspect never redispatches. */
 export interface BackgroundWorkerRuntime {
@@ -58,6 +61,7 @@ export interface BackgroundPrompt {
 }
 export interface BackgroundInvocation {
   id: string; kind: "initial" | "followup"; task: string; input: unknown;
+  executorKind?: WorkerExecutorKind;
   createdAt: number; status: "prepared" | "running" | "completed" | "failed";
   receipt?: WorkerReceipt; result?: RunResult; exported?: boolean; acceptedAt?: number; discardedAt?: number;
 }
@@ -90,7 +94,6 @@ export interface BackgroundServiceOptions {
   isStopping?: () => boolean;
   getScheduleStatus?: (scheduleId: string, chatId: string) => Promise<"active" | "paused" | "cancelled" | "completed" | undefined>;
   turnTimeoutMs?: number;
-  executorKind?: WorkerExecutorKind;
   now?: () => number; onError?: (error: unknown, context: string) => void;
 }
 export type BackgroundRun = Pick<AutomationRun, "id" | "scheduleId" | "chatId" | "scheduledAt">;

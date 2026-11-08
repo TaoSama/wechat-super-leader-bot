@@ -136,14 +136,14 @@ describe("safe background failure correlation", () => {
     expect(f.runtime.start).toHaveBeenCalledTimes(2);
   });
 
-  it.each(["worker_cancelled_before_launch", "worker_process_cleanup_unverified", "untrusted-provider-text"])(
+  it.each(["worker_cancelled_before_launch", "worker_executor_unavailable", "worker_process_cleanup_unverified", "untrusted-provider-text"])(
     "only logs allowlisted categories (%s)", async code => {
       const f = fixture(); await f.service.start(f.run, f.spec);
       f.runtime.inspect.mockResolvedValue({ status: "needs_attention", summary: "safe failure", error: code });
       await f.service.inspect(f.run);
       const report = f.reports.find(item => item.error instanceof BackgroundWorkerFailure)!;
       const diagnostic = (report.error as BackgroundWorkerFailure).diagnostic;
-      expect(diagnostic).toMatchObject(code === "worker_cancelled_before_launch" ? { category: "not_started", executionEvidence: "not_started" }
+      expect(diagnostic).toMatchObject(["worker_cancelled_before_launch", "worker_executor_unavailable"].includes(code) ? { category: "not_started", executionEvidence: "not_started" }
         : { category: code === "worker_process_cleanup_unverified" ? "cleanup_unverified" : "execution_unverified", executionEvidence: "unverified" });
       expect(JSON.stringify(diagnostic)).not.toContain("untrusted-provider-text");
     });

@@ -50,6 +50,7 @@ import { formatAutomationToolResult } from "../automations/tool-results.js";
 import { classifyAutomationAuthorization, type AutomationOperation } from "./model/automation-authorization.js";
 import { BackgroundSpecSchema } from "../background/contracts.js";
 import { classifyBackgroundAuthorization } from "./model/background-authorization.js";
+import { assertBackgroundExecutorAuthorized } from "./model/background-executor-authorization.js";
 import { AUTOMATION_INSTRUCTIONS } from "../automations/instructions.js";
 import { assertBackgroundSourcesDiscovered, BACKGROUND_INSTRUCTIONS, BACKGROUND_TOOLS, BACKGROUND_TOOL_NAMES,
   confirmBackgroundMutations, executeBackgroundTool, recoverBackgroundFollowups, type BackgroundToolAuthority, type BackgroundToolService, type BackgroundTurn } from "./background-tools.js";
@@ -102,10 +103,11 @@ export class LeaderOrchestrator {
   constructor(private store: IStore, private hub: Hub, private commands: Pick<CommandService, "submit">,
     private model: LeaderModel, private now: () => number = Date.now, private consoleLinkIssuer?: ConsoleLinkIssuer,
     executions?: ExecutionScheduler, goals?: GoalScheduler, private automations?: AutomationService,
-    private background?: BackgroundToolService, private readonly directOptions: { settings?: LocalSettingsService; isAllowed?: (chatId: string) => boolean; goalsAvailable?: boolean; consoleLinkResolver?: ConsoleLinkResolver; consoleLinkRedactor?: ConsoleLinkRedactor } = {}) {
+    private background?: BackgroundToolService, private readonly directOptions: { settings?: LocalSettingsService; isAllowed?: (chatId: string) => boolean; goalsAvailable?: boolean; consoleLinkResolver?: ConsoleLinkResolver; consoleLinkRedactor?: ConsoleLinkRedactor; backgroundExecutorAuthorizationModel?: LeaderModel } = {}) {
     this.executions = executions ?? new ExecutionScheduler(store, commands, { now });
     this.goals = new GoalConversation(store, hub, goals ?? new GoalScheduler(store, commands, createGoalDecider(model), { now }), now);
     this.direct = new DirectToolExecutor({ store, hub, now, automations, background, settings: directOptions.settings,
+      backgroundExecutorAuthorizationModel: directOptions.backgroundExecutorAuthorizationModel ?? model,
       consoleLinkResolver: directOptions.consoleLinkResolver,
       consoleLinkRedactor: directOptions.consoleLinkRedactor,
       isAllowed: directOptions.isAllowed ?? (() => true), goalsAvailable: directOptions.goalsAvailable ?? true,
@@ -610,8 +612,9 @@ export class LeaderOrchestrator {
               try {
                 const spec = BackgroundSpecSchema.parse(raw && typeof raw === "object" && "background" in raw ? raw.background : undefined);
                 assertBackgroundSourcesDiscovered(backgroundAuthority, spec.sources);
+                await assertBackgroundExecutorAuthorized(this.model, sanitizedUserPrompt, spec, signal);
               } catch {
-                messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: "后台任务参数或来源未获验证；先发现每台机器上的原生定时任务，再创建监控。" }) });
+                messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: "后台任务参数、来源或执行器授权未获验证；先发现来源，只有当前用户明确指定这一项任务使用 Claude 才能选择 Claude。" }) });
                 continue;
               }
             }

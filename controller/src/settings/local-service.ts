@@ -4,7 +4,7 @@ import { HttpLeaderModel, type HttpLeaderModelOptions } from "../leader/model/cl
 import { LOCAL_PROMPTS, LOCAL_TOOLS, LOCAL_TOOL_VALIDATORS } from "./local-registry.js";
 import { LocalSettingsStorage, revision } from "./local-storage.js";
 import { CLAUDE_PROVIDER_LABEL, LocalModelCatalogs, claudeModelCatalog } from "./local-catalog.js";
-import { isClaudeModel } from "../background/worker/claude-models.js";
+import { CLAUDE_DEFAULT_MODEL_LABEL, isClaudeModel } from "../background/worker/claude-models.js";
 import type { WorkerExecutorKind } from "../background/worker/contracts.js";
 import { assertEditedArguments, parseCompatibleTool } from "./local-tools.js";
 import { composePrompt, compositionNote } from "./local-composition.js";
@@ -71,7 +71,8 @@ export class LocalRuntimeSettings {
  * after an executor switch the configured default runs until a new choice is saved.
  */
 export function executorModelChoice(choice: LocalModelChoice, claude: boolean, fallback: string): LocalModelChoice {
-  return choice.model === fallback || isClaudeModel(choice.model) === claude ? choice : { model: fallback, reasoningEffort: null };
+  const claudeChoice = choice.model === CLAUDE_DEFAULT_MODEL_LABEL || isClaudeModel(choice.model);
+  return choice.model === fallback || claudeChoice === claude ? choice : { model: fallback, reasoningEffort: null };
 }
 
 /** A single persistent source for editable Controller runtime resources. */

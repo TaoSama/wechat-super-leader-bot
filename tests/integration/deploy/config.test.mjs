@@ -141,8 +141,7 @@ test('background workers use isolated paths inside one durable runtime store and
   assert.equal(controller.stop_grace_period, '30s');
   assert.deepEqual(controller.security_opt, ['no-new-privileges:true',
     'seccomp:./deploy/security/codex-seccomp.json', 'apparmor:super-leader-codex', 'systempaths=unconfined']);
-  // Background tasks run on Claude Code; the credential is only interpolated from the production env file.
-  assert.equal(controller.environment.BACKGROUND_EXECUTOR, 'claude');
+  assert.equal(controller.environment.BACKGROUND_EXECUTOR, 'codex');
   for (const name of ['BACKGROUND_CLAUDE_BASE_URL', 'BACKGROUND_CLAUDE_API_KEY', 'BACKGROUND_CLAUDE_AUTH_TOKEN',
     'BACKGROUND_CLAUDE_OAUTH_TOKEN', 'BACKGROUND_CLAUDE_MODEL', 'BACKGROUND_CLAUDE_PATH']) {
     assert.equal(controller.environment[name], '', name);

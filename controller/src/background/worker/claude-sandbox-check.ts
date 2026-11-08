@@ -33,7 +33,7 @@ export interface ClaudeSandboxCheckOptions {
 interface SandboxStatus { enabled?: unknown; strictMode?: unknown; unavailableReason?: unknown }
 
 function refuse(reason: string): never {
-  throw new Error(`BACKGROUND_EXECUTOR=claude refused: the Claude Code sandbox is unavailable (${reason}); background tasks never run unsandboxed`);
+  throw new Error(`Claude background execution refused: the Claude Code sandbox is unavailable (${reason}); background tasks never run unsandboxed`);
 }
 
 /** The bubblewrap the CLI launches: managed sandbox.bwrapPath when set, otherwise bwrap on PATH. */
@@ -48,8 +48,7 @@ function sandboxBwrap(managedSettingsPath: string): string {
 }
 
 /**
- * Proves at startup that the worker settings load and the OS sandbox can start,
- * so the controller fails closed instead of accepting tasks it cannot isolate.
+ * Checks worker settings and OS isolation before the first explicit Claude task.
  */
 export async function verifyClaudeSandbox(options: ClaudeSandboxCheckOptions): Promise<void> {
   const claude = executable(options.claudePath ?? "claude", "Claude");

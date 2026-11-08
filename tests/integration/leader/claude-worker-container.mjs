@@ -24,7 +24,7 @@ const SETTINGS_ROOT = `${RUNTIME_ROOT}/settings`;
 const KEY_PREFIX = 'sk-ant-synthetic-probe-';
 const PEER_TEMP = '/tmp/slc-peer-probe';
 const LOCAL_MARKER = 'LOCAL_LISTENER_REACHED';
-// Rules that exist only for the Claude Code sandbox; removing them must make startup refuse Claude.
+// Rules that exist only for the Claude Code sandbox; removing them must refuse Claude execution.
 const CLAUDE_ONLY_RULES = new Set([0x30020011, 0x70020011, 0x20020000]);
 let probeStage = 'bootstrap';
 
@@ -38,7 +38,7 @@ if (values['container-fixture']) {
     'Runs the real Claude Code CLI inside a locally built Controller image with the production hardening (read-only root, ' +
     'cap-drop ALL, no-new-privileges, the repository seccomp policy, the super-leader-codex AppArmor profile, systempaths=unconfined, UID 1000). ' +
     'A synthetic Anthropic API server inside the container drives real tool calls; no credential or network provider is used. ' +
-    'It also proves the controller refuses BACKGROUND_EXECUTOR=claude when the sandbox cannot start. Temporary containers and volumes are removed. ' +
+    'It also proves Claude execution is refused when the sandbox cannot start. Temporary containers and volumes are removed. ' +
     '--skip-apparmor runs on engines without AppArmor (Docker Desktop); production evidence still needs the profile loaded.');
 } else {
   await verifyContainers().catch(error => { console.error(`FAIL Claude worker container verification: ${error.message}`); process.exitCode = 1; });
@@ -154,7 +154,7 @@ async function fixture() {
   const check = { artifactRoot: ARTIFACT_ROOT, privateRoots: [RUNTIME_ROOT] };
   probeStage = 'startup-check';
   if (values['expect-refused']) {
-    await assert.rejects(verifyClaudeSandbox(check), /BACKGROUND_EXECUTOR=claude refused/);
+    await assert.rejects(verifyClaudeSandbox(check), /Claude background execution refused/);
     console.log(JSON.stringify({ pass: true, probe: 'claude-startup-refused-without-sandbox' }));
     return;
   }

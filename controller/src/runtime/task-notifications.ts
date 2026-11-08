@@ -202,7 +202,7 @@ export class TaskNotifications {
     return {
       automations: (await Promise.all(chatIds.map(id => this.automations.repository.list(id)))).flat()
         .map(schedule => schedule.kind === "background" && this.backgroundExecution
-          ? { ...schedule, executor: this.backgroundExecution.executorKind } : schedule),
+          ? { ...schedule, executor: schedule.background.executor ?? "codex" } : schedule),
       deliveries: (await this.results.repository.list(chatIds)).map(consoleDelivery),
       fallbackDeliveries: (await Promise.all(chatIds.map(id => this.fallbackRepository.list(id)))).flat(),
     };

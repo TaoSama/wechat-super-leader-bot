@@ -68,7 +68,7 @@ describe("background result summaries with rules mode", () => {
     const fetchModel = vi.fn<typeof fetch>().mockImplementation(async () => response());
     vi.stubGlobal("fetch", fetchModel);
     const { runtime, config } = fixture({ fileMaxBytes: mode === "download" ? 1 : undefined, executor });
-    expect(config.background?.executorKind).toBe(executor);
+    expect(config.background?.executorKind).toBe("codex");
     expect(config.leader).toBeUndefined();
     const request = input(LONG_RESULT);
     const plan = await runtime.results.prepareResult(request);

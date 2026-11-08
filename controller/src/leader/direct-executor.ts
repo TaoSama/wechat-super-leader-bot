@@ -4,7 +4,8 @@ import { parseSessionDirectoryQuery } from "@super-leader/wechat-text";
 import { CommandError } from "../commands/service.js";
 import { type IStore } from "../store/interface.js";
 import type { LeaderState } from "./state.js";
-import type { ModelToolCall } from "./model/contracts.js";
+import type { LeaderModel, ModelToolCall } from "./model/contracts.js";
+import { assertBackgroundExecutorAuthorized, BackgroundExecutorAuthorizationError } from "./model/background-executor-authorization.js";
 import { AUTOMATION_ARGUMENTS, AUTOMATION_TOOLS, AUTOMATION_TOOL_NAMES, executeAutomationTool } from "../automations/tools.js";
 import type { AutomationService } from "../automations/service.js";
 import { BackgroundSpecSchema } from "../background/contracts.js";
@@ -63,6 +64,7 @@ function assertAutomationKind(args: unknown) {
 
 interface LinkContext { requestId: string; cachedLinkPromise?: Promise<ConsoleLinkIssued>; issuedLink?: ConsoleLinkIssued }
 interface Options {
+  backgroundExecutorAuthorizationModel: LeaderModel;
   consoleLinkResolver?: ConsoleLinkResolver;
   consoleLinkRedactor?: ConsoleLinkRedactor;
   settings?: LocalSettingsService;
@@ -321,14 +323,21 @@ export class DirectToolExecutor {
         if (!o.automations) throw new CommandError(503, "定时任务工具当前不可用。告诉用户该功能暂时不能用，不要重试。");
         const raw = request.arguments;
         const background = raw !== null && typeof raw === "object" && "kind" in raw && raw.kind === "background";
+        let executorAuthorizationError: BackgroundExecutorAuthorizationError | undefined;
         if (name === "create_automation" && background) {
           const spec = BackgroundSpecSchema.parse("background" in raw ? raw.background : undefined);
           assertBackgroundSourcesDiscovered(authority, spec.sources);
+          try { await assertBackgroundExecutorAuthorized(o.backgroundExecutorAuthorizationModel, request.text, spec, signal); }
+          catch (error) {
+            if (!(error instanceof BackgroundExecutorAuthorizationError)) throw error;
+            executorAuthorizationError = error;
+          }
         }
         await assertAuthority();
-        result = await traceSpan("leader.tool", () => executeAutomationTool(o.automations!, name, raw, {
-          chatId, currentMessageId: messageId, explicitCurrentTurnAuthorization: true, assertCurrentAuthority: assertAuthority,
-        }, o.now()), { tool: name, source: "direct" });
+        result = executorAuthorizationError ? { error: executorAuthorizationError.message, code: "BACKGROUND_EXECUTOR_NOT_AUTHORIZED" }
+          : await traceSpan("leader.tool", () => executeAutomationTool(o.automations!, name, raw, {
+            chatId, currentMessageId: messageId, explicitCurrentTurnAuthorization: true, assertCurrentAuthority: assertAuthority,
+          }, o.now()), { tool: name, source: "direct" });
       } else if (name === "confirm_pending") {
         z.object({}).strict().parse(request.arguments);
         const text = request.text.trim(), explicitGoal = goalConfirmation(text);

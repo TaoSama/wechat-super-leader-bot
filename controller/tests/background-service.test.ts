@@ -26,26 +26,25 @@ function setup() {
 const watched = (f: ReturnType<typeof setup>) => ({ ...f.spec, sources: [{ nodeId: "mini", automationId: "daily", offsetMs: -3_600_000, windowMs: 60_000 }] });
 
 describe("24-hour isolated background workers", () => {
-  it("records the configured executor on new workers and exposes it publicly", async () => {
+  it("records each task's executor on new workers and exposes it publicly", async () => {
     const { publicBackgroundWorker } = await import("../src/background/public.js");
     const f = setup();
-    const legacy = await f.service.register(f.run, f.spec);
-    expect(legacy.executorKind).toBeUndefined();
-    expect(publicBackgroundWorker(legacy)).not.toHaveProperty("executor");
-    const claude = new BackgroundService({ ...f.options, executorKind: "claude" });
-    const worker = await claude.register({ ...f.run, id: randomUUID() }, f.spec);
+    const codex = await f.service.register(f.run, f.spec);
+    expect(codex.executorKind).toBe("codex");
+    expect(publicBackgroundWorker(codex)).toMatchObject({ executor: "codex" });
+    const worker = await f.service.register({ ...f.run, id: randomUUID() }, { ...f.spec, executor: "claude" });
     expect((await f.repository.get(worker.id))?.executorKind).toBe("claude");
     expect(publicBackgroundWorker(worker)).toMatchObject({ executor: "claude" });
   });
-  it("relabels a worker that lives through an executor switch when its next turn launches", async () => {
+  it("keeps a task on Codex when a restarted service receives a legacy global Claude option", async () => {
     const f = setup();
-    const codex = new BackgroundService({ ...f.options, executorKind: "codex" });
-    await codex.register(f.run, f.spec);
+    await f.service.register(f.run, f.spec);
     expect((await f.worker())?.executorKind).toBe("codex");
-    const claude = new BackgroundService({ ...f.options, executorKind: "claude" });
-    await claude.inspect(f.run);
+    const restarted = new BackgroundService(Object.assign({}, f.options, { executorKind: "claude" }));
+    await restarted.inspect(f.run);
     expect(f.runtime.start).toHaveBeenCalledTimes(1);
-    expect((await f.worker())?.executorKind).toBe("claude");
+    expect((f.runtime.start.mock.calls[0] as unknown[])[0]).toMatchObject({ executorKind: "codex" });
+    expect((await f.worker())?.executorKind).toBe("codex");
   });
   it.each([undefined, 2 * 3_600_000])("starts partial analysis at the default one-hour or explicit deadline (%s)", async deadlineMs => {
     const f = setup();

@@ -32,7 +32,7 @@ flowchart TB
 - 会话忙或离线时排队，恢复后按序投递，未发送内容可取消。
 - 状态不明时保留原记录，不换 ID 重发。
 - 后台定时任务的汇报格式可通过 `update_automation` 更新，仅影响后续轮次，详见 [docs/automation-prompt-updates.md](docs/automation-prompt-updates.md)。
-- 后台任务默认由 Codex 执行；`BACKGROUND_EXECUTOR=claude` 改用 Claude Code，生产编排默认启用，微信主对话仍用 Codex，见 [docs/production-deployment.md](docs/production-deployment.md#claude-code-后台执行器)。
+- 后台任务和 `kind=background` 定时任务默认由 Codex 执行；只有用户在自然语言里明确指定某项任务使用 Claude，才为该任务保存 `background.executor=claude`。定时后续轮次、24 小时内追问和重启恢复沿用任务的选择，其他任务仍用 Codex；全局 `BACKGROUND_EXECUTOR` 不改变任务选择。详见 [docs/production-deployment.md](docs/production-deployment.md#claude-code-后台执行器)。
 - 后台认证失败单独记录为 `worker_authentication_failed`，保留源任务观测和执行回执，不自动重跑；诊断与投递状态见 [docs/background-execution-failures.md](docs/background-execution-failures.md)。
 
 ## 控制台
@@ -58,6 +58,9 @@ node scripts/local.mjs --up       # 启动 Controller/Web/PostgreSQL
 node scripts/local.mjs --daemon   # 前台运行 Daemon
 node scripts/local.mjs --check    # 健康与鉴权检查
 ```
+
+本地 `--up` 只加载基础 `compose.yaml`，默认不启用后台任务。启用时需用本地 Compose 覆盖配置传入
+`BACKGROUND_WORKER_ROOT` 和完整的后台模型配置；只设置旧变量 `BACKGROUND_EXECUTOR` 不会开启后台或选择 Claude。
 
 首次启动 Gateway 需先建立基线，再开始轮询（须先配置聊天允许名单）：
 

@@ -19,6 +19,7 @@ import { selectExecutionObservation, selectModelObservation } from "../sessions/
 import { CommandService, CommandError } from "../commands/service.js";
 import { publicCommand } from "../commands/public.js";
 import { LeaderModel } from "../leader/model/contracts.js";
+import { HttpLeaderModel } from "../leader/model/client.js";
 import { LeaderOrchestrator } from "../leader/orchestrator.js";
 import { ExecutionScheduler } from "../leader/plans/scheduler.js";
 import { GoalScheduler } from "../leader/goals/scheduler.js";
@@ -104,6 +105,8 @@ export class ControllerServer {
     const businessModel: LeaderModel = leaderModel ?? { complete: async () => {
       throw new CommandError(503, "Leader model unavailable for background goal reasoning");
     } };
+    const backgroundExecutorAuthorizationModel = leaderModel ?? (config.background?.summaryProvider
+      ? new HttpLeaderModel(config.background.summaryProvider) : undefined);
     const reportProgress = this.progress?.request.bind(this.progress);
     this.executions = new ExecutionScheduler(store, this.commands, { now,
       isChatAllowed: chatId => this.config.allowedChatIds.has(chatId),
@@ -127,6 +130,7 @@ export class ControllerServer {
       (requestId, chatId) => this.consoleAuth.issueLink(requestId, chatId), this.executions, this.goals, this.taskNotifications.automations,
       this.taskNotifications.background, { isAllowed: chatId => this.config.allowedChatIds.has(chatId),
         goalsAvailable: Boolean(leaderModel), settings: this.settings,
+        backgroundExecutorAuthorizationModel,
         consoleLinkResolver: requestId => this.consoleAuth.recoverLink(requestId),
         consoleLinkRedactor: (requestId, text) => this.consoleAuth.redactReply(requestId, text) });
     if (leaderModel) this.leader = this.directLeader;
