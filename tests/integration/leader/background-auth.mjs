@@ -13,6 +13,7 @@ import { closeTestWebSocket, stopTestProcess, withTestCleanup } from '../../supp
 import { verificationEnvironment } from '../../../scripts/verify.mjs';
 
 const CHAT = 'auth-fixture-chat', NODE = 'auth-fixture-node', SOURCE = 'auth-fixture-source';
+const EMPTY_CHAT = 'auth-fixture-empty-chat';
 const SECRET = 'synthetic-auth-secret-canary';
 const { values } = parseArgs({ options: { run: { type: 'boolean' },
   'fixture-server': { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } });
@@ -115,13 +116,14 @@ async function verify() {
   const codexExecutable = path.join(directory, 'controlled-codex.mjs');
   let child, socket, base, heartbeat, preflightWorkerId, peerDnsLookups = 0;
   const logs = [], frames = [], errors = [], observations = [], outcomes = [];
+  let readOnlyErrorContext;
   const send = frame => socket.send(JSON.stringify(frame), error => { if (error) errors.push(error); });
   await withTestCleanup(async () => {
     await writeFile(executable, `#!${process.execPath}\n(${controlledClaude.toString()})(${JSON.stringify(native)}, ${JSON.stringify(path.join(directory, 'preparation-marker'))}).catch(error => { console.error(error); process.exitCode = 1; });\n`, { mode: 0o700 });
     await writeFile(codexExecutable, `#!${process.execPath}\n(${controlledCodex.toString()})().catch(error => { console.error(error); process.exitCode = 1; });\n`, { mode: 0o700 });
     child = fork(fileURLToPath(import.meta.url), ['--fixture-server'], { env: {
       ...verificationEnvironment(), PERSISTENCE_MODE: 'memory', CONTROLLER_TOKEN: token,
-      NODE_TOKENS: JSON.stringify({ [NODE]: nodeToken }), ALLOWED_CHAT_IDS: CHAT,
+      NODE_TOKENS: JSON.stringify({ [NODE]: nodeToken }), ALLOWED_CHAT_IDS: `${CHAT},${EMPTY_CHAT}`,
       LEADER_MODE: 'rules', CONTROLLER_DATA_ROOT: directory, TASK_NOTIFICATION_TICK_MS: '100',
       BACKGROUND_WORKER_ROOT: workerRoot,
       BACKGROUND_MODEL_NAME: 'synthetic-unused-codex', BACKGROUND_MODEL_BASE_URL: 'https://codex.fixture.invalid/v1',
@@ -195,6 +197,29 @@ async function verify() {
         return !!delivery;
       }, `${mode} result queued`);
       assert.equal(delivery.kind, success ? 'completed' : 'failed');
+      if (mode === 'authentication') {
+        const user = { chatId: CHAT, messageId: randomUUID(), text: '上面那个后台执行器认证失败啥意思' };
+        const catalog = await request('/v1/tools/list', user);
+        // These assertions check HTTP injection and tool behavior, not natural-language tool selection.
+        assert(catalog.instructions.includes('未经查询要求用户提供已有报错原文或截图'));
+        assert(catalog.instructions.includes('已有后台任务的只读查询与解释除外'));
+        for (const name of ['list_background_tasks', 'query_background_task']) {
+          assert.equal(catalog.tools.find(tool => tool.name === name)?.annotations.readOnlyHint, true);
+        }
+        const call = (name, arguments_) => request('/v1/tools/call', { ...user, callId: randomUUID(), name, arguments: arguments_ });
+        const candidates = (await call('list_background_tasks', {})).result;
+        assert.equal(candidates.length, 3);
+        assert(candidates.some(item => item.runId === run.id));
+        const details = (await call('query_background_task', { runId: run.id })).result;
+        assert.equal(details.result.result.error, 'worker_authentication_failed');
+        assert.equal(details.observations[0].status, 'completed');
+        const empty = (await request('/v1/tools/call', { ...user, chatId: EMPTY_CHAT,
+          messageId: randomUUID(), callId: randomUUID(), name: 'list_background_tasks', arguments: {} })).result;
+        assert.deepEqual(empty, []);
+        readOnlyErrorContext = { candidates: candidates.length, diagnostic: details.result.result.error,
+          sourceStatus: details.observations[0].status, deliveryKind: delivery.kind, otherChatCandidates: empty.length,
+          modelInference: false, modelToolSelectionVerified: false };
+      }
       const findDiagnostic = () => logs.join('').split('\n').slice(0, -1)
         .filter(line => line.startsWith('{')).map(line => JSON.parse(line))
         .find(event => event.event === 'background_worker_failed' && event.runId === run.id);
@@ -229,7 +254,7 @@ async function verify() {
     assert.equal(peerDnsLookups, 30, 'Only the five Claude CLI runs resolve their six absent peers locally');
     console.log(JSON.stringify({ pass: true, surface: 'actual Controller HTTP/scheduler/CLI/results', outcomes,
       legacyGlobalExecutor: 'claude', defaultTaskExecutor: 'codex',
-      sourceCommands: 0, realProviders: 0, realWeChat: 0, peerDnsLookups, securityBoundaryVerified: false }));
+      sourceCommands: 0, realProviders: 0, realWeChat: 0, peerDnsLookups, readOnlyErrorContext, securityBoundaryVerified: false }));
   }, [
     { label: 'heartbeat', cleanup: () => clearInterval(heartbeat) },
     { label: 'synthetic WebSocket', cleanup: () => closeTestWebSocket(socket) },
