@@ -324,6 +324,12 @@ docker-compose --env-file /dev/null --profile wechat \
 旧版 actionlint（如 1.7.12）尚未识别 GitHub 新增的 `concurrency.queue`；可针对这一项
 使用 `-ignore 'unexpected key "queue"'` 检查其余规则，并以 GitHub 实际工作流解析为准。
 
+## 生产沙箱发布前检查
+
+Codex 和 Claude 都依赖当前 AppArmor profile。发布前在 VPS 上用 `deploy/security/codex-apparmor`
+更新 `/etc/apparmor.d/super-leader-codex` 并执行 `sudo apparmor_parser -Kr /etc/apparmor.d/super-leader-codex`
+（见下文「隔离方式」）；该步骤不因默认使用 Codex 而跳过。
+
 ## Claude Code 后台执行器
 
 后台任务和 `kind=background` 定时任务默认由 Codex 执行。用户在自然语言里明确指定某项任务使用
@@ -358,13 +364,14 @@ Claude 网关可用；未配置或 sandbox 不可用时只让该 Claude 任务�
    ```
 
    返回 `200` 才算兼容。其他结果先保持任务使用 Codex，配好 `BACKGROUND_CLAUDE_*` 再创建 Claude 任务。
-2. 在 VPS 上用新的 `deploy/security/codex-apparmor` 覆盖 `/etc/apparmor.d/super-leader-codex` 并执行
-   `sudo apparmor_parser -Kr /etc/apparmor.d/super-leader-codex`（见下文「隔离方式」）。
 
 ### `.runtime/controller.env` 需要的变量
 
 后台执行仍需 `BACKGROUND_WORKER_ROOT`（例如 `/var/lib/super-leader-runtime/background/workers`），
 未设置时整个后台执行关闭。凭证只写在 `.runtime/controller.env`（权限 `600`），不进仓库、不进日志。
+启用后台时还须提供完整的 `BACKGROUND_MODEL_NAME` / `BACKGROUND_MODEL_BASE_URL` / `BACKGROUND_MODEL_API_KEY`，
+或在 `LEADER_MODE=model` 时继承完整的 `LEADER_MODEL_*`。仅配置 Claude 凭证不足以启用默认 Codex；
+缺少后台模型配置时 Controller 拒绝启动，不接受不可执行的任务。
 
 | 变量 | 说明 |
 |------|------|

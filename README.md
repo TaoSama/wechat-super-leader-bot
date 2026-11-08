@@ -59,6 +59,9 @@ node scripts/local.mjs --daemon   # 前台运行 Daemon
 node scripts/local.mjs --check    # 健康与鉴权检查
 ```
 
+本地 `--up` 只加载基础 `compose.yaml`，默认不启用后台任务。启用时需用本地 Compose 覆盖配置传入
+`BACKGROUND_WORKER_ROOT` 和完整的后台模型配置；只设置旧变量 `BACKGROUND_EXECUTOR` 不会开启后台或选择 Claude。
+
 首次启动 Gateway 需先建立基线，再开始轮询（须先配置聊天允许名单）：
 
 ```sh
