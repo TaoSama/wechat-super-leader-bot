@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -38,8 +39,19 @@ func TestManagementActionsReachFakeRunnerWithInvalidSkillRoots(t *testing.T) {
 				if err != nil || cfg.ServiceAction != action.name {
 					t.Fatalf("management CLI blocked by unrelated skill configuration: cfg=%+v err=%v", cfg, err)
 				}
-				runner := &fakeRunner{handler: func(_ string, _ ...string) ([]byte, error) {
+				loaded := true
+				runner := &fakeRunner{handler: func(_ string, args ...string) ([]byte, error) {
 					if platform == "darwin" {
+						switch args[0] {
+						case "bootout":
+							loaded = false
+						case "bootstrap":
+							loaded = true
+						case "print":
+							if !loaded {
+								return []byte("Could not find service"), errors.New("exit status 113")
+							}
+						}
 						return []byte("state = running\npid = 4242\n"), nil
 					}
 					return []byte("ActiveState=active\nSubState=running\nMainPID=4242\n"), nil

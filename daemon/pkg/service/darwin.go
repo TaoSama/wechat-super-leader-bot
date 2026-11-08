@@ -285,10 +285,19 @@ func (m *DarwinManager) Stop(ctx context.Context) error {
 }
 
 func (m *DarwinManager) Restart(ctx context.Context) error {
-	if err := m.Stop(ctx); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return m.Start(ctx)
+	if err := m.Stop(ctx); err != nil {
+		return errors.Join(err, ctx.Err())
+	}
+	if err := m.waitForUnload(ctx); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return errors.Join(m.Start(ctx), ctx.Err())
 }
 
 var (
