@@ -69,16 +69,18 @@ test('background provider settings alone do not enable background execution', ()
   for (const [name, value] of Object.entries(backgroundModel)) assert.equal(environment[name], value);
 });
 
-test('production runs background tasks on Claude Code and passes its gateway overrides through', () => {
-  assert.equal(renderControllerEnv().BACKGROUND_EXECUTOR, 'claude');
-  assert.equal(renderControllerEnv({ BACKGROUND_EXECUTOR: 'codex' }).BACKGROUND_EXECUTOR, 'codex');
+test('production defaults to Codex and preserves explicit Claude selection and gateway overrides', () => {
+  assert.equal(renderControllerEnv().BACKGROUND_EXECUTOR, 'codex');
+  assert.equal(renderControllerEnv({ BACKGROUND_EXECUTOR: '' }).BACKGROUND_EXECUTOR, 'codex');
   const claude = {
     BACKGROUND_CLAUDE_BASE_URL: 'https://claude-gateway.invalid',
     BACKGROUND_CLAUDE_AUTH_TOKEN: 'synthetic-claude-token',
     BACKGROUND_CLAUDE_MODEL: 'claude-sonnet-synthetic',
     BACKGROUND_CLAUDE_PATH: '/usr/local/bin/claude',
   };
-  const environment = renderControllerEnv({ BACKGROUND_WORKER_ROOT: workerRoot, ...backgroundModel, ...claude });
+  const environment = renderControllerEnv({ BACKGROUND_EXECUTOR: 'claude', BACKGROUND_WORKER_ROOT: workerRoot,
+    ...backgroundModel, ...claude });
+  assert.equal(environment.BACKGROUND_EXECUTOR, 'claude');
   for (const [name, value] of Object.entries({ ...backgroundModel, ...claude })) assert.equal(environment[name], value, name);
   assert.equal(environment.BACKGROUND_CLAUDE_API_KEY, '');
   assert.equal(environment.BACKGROUND_CLAUDE_OAUTH_TOKEN, '');

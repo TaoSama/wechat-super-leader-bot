@@ -326,16 +326,17 @@ docker-compose --env-file /dev/null --profile wechat \
 
 ## Claude Code 后台执行器
 
-生产 `compose.production.yaml` 默认 `BACKGROUND_EXECUTOR=claude`：后台任务、`kind=background`
-的定时任务和 leader 的后台追问/延期工具都由 Controller 容器内的 `claude -p` 子进程执行。
+生产 `compose.production.yaml` 默认 `BACKGROUND_EXECUTOR=codex`：后台任务、`kind=background`
+的定时任务和 leader 的后台追问/延期工具默认由 Codex 执行。只有在 `.runtime/controller.env`
+显式设置 `BACKGROUND_EXECUTOR=claude` 并重新发布后，才改由 Controller 容器内的 `claude -p` 子进程执行。
 微信主对话 leader 不受影响，仍使用 Codex Task；`kind=session` 定时任务仍发到创建时冻结的节点会话
-（可以是 Codex 会话，也可以是节点上的 Claude Code 会话）。回滚只需在 `.runtime/controller.env`
-设 `BACKGROUND_EXECUTOR=codex` 后重新发布。
+（可以是 Codex 会话，也可以是节点上的 Claude Code 会话）。切回 Codex 只需在 `.runtime/controller.env`
+删除 `BACKGROUND_EXECUTOR` 或设为 `codex` 后重新发布。
 
-### 合并后首次发布前
+### 启用 Claude 前
 
-这个默认值会让下一次发布直接切到 Claude，不需要改 `.runtime/controller.env`。Controller 启动时只在本地检查
-sandbox，不会调用模型网关，所以网关不兼容时健康检查照样通过，失败要等到第一个后台任务才出现。首次发布前：
+选择 Claude 时，Controller 启动只在本地检查 sandbox，不会调用模型网关，所以网关不兼容时健康检查
+照样通过，失败要等到第一个后台任务才出现。显式切换到 Claude 前：
 
 1. 确认 Claude 实际使用的网关支持 Anthropic Messages API（`POST /v1/messages`）和对应认证头。凭证从
    `.runtime/controller.env` 读取，经 stdin 交给 curl，不出现在命令行参数和 shell 历史里。`BASE` 是去掉末尾
@@ -363,7 +364,7 @@ sandbox，不会调用模型网关，所以网关不兼容时健康检查照样�
 
 | 变量 | 说明 |
 |------|------|
-| `BACKGROUND_EXECUTOR` | 可选，生产默认 `claude`；设 `codex` 回滚 |
+| `BACKGROUND_EXECUTOR` | 可选，默认 `codex`；显式设 `claude` 才启用 Claude Code |
 | `BACKGROUND_MODEL_BASE_URL` / `BACKGROUND_MODEL_API_KEY` | 已有的后台模型网关。未设置 Claude 专用凭证时，Claude 复用这对值：URL 作为 `ANTHROPIC_BASE_URL`，key 作为 `ANTHROPIC_API_KEY`（`x-api-key` 头）。两者都未设置时继续回退到 `LEADER_MODEL_*` |
 | `BACKGROUND_CLAUDE_BASE_URL` | 可选，覆盖 Anthropic 兼容端点。末尾的 `/v1` 会被去掉，因为 Claude Code 会自己拼 `/v1/messages`；必须是 `http(s)`，不能带用户名、密码、query 或 fragment |
 | `BACKGROUND_CLAUDE_API_KEY` | 可选，以 `ANTHROPIC_API_KEY`（`x-api-key`）发送 |
@@ -376,7 +377,7 @@ sandbox，不会调用模型网关，所以网关不兼容时健康检查照样�
 不会继承 `BACKGROUND_MODEL_BASE_URL`：没有 `BACKGROUND_CLAUDE_BASE_URL` 就发往 Anthropic 官方 API，
 避免把专用凭证发给别的端点。控制台「后台任务」模型设置在 Claude 下显示 `Claude Code CLI` 和 Claude
 模型别名；选中的 Claude 模型和推理强度作用于后续轮次，之前为 Codex 保存的模型不会传给 Claude。
-反过来也一样：回滚到 `codex` 后，为 Claude 保存的模型和推理强度不会传给 Codex，后台任务使用
+反过来也一样：切回 `codex` 后，为 Claude 保存的模型和推理强度不会传给 Codex，后台任务使用
 `BACKGROUND_MODEL_NAME`，直到在控制台重新保存 Codex 模型。
 
 长结果的微信摘要仍由 `BACKGROUND_MODEL_*`（缺省回退 `LEADER_MODEL_*`）这组 HTTP 模型生成，与执行器无关；

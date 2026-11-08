@@ -18,9 +18,7 @@ services:
       BACKGROUND_MODEL_NAME: ${BACKGROUND_MODEL_NAME:-}
       BACKGROUND_MODEL_BASE_URL: ${BACKGROUND_MODEL_BASE_URL:-}
       BACKGROUND_MODEL_API_KEY: ${BACKGROUND_MODEL_API_KEY:-}
-      # Background and scheduled background tasks run on Claude Code in production;
-      # the WeChat leader keeps its own model. Set BACKGROUND_EXECUTOR=codex to roll back.
-      BACKGROUND_EXECUTOR: ${BACKGROUND_EXECUTOR:-claude}
+      BACKGROUND_EXECUTOR: ${BACKGROUND_EXECUTOR:-codex}
       # Empty Claude endpoint and credentials reuse the background model gateway above.
       # Values live only in .runtime/controller.env; at most one credential may be set.
       BACKGROUND_CLAUDE_BASE_URL: ${BACKGROUND_CLAUDE_BASE_URL:-}
