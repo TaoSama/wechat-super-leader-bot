@@ -38,7 +38,7 @@ export type DirectToolResult = { result: unknown; reply?: LeaderReply };
 
 /** Cross-tool facts for the outer Codex; per-tool rules live in tool descriptions and parameter schemas. */
 export const DIRECT_TOOL_INSTRUCTIONS = `业务工具的共同规则：
-1. 用户明确交代、目标和范围清楚的任务，直接用 execute_plan 或 execute_goal，不再让用户确认。用户说“先看方案”“先别执行”时用 propose_plan 或 propose_goal。目标、会话或范围不清楚时先问。只是查询时只用查询工具。
+1. 用户明确交代、目标和范围清楚的任务，直接用 execute_plan 或 execute_goal，不再让用户确认。用户说“先看方案”“先别执行”时用 propose_plan 或 propose_goal。目标、会话或范围不清楚时先问；已有后台任务的只读查询与解释除外，按下文后台查询规则处理。只是查询时只用查询工具。
 2. 用户回复“好”“就这样”时：上文只有一个他本人提出或认可的待办，就按原范围执行；有多个或没有，先问是哪一个。询问能不能做、讨论方案、假设、引用别人的话、否定，都不执行变更。
 3. 回执照实转述：accepted 是“已接收，等待完成”；input-written 是“已写入终端，未确认执行”；uncertain 是“结果不明”，不要重发。完成要有终态回执或会话输出作证据。
 4. 会话忙、检查中、暂时失联，不等于不能发送；服务端会保留路线，等可用时再派发。你不能指定 sendRoute，被拒绝时不要换路。
