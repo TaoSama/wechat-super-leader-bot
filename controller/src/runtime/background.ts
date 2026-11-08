@@ -44,7 +44,12 @@ export class BackgroundExecution {
         return claudeExecutor.execute(request);
       } } },
       beforeExecute: async kind => {
-        if (kind === "claude") await (claudeReady ??= prepareClaude());
+        if (kind !== "claude") return;
+        claudeReady ??= prepareClaude().catch(error => {
+          claudeReady = undefined;
+          throw error;
+        });
+        await claudeReady;
       },
       ...(settings ? { runtimeSettings: kind => {
         const view = settings.capture();

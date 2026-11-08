@@ -46,7 +46,7 @@ async function serve() {
   process.send({ type: 'ready', base: `http://127.0.0.1:${app.getHttpServer().address().port}` });
 }
 
-async function controlledClaude(native) {
+async function controlledClaude(native, preparationMarker) {
   const fs = await import('node:fs');
   const { parseArgs } = await import('node:util');
   const { randomUUID } = await import('node:crypto');
@@ -54,6 +54,10 @@ async function controlledClaude(native) {
     settings: { type: 'string' }, 'setting-sources': { type: 'string' },
   } });
   if (positionals.includes('sandbox') && positionals.includes('status')) {
+    if (!fs.existsSync(preparationMarker)) {
+      fs.writeFileSync(preparationMarker, 'first preparation refused');
+      console.log(JSON.stringify({ enabled: false, strictMode: true, unavailableReason: 'synthetic temporary failure' })); return;
+    }
     console.log(JSON.stringify({ enabled: true, strictMode: true })); return;
   }
   if (process.env.CONTROLLER_TOKEN || process.env.NODE_TOKENS) throw new Error('Controller credentials reached worker');
@@ -109,11 +113,11 @@ async function verify() {
   const native = JSON.parse(await readFile(new URL('../../../controller/tests/background/worker/fixtures/claude-authentication-failed.json', import.meta.url), 'utf8'));
   const executable = path.join(directory, 'controlled-claude.mjs');
   const codexExecutable = path.join(directory, 'controlled-codex.mjs');
-  let child, socket, base, heartbeat, peerDnsLookups = 0;
+  let child, socket, base, heartbeat, preflightWorkerId, peerDnsLookups = 0;
   const logs = [], frames = [], errors = [], observations = [], outcomes = [];
   const send = frame => socket.send(JSON.stringify(frame), error => { if (error) errors.push(error); });
   await withTestCleanup(async () => {
-    await writeFile(executable, `#!${process.execPath}\n(${controlledClaude.toString()})(${JSON.stringify(native)}).catch(error => { console.error(error); process.exitCode = 1; });\n`, { mode: 0o700 });
+    await writeFile(executable, `#!${process.execPath}\n(${controlledClaude.toString()})(${JSON.stringify(native)}, ${JSON.stringify(path.join(directory, 'preparation-marker'))}).catch(error => { console.error(error); process.exitCode = 1; });\n`, { mode: 0o700 });
     await writeFile(codexExecutable, `#!${process.execPath}\n(${controlledCodex.toString()})().catch(error => { console.error(error); process.exitCode = 1; });\n`, { mode: 0o700 });
     child = fork(fileURLToPath(import.meta.url), ['--fixture-server'], { env: {
       ...verificationEnvironment(), PERSISTENCE_MODE: 'memory', CONTROLLER_TOKEN: token,
@@ -164,7 +168,8 @@ async function verify() {
     send({ type: 'hello', version: 1, nodeId: NODE, sessions: [], skills: [] });
     heartbeat = setInterval(() => { if (socket.readyState === WebSocket.OPEN) send({ type: 'heartbeat', sessions: [], skills: [] }); }, 250);
     await waitFor(async () => (await request(`/v1/source-automations?nodeId=${NODE}`)).items.length === 1, 'source discovery');
-    for (const mode of ['default-codex', 'authentication', 'after-tool', 'ordinary-failure', 'recovered', 'success']) {
+    for (const mode of ['preparation-failure', 'default-codex', 'authentication', 'after-tool', 'ordinary-failure', 'recovered', 'success']) {
+      const preflight = mode === 'preparation-failure';
       const success = mode === 'default-codex' || mode === 'recovered' || mode === 'success';
       const executor = mode === 'default-codex' ? 'codex' : 'claude';
       const { schedule } = await request('/v1/automations', { chatId: CHAT, input: { kind: 'background', title: `CASE=${mode}`,
@@ -180,7 +185,8 @@ async function verify() {
       assert.equal(task.executor, executor);
       assert.equal(task.observations[0].status, 'completed'); assert.equal(task.observations[0].text, 'synthetic completed report');
       const auth = mode === 'authentication' || mode === 'after-tool';
-      if (auth) assert.equal(run.result.error, 'worker_authentication_failed');
+      if (preflight) assert.equal(run.result.error, 'worker_executor_unavailable');
+      else if (auth) assert.equal(run.result.error, 'worker_authentication_failed');
       else if (!success) assert.equal(run.result.error, 'worker_execution_unverified');
       else assert.equal(run.result.text, 'synthetic completed report');
       let delivery;
@@ -197,27 +203,29 @@ async function verify() {
       if (success) assert.equal(diagnostic, undefined);
       else {
         assert.ok(diagnostic?.workerId && diagnostic.invocationId);
-        assert.equal(diagnostic.category, auth ? 'authentication_failed' : 'execution_unverified');
-        assert.equal(diagnostic.executionEvidence, mode === 'after-tool' ? 'tool_activity_observed' : 'unverified');
+        assert.equal(diagnostic.category, preflight ? 'not_started' : auth ? 'authentication_failed' : 'execution_unverified');
+        assert.equal(diagnostic.executionEvidence, preflight ? 'not_started' : mode === 'after-tool' ? 'tool_activity_observed' : 'unverified');
+        if (preflight) preflightWorkerId = diagnostic.workerId;
         const workspace = path.join(workerRoot, 'workers', diagnostic.workerId, 'workspace');
+        if (preflight) await assert.rejects(readFile(path.join(workspace, 'launch-count.txt'), 'utf8'), { code: 'ENOENT' });
         if (mode === 'after-tool') assert.equal(await readFile(path.join(workspace, 'side-effect.txt'), 'utf8'), 'preserved');
       }
       for (let repeat = 0; repeat < 3; repeat++) await request(`/v1/background-tasks/${run.id}?chatId=${CHAT}`);
-      if (diagnostic) {
+      if (diagnostic && !preflight) {
         const workspace = path.join(workerRoot, 'workers', diagnostic.workerId, 'workspace');
         assert.equal(await readFile(path.join(workspace, 'launch-count.txt'), 'utf8'), '1');
       }
-      const cliExecutions = await Promise.all((await readdir(path.join(workerRoot, 'workers'))).map(async workerId => {
+      const cliExecutions = await Promise.all((await readdir(path.join(workerRoot, 'workers'))).filter(workerId => workerId !== preflightWorkerId).map(async workerId => {
         const workspace = path.join(workerRoot, 'workers', workerId, 'workspace');
         return JSON.parse(await readFile(path.join(workspace, 'observed-executor.json'), 'utf8'));
       }));
-      assert.deepEqual(cliExecutions.filter(item => item.mode === mode), [{ mode, executor }]);
+      assert.deepEqual(cliExecutions.filter(item => item.mode === mode), preflight ? [] : [{ mode, executor }]);
       const serialized = JSON.stringify({ task, run, delivery, diagnostic, logs });
       for (const secret of [SECRET, token, nodeToken, 'synthetic-auth-error-canary']) assert(!serialized.includes(secret), 'Secret/provider text escaped');
       outcomes.push({ mode, status: run.status, category: diagnostic?.category, executionEvidence: diagnostic?.executionEvidence,
-        sourceStatus: task.observations[0].status, deliveryKind: delivery.kind, actualCli: executor, queueOnly: true });
+        sourceStatus: task.observations[0].status, deliveryKind: delivery.kind, actualCli: preflight ? null : executor, queueOnly: true });
     }
-    assert.equal(observations.length, 6); assert(!frames.includes('command')); assert.equal(errors.length, 0);
+    assert.equal(observations.length, 7); assert(!frames.includes('command')); assert.equal(errors.length, 0);
     assert.equal(peerDnsLookups, 30, 'Only the five Claude CLI runs resolve their six absent peers locally');
     console.log(JSON.stringify({ pass: true, surface: 'actual Controller HTTP/scheduler/CLI/results', outcomes,
       legacyGlobalExecutor: 'claude', defaultTaskExecutor: 'codex',
