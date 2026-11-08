@@ -88,6 +88,20 @@ describe("background executor selection", () => {
     expect(await f.run()).toMatchObject({ status: "completed" });
     expect(codexCalls).toHaveLength(1);
   });
+  it.each(["configuration", "sandbox"])("retries a failed Claude %s preparation for later tasks", async failure => {
+    const claude = { path: "claude", apiKey: "key", privateRoots: [] };
+    const resolveClaude = vi.fn(() => claude);
+    if (failure === "configuration") resolveClaude.mockImplementationOnce(() => { throw new Error("configuration unavailable"); });
+    else sandbox.mockRejectedValueOnce(new Error("sandbox temporarily unavailable"));
+    const f = fixture({ resolveClaude });
+    expect(await f.run("claude")).toMatchObject({ status: "failed", error: "worker_executor_unavailable" });
+    expect(claudeCalls).toHaveLength(0); expect(codexCalls).toHaveLength(0);
+    const receipts = await Promise.all([f.run("claude"), f.run("claude")]);
+    expect(receipts.map(receipt => receipt.status)).toEqual(["completed", "completed"]);
+    expect(claudeCalls).toHaveLength(2); expect(codexCalls).toHaveLength(0);
+    expect(resolveClaude).toHaveBeenCalledTimes(failure === "configuration" ? 2 : 1);
+    expect(sandbox).toHaveBeenCalledTimes(failure === "sandbox" ? 2 : 1);
+  });
   it.each(["opus", "claude-cli-default"])("does not pass saved Claude model %s to the default Codex executor", async model => {
     const f = fixture({}, model);
     expect(await f.run()).toMatchObject({ status: "completed" });
