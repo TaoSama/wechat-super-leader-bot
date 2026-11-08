@@ -18,6 +18,7 @@ services:
       BACKGROUND_MODEL_NAME: ${BACKGROUND_MODEL_NAME:-}
       BACKGROUND_MODEL_BASE_URL: ${BACKGROUND_MODEL_BASE_URL:-}
       BACKGROUND_MODEL_API_KEY: ${BACKGROUND_MODEL_API_KEY:-}
+      # Legacy configuration does not override the executor saved on each task.
       BACKGROUND_EXECUTOR: ${BACKGROUND_EXECUTOR:-codex}
       # Empty Claude endpoint and credentials reuse the background model gateway above.
       # Values live only in .runtime/controller.env; at most one credential may be set.

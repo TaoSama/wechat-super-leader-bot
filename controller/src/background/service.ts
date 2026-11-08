@@ -6,6 +6,7 @@ import { BACKGROUND_LEASE_MS, BACKGROUND_LEASE_RENEWAL_MS, BackgroundSpecSchema,
 import { clearBackgroundBody } from "./retention.js";
 import { fallbackSummary, observationInput, observeSources } from "./observations.js";
 import { BackgroundWorkerFailure } from "./failure.js";
+import { DEFAULT_WORKER_EXECUTOR } from "./worker/contracts.js";
 
 const terminal = (receipt: WorkerReceipt) => !["running", "queued", "unknown"].includes(receipt.status);
 const running = (): RunnerOutcome => ({ status: "running" });
@@ -42,7 +43,7 @@ export class BackgroundService {
       chatId: run.chatId, scheduledAt: run.scheduledAt, spec: parsed, createdAt: now, expiresAt: now + WORKER_LIFETIME_MS,
       deadlineAt: run.scheduledAt + parsed.deadlineMs, phase: "observing", checkCount: 0, nextCheckAt: now,
       observations: [], prompts: [], invocations: [], leaseUntil: 0, updatedAt: now,
-      ...(this.options.executorKind ? { executorKind: this.options.executorKind } : {}) });
+      executorKind: parsed.executor ?? DEFAULT_WORKER_EXECUTOR });
   }
   async inspect(run: BackgroundRun, spec?: BackgroundSpec): Promise<RunnerOutcome> {
     const worker = await this.repository.getByRun(run.id);
@@ -125,6 +126,15 @@ export class BackgroundService {
   private assertChat(worker: BackgroundWorker, chatId: string): void {
     if (worker.chatId !== chatId) throw new Error("Background worker does not belong to this chat");
     if (!this.allowed(chatId)) throw new Error("Background authorization has been revoked");
+  }
+  private applyActiveReceipt(worker: BackgroundWorker, invocation: BackgroundInvocation, receipt: WorkerReceipt): void {
+    const active = worker.invocations.find(item => item.id === invocation.id);
+    if (worker.activeInvocationId !== invocation.id || !active) throw new Error("Background receipt lost its active invocation binding");
+    active.receipt = receipt;
+    if (!receipt.executorKind || receipt.receiptMissing || ["queued", "unknown"].includes(receipt.status) ||
+        ["worker_executor_unavailable", "worker_cancelled_before_launch", "worker_cancelled", "worker_expired"].includes(receipt.error ?? "")) return;
+    active.executorKind = receipt.executorKind;
+    worker.executorKind = receipt.executorKind;
   }
   private async advance(workerId: string, knownWorker?: BackgroundWorker): Promise<RunnerOutcome> {
     const owner = randomUUID();
@@ -220,7 +230,7 @@ export class BackgroundService {
               afterCancel.status === "completed" || afterCancel.error === "worker_process_cleanup_unverified" ? afterCancel : {
                 receiptMissing: afterCancel.receiptMissing, status: "failed", summary: fallbackSummary(worker, "后台会话保留期已结束，本轮执行已停止。"), error: "worker_expired" }, save);
           } else {
-            worker = await save(current => { current.invocations.find(item => item.id === invocation.id)!.receipt = beforeCancel; });
+            worker = await save(current => { this.applyActiveReceipt(current, invocation, beforeCancel); });
             return worker.initialOutcome ?? running();
           }
           if (worker.phase === "quarantined") return worker.initialOutcome ?? running();
@@ -229,7 +239,7 @@ export class BackgroundService {
           if (this.stopping()) return worker.initialOutcome ?? running();
           if (terminal(receipt)) worker = await this.recordReceipt(worker, invocation, receipt, save);
           else {
-            worker = await save(current => { current.invocations.find(item => item.id === invocation.id)!.receipt = receipt; });
+            worker = await save(current => { this.applyActiveReceipt(current, invocation, receipt); });
             return worker.initialOutcome ?? running();
           }
         }
@@ -287,6 +297,7 @@ export class BackgroundService {
   private async launch(worker: BackgroundWorker, invocation: BackgroundInvocation,
     save: (mutate: (current: BackgroundWorker) => void) => Promise<BackgroundWorker>): Promise<BackgroundWorker> {
     if (this.stopping() || !this.allowed(worker.chatId) || worker.cancelRequestedAt || this.now() >= worker.expiresAt) return worker;
+    invocation = { ...invocation, executorKind: worker.spec.executor ?? DEFAULT_WORKER_EXECUTOR };
     // Persist the invocation before calling external runtime; a crash can only inspect this identity.
     worker = await save(current => { current.invocations.push(invocation); current.activeInvocationId = invocation.id; current.phase = "executing"; });
     const cancelled = (await this.options.getScheduleStatus?.(worker.scheduleId, worker.chatId)) === "cancelled";
@@ -295,8 +306,7 @@ export class BackgroundService {
       if (cancelled && !this.stopping()) current.cancelRequestedAt ??= this.now();
       canLaunch = !this.stopping() && this.allowed(current.chatId) && !current.cancelRequestedAt && this.now() < current.expiresAt;
       if (canLaunch) {
-        // A worker that lives through an executor switch runs this turn on the current executor.
-        if (this.options.executorKind) current.executorKind = this.options.executorKind;
+        current.executorKind = invocation.executorKind;
         return;
       }
       current.invocations = current.invocations.filter(item => item.id !== invocation.id);
@@ -306,7 +316,7 @@ export class BackgroundService {
     if (!canLaunch) return worker;
     let receipt: WorkerReceipt;
     try { receipt = await this.options.runtime.start({ workerId: worker.id, invocationId: invocation.id, task: invocation.task,
-      preferences: worker.spec.preferences, input: invocation.input,
+      preferences: worker.spec.preferences, input: invocation.input, executorKind: invocation.executorKind,
       launchDeadlineAt: worker.expiresAt, executionDeadlineAt: worker.expiresAt + WORKER_SHUTDOWN_GRACE_MS,
       timeoutMs: this.turnTimeoutMs }); }
     catch (error) {
@@ -316,7 +326,8 @@ export class BackgroundService {
         active.status = "running"; active.receipt = { status: "unknown", error: "Submission receipt unavailable; observing without redispatch" }; });
     }
     if (terminal(receipt)) return this.recordReceipt(worker, invocation, receipt, save);
-    return save(current => { const active = current.invocations.find(item => item.id === invocation.id)!; active.status = "running"; active.receipt = receipt; });
+    return save(current => { this.applyActiveReceipt(current, invocation, receipt);
+      current.invocations.find(item => item.id === invocation.id)!.status = "running"; });
   }
   private async recordReceipt(worker: BackgroundWorker, invocation: BackgroundInvocation, receipt: WorkerReceipt,
     save: (mutate: (current: BackgroundWorker) => void) => Promise<BackgroundWorker>): Promise<BackgroundWorker> {
@@ -339,7 +350,8 @@ export class BackgroundService {
         `已到本轮汇报截止时间，跟踪已结束；以下为现有结果及缺项。\n${summary}` : summary;
       const text = [resultSummary, ...(links ?? [])].join("\n\n");
       const active = current.invocations.find(item => item.id === invocation.id)!;
-      active.status = failed ? "failed" : "completed"; active.receipt = durableReceipt; active.exported = !quarantined;
+      this.applyActiveReceipt(current, invocation, durableReceipt);
+      active.status = failed ? "failed" : "completed"; active.exported = !quarantined;
       delete current.activeInvocationId;
       if (continuing) {
         if (artifacts.length) active.result = { text, meaningful: true };
@@ -419,7 +431,7 @@ export class BackgroundService {
       const receipt = await this.options.runtime.inspect(worker.id, invocation.id);
       if (receipt.error === "worker_process_cleanup_unverified") return save(current => {
         current.phase = "quarantined";
-        current.invocations.find(item => item.id === invocation.id)!.receipt = receipt;
+        this.applyActiveReceipt(current, invocation, receipt);
       });
       if (!terminal(receipt) && !receipt.receiptMissing) return worker;
       const artifacts = receipt.receiptMissing ? [] : await this.options.runtime.exportArtifacts(worker.id, invocation.id);
@@ -429,7 +441,7 @@ export class BackgroundService {
       }
       worker = await save(current => {
         const active = current.invocations.find(item => item.id === invocation.id)!;
-        active.receipt = { ...receipt, artifacts }; active.exported = true;
+        this.applyActiveReceipt(current, invocation, { ...receipt, artifacts }); active.exported = true;
         active.status = receipt.status === "completed" ? "completed" : "failed";
         active.discardedAt ??= this.now();
         delete current.activeInvocationId;

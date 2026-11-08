@@ -32,7 +32,7 @@ flowchart TB
 - 会话忙或离线时排队，恢复后按序投递，未发送内容可取消。
 - 状态不明时保留原记录，不换 ID 重发。
 - 后台定时任务的汇报格式可通过 `update_automation` 更新，仅影响后续轮次，详见 [docs/automation-prompt-updates.md](docs/automation-prompt-updates.md)。
-- 后台任务和 `kind=background` 定时任务在本地、生产均默认由 Codex 执行；显式设置 `BACKGROUND_EXECUTOR=claude` 才改用 Claude Code，微信主对话仍用 Codex，见 [docs/production-deployment.md](docs/production-deployment.md#claude-code-后台执行器)。
+- 后台任务和 `kind=background` 定时任务默认由 Codex 执行；只有用户在自然语言里明确指定某项任务使用 Claude，才为该任务保存 `background.executor=claude`。定时后续轮次、24 小时内追问和重启恢复沿用任务的选择，其他任务仍用 Codex；全局 `BACKGROUND_EXECUTOR` 不改变任务选择。详见 [docs/production-deployment.md](docs/production-deployment.md#claude-code-后台执行器)。
 - 后台认证失败单独记录为 `worker_authentication_failed`，保留源任务观测和执行回执，不自动重跑；诊断与投递状态见 [docs/background-execution-failures.md](docs/background-execution-failures.md)。
 
 ## 控制台

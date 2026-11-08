@@ -69,7 +69,7 @@ test('background provider settings alone do not enable background execution', ()
   for (const [name, value] of Object.entries(backgroundModel)) assert.equal(environment[name], value);
 });
 
-test('production defaults to Codex and preserves explicit Claude selection and gateway overrides', () => {
+test('production defaults its legacy executor flag to Codex and preserves Claude gateway overrides', () => {
   assert.equal(renderControllerEnv().BACKGROUND_EXECUTOR, 'codex');
   assert.equal(renderControllerEnv({ BACKGROUND_EXECUTOR: '' }).BACKGROUND_EXECUTOR, 'codex');
   const claude = {

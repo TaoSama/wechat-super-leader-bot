@@ -28,12 +28,14 @@ const receiptSchema = z.object({
   processPid: z.number().int().positive().optional(),
   status: z.enum(["queued", "running", "completed", "waiting", "needs_attention", "failed", "unknown"]),
   summary: z.string(), attachments: z.array(z.string()),
+  executorKind: z.enum(["codex", "claude"]).optional(),
   failureDiagnostic: z.object({ category: z.literal("authentication_failed"),
     executionEvidence: z.enum(["tool_activity_observed", "unverified"]) }).strict().optional(),
   queuedAt: z.number().int().nonnegative().optional(),
   launchDeadlineAt: z.number().int().positive().optional(), executionDeadlineAt: z.number().int().positive().optional(),
   pendingInput: z.object({ workerId: z.string().regex(UUID), invocationId: z.string().regex(UUID),
     task: z.string().trim().min(1), input: z.unknown(),
+    executorKind: z.enum(["codex", "claude"]).optional(),
     launchDeadlineAt: z.number().int().positive().optional(), executionDeadlineAt: z.number().int().positive().optional(),
   }).passthrough().optional(),
 }).passthrough();
@@ -186,7 +188,8 @@ export class WorkerStorage {
       throw new Error("Invalid worker receipt metadata");
     }
     if (value.status === "queued" && (!value.pendingInput || value.pendingInput.workerId !== value.workerId ||
-      value.pendingInput.invocationId !== invocationId || hash(JSON.stringify(value.pendingInput)) !== value.inputHash)) {
+      value.pendingInput.invocationId !== invocationId || hash(JSON.stringify(value.pendingInput)) !== value.inputHash ||
+      value.executorKind !== value.pendingInput.executorKind)) {
       throw new Error("Invalid queued worker input metadata");
     }
     return value;

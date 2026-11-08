@@ -71,6 +71,7 @@ export async function confirmBackgroundMutations(service: BackgroundToolService,
   return [...new Set([...receipts, ...turn.errors])].join("\n");
 }
 export const BACKGROUND_INSTRUCTIONS = `隔离后台任务通过 create_automation(kind=background) 创建，即时任务也由统一调度器安排。
+后台执行器默认 Codex：background.executor 省略或填 codex。只有用户在当前自然语言里明确要求这一个任务使用 Claude 时才填 claude；提及 Claude 文档、源会话或模型，否定、引文、示例和假设均不算。多任务中只给明确指定的那一项选择 Claude，不能全局切换。选择随任务保存，定时轮次和原后台会话的追问沿用；追问不能暗中更换执行器，需要换执行器时新建明确授权的任务。
 监控已有 Codex 原生定时任务时先 list_nodes，再 list_source_automations 获取机器和源任务 ID；sources 填精确发现的 ID。
 源 occurrence 时间以本轮调度时间加 offsetMs 定位；明确 expectedAt/notAfter 才能 inspect_source_automation，不得用最近一条消息推断本轮完成。
 用户指出后来成功、要求重读最终结果时，继续用 read_session 只读查询工具已定位的原机器和会话；目标尚不唯一时先查询或澄清，不猜 ID，也不止于重复原 occurrence 的状态。按返回正文和时间说明后续会话报告，保留原轮次失败；后续独立轮次的结果不能改写原 occurrence，也不能证明本次派发完成。分别说明原轮次、后续结果、监控和微信投递，有回执就按回执说明，API 接受不代表已读。没有后续结果、读取失败或范围被裁剪时如实说明证据缺口，不编造成功。

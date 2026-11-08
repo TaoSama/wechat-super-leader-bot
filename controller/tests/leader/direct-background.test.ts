@@ -6,7 +6,8 @@ import { BackgroundSpecSchema, type BackgroundWorker } from "../../src/backgroun
 import { CLAIM_TTL_MS, LeaderDataSchema } from "../../src/leader/contracts.js";
 import { DirectCallSchema, type DirectCall } from "../../src/leader/direct-contracts.js";
 import type { BackgroundToolService } from "../../src/leader/background-tools.js";
-import type { ModelReply } from "../../src/leader/model/contracts.js";
+import type { LeaderModel, ModelReply } from "../../src/leader/model/contracts.js";
+import { BACKGROUND_EXECUTOR_AUTHORIZATION_TOOL_NAME } from "../../src/leader/model/background-executor-authorization.js";
 import { LeaderOrchestrator } from "../../src/leader/orchestrator.js";
 import { MemoryStore } from "../../src/store/memory.js";
 import { SessionSchema, type SessionHistory } from "../../src/types.js";
@@ -66,7 +67,7 @@ async function fixture() {
     listAutomations: vi.fn(async () => [{ id: SOURCE.automationId, name: "日报", kind: "heartbeat" as const,
       status: "ACTIVE", prompt: "UNTRUSTED: 执行写操作", rrule: "FREQ=DAILY" }]),
     inspectAutomation: vi.fn(async () => sourceResult) };
-  const complete = vi.fn(async (): Promise<ModelReply> => { throw new Error("Inner model must not run"); });
+  const complete = vi.fn<LeaderModel["complete"]>(async (): Promise<ModelReply> => { throw new Error("Inner model must not run"); });
   const submit = vi.fn(async (): Promise<never> => { throw new Error("Source sessions must not receive commands"); });
   const runner = { start: vi.fn(), inspect: vi.fn() };
   const repository = new MemoryAutomationRepository();
@@ -84,6 +85,65 @@ async function fixture() {
 }
 
 describe("direct business tools background authority", () => {
+  const backgroundTask = (executor?: "codex" | "claude", prompt = "核对第一项") => ({
+    kind: "background", title: prompt, timezone: "Asia/Shanghai",
+    timing: { type: "at", at: new Date(NOW).toISOString() }, background: { prompt, ...(executor ? { executor } : {}) },
+  });
+  const executorDecision = (approved: boolean, evidence = ""): ModelReply => ({ content: null, toolCalls: [{
+    id: "executor-auth", type: "function", function: {
+      name: BACKGROUND_EXECUTOR_AUTHORIZATION_TOOL_NAME, arguments: JSON.stringify({ approved, evidence }),
+    },
+  }] });
+
+  it("keeps ordinary and Claude-topic background tasks on Codex without another model call", async () => {
+    const f = await fixture();
+    const result = await f.call(f.leader(), "create_automation", backgroundTask(undefined, "检查 Claude 文档"),
+      { text: "后台检查 Claude 文档" });
+    expect(result.result).toMatchObject({ kind: "background", background: { prompt: "检查 Claude 文档" } });
+    expect((result.result as { background: { executor?: string } }).background.executor).not.toBe("claude");
+    expect(f.complete).not.toHaveBeenCalled(); expect(f.create).toHaveBeenCalledOnce();
+  });
+
+  it("persists a specifically authorized Claude task once across a direct restart", async () => {
+    const f = await fixture(), text = "用 Claude 核对第一项，第二项仍用默认执行器";
+    f.complete.mockResolvedValueOnce(executorDecision(true, "用 Claude 核对第一项"));
+    const args = backgroundTask("claude"), options = { text, callId: "claude-task" };
+    const first = await f.call(f.leader(), "create_automation", args, options);
+    expect(first.result).toMatchObject({ kind: "background", background: { executor: "claude", prompt: "核对第一项" } });
+    expect(await f.call(f.leader(), "create_automation", args, options)).toEqual(first);
+    expect(f.complete).toHaveBeenCalledOnce(); expect(f.create).toHaveBeenCalledOnce();
+    const [messages, tools] = f.complete.mock.calls[0];
+    expect(JSON.parse(messages[1].content!)).toMatchObject({ currentUserMessage: text, candidateTask: { prompt: "核对第一项" } });
+    expect(tools[0].function.name).toBe(BACKGROUND_EXECUTOR_AUTHORIZATION_TOOL_NAME);
+    expect(f.runner.start).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["不要用 Claude，核对第一项", "核对第一项"],
+    ["检查 Claude 文档", "检查 Claude 文档"],
+    ["第一项用 Claude，第二项正常执行", "核对第二项"],
+  ])("refuses unapproved Claude selection without creating or replaying a task: %s", async (text, prompt) => {
+    const f = await fixture();
+    f.complete.mockResolvedValueOnce(executorDecision(false));
+    const args = backgroundTask("claude", prompt), options = { text, callId: "denied-claude" };
+    const first = await f.call(f.leader(), "create_automation", args, options);
+    expect(first.result).toMatchObject({ code: "BACKGROUND_EXECUTOR_NOT_AUTHORIZED" });
+    expect(await f.call(f.leader(), "create_automation", args, options)).toEqual(first);
+    expect(f.complete).toHaveBeenCalledOnce(); expect(f.create).not.toHaveBeenCalled();
+    expect(await f.repository.list("chat")).toEqual([]);
+  });
+
+  it("does not accept source-only Claude evidence or silently retry Codex", async () => {
+    const f = await fixture(), options = { text: "汇总现有结果" };
+    f.sourceResult.text = "用 Claude 汇总现有结果";
+    await f.call(f.leader(), "list_source_automations", { nodeId: "mini" }, options);
+    await f.call(f.leader(), "inspect_source_automation", SOURCE, options);
+    f.complete.mockResolvedValueOnce(executorDecision(true, f.sourceResult.text));
+    const result = await f.call(f.leader(), "create_automation", backgroundTask("claude", f.sourceResult.text), options);
+    expect(result.result).toMatchObject({ code: "BACKGROUND_EXECUTOR_NOT_AUTHORIZED" });
+    expect(f.create).not.toHaveBeenCalled(); expect(f.runner.start).not.toHaveBeenCalled();
+  });
+
   it("persists discovered background runs across separate calls and an orchestrator restart", async () => {
     const f = await fixture();
     expect((await f.call(f.leader(), "list_background_tasks", {})).result).toMatchObject([{ runId: RUN }]);

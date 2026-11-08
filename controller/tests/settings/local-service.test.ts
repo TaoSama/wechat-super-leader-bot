@@ -54,11 +54,11 @@ describe("Controller persistent runtime settings", () => {
     await codex.updateModel({ scope: "background", model: "new-future-model", reasoningEffort: null, expectedRevision: codexScope.revision });
     expect((await service.snapshot()).scopes.find(item => item.id === "background")).toMatchObject({ model: "claude-cli-default" });
   });
-  it("rolls a saved Claude background model back to the Codex default after an executor switch", async () => {
+  it.each(["sonnet", "claude-cli-default"])("rolls saved Claude model %s back to the Codex default after an executor switch", async model => {
     const f = fixture();
     const service = new LocalSettingsService({ ...f.options, background: { model: "claude-cli-default", baseUrl: "", apiKey: "", executorKind: "claude" } });
     const scope = (await service.snapshot()).scopes.find(item => item.id === "background")!;
-    await service.updateModel({ scope: "background", model: "sonnet", reasoningEffort: "max", expectedRevision: scope.revision });
+    await service.updateModel({ scope: "background", model, reasoningEffort: model === "sonnet" ? "max" : null, expectedRevision: scope.revision });
     const codex = new LocalSettingsService(f.options);
     expect((await codex.snapshot()).scopes.find(item => item.id === "background"))
       .toMatchObject({ model: "worker", reasoningEffort: null, provider: "https://worker-model.example" });

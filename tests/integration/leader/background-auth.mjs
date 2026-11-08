@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { fork } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -17,7 +17,7 @@ const SECRET = 'synthetic-auth-secret-canary';
 const { values } = parseArgs({ options: { run: { type: 'boolean' },
   'fixture-server': { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } });
 if (values['fixture-server']) await serve();
-else if (!values.run || values.help) console.log('Usage: node tests/integration/leader/background-auth.mjs --run\nRuns the built Controller HTTP/scheduler/result flow with a controlled Claude executable and native authentication-error fixture. No real providers, daemon sessions or WeChat. Compose peer DNS and sandbox posture are simulated; this is not a sandbox security test.');
+else if (!values.run || values.help) console.log('Usage: node tests/integration/leader/background-auth.mjs --run\nRuns the built Controller HTTP/scheduler/result flow with controlled Codex and Claude executables, task-scoped selection and a native authentication-error fixture. No real providers, daemon sessions or WeChat. Compose peer DNS and sandbox posture are simulated; this is not a sandbox security test.');
 else await verify().catch(error => { console.error(error); process.exitCode = 1; });
 
 async function serve() {
@@ -60,6 +60,7 @@ async function controlledClaude(native) {
   let prompt = ''; for await (const chunk of process.stdin) prompt += chunk;
   const mode = prompt.match(/CASE=([a-z-]+)/)?.[1];
   if (!mode) throw new Error('Missing fixture mode');
+  fs.writeFileSync('observed-executor.json', JSON.stringify({ mode, executor: 'claude' }));
   const count = fs.existsSync('launch-count.txt') ? Number(fs.readFileSync('launch-count.txt', 'utf8')) : 0;
   fs.writeFileSync('launch-count.txt', String(count + 1));
   const session_id = randomUUID(), emit = event => console.log(JSON.stringify({ session_id, ...event }));
@@ -82,6 +83,23 @@ async function controlledClaude(native) {
   process.exitCode = 1;
 }
 
+async function controlledCodex() {
+  const fs = await import('node:fs');
+  const { randomUUID } = await import('node:crypto');
+  if (process.env.CONTROLLER_TOKEN || process.env.NODE_TOKENS) throw new Error('Controller credentials reached worker');
+  let prompt = ''; for await (const chunk of process.stdin) prompt += chunk;
+  const mode = prompt.match(/CASE=([a-z-]+)/)?.[1];
+  if (mode !== 'default-codex') throw new Error('An explicit Claude task reached Codex');
+  fs.writeFileSync('observed-executor.json', JSON.stringify({ mode, executor: 'codex' }));
+  fs.writeFileSync('launch-count.txt', '1');
+  const emit = event => console.log(JSON.stringify(event));
+  emit({ type: 'thread.started', thread_id: randomUUID() });
+  emit({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify({
+    status: 'completed', summary: 'synthetic completed report', nextCheckAt: null, attachments: [],
+  }) } });
+  emit({ type: 'turn.completed' });
+}
+
 async function verify() {
   const require = createRequire(new URL('../../../controller/package.json', import.meta.url));
   const { WebSocket } = require('ws');
@@ -90,17 +108,21 @@ async function verify() {
   const token = randomUUID(), nodeToken = randomUUID();
   const native = JSON.parse(await readFile(new URL('../../../controller/tests/background/worker/fixtures/claude-authentication-failed.json', import.meta.url), 'utf8'));
   const executable = path.join(directory, 'controlled-claude.mjs');
+  const codexExecutable = path.join(directory, 'controlled-codex.mjs');
   let child, socket, base, heartbeat, peerDnsLookups = 0;
   const logs = [], frames = [], errors = [], observations = [], outcomes = [];
   const send = frame => socket.send(JSON.stringify(frame), error => { if (error) errors.push(error); });
   await withTestCleanup(async () => {
     await writeFile(executable, `#!${process.execPath}\n(${controlledClaude.toString()})(${JSON.stringify(native)}).catch(error => { console.error(error); process.exitCode = 1; });\n`, { mode: 0o700 });
+    await writeFile(codexExecutable, `#!${process.execPath}\n(${controlledCodex.toString()})().catch(error => { console.error(error); process.exitCode = 1; });\n`, { mode: 0o700 });
     child = fork(fileURLToPath(import.meta.url), ['--fixture-server'], { env: {
       ...verificationEnvironment(), PERSISTENCE_MODE: 'memory', CONTROLLER_TOKEN: token,
       NODE_TOKENS: JSON.stringify({ [NODE]: nodeToken }), ALLOWED_CHAT_IDS: CHAT,
       LEADER_MODE: 'rules', CONTROLLER_DATA_ROOT: directory, TASK_NOTIFICATION_TICK_MS: '100',
       BACKGROUND_WORKER_ROOT: workerRoot,
-      BACKGROUND_EXECUTOR: 'claude', BACKGROUND_CLAUDE_PATH: executable,
+      BACKGROUND_MODEL_NAME: 'synthetic-unused-codex', BACKGROUND_MODEL_BASE_URL: 'https://codex.fixture.invalid/v1',
+      BACKGROUND_MODEL_API_KEY: 'synthetic-unused-codex-key', BACKGROUND_CLAUDE_PATH: executable,
+      BACKGROUND_CODEX_PATH: codexExecutable, BACKGROUND_EXECUTOR: 'claude',
       BACKGROUND_CLAUDE_API_KEY: SECRET, BACKGROUND_CLAUDE_BASE_URL: 'https://fixture.invalid',
       BACKGROUND_TURN_TIMEOUT_MS: '10000',
     }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
@@ -142,17 +164,20 @@ async function verify() {
     send({ type: 'hello', version: 1, nodeId: NODE, sessions: [], skills: [] });
     heartbeat = setInterval(() => { if (socket.readyState === WebSocket.OPEN) send({ type: 'heartbeat', sessions: [], skills: [] }); }, 250);
     await waitFor(async () => (await request(`/v1/source-automations?nodeId=${NODE}`)).items.length === 1, 'source discovery');
-    for (const mode of ['authentication', 'after-tool', 'ordinary-failure', 'recovered', 'success']) {
-      const success = mode === 'recovered' || mode === 'success';
+    for (const mode of ['default-codex', 'authentication', 'after-tool', 'ordinary-failure', 'recovered', 'success']) {
+      const success = mode === 'default-codex' || mode === 'recovered' || mode === 'success';
+      const executor = mode === 'default-codex' ? 'codex' : 'claude';
       const { schedule } = await request('/v1/automations', { chatId: CHAT, input: { kind: 'background', title: `CASE=${mode}`,
         timing: { type: 'at', at: new Date().toISOString() }, timezone: 'Asia/Shanghai', retention: 'retain',
-        background: { prompt: `CASE=${mode}`, sources: [{ nodeId: NODE, automationId: SOURCE }] } } });
+        background: { ...(executor === 'claude' ? { executor } : {}), prompt: `CASE=${mode}`,
+          sources: [{ nodeId: NODE, automationId: SOURCE }] } } });
       let run;
       await waitFor(async () => {
         run = (await request(`/v1/automations/${schedule.id}/runs?chatId=${CHAT}`)).items[0];
         return run?.status === (success ? 'completed' : 'failed');
       }, `${mode} terminal outcome`);
       const { task } = await request(`/v1/background-tasks/${run.id}?chatId=${CHAT}`);
+      assert.equal(task.executor, executor);
       assert.equal(task.observations[0].status, 'completed'); assert.equal(task.observations[0].text, 'synthetic completed report');
       const auth = mode === 'authentication' || mode === 'after-tool';
       if (auth) assert.equal(run.result.error, 'worker_authentication_failed');
@@ -182,14 +207,20 @@ async function verify() {
         const workspace = path.join(workerRoot, 'workers', diagnostic.workerId, 'workspace');
         assert.equal(await readFile(path.join(workspace, 'launch-count.txt'), 'utf8'), '1');
       }
+      const cliExecutions = await Promise.all((await readdir(path.join(workerRoot, 'workers'))).map(async workerId => {
+        const workspace = path.join(workerRoot, 'workers', workerId, 'workspace');
+        return JSON.parse(await readFile(path.join(workspace, 'observed-executor.json'), 'utf8'));
+      }));
+      assert.deepEqual(cliExecutions.filter(item => item.mode === mode), [{ mode, executor }]);
       const serialized = JSON.stringify({ task, run, delivery, diagnostic, logs });
       for (const secret of [SECRET, token, nodeToken, 'synthetic-auth-error-canary']) assert(!serialized.includes(secret), 'Secret/provider text escaped');
       outcomes.push({ mode, status: run.status, category: diagnostic?.category, executionEvidence: diagnostic?.executionEvidence,
-        sourceStatus: task.observations[0].status, deliveryKind: delivery.kind, queueOnly: true });
+        sourceStatus: task.observations[0].status, deliveryKind: delivery.kind, actualCli: executor, queueOnly: true });
     }
-    assert.equal(observations.length, 5); assert(!frames.includes('command')); assert.equal(errors.length, 0);
-    assert.equal(peerDnsLookups, 30, 'Every CLI run must resolve the six absent peers locally');
+    assert.equal(observations.length, 6); assert(!frames.includes('command')); assert.equal(errors.length, 0);
+    assert.equal(peerDnsLookups, 30, 'Only the five Claude CLI runs resolve their six absent peers locally');
     console.log(JSON.stringify({ pass: true, surface: 'actual Controller HTTP/scheduler/CLI/results', outcomes,
+      legacyGlobalExecutor: 'claude', defaultTaskExecutor: 'codex',
       sourceCommands: 0, realProviders: 0, realWeChat: 0, peerDnsLookups, securityBoundaryVerified: false }));
   }, [
     { label: 'heartbeat', cleanup: () => clearInterval(heartbeat) },

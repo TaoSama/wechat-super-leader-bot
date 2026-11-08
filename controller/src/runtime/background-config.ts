@@ -1,6 +1,6 @@
 import path from "node:path";
 import { WORKER_EXECUTOR_KINDS, type WorkerExecutorKind } from "../background/worker/contracts.js";
-import { CLAUDE_DEFAULT_MODEL_LABEL, isClaudeModel } from "../background/worker/claude-models.js";
+import { isClaudeModel } from "../background/worker/claude-models.js";
 
 export const BACKGROUND_EXECUTOR_KINDS = WORKER_EXECUTOR_KINDS;
 export type BackgroundExecutorKind = WorkerExecutorKind;
@@ -20,8 +20,10 @@ export interface ClaudeBackgroundConfig {
 
 export interface BackgroundConfig {
   executorKind: BackgroundExecutorKind;
-  /** Present only when executorKind is claude. */
+  /** Optional pre-resolved Claude capability, primarily for embedded runtimes. */
   claude?: ClaudeBackgroundConfig;
+  /** Validated only when a task explicitly selects Claude. */
+  resolveClaude?: () => ClaudeBackgroundConfig;
   root: string;
   artifactRoot: string;
   codexPath: string;
@@ -37,12 +39,11 @@ export interface BackgroundConfig {
 const DEFAULT_TURN_TIMEOUT_MS = 10 * 60_000;
 const MAX_TURN_TIMEOUT_MS = 60 * 60_000;
 
-function loadExecutorKind(env: NodeJS.ProcessEnv): BackgroundExecutorKind {
+function validateLegacyExecutor(env: NodeJS.ProcessEnv): void {
   const raw = env.BACKGROUND_EXECUTOR?.trim() || "codex";
   if (!(BACKGROUND_EXECUTOR_KINDS as readonly string[]).includes(raw)) {
     throw new Error(`Invalid BACKGROUND_EXECUTOR; expected one of: ${BACKGROUND_EXECUTOR_KINDS.join(", ")}`);
   }
-  return raw as BackgroundExecutorKind;
 }
 
 /**
@@ -72,7 +73,7 @@ function loadClaudeConfig(env: NodeJS.ProcessEnv, privateRoots: string[], gatewa
   const credential = set.length ? Object.fromEntries(set) as Partial<typeof explicit>
     : gateway.apiKey ? { apiKey: gateway.apiKey } : undefined;
   if (!credential) {
-    throw new Error("BACKGROUND_EXECUTOR=claude requires BACKGROUND_CLAUDE_API_KEY, BACKGROUND_CLAUDE_AUTH_TOKEN, " +
+    throw new Error("Claude tasks require BACKGROUND_CLAUDE_API_KEY, BACKGROUND_CLAUDE_AUTH_TOKEN, " +
       "BACKGROUND_CLAUDE_OAUTH_TOKEN or a background model provider key");
   }
   // The gateway URL is inherited only with the gateway key, so a Claude-specific
@@ -111,14 +112,15 @@ export function loadBackgroundConfig(env: NodeJS.ProcessEnv,
   if (resolvedRoot === resolvedArtifacts || resolvedRoot.startsWith(resolvedArtifacts + path.sep) || resolvedArtifacts.startsWith(resolvedRoot + path.sep)) {
     throw new Error("Background artifact storage must be separate from worker storage");
   }
-  const executorKind = loadExecutorKind(env);
+  // Keep validating legacy configuration, but task selection alone chooses an executor.
+  validateLegacyExecutor(env);
   const model = env.BACKGROUND_MODEL_NAME?.trim() || leader?.model;
   const baseUrl = env.BACKGROUND_MODEL_BASE_URL?.trim() || leader?.baseUrl;
   const apiKey = env.BACKGROUND_MODEL_API_KEY?.trim() || leader?.apiKey;
-  // Claude reuses the background provider's Anthropic-compatible gateway unless its own endpoint is set.
-  const claude = executorKind === "claude"
-    ? loadClaudeConfig(env, [controllerDataRoot ? path.resolve(controllerDataRoot) : resolvedRoot], { baseUrl, apiKey }) : undefined;
-  if (!claude && (!model || !baseUrl || !apiKey)) throw new Error("Background execution requires a model provider");
+  if (!model || !baseUrl || !apiKey) throw new Error("Background execution requires a model provider");
+  const claudeEnv = Object.fromEntries(Object.entries(env).filter(([name]) => name.startsWith("BACKGROUND_CLAUDE_")));
+  const resolveClaude = () => loadClaudeConfig(claudeEnv,
+    [controllerDataRoot ? path.resolve(controllerDataRoot) : resolvedRoot], { baseUrl, apiKey });
   const integer = (name: string, fallback: number, max: number): number => {
     const raw = env[name];
     if (raw === undefined || raw === "") return fallback;
@@ -127,10 +129,8 @@ export function loadBackgroundConfig(env: NodeJS.ProcessEnv,
     }
     return Number(raw);
   };
-  return { executorKind, ...(claude ? { claude } : {}), root: resolvedRoot, artifactRoot: resolvedArtifacts,
-    // The Codex provider is unused by Claude, which falls back to its CLI default model.
-    ...(claude ? { model: claude.model ?? CLAUDE_DEFAULT_MODEL_LABEL, baseUrl: "", apiKey: "" } : { model: model!, baseUrl: baseUrl!, apiKey: apiKey! }),
-    ...(model && baseUrl && apiKey ? { summaryProvider: { model, baseUrl, apiKey } } : {}),
+  return { executorKind: "codex", resolveClaude, root: resolvedRoot, artifactRoot: resolvedArtifacts,
+    model, baseUrl, apiKey, summaryProvider: { model, baseUrl, apiKey },
     codexPath: env.BACKGROUND_CODEX_PATH?.trim() || "codex",
     timeoutMs: integer("BACKGROUND_TURN_TIMEOUT_MS", DEFAULT_TURN_TIMEOUT_MS, MAX_TURN_TIMEOUT_MS),
     maxConcurrent: integer("BACKGROUND_MAX_CONCURRENT", 2, 8) };

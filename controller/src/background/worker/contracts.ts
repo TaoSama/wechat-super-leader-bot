@@ -11,6 +11,8 @@ export interface WorkerInput {
   preferences?: string[];
   /** Observations are data, never authorization to control their source. */
   input: unknown;
+  /** Chosen from the task's frozen executor selection, never its observations. */
+  executorKind?: WorkerExecutorKind;
   timeoutMs?: number;
   /** Absolute boundaries survive time spent waiting for execution capacity. */
   launchDeadlineAt?: number;
@@ -50,6 +52,8 @@ export interface WorkerRuntimeStatus {
   artifacts?: WorkerArtifact[];
   error?: string;
   failureDiagnostic?: WorkerFailureDiagnostic;
+  /** Persisted before launch so queued work keeps the same executor after restart. */
+  executorKind?: WorkerExecutorKind;
   /** Local durable metadata confirms this invocation was never recorded. */
   receiptMissing?: boolean;
 }
@@ -87,12 +91,14 @@ export interface WorkerRuntimeOptions {
   root: string;
   artifactRoot: string;
   model: string;
-  runtimeSettings?: () => { model: string; reasoningEffort: string | null; systemPrompt: string };
+  runtimeSettings?: (kind: WorkerExecutorKind) => { model: string; reasoningEffort: string | null; systemPrompt: string };
   apiKey?: string;
   baseUrl?: string;
   codexPath?: string;
   timeoutMs?: number;
   maxConcurrent?: number;
   executor?: WorkerExecutor;
+  executors?: Partial<Record<WorkerExecutorKind, WorkerExecutor>>;
+  beforeExecute?: (kind: WorkerExecutorKind, signal: AbortSignal) => Promise<void>;
   onError?: (error: Error) => void;
 }

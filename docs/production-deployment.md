@@ -326,17 +326,22 @@ docker-compose --env-file /dev/null --profile wechat \
 
 ## Claude Code 后台执行器
 
-生产 `compose.production.yaml` 默认 `BACKGROUND_EXECUTOR=codex`：后台任务、`kind=background`
-的定时任务和 leader 的后台追问/延期工具默认由 Codex 执行。只有在 `.runtime/controller.env`
-显式设置 `BACKGROUND_EXECUTOR=claude` 并重新发布后，才改由 Controller 容器内的 `claude -p` 子进程执行。
+后台任务和 `kind=background` 定时任务默认由 Codex 执行。用户在自然语言里明确指定某项任务使用
+Claude 时，该任务保存 `background.executor=claude`，由 Controller 容器内的 `claude -p` 子进程执行；
+例如“每天 10 点用 Claude 汇总日报”。“整理 Claude 文档”、否定、引文、源任务结果和历史提及都不算选择 Claude。
+微信工具在创建 Claude 任务前单独核验当前用户原文、具体任务范围及逐字引用；未获明确授权或核验不可用时
+拒绝创建，不静默换执行器。普通 Codex 任务不增加这次模型核验。管理 API 的显式 `background.executor`
+属于管理员配置，默认也为 Codex。
 微信主对话 leader 不受影响，仍使用 Codex Task；`kind=session` 定时任务仍发到创建时冻结的节点会话
-（可以是 Codex 会话，也可以是节点上的 Claude Code 会话）。切回 Codex 只需在 `.runtime/controller.env`
-删除 `BACKGROUND_EXECUTOR` 或设为 `codex` 后重新发布。
+（可以是 Codex 会话，也可以是节点上的 Claude Code 会话）。执行器选择随任务保存：定时后续轮次、
+追问、延期和重启恢复均保留原选择；不在原隔离会话中跨 CLI 续接，需要换执行器时创建新任务。
+旧任务没有 `executor` 字段时，未来执行按 Codex；旧失败、历史回执和已执行轮次保持原记录，不自动重跑。
+`BACKGROUND_EXECUTOR` 仅兼容旧配置，不再覆盖任务的执行器选择。
 
 ### 启用 Claude 前
 
-选择 Claude 时，Controller 启动只在本地检查 sandbox，不会调用模型网关，所以网关不兼容时健康检查
-照样通过，失败要等到第一个后台任务才出现。显式切换到 Claude 前：
+Claude 的 sandbox 在首次执行 Claude 任务时检查，不向模型网关发送探测请求。Controller 健康检查不能证明
+Claude 网关可用；未配置或 sandbox 不可用时只让该 Claude 任务失败，不能自动换用 Codex。启用前：
 
 1. 确认 Claude 实际使用的网关支持 Anthropic Messages API（`POST /v1/messages`）和对应认证头。凭证从
    `.runtime/controller.env` 读取，经 stdin 交给 curl，不出现在命令行参数和 shell 历史里。`BASE` 是去掉末尾
@@ -352,8 +357,7 @@ docker-compose --env-file /dev/null --profile wechat \
        "$BASE/v1/messages" )
    ```
 
-   返回 `200` 才算兼容。其他结果先在 `.runtime/controller.env` 固定 `BACKGROUND_EXECUTOR=codex`，配好
-   `BACKGROUND_CLAUDE_*` 再切换。
+   返回 `200` 才算兼容。其他结果先保持任务使用 Codex，配好 `BACKGROUND_CLAUDE_*` 再创建 Claude 任务。
 2. 在 VPS 上用新的 `deploy/security/codex-apparmor` 覆盖 `/etc/apparmor.d/super-leader-codex` 并执行
    `sudo apparmor_parser -Kr /etc/apparmor.d/super-leader-codex`（见下文「隔离方式」）。
 
@@ -364,7 +368,7 @@ docker-compose --env-file /dev/null --profile wechat \
 
 | 变量 | 说明 |
 |------|------|
-| `BACKGROUND_EXECUTOR` | 可选，默认 `codex`；显式设 `claude` 才启用 Claude Code |
+| `BACKGROUND_EXECUTOR` | 可选，默认 `codex`；旧值 `claude` 也不再切换全部后台任务，实际执行器由任务的 `background.executor` 决定 |
 | `BACKGROUND_MODEL_BASE_URL` / `BACKGROUND_MODEL_API_KEY` | 已有的后台模型网关。未设置 Claude 专用凭证时，Claude 复用这对值：URL 作为 `ANTHROPIC_BASE_URL`，key 作为 `ANTHROPIC_API_KEY`（`x-api-key` 头）。两者都未设置时继续回退到 `LEADER_MODEL_*` |
 | `BACKGROUND_CLAUDE_BASE_URL` | 可选，覆盖 Anthropic 兼容端点。末尾的 `/v1` 会被去掉，因为 Claude Code 会自己拼 `/v1/messages`；必须是 `http(s)`，不能带用户名、密码、query 或 fragment |
 | `BACKGROUND_CLAUDE_API_KEY` | 可选，以 `ANTHROPIC_API_KEY`（`x-api-key`）发送 |
@@ -373,12 +377,11 @@ docker-compose --env-file /dev/null --profile wechat \
 | `BACKGROUND_CLAUDE_MODEL` | 可选，网关暴露的 Claude 模型名：别名 `sonnet` / `opus` / `haiku`，或 `claude-*`（允许 `vendor/claude-*` 前缀和 `[1m]` 后缀）；未设置时使用 CLI 默认模型 |
 | `BACKGROUND_CLAUDE_PATH` | 可选，默认镜像内的 `claude` |
 
-三个 `BACKGROUND_CLAUDE_*` 凭证最多设一个，同时设置多个时 Controller 拒绝启动。设置了 Claude 专用凭证时，
+三个 `BACKGROUND_CLAUDE_*` 凭证最多设一个，同时设置多个时 Claude 任务配置无效。设置了 Claude 专用凭证时，
 不会继承 `BACKGROUND_MODEL_BASE_URL`：没有 `BACKGROUND_CLAUDE_BASE_URL` 就发往 Anthropic 官方 API，
-避免把专用凭证发给别的端点。控制台「后台任务」模型设置在 Claude 下显示 `Claude Code CLI` 和 Claude
-模型别名；选中的 Claude 模型和推理强度作用于后续轮次，之前为 Codex 保存的模型不会传给 Claude。
-反过来也一样：切回 `codex` 后，为 Claude 保存的模型和推理强度不会传给 Codex，后台任务使用
-`BACKGROUND_MODEL_NAME`，直到在控制台重新保存 Codex 模型。
+避免把专用凭证发给别的端点。控制台「后台任务」模型设置不改变任务的执行器。保存的模型与任务执行器
+不属于同一系列时，使用该执行器的配置默认模型：Codex 使用 `BACKGROUND_MODEL_NAME`（缺省回退
+`LEADER_MODEL_NAME`），Claude 使用 `BACKGROUND_CLAUDE_MODEL`（缺省为 CLI 默认模型）。
 
 长结果的微信摘要仍由 `BACKGROUND_MODEL_*`（缺省回退 `LEADER_MODEL_*`）这组 HTTP 模型生成，与执行器无关；
 Claude 执行器下也保留这组配置，否则 `LEADER_MODE=rules` 时长结果会停在 `summary_generation_failed`。

@@ -35,7 +35,7 @@ RUN mkdir -p /usr/libexec/claude-sandbox \
     && apt-get install -y --no-install-recommends python3 curl python3-bs4 python3-html2text bubblewrap socat \
     && rm -rf /var/lib/apt/lists/*
 # Install on the target platform so the Codex and Claude Code native binaries match the deployed CPU.
-# The controller refuses BACKGROUND_EXECUTOR=claude at startup when the Claude sandbox cannot start.
+# Each Claude task is refused before execution when the Claude sandbox cannot start.
 RUN npm install --global @openai/codex@0.163.0 @anthropic-ai/claude-code@2.1.311 \
     && npm cache clean --force \
     && mkdir -p /var/lib/super-leader-runtime/settings /var/lib/super-leader-runtime/background/workers /var/lib/super-leader-runtime/background/artifacts \

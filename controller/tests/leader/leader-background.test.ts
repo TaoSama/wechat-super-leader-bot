@@ -7,6 +7,7 @@ import { MemoryBackgroundRepository } from "../../src/background/memory.js";
 import type { BackgroundWorker } from "../../src/background/contracts.js";
 import { ACKNOWLEDGEMENT_PROMPT } from "../../src/leader/acknowledgement.js";
 import { BACKGROUND_AUTHORIZATION_TOOL_NAME, type BackgroundOperation } from "../../src/leader/model/background-authorization.js";
+import { BACKGROUND_EXECUTOR_AUTHORIZATION_TOOL_NAME } from "../../src/leader/model/background-executor-authorization.js";
 import { AUTOMATION_AUTHORIZATION_TOOL_NAME } from "../../src/leader/model/automation-authorization.js";
 import { AUTHORIZATION_TOOL_NAME } from "../../src/leader/model/user-authorization.js";
 import { backgroundFollowupRequestId } from "../../src/leader/background-tools.js";
@@ -54,6 +55,8 @@ async function fixture(replies: ModelReply[], operations: BackgroundOperation[] 
     initialAcceptedAt: NOW, leaseUntil: 0, updatedAt: NOW };
   await backgroundRepository.create(worker);
   const classifierMessages: ModelMessage[][] = [];
+  const executorClassifierMessages: ModelMessage[][] = [];
+  let executorDecision = { approved: false, evidence: "" };
   const plannerMessages: ModelMessage[][] = [];
   const submit = vi.fn(async (request: PostCommandRequest, _wait?: number, guard?: () => Promise<void>, sendRoute?: SendRoute) => {
     await guard?.();
@@ -64,6 +67,10 @@ async function fixture(replies: ModelReply[], operations: BackgroundOperation[] 
   });
   let onClassify: (() => void) | undefined;
   const model: LeaderModel = { complete: vi.fn(async (messages, tools): Promise<ModelReply> => {
+    if (tools.length === 1 && tools[0].function.name === BACKGROUND_EXECUTOR_AUTHORIZATION_TOOL_NAME) {
+      executorClassifierMessages.push(structuredClone(messages));
+      return tool(BACKGROUND_EXECUTOR_AUTHORIZATION_TOOL_NAME, executorDecision);
+    }
     if (tools.length === 1 && tools[0].function.name === BACKGROUND_AUTHORIZATION_TOOL_NAME) {
       classifierMessages.push(structuredClone(messages)); onClassify?.();
       return tool(BACKGROUND_AUTHORIZATION_TOOL_NAME, { operations });
@@ -77,11 +84,41 @@ async function fixture(replies: ModelReply[], operations: BackgroundOperation[] 
   const leader = (configured = true) => new LeaderOrchestrator(store, hub, { submit }, model, () => clock,
     undefined, undefined, undefined, automations, configured ? background : undefined);
   return { store, automations, repository, createAutomation, backgroundRepository, background, hub, runtime, enqueue, extend,
-    worker, model, classifierMessages, plannerMessages, submit, leader, source, sessions,
+    worker, model, classifierMessages, executorClassifierMessages, plannerMessages, submit, leader, source, sessions,
+    executorAuthorization: (decision: typeof executorDecision) => { executorDecision = decision; },
     advance: (ms: number) => { clock += ms; }, onClassify: (callback: () => void) => { onClassify = callback; } };
 }
 
 describe("Leader isolated background work", () => {
+  it("keeps one explicit Claude task separate from another task's default executor", async () => {
+    const first = { ...spec(), background: { ...spec().background, prompt: "核对第一项", executor: "claude" } }, second = spec();
+    second.background.prompt = "核对第二项";
+    const f = await fixture([{ content: null, toolCalls: [call("create_automation", first), call("create_automation", second)] }], ["create"]);
+    f.executorAuthorization({ approved: true, evidence: "第一项用 Claude" });
+    await f.leader().handle("chat", "scoped-executors", "第一项用 Claude，第二项正常执行，都放后台");
+    const schedules = await f.repository.list("chat");
+    expect(schedules).toHaveLength(2);
+    expect(schedules).toEqual(expect.arrayContaining([
+      expect.objectContaining({ background: expect.objectContaining({ prompt: "核对第一项", executor: "claude" }) }),
+      expect.objectContaining({ background: expect.objectContaining({ prompt: "核对第二项" }) }),
+    ]));
+    expect(schedules.find(schedule => schedule.kind === "background" && schedule.background.prompt === "核对第二项"))
+      .not.toHaveProperty("background.executor", "claude");
+    expect(f.executorClassifierMessages).toHaveLength(1);
+    expect(JSON.parse(f.executorClassifierMessages[0][1].content!)).toMatchObject({
+      currentUserMessage: "第一项用 Claude，第二项正常执行，都放后台", candidateTask: { prompt: "核对第一项" },
+    });
+  });
+
+  it("does not create a Claude task when current-turn executor authorization is denied", async () => {
+    const proposed = { ...spec(), background: { prompt: "核对第二项", executor: "claude" } };
+    const f = await fixture([tool("create_automation", proposed), final("第二项没有 Claude 授权。")], ["create"]);
+    await f.leader().handle("chat", "wrong-claude-task", "第一项用 Claude，第二项正常执行，都放后台");
+    expect(f.executorClassifierMessages).toHaveLength(1);
+    expect(await f.repository.list("chat")).toEqual([]); expect(f.createAutomation).not.toHaveBeenCalled();
+    expect(JSON.stringify(f.plannerMessages.at(-1))).toContain("执行器授权未获验证");
+  });
+
   it.each([
     "让‘微信 · 异步 typing · 合并上线’会话修改项目，开启原生网络搜索工具，并验证可用。",
     "让已有会话继续修改后台任务模块，完成后汇总给我。",

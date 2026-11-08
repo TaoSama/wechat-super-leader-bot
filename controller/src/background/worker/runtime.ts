@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { DEFAULT_WORKER_EXECUTOR, type WorkerExecutor, type WorkerExecutorKind, type WorkerInput, type WorkerInspectOptions,
+import { DEFAULT_WORKER_EXECUTOR, WORKER_EXECUTOR_KINDS, type WorkerExecutor, type WorkerInput, type WorkerInspectOptions,
   type WorkerRuntime, type WorkerRuntimeOptions, type WorkerRuntimeStatus } from "./contracts.js";
 import { WorkerStorage, alive, hash, readJson, validId, writeJson, type Receipt } from "./storage.js";
 import { CodexCliExecutor } from "./executor.js";
@@ -51,7 +51,13 @@ export class CodexWorkerRuntime implements WorkerRuntime {
     if (!input.task?.trim()) throw new Error("Background worker task is required");
     this.validateTimeout(input.timeoutMs ?? this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
     this.validateDeadlines(input);
+    if (input.executorKind !== undefined && !(WORKER_EXECUTOR_KINDS as readonly string[]).includes(input.executorKind)) {
+      throw new Error("Invalid worker executor kind");
+    }
     input = JSON.parse(JSON.stringify(input)) as WorkerInput;
+    const legacyInputHash = hash(JSON.stringify(input));
+    const executorKind = input.executorKind ?? this.executor.kind ?? DEFAULT_WORKER_EXECUTOR;
+    input.executorKind = executorKind;
     const inputHash = hash(JSON.stringify(input));
     const dir = this.store.worker(input.workerId, true)!;
     const prior = this.store.receipt(dir, input.invocationId);
@@ -61,14 +67,16 @@ export class CodexWorkerRuntime implements WorkerRuntime {
       return publicStatus(this.cancelledReceipt(dir, input.workerId, input.invocationId));
     }
     if (prior) {
-      if (prior.inputHash !== inputHash) throw new Error("Invocation ID conflicts with previously authorized input");
+      if (prior.inputHash !== inputHash && !(prior.executorKind === undefined && prior.inputHash === legacyInputHash)) {
+        throw new Error("Invocation ID conflicts with previously authorized input");
+      }
       return this.inspect(input.workerId, input.invocationId);
     }
     this.store.claim(dir, input.invocationId);
-    const threadId = this.resumableThread(dir);
+    const threadId = this.store.resumableThread(dir, executorKind);
     const receipt: Receipt = { workerId: input.workerId, invocationId: input.invocationId, inputHash,
       ownerPid: process.pid, status: "queued", summary: "后台会话已排队，等待执行容量。", attachments: [],
-      queuedAt: Date.now(), pendingInput: input,
+      queuedAt: Date.now(), pendingInput: input, executorKind,
       launchDeadlineAt: input.launchDeadlineAt ?? UNBOUNDED_LAUNCH_DEADLINE,
       ...(input.executionDeadlineAt === undefined ? {} : { executionDeadlineAt: input.executionDeadlineAt }),
       ...(threadId ? { threadId } : {}) };
@@ -217,6 +225,7 @@ export class CodexWorkerRuntime implements WorkerRuntime {
       const abort = new AbortController();
       // Persist before spawn: a crash after this boundary is uncertain, never replayed.
       receipt.status = "running"; receipt.ownerPid = process.pid; receipt.summary = "后台会话正在启动。";
+      receipt.executorKind ??= input.executorKind ?? DEFAULT_WORKER_EXECUTOR;
       delete receipt.pendingInput;
       try { this.store.save(dir, receipt); }
       catch (error) { fs.unlinkSync(slot); throw error; }
@@ -229,6 +238,7 @@ export class CodexWorkerRuntime implements WorkerRuntime {
   private async run(dir: string, input: WorkerInput, receipt: Receipt, abort: AbortController, slot: string): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let exporting = false;
+    let executionStarted = false;
     try {
       const timeoutMs = Math.min(input.timeoutMs ?? this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         (receipt.executionDeadlineAt ?? input.executionDeadlineAt ?? Infinity) - Date.now());
@@ -239,15 +249,26 @@ export class CodexWorkerRuntime implements WorkerRuntime {
         return;
       }
       timer = setTimeout(() => abort.abort(), timeoutMs);
-      // A receipt queued before an executor switch may carry another CLI's session ID.
-      const threadId = this.resumableThread(dir);
+      const executorKind = receipt.executorKind ?? input.executorKind ?? DEFAULT_WORKER_EXECUTOR;
+      const executor = this.options.executors?.[executorKind] ??
+        ((this.executor.kind ?? DEFAULT_WORKER_EXECUTOR) === executorKind ? this.executor : undefined);
+      if (!executor) throw new Error("Requested background executor is unavailable");
+      if (this.options.beforeExecute) await this.options.beforeExecute(executorKind, abort.signal);
+      abort.signal.throwIfAborted();
+      if ((receipt.launchDeadlineAt ?? input.launchDeadlineAt ?? Infinity) <= Date.now()) {
+        this.expiredBeforeLaunch(dir, receipt);
+        return;
+      }
+      // A queued receipt must never resume a session created by another CLI.
+      const threadId = this.store.resumableThread(dir, executorKind);
       if (threadId) receipt.threadId = threadId; else delete receipt.threadId;
-      const settings = this.options.runtimeSettings?.();
-      const text = await this.executor.execute({ workspace: path.join(dir, "workspace"), home: path.join(dir, "home"),
+      const settings = this.options.runtimeSettings?.(executorKind);
+      executionStarted = true;
+      const text = await executor.execute({ workspace: path.join(dir, "workspace"), home: path.join(dir, "home"),
         schemaPath: path.join(dir, "output-schema.json"), prompt: workerPrompt(input, settings?.systemPrompt), threadId,
         ...(settings ? { model: settings.model, reasoningEffort: settings.reasoningEffort } : {}),
         signal: abort.signal,
-        onThread: async threadId => { this.store.setThread(dir, threadId, this.executorKind); receipt.threadId = threadId; this.store.save(dir, receipt); },
+        onThread: async threadId => { this.store.setThread(dir, threadId, executorKind); receipt.threadId = threadId; this.store.save(dir, receipt); },
         onProcess: async pid => {
           receipt.processPid = pid; receipt.summary = "后台会话正在执行。";
           writeJson(slot, { ...readJson<Record<string, unknown>>(slot), processPid: pid });
@@ -263,6 +284,10 @@ export class CodexWorkerRuntime implements WorkerRuntime {
       receipt.status = "needs_attention";
       receipt.summary = exporting ? "执行已结束，但结果附件未通过接收校验，需要核对。" : UNCERTAIN;
       receipt.error = abort.signal.aborted ? "worker_interrupted" : exporting ? "worker_artifact_invalid" : "worker_execution_unverified";
+      if (!executionStarted && !abort.signal.aborted) {
+        receipt.status = "failed"; receipt.error = "worker_executor_unavailable";
+        receipt.summary = "指定的后台执行器配置或隔离检查未通过，本轮任务未启动；没有自动改用其他执行器。";
+      }
       if (!abort.signal.aborted && !exporting && error instanceof WorkerExecutionFailure && error.failureDiagnostic &&
           !error.processCleanupUnverified) {
         receipt.failureDiagnostic = error.failureDiagnostic;
@@ -292,8 +317,6 @@ export class CodexWorkerRuntime implements WorkerRuntime {
     }
   }
 
-  private get executorKind(): WorkerExecutorKind { return this.executor.kind ?? DEFAULT_WORKER_EXECUTOR; }
-  private resumableThread(dir: string): string | undefined { return this.store.resumableThread(dir, this.executorKind); }
   private validateTimeout(value: number): void {
     if (!Number.isSafeInteger(value) || value <= 0 || value > MAX_TIMEOUT_MS) throw new Error("Invalid worker timeout budget");
   }

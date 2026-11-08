@@ -43,6 +43,24 @@ describe("background schedules on the unified automation ledger", () => {
     if (schedule.kind !== "background") throw new Error("Expected background schedule");
     await expect(f.repository.create({ ...schedule, background: { ...schedule.background, prompt: "other" } })).rejects.toThrow("conflicts");
   });
+  it("persists a task's explicit executor across recurring occurrences and a scheduler restart", async () => {
+    const f = fixture(); let now = NOW;
+    const options = { ...f.options, now: () => now };
+    const service = new AutomationService(options);
+    const schedule = await service.create(CreateScheduleSchema.parse({ ...input(),
+      timing: { type: "cron", expression: "0 10 * * *" },
+      background: { prompt: "收齐结果后比较差异", executor: "claude" },
+    }), authority);
+    expect(await f.repository.get(schedule.id, "chat")).toMatchObject({ background: { executor: "claude" } });
+    now += 3_600_000; await service.tick();
+    now += 86_400_000; await new AutomationService(options).tick();
+    expect(f.runner.start).toHaveBeenCalledTimes(2);
+    for (const [run, persisted] of vi.mocked(f.runner.start).mock.calls) {
+      expect(run.scheduleId).toBe(schedule.id);
+      expect(persisted).toMatchObject({ background: { executor: "claude" } });
+    }
+    expect(vi.mocked(f.runner.start).mock.calls[1][0].id).not.toBe(vi.mocked(f.runner.start).mock.calls[0][0].id);
+  });
   it("calls onFinished after the result and outbox commit", async () => {
     const f = fixture();
     f.onFinished.mockImplementation(async () => {

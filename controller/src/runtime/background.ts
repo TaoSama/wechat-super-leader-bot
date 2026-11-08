@@ -8,6 +8,8 @@ import type { Config } from "./config.js";
 import { BackgroundArtifacts, BACKGROUND_ARTIFACT_RETENTION_MS } from "./background-artifacts.js";
 import { executorModelChoice, type LocalSettingsService } from "../settings/local-service.js";
 import { BackgroundWorkerFailure } from "../background/failure.js";
+import { CLAUDE_DEFAULT_MODEL_LABEL } from "../background/worker/claude-models.js";
+import type { ClaudeBackgroundConfig } from "./background-config.js";
 
 const ARTIFACT_MAINTENANCE_INTERVAL_MS = 60_000;
 
@@ -23,15 +25,32 @@ export class BackgroundExecution {
     private readonly now: () => number = Date.now, private readonly changed: () => void = () => {}, settings?: LocalSettingsService) {
     if (!config.background) throw new Error("Background execution is disabled");
     const repository = pool ? new PostgresBackgroundRepository(pool) : new MemoryBackgroundRepository();
-    const claude = config.background.claude;
-    this.runtime = new CodexWorkerRuntime({ ...config.background,
-      ...(claude ? { executor: new ClaudeCliExecutor({ artifactRoot: config.background.artifactRoot, claudePath: claude.path,
+    const background = config.background;
+    let claude: ClaudeBackgroundConfig | undefined;
+    let claudeExecutor: ClaudeCliExecutor | undefined;
+    let claudeReady: Promise<void> | undefined;
+    const prepareClaude = async () => {
+      claude ??= background.resolveClaude?.() ?? background.claude;
+      if (!claude) throw new Error("Claude background execution is not configured");
+      await verifyClaudeSandbox({ claudePath: claude.path, artifactRoot: background.artifactRoot,
+        privateRoots: claude.privateRoots });
+      claudeExecutor = new ClaudeCliExecutor({ artifactRoot: background.artifactRoot, claudePath: claude.path,
         privateRoots: claude.privateRoots, model: claude.model, baseUrl: claude.baseUrl,
-        apiKey: claude.apiKey, authToken: claude.authToken, oauthToken: claude.oauthToken }) } : {}),
-      ...(settings ? { runtimeSettings: () => {
+        apiKey: claude.apiKey, authToken: claude.authToken, oauthToken: claude.oauthToken });
+    };
+    this.runtime = new CodexWorkerRuntime({ ...config.background,
+      executors: { claude: { kind: "claude", execute: request => {
+        if (!claudeExecutor) throw new Error("Claude background execution was not prepared");
+        return claudeExecutor.execute(request);
+      } } },
+      beforeExecute: async kind => {
+        if (kind === "claude") await (claudeReady ??= prepareClaude());
+      },
+      ...(settings ? { runtimeSettings: kind => {
         const view = settings.capture();
-        const fallback = config.background!.model;
-        return { ...executorModelChoice(view.model("background", fallback), !!claude, fallback), systemPrompt: view.prompt("background-worker") };
+        const isClaude = kind === "claude";
+        const fallback = isClaude ? claude?.model ?? CLAUDE_DEFAULT_MODEL_LABEL : background.model;
+        return { ...executorModelChoice(view.model("background", fallback), isClaude, fallback), systemPrompt: view.prompt("background-worker") };
       } } : {}),
       onError: () => console.warn("Background worker runtime failure; inspect persisted execution state") });
     this.artifacts = new BackgroundArtifacts({ root: config.background.artifactRoot,
@@ -39,7 +58,6 @@ export class BackgroundExecution {
       secret: createHash("sha256").update(`background-artifacts:${config.controllerToken}`).digest("hex"),
       repository, allowed: () => config.allowedChatIds, now });
     this.service = new BackgroundService({ repository, runtime: this.runtime, sources: hub, now,
-      executorKind: config.background.executorKind,
       isAllowed: chatId => config.allowedChatIds.has(chatId), isStopping: () => this.stopping,
       turnTimeoutMs: config.background.timeoutMs,
       getScheduleStatus: async (scheduleId, chatId) => (await schedules.get(scheduleId, chatId))?.status,
@@ -60,14 +78,10 @@ export class BackgroundExecution {
     });
   }
   async initialize(): Promise<void> {
-    const claude = this.config.background!.claude;
-    // Fail closed before accepting work: startup aborts when Bash could not be isolated.
-    if (claude) await verifyClaudeSandbox({ claudePath: claude.path, artifactRoot: this.config.background!.artifactRoot,
-      privateRoots: claude.privateRoots });
     if (this.pool) await initBackgroundTables(this.pool);
   }
-  /** The executor that runs newly started background turns. */
-  get executorKind() { return this.config.background!.executorKind; }
+  /** Default for tasks without an explicit executor selection. */
+  get executorKind() { return "codex" as const; }
   wrap(session: AutomationRunner): AutomationRunner {
     const allowed = (schedule: Schedule) => this.config.allowedChatIds.has(schedule.chatId);
     return {
