@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -15,53 +14,6 @@ import (
 	"github.com/TaoSama/wechat-super-leader-bot/daemon/pkg/protocol"
 	"github.com/gorilla/websocket"
 )
-
-const controllerWriteChunkBytes = 4 * 1024
-
-// Keep one logical message intact while bounding each network write. Renewing
-// the deadline between fragments lets a progressing large result finish, and
-// control pings keep the peer's watchdog alive before the complete JSON arrives.
-// The caller serializes data messages; Gorilla permits interleaved control frames.
-func writeControllerMessage(conn *websocket.Conn, encoded []byte, idleTimeout, keepaliveInterval time.Duration) error {
-	setDeadline := func() error {
-		if err := conn.SetWriteDeadline(time.Now().Add(idleTimeout)); err != nil {
-			return fmt.Errorf("set controller write deadline: %w", err)
-		}
-		return nil
-	}
-	if err := setDeadline(); err != nil {
-		return err
-	}
-	writer, err := conn.NextWriter(websocket.TextMessage)
-	if err != nil {
-		return err
-	}
-	lastKeepalive := time.Now()
-	for len(encoded) > 0 {
-		if err := setDeadline(); err != nil {
-			return err
-		}
-		chunk := encoded[:min(len(encoded), controllerWriteChunkBytes)]
-		written, err := writer.Write(chunk)
-		if err != nil {
-			return err
-		}
-		if written != len(chunk) {
-			return io.ErrShortWrite
-		}
-		encoded = encoded[written:]
-		if time.Since(lastKeepalive) >= keepaliveInterval {
-			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(idleTimeout)); err != nil {
-				return fmt.Errorf("controller transfer keepalive failed: %w", err)
-			}
-			lastKeepalive = time.Now()
-		}
-	}
-	if err := setDeadline(); err != nil {
-		return err
-	}
-	return writer.Close()
-}
 
 // Run maintains the outbound WebSocket connection to Controller with exponential backoff until ctx is canceled.
 func (d *Daemon) Run(ctx context.Context) error {
@@ -106,6 +58,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 // runOnce establishes one WebSocket session with Controller, sends hello + periodic heartbeats, and handles commands.
 func (d *Daemon) runOnce(ctx context.Context) error {
+	diagnostic := newControllerSendDiagnostic(d.cfg.NodeID)
+	// Registered before the connection defers so after_cleanup includes all of them.
+	defer diagnostic.setPhase(controllerAfterCleanup)
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer "+d.cfg.NodeToken)
 
@@ -137,20 +92,13 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 		closeConnection()
 	}()
 	defer func() {
+		diagnostic.setPhase(controllerCleanup)
 		cancelConn()
 		<-connectionClosed
 	}()
 
-	var writeMu sync.Mutex
-	sendJSON := func(msg any) error {
-		encoded, err := encodeControllerMessage(msg)
-		if err != nil {
-			return err
-		}
-		writeMu.Lock()
-		defer writeMu.Unlock()
-		return writeControllerMessage(wsConn, encoded, controllerWriteTimeout, regularHeartbeatInterval)
-	}
+	sender := &controllerSender{conn: wsConn, diagnostic: diagnostic}
+	sendJSON := sender.send
 
 	// Connection liveness does not wait for source discovery. A reconnect retains
 	// the last successful snapshot with its original observation timestamps.
@@ -202,6 +150,7 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 	historySlots := make(chan struct{}, maxConcurrentHistoryReads)
 	var historyWorkers sync.WaitGroup
 	defer func() {
+		diagnostic.setPhase(controllerCleanup)
 		cancelConn()
 		closeConnection()
 		<-connectionClosed
