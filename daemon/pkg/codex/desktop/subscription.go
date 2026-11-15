@@ -3,7 +3,6 @@ package desktop
 import (
 	"context"
 	"errors"
-	"log"
 	"sync"
 	"time"
 
@@ -214,13 +213,7 @@ func (o *DesktopObserver) watchSubscriptions(parent context.Context, ids []strin
 				continue
 			}
 			if event.err != nil && ctx.Err() == nil {
-				reason := "invalid-state-or-transport"
-				if errors.Is(event.err, errDesktopFrameTooLarge) {
-					reason = "frame-too-large"
-				} else if errors.Is(event.err, context.DeadlineExceeded) || errors.Is(event.err, context.Canceled) {
-					reason = "subscription-window-ended"
-				}
-				log.Printf("desktop target subscription unavailable: %s", reason)
+				logDesktopSubscriptionFailure(event.err)
 			}
 		}
 	}
@@ -235,34 +228,35 @@ func (o *DesktopObserver) subscribeDesktopTarget(ctx context.Context, id, owner 
 		if ctx.Err() != nil {
 			err = ctx.Err()
 		}
+		err = desktopSubscriptionAt(desktopSubscriptionStageAttempt, err)
 	}()
 	if err := o.frameBudget.acquire(ctx); err != nil {
-		return err
+		return desktopSubscriptionAt(desktopSubscriptionStageBudget, err)
 	}
 	c, cleanup, err := connectDesktop(ctx, o.socketPath)
 	o.frameBudget.release()
 	if err != nil {
-		return err
+		return desktopSubscriptionAt(desktopSubscriptionStageConnect, err)
 	}
 	defer cleanup()
 	if owner == c.clientID {
-		return errors.New("invalid desktop owner identity")
+		return desktopSubscriptionAt(desktopSubscriptionStageOwner, errors.New("invalid desktop owner identity"))
 	}
 	defer func() {
 		if ctx.Err() == nil {
 			if deadlineErr := c.SetWriteDeadline(time.Now().Add(desktopUnsubscribeTimeout)); deadlineErr != nil {
-				err = errors.Join(err, deadlineErr)
+				err = errors.Join(err, desktopSubscriptionAt(desktopSubscriptionStageUnfollow, deadlineErr))
 			} else if followErr := c.follow(owner, id, false); followErr != nil {
-				err = errors.Join(err, followErr)
+				err = errors.Join(err, desktopSubscriptionAt(desktopSubscriptionStageUnfollow, followErr))
 			}
 		}
 	}()
 	headerDeadline := time.Now().Add(o.ownerTimeout)
 	if err := c.SetWriteDeadline(time.Now().Add(desktopRequestTimeout)); err != nil {
-		return err
+		return desktopSubscriptionAt(desktopSubscriptionStageFollow, err)
 	}
 	if err := c.follow(owner, id, true); err != nil {
-		return err
+		return desktopSubscriptionAt(desktopSubscriptionStageFollow, err)
 	}
 	followed()
 	projection := &desktopProjection{owner: owner}
@@ -272,17 +266,17 @@ func (o *DesktopObserver) subscribeDesktopTarget(ctx context.Context, id, owner 
 			return err
 		}
 		if err := c.SetReadDeadline(headerDeadline); err != nil {
-			return err
+			return desktopSubscriptionAt(desktopSubscriptionStageReadDeadline, err)
 		}
 		var observation protocol.DesktopObservation
 		observed := false
 		err := c.readBudgeted(ctx, o.frameBudget, func(message desktopEnvelope) error {
 			if desktopSubscriptionRevoked(message, c.clientID, id, owner) {
-				return errDesktopUnavailable
+				return desktopSubscriptionAt(desktopSubscriptionStageRevoked, errDesktopUnavailable)
 			}
-			return applyDesktopChange(message, c.clientID, projections, func(_ string, scalar protocol.DesktopObservation) {
+			return desktopSubscriptionAt(desktopSubscriptionStageApply, applyDesktopChange(message, c.clientID, projections, func(_ string, scalar protocol.DesktopObservation) {
 				observation, observed = scalar, true
-			})
+			}))
 		})
 		if err != nil {
 			if ctx.Err() != nil {
