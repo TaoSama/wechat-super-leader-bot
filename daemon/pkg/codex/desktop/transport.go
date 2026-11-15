@@ -163,10 +163,10 @@ func (c *desktopConn) readBody(size int) (desktopEnvelope, error) {
 func (c *desktopConn) readBudgeted(ctx context.Context, budget *desktopFrameBudget, consume func(desktopEnvelope) error) (err error) {
 	size, err := c.readHeader(desktopSubscriptionFrameLimit)
 	if err != nil {
-		return err
+		return desktopSubscriptionAt(desktopSubscriptionStageHeader, err)
 	}
 	if err := budget.acquire(ctx); err != nil {
-		return err
+		return desktopSubscriptionAt(desktopSubscriptionStageBudget, err)
 	}
 	defer budget.release()
 	deadline := time.Now().Add(budget.bodyTimeout)
@@ -174,21 +174,23 @@ func (c *desktopConn) readBudgeted(ctx context.Context, budget *desktopFrameBudg
 		deadline = end
 	}
 	if err := c.SetReadDeadline(deadline); err != nil {
-		return err
+		return desktopSubscriptionAt(desktopSubscriptionStageReadDeadline, err)
 	}
-	defer func() { err = errors.Join(err, c.SetReadDeadline(time.Time{})) }()
+	defer func() {
+		err = errors.Join(err, desktopSubscriptionAt(desktopSubscriptionStageReset, c.SetReadDeadline(time.Time{})))
+	}()
 	bodyCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	body := &io.LimitedReader{R: c, N: int64(size)}
 	message, err := readDesktopSubscriptionEnvelope(bodyCtx, body)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			return io.ErrUnexpectedEOF
+			return desktopSubscriptionAt(desktopSubscriptionStageBody, io.ErrUnexpectedEOF)
 		}
-		return err
+		return desktopSubscriptionAt(desktopSubscriptionStageBody, err)
 	}
 	if body.N != 0 {
-		return io.ErrUnexpectedEOF
+		return desktopSubscriptionAt(desktopSubscriptionStageBody, io.ErrUnexpectedEOF)
 	}
 	return consume(message)
 }
