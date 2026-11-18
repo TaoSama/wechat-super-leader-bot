@@ -123,7 +123,7 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 	return err
 }
 
-// Measure the active connection after hello is written, before deferred cleanup.
+// Measure application-observed lifetime after hello, before deferred cleanup.
 func (d *Daemon) runControllerConnection(ctx context.Context) (time.Duration, error) {
 	diagnostic := newControllerSendDiagnostic(d.cfg.NodeID)
 	// Registered before the connection defers so after_cleanup includes all of them.

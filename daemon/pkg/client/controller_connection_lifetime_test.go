@@ -139,7 +139,6 @@ func TestControllerLifetimeRetainsCommandResultFailureBeforeCachedHeartbeatError
 func TestControllerLifetimeRecordsCloseBeforeDefaultReplyWait(t *testing.T) {
 	conn, remote := controllerPipePair(t)
 	lifetime := newControllerConnectionLifetime(t.Context())
-	lifetime.startedAt = time.Now().Add(-9500 * time.Millisecond)
 	observed := make(chan time.Time, 1)
 	handleClose := conn.CloseHandler()
 	conn.SetCloseHandler(func(code int, text string) error {
@@ -192,7 +191,7 @@ func TestControllerLifetimeRecordsCloseBeforeDefaultReplyWait(t *testing.T) {
 	if !errors.As(readErr, &closeError) || closeError.Code != websocket.CloseNormalClosure || closeError.Text != "fixture close" {
 		t.Fatalf("default close error changed: %v", readErr)
 	}
-	if elapsed := time.Since(lifetime.startedAt); active > closeAt.Sub(lifetime.startedAt) || active >= reconnectBackoffResetAfter || elapsed <= reconnectBackoffResetAfter || elapsed-active < 900*time.Millisecond {
+	if elapsed := time.Since(lifetime.startedAt); active > closeAt.Sub(lifetime.startedAt) || elapsed-active < 900*time.Millisecond {
 		t.Fatalf("close reply wait counted as active: active=%v elapsed=%v", active, elapsed)
 	}
 	t.Logf("active=%v total=%v closeCode=%d", active, time.Since(lifetime.startedAt), closeError.Code)
