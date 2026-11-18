@@ -15,9 +15,15 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const reconnectBackoffResetAfter = 10 * time.Second
+
 // Run maintains the outbound WebSocket connection to Controller with exponential backoff until ctx is canceled.
 func (d *Daemon) Run(ctx context.Context) error {
 	defer d.workers.Wait()
+	return d.runControllerReconnectLoop(ctx, d.runControllerConnection)
+}
+
+func (d *Daemon) runControllerReconnectLoop(ctx context.Context, connect func(context.Context) (time.Duration, error)) error {
 	backoff := MinReconnectBackoff
 
 	for {
@@ -27,15 +33,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		default:
 		}
 
-		connectedAt := time.Now()
-		err := d.runOnce(ctx)
+		connectedFor, err := connect(ctx)
 		d.recoverControllerPayload(ctx, err)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
-		// Reset backoff if we stayed connected for a reasonable time
-		if time.Since(connectedAt) > 10*time.Second {
+		// Dialing, hello failure and cleanup do not establish a stable connection.
+		if connectedFor > reconnectBackoffResetAfter {
 			backoff = MinReconnectBackoff
 		}
 
@@ -58,6 +63,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 // runOnce establishes one WebSocket session with Controller, sends hello + periodic heartbeats, and handles commands.
 func (d *Daemon) runOnce(ctx context.Context) error {
+	_, err := d.runControllerConnection(ctx)
+	return err
+}
+
+// Measure the active connection after hello is written, before deferred cleanup.
+func (d *Daemon) runControllerConnection(ctx context.Context) (time.Duration, error) {
 	diagnostic := newControllerSendDiagnostic(d.cfg.NodeID)
 	// Registered before the connection defers so after_cleanup includes all of them.
 	defer diagnostic.setPhase(controllerAfterCleanup)
@@ -71,9 +82,9 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 	wsConn, resp, err := dialer.DialContext(ctx, d.cfg.ControllerURL, headers)
 	if err != nil {
 		if resp != nil {
-			return fmt.Errorf("websocket dial failed (HTTP %d): %w", resp.StatusCode, err)
+			return 0, fmt.Errorf("websocket dial failed (HTTP %d): %w", resp.StatusCode, err)
 		}
-		return fmt.Errorf("websocket dial failed: %w", err)
+		return 0, fmt.Errorf("websocket dial failed: %w", err)
 	}
 	closeConnection := func() {
 		if err := wsConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
@@ -113,8 +124,9 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 		InputAttachments: true,
 	}
 	if err := sendJSON(hello); err != nil {
-		return fmt.Errorf("failed to send hello: %w", err)
+		return 0, fmt.Errorf("failed to send hello: %w", err)
 	}
+	connectedAt := time.Now()
 	// Heartbeat loop
 	errCh := make(chan error, 2)
 	reportFailure := func(err error) {
@@ -241,8 +253,8 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return time.Since(connectedAt), ctx.Err()
 	case err := <-errCh:
-		return err
+		return time.Since(connectedAt), err
 	}
 }
