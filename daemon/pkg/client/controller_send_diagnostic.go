@@ -191,13 +191,19 @@ type controllerSender struct {
 }
 
 func (s *controllerSender) send(msg any) error {
+	_, err := s.sendObserved(msg)
+	return err
+}
+
+func (s *controllerSender) sendObserved(msg any) (time.Time, error) {
 	metrics := controllerSendMetrics{stage: controllerEncode, messageKind: controllerMessageKind(msg)}
 	started := time.Now()
 	encoded, err := encodeControllerMessage(msg)
 	metrics.encodeTime, metrics.encodedBytes = time.Since(started), len(encoded)
 	if err != nil {
+		observedAt := time.Now()
 		s.diagnostic.emit(s.diagnostic.capture(metrics, err))
-		return err
+		return observedAt, err
 	}
 	waiting := time.Now()
 	s.writeMu.Lock()
@@ -210,6 +216,7 @@ func (s *controllerSender) send(msg any) error {
 	started = time.Now()
 	err = writeObservedControllerMessage(s.conn, encoded, controllerWriteTimeout, regularHeartbeatInterval, &metrics)
 	metrics.helperTime = time.Since(started)
+	observedAt := time.Now()
 	record = s.diagnostic.capture(metrics, err)
-	return err
+	return observedAt, err
 }

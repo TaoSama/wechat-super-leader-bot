@@ -17,6 +17,32 @@ import (
 
 const reconnectBackoffResetAfter = 10 * time.Second
 
+type controllerConnectionFailure struct {
+	error
+	observedAt time.Time
+}
+
+func (f *controllerConnectionFailure) Unwrap() error { return f.error }
+
+func observeControllerFailure(err error) error {
+	if err == nil {
+		return nil
+	}
+	var failure *controllerConnectionFailure
+	if errors.As(err, &failure) {
+		return err
+	}
+	return &controllerConnectionFailure{error: err, observedAt: time.Now()}
+}
+
+func controllerFailureLifetime(connectedAt time.Time, err error) time.Duration {
+	var failure *controllerConnectionFailure
+	if !errors.As(err, &failure) {
+		return 0
+	}
+	return max(0, failure.observedAt.Sub(connectedAt))
+}
+
 // Run maintains the outbound WebSocket connection to Controller with exponential backoff until ctx is canceled.
 func (d *Daemon) Run(ctx context.Context) error {
 	defer d.workers.Wait()
@@ -109,7 +135,13 @@ func (d *Daemon) runControllerConnection(ctx context.Context) (time.Duration, er
 	}()
 
 	sender := &controllerSender{conn: wsConn, diagnostic: diagnostic}
-	sendJSON := sender.send
+	sendJSON := func(message any) error {
+		observedAt, err := sender.sendObserved(message)
+		if err != nil {
+			return &controllerConnectionFailure{error: err, observedAt: observedAt}
+		}
+		return nil
+	}
 
 	// Connection liveness does not wait for source discovery. A reconnect retains
 	// the last successful snapshot with its original observation timestamps.
@@ -130,6 +162,7 @@ func (d *Daemon) runControllerConnection(ctx context.Context) (time.Duration, er
 	// Heartbeat loop
 	errCh := make(chan error, 2)
 	reportFailure := func(err error) {
+		err = observeControllerFailure(err)
 		select {
 		case errCh <- err:
 		case <-connCtx.Done():
@@ -255,6 +288,6 @@ func (d *Daemon) runControllerConnection(ctx context.Context) (time.Duration, er
 	case <-ctx.Done():
 		return time.Since(connectedAt), ctx.Err()
 	case err := <-errCh:
-		return time.Since(connectedAt), err
+		return controllerFailureLifetime(connectedAt, err), err
 	}
 }

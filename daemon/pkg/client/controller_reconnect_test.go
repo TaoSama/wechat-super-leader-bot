@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -111,13 +112,16 @@ func TestControllerReconnectWaitCancelsPromptly(t *testing.T) {
 }
 
 type reconnectCleanupAdapter struct {
-	started chan struct{}
-	once    sync.Once
-	cleanup time.Duration
+	started  chan struct{}
+	once     sync.Once
+	cleanup  time.Duration
+	announce bool
 }
 
 func (a *reconnectCleanupAdapter) DiscoverSessions(ctx context.Context) ([]protocol.Session, error) {
-	a.once.Do(func() { close(a.started) })
+	if a.announce {
+		a.once.Do(func() { close(a.started) })
+	}
 	<-ctx.Done()
 	time.Sleep(a.cleanup)
 	return nil, ctx.Err()
@@ -132,48 +136,81 @@ func (*reconnectCleanupAdapter) SendPrompt(context.Context, string, string) (str
 func TestControllerConnectionLifetimeExcludesHandshakeAndCleanup(t *testing.T) {
 	const handshakeDelay = 150 * time.Millisecond
 	const cleanupDelay = 150 * time.Millisecond
-	adapter := &reconnectCleanupAdapter{started: make(chan struct{}), cleanup: cleanupDelay}
-	fixtureErrors := make(chan error, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(handshakeDelay)
-		upgrader := websocket.Upgrader{}
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			fixtureErrors <- err
-			return
-		}
-		defer func() {
-			if err := conn.Close(); err != nil {
-				t.Error(err)
+	for _, announce := range []bool{true, false} {
+		t.Run(fmt.Sprintf("adapter_announced_%t", announce), func(t *testing.T) {
+			timeout := 5 * time.Second
+			if !announce {
+				timeout = 500 * time.Millisecond
 			}
-		}()
-		var hello protocol.DaemonHelloMessage
-		if err := conn.ReadJSON(&hello); err != nil {
-			fixtureErrors <- err
-			return
-		}
-		select {
-		case <-adapter.started:
-		case <-r.Context().Done():
-			fixtureErrors <- r.Context().Err()
-			return
-		}
-		fixtureErrors <- conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "fixture finished"), time.Now().Add(time.Second))
-	}))
-	defer server.Close()
-	d := NewDaemon(&config.Config{NodeID: "lifetime-fixture", ControllerURL: "ws" + strings.TrimPrefix(server.URL, "http")}, adapter)
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	started := time.Now()
-	connectedFor, err := d.runControllerConnection(ctx)
-	if err == nil {
-		t.Fatal("expected fixture close")
-	}
-	if err := <-fixtureErrors; err != nil {
-		t.Fatal(err)
-	}
-	if total := time.Since(started); connectedFor <= 0 || total-connectedFor < handshakeDelay+cleanupDelay {
-		t.Fatalf("active=%v total=%v includes handshake or cleanup", connectedFor, total)
+			ctx, cancel := context.WithTimeout(t.Context(), timeout)
+			defer cancel()
+			adapter := &reconnectCleanupAdapter{started: make(chan struct{}), cleanup: cleanupDelay, announce: announce}
+			fixtureErrors := make(chan error, 1)
+			handlerDone := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(handlerDone)
+				time.Sleep(handshakeDelay)
+				upgrader := websocket.Upgrader{}
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					fixtureErrors <- err
+					return
+				}
+				defer func() {
+					if err := conn.Close(); err != nil {
+						t.Error(err)
+					}
+				}()
+				var hello protocol.DaemonHelloMessage
+				if err := conn.ReadJSON(&hello); err != nil {
+					fixtureErrors <- err
+					return
+				}
+				select {
+				case <-adapter.started:
+				case <-ctx.Done():
+					fixtureErrors <- ctx.Err()
+					return
+				}
+				fixtureErrors <- conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "fixture finished"), time.Now().Add(time.Second))
+			}))
+			defer server.Close()
+			defer func() {
+				cancel()
+				timer := time.NewTimer(time.Second)
+				defer timer.Stop()
+				select {
+				case <-handlerDone:
+				case <-timer.C:
+					t.Error("lifetime fixture handler did not exit")
+				}
+			}()
+			d := NewDaemon(&config.Config{NodeID: "lifetime-fixture", ControllerURL: "ws" + strings.TrimPrefix(server.URL, "http")}, adapter)
+			started := time.Now()
+			connectedFor, connectionErr := d.runControllerConnection(ctx)
+			if connectionErr == nil {
+				t.Fatal("expected fixture close")
+			}
+			select {
+			case err := <-fixtureErrors:
+				if announce && err != nil || !announce && !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatal(err)
+				}
+			case <-ctx.Done():
+				if announce {
+					t.Fatalf("fixture did not finish: %v; connection: %v", ctx.Err(), connectionErr)
+				}
+			}
+			if !announce {
+				if !errors.Is(ctx.Err(), context.DeadlineExceeded) || time.Since(started) >= 2*time.Second {
+					t.Fatalf("missing adapter startup did not exit at its deadline: %v", connectionErr)
+				}
+				return
+			}
+			if total := time.Since(started); connectedFor <= 0 || total-connectedFor < handshakeDelay+cleanupDelay {
+				t.Fatalf("active=%v total=%v includes handshake or cleanup", connectedFor, total)
+			}
+		})
 	}
 }
 
@@ -214,5 +251,34 @@ func TestControllerFailedDialHasNoActiveLifetime(t *testing.T) {
 	connectedFor, err := d.runControllerConnection(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "HTTP 403") || connectedFor != 0 {
 		t.Fatalf("active=%v error=%v", connectedFor, err)
+	}
+}
+
+func TestControllerFailureLifetimeStopsBeforeDiagnosticAndQueueDelay(t *testing.T) {
+	for _, failAfter := range []time.Duration{9 * time.Second, 11 * time.Second} {
+		t.Run(failAfter.String(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				connectedAt := time.Now()
+				time.Sleep(failAfter)
+				cause := errors.New("fixture write failure")
+				diagnostic := newControllerSendDiagnostic("queued-failure")
+				diagnostic.output = func(controllerSendErrorRecord) { time.Sleep(2 * time.Second) }
+				sender := &controllerSender{conn: &diagnosticWriter{fail: controllerChunkWrite, err: cause}, diagnostic: diagnostic}
+				observedAt, err := sender.sendObserved(protocol.DaemonHeartbeatMessage{Type: "heartbeat"})
+				if err != cause {
+					t.Fatal("sender changed the original error identity")
+				}
+				failures := make(chan error, 1)
+				failures <- fmt.Errorf("worker response: %w", &controllerConnectionFailure{error: err, observedAt: observedAt})
+				time.Sleep(2 * time.Second)
+				err = observeControllerFailure(<-failures)
+				if got := controllerFailureLifetime(connectedAt, err); got != failAfter || !errors.Is(err, cause) {
+					t.Fatalf("active=%v want=%v error=%v", got, failAfter, err)
+				}
+				if time.Since(connectedAt) <= reconnectBackoffResetAfter {
+					t.Fatal("fixture did not cross the stability threshold before consumption")
+				}
+			})
+		})
 	}
 }
