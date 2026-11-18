@@ -51,6 +51,15 @@ func (l *controllerConnectionLifetime) recordCommandResultFailure(stage controll
 	}
 }
 
+func (l *controllerConnectionLifetime) trackClose(conn *websocket.Conn) {
+	handleClose := conn.CloseHandler()
+	conn.SetCloseHandler(func(code int, text string) error {
+		// The default handler can wait for a close reply before ReadMessage returns.
+		l.recordFailure(time.Now())
+		return handleClose(code, text)
+	})
+}
+
 func (l *controllerConnectionLifetime) finish() time.Duration {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -173,6 +182,7 @@ func (d *Daemon) runControllerConnection(ctx context.Context) (time.Duration, er
 		return 0, fmt.Errorf("failed to send hello: %w", err)
 	}
 	lifetime := newControllerConnectionLifetime(connCtx)
+	lifetime.trackClose(wsConn)
 	sendJSON := func(message any) error { return sender.sendObserved(message, lifetime.recordSendFailure) }
 	// Heartbeat loop
 	errCh := make(chan error, 2)
