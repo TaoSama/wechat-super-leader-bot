@@ -15,9 +15,71 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const reconnectBackoffResetAfter = 10 * time.Second
+
+type controllerConnectionLifetime struct {
+	mu             sync.Mutex
+	ctx            context.Context
+	startedAt      time.Time
+	firstFailureAt time.Time
+	endedAt        time.Time
+}
+
+func newControllerConnectionLifetime(ctx context.Context) *controllerConnectionLifetime {
+	return &controllerConnectionLifetime{ctx: ctx, startedAt: time.Now()}
+}
+
+func (l *controllerConnectionLifetime) recordFailure(observedAt time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.endedAt.IsZero() || l.ctx.Err() != nil {
+		return
+	}
+	if l.firstFailureAt.IsZero() || observedAt.Before(l.firstFailureAt) {
+		l.firstFailureAt = observedAt
+	}
+}
+
+func (l *controllerConnectionLifetime) recordSendFailure(_ controllerSendStage, at time.Time) {
+	l.recordFailure(at)
+}
+
+func (l *controllerConnectionLifetime) recordCommandResultFailure(stage controllerSendStage, at time.Time) {
+	// A rejected result payload leaves the socket usable; a failed write does not.
+	if stage != controllerEncode {
+		l.recordFailure(at)
+	}
+}
+
+func (l *controllerConnectionLifetime) trackClose(conn *websocket.Conn) {
+	handleClose := conn.CloseHandler()
+	conn.SetCloseHandler(func(code int, text string) error {
+		// The default handler can wait for a close reply before ReadMessage returns.
+		l.recordFailure(time.Now())
+		return handleClose(code, text)
+	})
+}
+
+func (l *controllerConnectionLifetime) finish() time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.endedAt.IsZero() {
+		l.endedAt = time.Now()
+	}
+	endedAt := l.endedAt
+	if !l.firstFailureAt.IsZero() && l.firstFailureAt.Before(endedAt) {
+		endedAt = l.firstFailureAt
+	}
+	return max(0, endedAt.Sub(l.startedAt))
+}
+
 // Run maintains the outbound WebSocket connection to Controller with exponential backoff until ctx is canceled.
 func (d *Daemon) Run(ctx context.Context) error {
 	defer d.workers.Wait()
+	return d.runControllerReconnectLoop(ctx, d.runControllerConnection)
+}
+
+func (d *Daemon) runControllerReconnectLoop(ctx context.Context, connect func(context.Context) (time.Duration, error)) error {
 	backoff := MinReconnectBackoff
 
 	for {
@@ -27,15 +89,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		default:
 		}
 
-		connectedAt := time.Now()
-		err := d.runOnce(ctx)
+		connectedFor, err := connect(ctx)
 		d.recoverControllerPayload(ctx, err)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
-		// Reset backoff if we stayed connected for a reasonable time
-		if time.Since(connectedAt) > 10*time.Second {
+		// Dialing, hello failure and cleanup do not establish a stable connection.
+		if connectedFor > reconnectBackoffResetAfter {
 			backoff = MinReconnectBackoff
 		}
 
@@ -58,6 +119,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 // runOnce establishes one WebSocket session with Controller, sends hello + periodic heartbeats, and handles commands.
 func (d *Daemon) runOnce(ctx context.Context) error {
+	_, err := d.runControllerConnection(ctx)
+	return err
+}
+
+// Measure application-observed lifetime after hello, before deferred cleanup.
+func (d *Daemon) runControllerConnection(ctx context.Context) (time.Duration, error) {
 	diagnostic := newControllerSendDiagnostic(d.cfg.NodeID)
 	// Registered before the connection defers so after_cleanup includes all of them.
 	defer diagnostic.setPhase(controllerAfterCleanup)
@@ -71,9 +138,9 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 	wsConn, resp, err := dialer.DialContext(ctx, d.cfg.ControllerURL, headers)
 	if err != nil {
 		if resp != nil {
-			return fmt.Errorf("websocket dial failed (HTTP %d): %w", resp.StatusCode, err)
+			return 0, fmt.Errorf("websocket dial failed (HTTP %d): %w", resp.StatusCode, err)
 		}
-		return fmt.Errorf("websocket dial failed: %w", err)
+		return 0, fmt.Errorf("websocket dial failed: %w", err)
 	}
 	closeConnection := func() {
 		if err := wsConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
@@ -98,7 +165,6 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 	}()
 
 	sender := &controllerSender{conn: wsConn, diagnostic: diagnostic}
-	sendJSON := sender.send
 
 	// Connection liveness does not wait for source discovery. A reconnect retains
 	// the last successful snapshot with its original observation timestamps.
@@ -112,12 +178,16 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 		DeliveryModes:    []protocol.DeliveryMode{protocol.DeliveryNextTurn, protocol.DeliverySteer},
 		InputAttachments: true,
 	}
-	if err := sendJSON(hello); err != nil {
-		return fmt.Errorf("failed to send hello: %w", err)
+	if err := sender.send(hello); err != nil {
+		return 0, fmt.Errorf("failed to send hello: %w", err)
 	}
+	lifetime := newControllerConnectionLifetime(connCtx)
+	lifetime.trackClose(wsConn)
+	sendJSON := func(message any) error { return sender.sendObserved(message, lifetime.recordSendFailure) }
 	// Heartbeat loop
 	errCh := make(chan error, 2)
 	reportFailure := func(err error) {
+		lifetime.recordFailure(time.Now())
 		select {
 		case errCh <- err:
 		case <-connCtx.Done():
@@ -232,7 +302,7 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 				defer d.workers.Done()
 				res := d.ExecuteCommand(ctx, c)
 				d.queueResult(res)
-				if sendErr := sendJSON(res); sendErr != nil {
+				if sendErr := sender.sendObserved(res, lifetime.recordCommandResultFailure); sendErr != nil {
 					log.Printf("[daemon:%s] failed to send command result for %s: %v", d.cfg.NodeID, c.CommandID, sendErr)
 				}
 			}(cmd)
@@ -241,8 +311,8 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return lifetime.finish(), ctx.Err()
 	case err := <-errCh:
-		return err
+		return lifetime.finish(), err
 	}
 }
