@@ -17,30 +17,51 @@ import (
 
 const reconnectBackoffResetAfter = 10 * time.Second
 
-type controllerConnectionFailure struct {
-	error
-	observedAt time.Time
+type controllerConnectionLifetime struct {
+	mu             sync.Mutex
+	ctx            context.Context
+	startedAt      time.Time
+	firstFailureAt time.Time
+	endedAt        time.Time
 }
 
-func (f *controllerConnectionFailure) Unwrap() error { return f.error }
-
-func observeControllerFailure(err error) error {
-	if err == nil {
-		return nil
-	}
-	var failure *controllerConnectionFailure
-	if errors.As(err, &failure) {
-		return err
-	}
-	return &controllerConnectionFailure{error: err, observedAt: time.Now()}
+func newControllerConnectionLifetime(ctx context.Context) *controllerConnectionLifetime {
+	return &controllerConnectionLifetime{ctx: ctx, startedAt: time.Now()}
 }
 
-func controllerFailureLifetime(connectedAt time.Time, err error) time.Duration {
-	var failure *controllerConnectionFailure
-	if !errors.As(err, &failure) {
-		return 0
+func (l *controllerConnectionLifetime) recordFailure(observedAt time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.endedAt.IsZero() || l.ctx.Err() != nil {
+		return
 	}
-	return max(0, failure.observedAt.Sub(connectedAt))
+	if l.firstFailureAt.IsZero() || observedAt.Before(l.firstFailureAt) {
+		l.firstFailureAt = observedAt
+	}
+}
+
+func (l *controllerConnectionLifetime) recordSendFailure(_ controllerSendStage, at time.Time) {
+	l.recordFailure(at)
+}
+
+func (l *controllerConnectionLifetime) recordCommandResultFailure(stage controllerSendStage, at time.Time) {
+	// A rejected result payload leaves the socket usable; a failed write does not.
+	if stage != controllerEncode {
+		l.recordFailure(at)
+	}
+}
+
+func (l *controllerConnectionLifetime) finish() time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.endedAt.IsZero() {
+		l.endedAt = time.Now()
+	}
+	endedAt := l.endedAt
+	if !l.firstFailureAt.IsZero() && l.firstFailureAt.Before(endedAt) {
+		endedAt = l.firstFailureAt
+	}
+	return max(0, endedAt.Sub(l.startedAt))
 }
 
 // Run maintains the outbound WebSocket connection to Controller with exponential backoff until ctx is canceled.
@@ -135,13 +156,6 @@ func (d *Daemon) runControllerConnection(ctx context.Context) (time.Duration, er
 	}()
 
 	sender := &controllerSender{conn: wsConn, diagnostic: diagnostic}
-	sendJSON := func(message any) error {
-		observedAt, err := sender.sendObserved(message)
-		if err != nil {
-			return &controllerConnectionFailure{error: err, observedAt: observedAt}
-		}
-		return nil
-	}
 
 	// Connection liveness does not wait for source discovery. A reconnect retains
 	// the last successful snapshot with its original observation timestamps.
@@ -155,14 +169,15 @@ func (d *Daemon) runControllerConnection(ctx context.Context) (time.Duration, er
 		DeliveryModes:    []protocol.DeliveryMode{protocol.DeliveryNextTurn, protocol.DeliverySteer},
 		InputAttachments: true,
 	}
-	if err := sendJSON(hello); err != nil {
+	if err := sender.send(hello); err != nil {
 		return 0, fmt.Errorf("failed to send hello: %w", err)
 	}
-	connectedAt := time.Now()
+	lifetime := newControllerConnectionLifetime(connCtx)
+	sendJSON := func(message any) error { return sender.sendObserved(message, lifetime.recordSendFailure) }
 	// Heartbeat loop
 	errCh := make(chan error, 2)
 	reportFailure := func(err error) {
-		err = observeControllerFailure(err)
+		lifetime.recordFailure(time.Now())
 		select {
 		case errCh <- err:
 		case <-connCtx.Done():
@@ -277,7 +292,7 @@ func (d *Daemon) runControllerConnection(ctx context.Context) (time.Duration, er
 				defer d.workers.Done()
 				res := d.ExecuteCommand(ctx, c)
 				d.queueResult(res)
-				if sendErr := sendJSON(res); sendErr != nil {
+				if sendErr := sender.sendObserved(res, lifetime.recordCommandResultFailure); sendErr != nil {
 					log.Printf("[daemon:%s] failed to send command result for %s: %v", d.cfg.NodeID, c.CommandID, sendErr)
 				}
 			}(cmd)
@@ -286,8 +301,8 @@ func (d *Daemon) runControllerConnection(ctx context.Context) (time.Duration, er
 
 	select {
 	case <-ctx.Done():
-		return time.Since(connectedAt), ctx.Err()
+		return lifetime.finish(), ctx.Err()
 	case err := <-errCh:
-		return controllerFailureLifetime(connectedAt, err), err
+		return lifetime.finish(), err
 	}
 }

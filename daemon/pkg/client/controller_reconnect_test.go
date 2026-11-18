@@ -188,23 +188,23 @@ func TestControllerConnectionLifetimeExcludesHandshakeAndCleanup(t *testing.T) {
 			d := NewDaemon(&config.Config{NodeID: "lifetime-fixture", ControllerURL: "ws" + strings.TrimPrefix(server.URL, "http")}, adapter)
 			started := time.Now()
 			connectedFor, connectionErr := d.runControllerConnection(ctx)
+			if !announce && (!errors.Is(ctx.Err(), context.DeadlineExceeded) || time.Since(started) >= 2*time.Second) {
+				t.Fatalf("missing adapter startup did not exit at its deadline: context=%v connection=%v", ctx.Err(), connectionErr)
+			}
 			if connectionErr == nil {
 				t.Fatal("expected fixture close")
 			}
+			fixtureWait := time.NewTimer(time.Second)
+			defer fixtureWait.Stop()
 			select {
 			case err := <-fixtureErrors:
 				if announce && err != nil || !announce && !errors.Is(err, context.DeadlineExceeded) {
 					t.Fatal(err)
 				}
-			case <-ctx.Done():
-				if announce {
-					t.Fatalf("fixture did not finish: %v; connection: %v", ctx.Err(), connectionErr)
-				}
+			case <-fixtureWait.C:
+				t.Fatalf("fixture did not finish: %v; connection: %v", ctx.Err(), connectionErr)
 			}
 			if !announce {
-				if !errors.Is(ctx.Err(), context.DeadlineExceeded) || time.Since(started) >= 2*time.Second {
-					t.Fatalf("missing adapter startup did not exit at its deadline: %v", connectionErr)
-				}
 				return
 			}
 			if total := time.Since(started); connectedFor <= 0 || total-connectedFor < handshakeDelay+cleanupDelay {
@@ -251,34 +251,5 @@ func TestControllerFailedDialHasNoActiveLifetime(t *testing.T) {
 	connectedFor, err := d.runControllerConnection(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "HTTP 403") || connectedFor != 0 {
 		t.Fatalf("active=%v error=%v", connectedFor, err)
-	}
-}
-
-func TestControllerFailureLifetimeStopsBeforeDiagnosticAndQueueDelay(t *testing.T) {
-	for _, failAfter := range []time.Duration{9 * time.Second, 11 * time.Second} {
-		t.Run(failAfter.String(), func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				connectedAt := time.Now()
-				time.Sleep(failAfter)
-				cause := errors.New("fixture write failure")
-				diagnostic := newControllerSendDiagnostic("queued-failure")
-				diagnostic.output = func(controllerSendErrorRecord) { time.Sleep(2 * time.Second) }
-				sender := &controllerSender{conn: &diagnosticWriter{fail: controllerChunkWrite, err: cause}, diagnostic: diagnostic}
-				observedAt, err := sender.sendObserved(protocol.DaemonHeartbeatMessage{Type: "heartbeat"})
-				if err != cause {
-					t.Fatal("sender changed the original error identity")
-				}
-				failures := make(chan error, 1)
-				failures <- fmt.Errorf("worker response: %w", &controllerConnectionFailure{error: err, observedAt: observedAt})
-				time.Sleep(2 * time.Second)
-				err = observeControllerFailure(<-failures)
-				if got := controllerFailureLifetime(connectedAt, err); got != failAfter || !errors.Is(err, cause) {
-					t.Fatalf("active=%v want=%v error=%v", got, failAfter, err)
-				}
-				if time.Since(connectedAt) <= reconnectBackoffResetAfter {
-					t.Fatal("fixture did not cross the stability threshold before consumption")
-				}
-			})
-		})
 	}
 }
