@@ -197,7 +197,12 @@ globalThis.Date = class extends OriginalDate { constructor(...args) { super(...(
     await writeFile(path.join(directory, 'release-first'), 'release', { mode: 0o600 });
     const firstRun = await awaitComplete(created.id, 1);
     assert.equal(firstRun.result.text, `Completed: ${FIRST_EDIT}`);
-    const oldWorker = await savedWorker(firstRun.id);
+    let oldWorker;
+    await waitFor(async () => {
+      oldWorker = await savedWorker(firstRun.id);
+      return oldWorker?.initialAcceptedAt !== undefined && oldWorker.invocations.every(invocation =>
+        invocation.kind !== 'initial' || !invocation.result || invocation.acceptedAt !== undefined);
+    }, 'First result handoff committed');
     assert.equal(oldWorker.spec.prompt, FIRST_EDIT);
     assert.equal(oldWorker.invocations[0].task, FIRST_EDIT);
     console.log('OBS first occurrence', JSON.stringify({ runId: firstRun.id, workerId: oldWorker.id,
