@@ -71,8 +71,8 @@ func TestDesktopObservationVersion13PreservesValidation(t *testing.T) {
 		{"unsupported-future", 14, desktopSnapshotChange("active", 3), nil, true},
 		{"wrong-owner", 13, desktopSnapshotChange("active", 3), func(e *desktopEnvelope) { e.SourceClientID = "other-owner" }, true},
 		{"unrelated-recipient", 13, desktopSnapshotChange("active", 3), func(e *desktopEnvelope) { e.TargetClientIDs = []string{"other-client"} }, false},
-		{"wrong-outer-host", 13, desktopSnapshotChange("active", 3), func(e *desktopEnvelope) {
-			e.Params = []byte(`{"conversationId":"session","hostId":"remote","change":{"type":"snapshot","revision":3,"conversationState":{"id":"session","hostId":"local","threadRuntimeStatus":{"type":"active"}}}}`)
+		{"wrong-outer-host", 13, desktopSnapshotChange("idle", 3), func(e *desktopEnvelope) {
+			e.Params = []byte(`{"conversationId":"session","hostId":"remote","change":{"type":"snapshot","revision":3,"conversationState":{"id":"session","hostId":"local","threadRuntimeStatus":{"type":"idle"}}}}`)
 		}, true},
 		{"wrong-snapshot-target", 13, map[string]any{"type": "snapshot", "revision": 3, "conversationState": map[string]string{"id": "other", "hostId": "local"}}, nil, true},
 		{"wrong-snapshot-host", 13, map[string]any{"type": "snapshot", "revision": 3, "conversationState": map[string]string{"id": "session", "hostId": "remote"}}, nil, true},
