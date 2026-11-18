@@ -14,6 +14,11 @@ const DesktopWatchWindow = 30 * time.Second
 const desktopUnsubscribeTimeout = 200 * time.Millisecond
 const maxDesktopRevision = 1<<53 - 1
 
+const (
+	desktopObservationVersionLegacy = 11
+	desktopObservationVersion13     = 13
+)
+
 type DesktopWatcher interface {
 	Watch(context.Context, []string, func(string, protocol.DesktopObservation)) error
 }
@@ -183,7 +188,10 @@ func applyDesktopChange(message desktopEnvelope, clientID string, projections ma
 		return nil
 	}
 	var params desktopChangeParams
-	if message.Version != 11 || json.Unmarshal(message.Params, &params) != nil || params.HostID != "local" {
+	// Both versions use the same bounded scalar snapshot/patch projection.
+	// Keep unverified versions unavailable instead of inferring compatibility.
+	if (message.Version != desktopObservationVersionLegacy && message.Version != desktopObservationVersion13) ||
+		json.Unmarshal(message.Params, &params) != nil || params.HostID != "local" {
 		return errors.New("invalid desktop state envelope")
 	}
 	projection, ok := projections[params.ConversationID]
