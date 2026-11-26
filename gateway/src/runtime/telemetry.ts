@@ -23,7 +23,7 @@ const FIELD_NAMES = new Set([
   "nativeTurnIdAvailable", "ttftAvailable", "usageAvailable", "pendingItems", "coverage", "commandId",
   "cacheWriteInputTokens", "reasoningOutputTokens", "queued", "isTool", "startObserved",
   "turnCompletedObserved", "firstEventObserved", "untrackedItemStarts", "cliExitTimeAvailable",
-  "aborted", "emptyReply", "failed", "cleanupPending", "replyAlreadyReady", "processElapsedMs", "signal", "pendingRuns",
+  "aborted", "emptyReply", "failed", "cleanupPending", "replyAlreadyReady", "processElapsedMs", "signal", "pendingRuns", "ret", "errcode",
 ]);
 let warned = false;
 
@@ -42,6 +42,8 @@ export function traceEvent(stage: string, fields: TraceFields = {}): void {
   const safe: TraceFields = {};
   for (const [key, value] of Object.entries(fields)) {
     if (!FIELD_NAMES.has(key) || value === undefined) continue;
+    if ((key === "ret" || key === "errcode") && value !== null &&
+        (typeof value !== "number" || !Number.isSafeInteger(value))) continue;
     if (typeof value === "number" && !Number.isFinite(value)) continue;
     safe[key] = typeof value === "string" ? value.slice(0, 128) : value;
   }

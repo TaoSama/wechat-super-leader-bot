@@ -65,6 +65,20 @@ test("async trace contexts remain separate and restore the caller context", asyn
   assert.equal(currentTrace(), undefined);
 });
 
+test("poll code telemetry rejects strings and fractional numbers at the logging boundary", () => {
+  const events: Record<string, unknown>[] = [];
+  const trace = createMessageTrace("poll", "fixture", event => events.push(event));
+  runWithTrace(trace, () => {
+    traceEvent("wechat.poll.rejected", { ret: "private-token", errcode: 1.5 });
+    traceEvent("wechat.poll.rejected", { ret: -14, errcode: null });
+  });
+  assert.equal(Object.hasOwn(events[0], "ret"), false);
+  assert.equal(Object.hasOwn(events[0], "errcode"), false);
+  assert.equal(events[1].ret, -14);
+  assert.equal(events[1].errcode, null);
+  assert.ok(!JSON.stringify(events).includes("private-token"));
+});
+
 test("spans pair success and failure without swallowing the original error", async () => {
   const events: Record<string, unknown>[] = [];
   const trace = createMessageTrace("chat", "message", event => events.push(event));

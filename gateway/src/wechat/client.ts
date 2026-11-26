@@ -2,7 +2,6 @@ import { LocalSendDeferredError } from "../runtime/context-policy.js";
 import { performance } from "node:perf_hooks";
 import { traceEvent, traceSpan } from "../runtime/telemetry.js";
 import * as crypto from "node:crypto";
-import { InboundWeChatMessage } from "../types.js";
 import { StateManager } from "../runtime/state.js";
 import { DEFAULT_MESSAGE_MAX_CHARS, legacyWeChatCitationBody, markdownToWeChat, unicodeSafeBoundary } from "./markdown.js";
 import { DEFAULT_POLL_TIMEOUT_MS, MAX_POLL_TIMEOUT_MS, POLL_NETWORK_MARGIN_MS, MAX_POLL_ATTEMPTS, SEND_REQUEST_TIMEOUT_MS, REPLY_TIMEOUT_MS, NOTIFICATION_REPLY_TIMEOUT_MS } from "../runtime/budgets.js";
@@ -15,21 +14,16 @@ import { deliverFileReply, type FileReplyOptions } from "./file-delivery.js";
 import { beforeAbort } from "../runtime/abort.js";
 import { CHANNEL_VERSION } from "./protocol.js";
 import { RequestDiagnostics } from "../runtime/request-diagnostics.js";
-import { ITEM_TYPE_TEXT, parseInboundContent } from "./inbound-content.js";
+import { ITEM_TYPE_TEXT } from "./inbound-content.js";
+import { parsePollBatch, validatePollResponse, type ILinkPollBatch } from "./poll-response.js";
+export { MESSAGE_TYPE_INBOUND_TEXT, type ILinkPollBatch } from "./poll-response.js";
 export { CHANNEL_VERSION } from "./protocol.js";
 
 // Only used to reconstruct deliveries written by the short-lived citation-sanitizing
 // release. New deliveries always use the caller's original text.
 export const DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com";
-export const MESSAGE_TYPE_INBOUND_TEXT = 1;
 export const MESSAGE_TYPE_OUTBOUND_TEXT = 2;
 export const MESSAGE_STATE_OUTBOUND = 2;
-
-export interface ILinkPollBatch {
-  nextSyncBuf: string;
-  messages: InboundWeChatMessage[];
-  rawMessageCount: number;
-}
 
 export type FetchLike = typeof globalThis.fetch;
 
@@ -213,13 +207,7 @@ export class ILinkClient {
       this.pollBudgetMs
     );
 
-    const ret = response.ret;
-    const finalErrcode = response.errcode;
-    if ((ret !== undefined && ret !== null && ret !== 0) || (finalErrcode !== undefined && finalErrcode !== null && finalErrcode !== 0)) {
-      throw new Error(
-        `WeChat getupdates failed: ret=${String(ret)} errcode=${String(finalErrcode)}`
-      );
-    }
+    validatePollResponse(response);
 
     const suggestedTimeout = response.longpolling_timeout_ms;
     // Invalid or unbounded hints never change the last usable local budget.
@@ -228,78 +216,7 @@ export class ILinkClient {
       this.pollTimeoutMs = suggestedTimeout;
     }
 
-    const nextSyncBuf = typeof response.get_updates_buf === "string" && response.get_updates_buf
-      ? response.get_updates_buf
-      : this.stateManager.syncBuf;
-
-    const rawMsgs = Array.isArray(response.msgs) ? response.msgs : [];
-    const messages: InboundWeChatMessage[] = [];
-
-    for (let msgIdx = 0; msgIdx < rawMsgs.length; msgIdx++) {
-      const rawMsg = rawMsgs[msgIdx];
-      if (typeof rawMsg !== "object" || rawMsg === null) continue;
-      const msg = rawMsg as Record<string, unknown>;
-      if (msg.message_type !== MESSAGE_TYPE_INBOUND_TEXT) continue;
-
-      const sender = String(msg.from_user_id || "unknown");
-      const itemList = Array.isArray(msg.item_list) ? msg.item_list : [];
-      const content = parseInboundContent(itemList);
-      if (!content) continue;
-      // Legacy deterministic IDs hashed only the sender's text; unsupported content hashes its kinds.
-      // Media-only messages hash their CDN references so distinct pictures stay distinct.
-      const identityText = content.unsupportedKinds ? `unsupported:${content.unsupportedKinds.join(",")}`
-        : content.ownText || `media:${crypto.createHash("sha256").update(JSON.stringify(content.media ?? [])).digest("hex")}`;
-
-      const contextToken = typeof msg.context_token === "string" && msg.context_token ? msg.context_token : undefined;
-
-      const clientId = typeof msg.client_id === "string" && msg.client_id.trim() ||
-        typeof msg.client_id === "number" && Number.isSafeInteger(msg.client_id) && msg.client_id >= 0
-        ? String(msg.client_id) : "";
-      const serverMessageId = typeof msg.message_id === "string" && /^\d+$/.test(msg.message_id)
-        ? `server:${msg.message_id}` : "";
-      const stableId = clientId || serverMessageId;
-      const createTimeMs = typeof msg.create_time_ms === "string" || typeof msg.create_time_ms === "number"
-        ? String(msg.create_time_ms)
-        : "";
-      const parsedCreateTime = /^\d+$/.test(createTimeMs) ? Number(createTimeMs) : Number.NaN;
-      // Invalid platform timestamps are absent from the message contract. NaN would
-      // leak an invalid number through pollBatch even though all consumers reject it.
-      const createdAtMs = Number.isSafeInteger(parsedCreateTime) && parsedCreateTime >= 0
-        ? parsedCreateTime : undefined;
-
-      // Preserve client identities already stored in checkpoints before using server IDs.
-      let messageId: string;
-      let deliveryKey: string;
-      if (stableId) {
-        messageId = stableId;
-        deliveryKey = this.stateManager.computeDeliveryKey(sender, stableId);
-      } else {
-        // Without a stable ID, only retries of the same page position are identifiable.
-        // Keep positions distinct so identical commands are not silently merged across pages.
-        const rawDigest = crypto.createHash("sha256")
-          .update(`${account.accountId}:${sender}:${createTimeMs}:${currentSyncBuf}:${msgIdx}:${identityText}`, "utf8")
-          .digest("hex").slice(0, 24);
-        messageId = `det:${rawDigest}`;
-        deliveryKey = this.stateManager.computeDeliveryKey(sender, messageId);
-      }
-
-      if (deliveryKey && this.stateManager.isMessageProcessed(deliveryKey)) {
-        continue;
-      }
-
-      messages.push({
-        chatId: sender,
-        text: content.text,
-        messageId,
-        deliveryKey,
-        contextToken,
-        createdAtMs,
-        ...(content.unsupportedKinds ? { unsupportedKinds: content.unsupportedKinds } : {}),
-        ...(content.media ? { media: content.media } : {}),
-      });
-    }
-
-    return { nextSyncBuf, messages, rawMessageCount: rawMsgs.length };
+    return parsePollBatch(response, this.stateManager, account.accountId, currentSyncBuf);
   }
 
   public async sendSingleText(chatId: string, formattedText: string, clientIdOverride?: string, signal?: AbortSignal): Promise<void> {

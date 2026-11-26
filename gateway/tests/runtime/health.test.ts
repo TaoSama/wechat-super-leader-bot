@@ -74,3 +74,52 @@ test("Log error classification and output redaction verification", () => {
   const parseErr = new SyntaxError("Unexpected token in JSON at position 12");
   assert.equal(sanitizeErrorType(parseErr), "InvalidJsonSyntax");
 });
+
+test("failed poll retries cannot renew stale success through a fresh polling phase", t => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-11-26T09:28:03Z") });
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-health-retry-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const healthPath = path.join(directory, "health.json");
+  const tracker = new HealthTracker(healthPath);
+  tracker.startRun();
+  tracker.recordPollSuccess();
+  const error = new Error("WeChat getupdates failed");
+  for (let attempt = 0; attempt < 121; attempt++) {
+    tracker.recordPollStart();
+    tracker.recordPollError(error);
+    t.mock.timers.tick(1000);
+  }
+  tracker.recordPollStart();
+  const failed = checkGatewayHealth(healthPath);
+  assert.equal(failed.ok, false);
+  assert.equal(failed.reason, "PollStale");
+  assert.equal(failed.status, "degraded");
+  assert.equal(failed.consecutiveErrors, 121);
+  assert.equal(failed.lastErrorType, "ILinkGetUpdatesError");
+  tracker.recordPollSuccess();
+  assert.equal(checkGatewayHealth(healthPath).ok, true);
+  assert.equal(checkGatewayHealth(healthPath).consecutiveErrors, 0);
+});
+
+test("retry polling retains only the remaining successful-poll grace and never renews startup grace", t => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-11-26T09:28:03Z") });
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-health-retry-grace-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const healthPath = path.join(directory, "health.json");
+  const tracker = new HealthTracker(healthPath);
+  tracker.startRun();
+  tracker.recordPollError(new Error("WeChat getupdates failed"));
+  tracker.recordPollStart();
+  assert.equal(checkGatewayHealth(healthPath).reason, "NoSuccessfulPollRecorded");
+  tracker.recordPollSuccess();
+  tracker.recordPollError(new Error("WeChat getupdates failed"));
+  tracker.recordPollStart();
+  assert.equal(checkGatewayHealth(healthPath).ok, true);
+  assert.equal(checkGatewayHealth(healthPath).status, "degraded");
+  t.mock.timers.tick(45001);
+  assert.equal(checkGatewayHealth(healthPath).reason, "ProcessingDeadlineExceeded",
+    "a stuck retry still fails its request deadline before the successful-poll grace expires");
+  tracker.recordMessageStart(300000);
+  t.mock.timers.tick(120001);
+  assert.equal(checkGatewayHealth(healthPath).ok, true, "bounded processing still owns its phase budget");
+});
