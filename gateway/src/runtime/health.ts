@@ -265,9 +265,13 @@ export function checkGatewayHealth(
       start > Date.now() || deadline <= start || deadline - start > maxBudget) {
       return { ok: false, reason: "MalformedProcessingPhase", healthPath: resolved };
     }
-    return { ok: Date.now() <= deadline, reason: Date.now() > deadline ? "ProcessingDeadlineExceeded" : undefined,
-      status: "processing", runId: data.run_id, pid: data.pid, ageMs: Date.now() - start, maxAgeMs: deadline - start,
-      consecutiveErrors: data.consecutive_errors, totalErrorCount: data.total_error_count, healthPath: resolved };
+    // A retry starts a new request budget, but cannot renew a failed poll's health grace.
+    const nowMs = Date.now();
+    if (nowMs > deadline || phase.name !== "polling" || data.status !== "degraded") {
+      return { ok: nowMs <= deadline, reason: nowMs > deadline ? "ProcessingDeadlineExceeded" : undefined,
+        status: "processing", runId: data.run_id, pid: data.pid, ageMs: nowMs - start, maxAgeMs: deadline - start,
+        consecutiveErrors: data.consecutive_errors, totalErrorCount: data.total_error_count, healthPath: resolved };
+    }
   }
 
   if (typeof data.last_poll_succeeded_at !== "string" || !data.last_poll_succeeded_at) {
